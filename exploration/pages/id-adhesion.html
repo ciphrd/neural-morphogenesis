@@ -1,0 +1,1062 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>ID / Membrane Stickiness Sandbox</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #111318;
+        color: #e8eaed;
+        display: flex;
+      }
+      .panel {
+        width: 340px;
+        flex-shrink: 0;
+        padding: 20px;
+        background: #1a1c22;
+        border-right: 1px solid #2a2d35;
+        overflow-y: auto;
+      }
+      .panel h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+      .panel .subtitle {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 0 0 20px;
+      }
+      .panel section {
+        margin-bottom: 20px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #2a2d35;
+      }
+      .panel section:last-child {
+        border-bottom: none;
+      }
+      .panel h2 {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #9aa0ab;
+        margin: 0 0 10px;
+      }
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-size: 12px;
+      }
+      .slider-row label {
+        width: 78px;
+        flex-shrink: 0;
+        color: #9aa0ab;
+      }
+      .slider-row input[type="range"] {
+        flex: 1;
+      }
+      .slider-row .value {
+        width: 40px;
+        flex-shrink: 0;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        color: #e8eaed;
+      }
+      .swatch {
+        width: 100%;
+        height: 28px;
+        border-radius: 6px;
+        border: 1px solid #2a2d35;
+        margin-bottom: 10px;
+      }
+      button {
+        width: 100%;
+        padding: 8px 12px;
+        border: none;
+        border-radius: 6px;
+        background: #2a2d35;
+        color: #e8eaed;
+        font-size: 13px;
+        cursor: pointer;
+        margin-bottom: 6px;
+      }
+      button:last-child {
+        margin-bottom: 0;
+      }
+      button:hover {
+        filter: brightness(1.15);
+      }
+      button.danger:hover {
+        background: #7f1d1d;
+      }
+      button.primary {
+        background: #2d4f8f;
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      button:disabled:hover {
+        filter: none;
+      }
+      .toggle-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 13px;
+        margin-bottom: 10px;
+        cursor: pointer;
+      }
+      .toggle-row input {
+        width: 34px;
+        height: 18px;
+        accent-color: #4f8cff;
+        cursor: pointer;
+      }
+      .checks {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 12px;
+      }
+      .checks label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+      }
+      .stat-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        margin-bottom: 4px;
+        color: #c9c9d1;
+      }
+      .stat-row span:first-child {
+        color: #9aa0ab;
+      }
+      .hint {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 0 0 8px;
+      }
+      .empty-hint {
+        font-size: 12px;
+        color: #666b76;
+        font-style: italic;
+      }
+      .callout {
+        font-size: 12px;
+        line-height: 1.5;
+        color: #d8c98a;
+        background: rgba(216, 201, 138, 0.08);
+        border: 1px solid rgba(216, 201, 138, 0.25);
+        border-radius: 6px;
+        padding: 8px 10px;
+        margin-top: 8px;
+      }
+      .neighbor-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        padding: 3px 0;
+        border-bottom: 1px solid #22242b;
+      }
+      .neighbor-row .swatch-sm {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        margin-right: 6px;
+        vertical-align: middle;
+      }
+      .status-line {
+        font-size: 12px;
+        color: #4f8cff;
+        min-height: 16px;
+        margin: 6px 0 0;
+      }
+      .viewport {
+        flex: 1;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0c0d10;
+      }
+      canvas {
+        cursor: crosshair;
+        border: 1px solid #2a2d35;
+        touch-action: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>ID / Membrane Stickiness Sandbox</h1>
+      <p class="subtitle">
+        Ports <code>trainer/backend/physics.py</code>'s <code>relax()</code> math exactly (Jacobi
+        surface tension + collision, same constants), run continuously frame-over-frame instead
+        of converge-and-stop, so pairwise tension can be watched directly and every tweak takes
+        effect live. Each node's 3-dim <code>id</code> vector is shown as RGB — tension between
+        two nodes in range is scaled by the cosine similarity of their ids, clipped to
+        <code>[0, 1]</code> ("homophilic adhesion"): matching ids pull at full strength,
+        orthogonal/opposed ids feel nothing, never repulsion.
+      </p>
+
+      <section>
+        <h2 id="node-value-heading">New node ID vector</h2>
+        <div class="swatch" id="value-swatch"></div>
+        <div class="slider-row">
+          <label>id&#8320; (R)</label>
+          <input type="range" id="slider-r" min="-1" max="1" step="0.01" value="1" />
+          <span class="value" id="value-r">1.00</span>
+        </div>
+        <div class="slider-row">
+          <label>id&#8321; (G)</label>
+          <input type="range" id="slider-g" min="-1" max="1" step="0.01" value="-0.6" />
+          <span class="value" id="value-g">-0.60</span>
+        </div>
+        <div class="slider-row">
+          <label>id&#8322; (B)</label>
+          <input type="range" id="slider-b" min="-1" max="1" step="0.01" value="-0.6" />
+          <span class="value" id="value-b">-0.60</span>
+        </div>
+        <p class="hint" id="edit-hint">
+          Click empty space to drop a node with this id. Click a node to select and edit its id
+          here, drag to move it, shift-click to pin/unpin, right-click to delete.
+        </p>
+        <button id="deselect-btn" style="display: none">Done editing</button>
+      </section>
+
+      <section>
+        <h2>Adhesion</h2>
+        <label class="toggle-row">
+          <span>ID-modulated tension</span>
+          <input type="checkbox" id="modulation-toggle" checked />
+        </label>
+        <p class="hint">
+          Unchecked forces compatibility to 1 for every pair — plain unmodulated surface tension,
+          as if all ids matched. The single most direct A/B switch for "what do ids actually do."
+        </p>
+        <div class="slider-row">
+          <label>Tension k</label>
+          <input type="range" id="slider-stiffness" min="0" max="1" step="0.01" value="0.3" />
+          <span class="value" id="value-stiffness">0.30</span>
+        </div>
+        <div class="slider-row">
+          <label>Tension range</label>
+          <input type="range" id="slider-range" min="1.0" max="2.5" step="0.01" value="1.15" />
+          <span class="value" id="value-range">1.15</span>
+        </div>
+        <div class="slider-row">
+          <label>Collision k</label>
+          <input type="range" id="slider-collision" min="0" max="1" step="0.01" value="0.5" />
+          <span class="value" id="value-collision">0.50</span>
+        </div>
+        <p class="hint">
+          Defaults match <code>physics.py</code> (<code>TENSION_STIFFNESS=0.3</code>,
+          <code>TENSION_RANGE=1.15×CONTACT_DISTANCE</code>, <code>SETTLE_STIFFNESS=0.5</code>).
+          Range is a multiple of contact distance (1.0). Radius/contact distance are fixed to the
+          real values. The hard collision cleanup pass is always full-strength and never
+          id-modulated, same as the real code.
+        </p>
+      </section>
+
+      <section>
+        <h2>Experiments</h2>
+        <button id="preset-uniform">1 — Uniform soup (control)</button>
+        <button id="preset-sorting">2 — Mixed soup: cell sorting</button>
+        <button id="preset-boundary">3 — Two clusters: membrane boundary</button>
+        <button id="preset-chain">4 — ID-segmented chain (+ jitter)</button>
+        <button id="preset-zero">5 — Zero-id edge case</button>
+        <p class="hint" id="preset-hint">Pick an experiment to seed the canvas.</p>
+        <button id="jitter-btn">Jitter positions</button>
+        <button id="clear-btn" class="danger">Clear all</button>
+      </section>
+
+      <section>
+        <h2>Simulation</h2>
+        <p class="hint">
+          Always running — physics steps every frame using whatever's currently on the canvas and
+          in the sliders above, so any tweak (drag a node, edit an id, flip the modulation toggle,
+          change a stiffness) shows its effect live instead of needing a "relax" click.
+        </p>
+        <button id="play-pause-btn" class="primary">⏸ Pause</button>
+        <div class="slider-row">
+          <label>Speed</label>
+          <input type="range" id="slider-speed" min="1" max="10" step="1" value="3" />
+          <span class="value" id="value-speed">3</span>
+        </div>
+        <p class="hint">Physics substeps computed per animation frame.</p>
+      </section>
+
+      <section>
+        <h2>Sorting metric</h2>
+        <p class="hint">
+          Mean cosine-similarity (clipped [0,1], same formula the force uses) between each node
+          and its physically-neighboring nodes (within tension range) — rises when same-id nodes
+          end up spatially adjacent, independent of whether modulation is currently on. Updates
+          live every frame.
+        </p>
+        <div class="stat-row"><span>Affinity index</span><span id="affinity-live">—</span></div>
+      </section>
+
+      <section>
+        <h2>Inspector</h2>
+        <div id="inspector-readout">
+          <p class="empty-hint">Hover a node to see its active tension links.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Nodes (<span id="node-count">0</span>) · pinned (<span id="pinned-count">0</span>)</h2>
+        <div class="callout">
+          A zero id vector has no direction — cosine similarity against it is undefined. The real
+          code's fallback (<code>norms &lt; 1e-9 → norm = 1</code>) makes a zero vector's "unit"
+          form <code>[0,0,0]</code>, so its dot product with anything, including another zero
+          vector, is 0 → clipped compatibility 0. Two "matching" zero-id nodes get <em>no</em>
+          pull, same as fully opposed ids. Try experiment 5.
+        </div>
+      </section>
+    </div>
+
+    <div class="viewport">
+      <canvas id="canvas" width="700" height="700"></canvas>
+    </div>
+
+    <script>
+      // ==========================================================
+      // Physics: a faithful port of trainer/backend/physics.py's
+      // relax() / _tension_compatibility() / _resolve_collisions(),
+      // restructured so a single substep (one settle-pass iteration +
+      // a few full-strength collision iterations) can be called
+      // forever from a live requestAnimationFrame loop, reading
+      // whatever the current nodes/params are each time, instead of
+      // batching to convergence once per click.
+      // ==========================================================
+      const RADIUS = 0.5;
+      const CONTACT_DISTANCE = 2 * RADIUS;
+      // Per-substep collision cleanup iterations — a small fixed budget
+      // (rather than physics.py's up-to-400-iterations-to-convergence)
+      // since this runs every substep, every frame, forever; overlaps
+      // that aren't fully resolved in one substep just finish resolving
+      // over the next few frames instead, which is invisible at
+      // animation speed.
+      const COLLISION_SUBITERS = 4;
+
+      function pairwise(pos) {
+        const n = pos.length;
+        const dist = Array.from({ length: n }, () => new Array(n).fill(Infinity));
+        const dir = Array.from({ length: n }, () => new Array(n).fill(null));
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            if (i === j) continue;
+            const dx = pos[j].x - pos[i].x;
+            const dy = pos[j].y - pos[i].y;
+            const d = Math.hypot(dx, dy);
+            dist[i][j] = d;
+            dir[i][j] = d > 0 ? [dx / d, dy / d] : [0, 0];
+          }
+        }
+        return { dist, dir };
+      }
+
+      // Mirrors _tension_compatibility: (N,N) cosine similarity of id
+      // vectors, clipped to [0,1]. `modulationEnabled=false` short-circuits
+      // to 1 everywhere — the sandbox's A/B switch, not part of the real
+      // function's signature.
+      function tensionCompatibility(idVectors, modulationEnabled) {
+        const n = idVectors.length;
+        const compat = Array.from({ length: n }, () => new Array(n).fill(1));
+        if (!modulationEnabled) return compat;
+        const unit = idVectors.map((v) => {
+          const norm = Math.hypot(...v);
+          const safe = norm < 1e-9 ? 1.0 : norm;
+          return v.map((c) => c / safe);
+        });
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            let dot = 0;
+            for (let k = 0; k < unit[i].length; k++) dot += unit[i][k] * unit[j][k];
+            compat[i][j] = Math.min(1, Math.max(0, dot));
+          }
+        }
+        return compat;
+      }
+
+      function jacobiStep(n, freeMask, active, magnitude, dir) {
+        const correction = [];
+        for (let i = 0; i < n; i++) {
+          let sx = 0,
+            sy = 0,
+            count = 0;
+          for (let j = 0; j < n; j++) {
+            if (i === j) continue;
+            if (active[i][j]) count++;
+            sx += dir[i][j][0] * magnitude[i][j];
+            sy += dir[i][j][1] * magnitude[i][j];
+          }
+          if (count === 0) count = 1;
+          let cx = sx / count,
+            cy = sy / count;
+          if (!freeMask[i]) {
+            cx = 0;
+            cy = 0;
+          }
+          correction.push({ x: cx, y: cy });
+        }
+        return correction;
+      }
+
+      // One live substep: a single settle-pass iteration (tension,
+      // id-modulated, + soft collision — mirrors one iteration of
+      // relax()'s first loop) followed by COLLISION_SUBITERS iterations
+      // of hard, unconditional, never-modulated collision cleanup
+      // (mirrors _resolve_collisions, just budget-capped instead of
+      // convergence-capped). `freeMask` lets the caller pin a node
+      // — including transiently, e.g. the node currently being
+      // dragged — without touching its persistent `.pinned` flag.
+      function physicsSubstep(positions, freeMask, idVectors, params) {
+        const n = positions.length;
+        let pos = positions.map((p) => ({ x: p.x, y: p.y }));
+        if (n < 2) return pos;
+
+        const compat = tensionCompatibility(idVectors, params.modulationEnabled);
+        const tensionRange = CONTACT_DISTANCE * params.tensionRangeMultiplier;
+
+        {
+          const { dist, dir } = pairwise(pos);
+          const active = Array.from({ length: n }, () => new Array(n).fill(false));
+          const magnitude = Array.from({ length: n }, () => new Array(n).fill(0));
+          for (let i = 0; i < n; i++) {
+            for (let j = 0; j < n; j++) {
+              if (i === j) continue;
+              const d = dist[i][j];
+              const collision = d < CONTACT_DISTANCE;
+              const tension = d >= CONTACT_DISTANCE && d <= tensionRange;
+              if (collision) {
+                active[i][j] = true;
+                magnitude[i][j] = (d - CONTACT_DISTANCE) * params.settleStiffness;
+              } else if (tension) {
+                active[i][j] = true;
+                magnitude[i][j] = (d - CONTACT_DISTANCE) * params.tensionStiffness * compat[i][j];
+              }
+            }
+          }
+          const correction = jacobiStep(n, freeMask, active, magnitude, dir);
+          pos = pos.map((p, i) => ({ x: p.x + correction[i].x, y: p.y + correction[i].y }));
+        }
+
+        for (let iter = 0; iter < COLLISION_SUBITERS; iter++) {
+          const { dist, dir } = pairwise(pos);
+          const active = Array.from({ length: n }, () => new Array(n).fill(false));
+          const magnitude = Array.from({ length: n }, () => new Array(n).fill(0));
+          for (let i = 0; i < n; i++) {
+            for (let j = 0; j < n; j++) {
+              if (i === j) continue;
+              if (dist[i][j] < CONTACT_DISTANCE) {
+                active[i][j] = true;
+                magnitude[i][j] = dist[i][j] - CONTACT_DISTANCE; // full strength, no stiffness
+              }
+            }
+          }
+          const correction = jacobiStep(n, freeMask, active, magnitude, dir);
+          pos = pos.map((p, i) => ({ x: p.x + correction[i].x, y: p.y + correction[i].y }));
+        }
+
+        return pos;
+      }
+
+      // ---- world <-> screen mapping ----
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const WORLD_HALF_EXTENT = 8;
+      const scale = canvas.width / (WORLD_HALF_EXTENT * 2);
+
+      function screenToWorld(sx, sy) {
+        return {
+          x: (sx - canvas.width / 2) / scale,
+          y: -(sy - canvas.height / 2) / scale,
+        };
+      }
+      function worldToScreen(x, y) {
+        return {
+          x: canvas.width / 2 + x * scale,
+          y: canvas.height / 2 - y * scale,
+        };
+      }
+
+      function toRgb(id) {
+        const squash = (v) => Math.round(((Math.tanh(v) + 1) / 2) * 255);
+        return `rgb(${squash(id[0])}, ${squash(id[1])}, ${squash(id[2])})`;
+      }
+
+      // ---- state ----
+      // node: { x, y, id: [i0,i1,i2], pinned: bool }
+      let nodes = [];
+      let selectedNode = null;
+      let hoverNode = null;
+      let draggingNode = null;
+      let dragMoved = false;
+      let running = true; // simulation loop is on by default and always ticking
+
+      const sliderR = document.getElementById("slider-r");
+      const sliderG = document.getElementById("slider-g");
+      const sliderB = document.getElementById("slider-b");
+      const valueR = document.getElementById("value-r");
+      const valueG = document.getElementById("value-g");
+      const valueB = document.getElementById("value-b");
+      const valueSwatch = document.getElementById("value-swatch");
+      const nodeValueHeading = document.getElementById("node-value-heading");
+      const editHint = document.getElementById("edit-hint");
+      const deselectBtn = document.getElementById("deselect-btn");
+      const nodeCountEl = document.getElementById("node-count");
+      const pinnedCountEl = document.getElementById("pinned-count");
+      const inspectorReadout = document.getElementById("inspector-readout");
+
+      const modulationToggle = document.getElementById("modulation-toggle");
+      const sliderStiffness = document.getElementById("slider-stiffness");
+      const sliderRange = document.getElementById("slider-range");
+      const sliderCollision = document.getElementById("slider-collision");
+      const valueStiffness = document.getElementById("value-stiffness");
+      const valueRange = document.getElementById("value-range");
+      const valueCollision = document.getElementById("value-collision");
+
+      const playPauseBtn = document.getElementById("play-pause-btn");
+      const sliderSpeed = document.getElementById("slider-speed");
+      const valueSpeed = document.getElementById("value-speed");
+
+      const affinityLive = document.getElementById("affinity-live");
+      const presetHint = document.getElementById("preset-hint");
+
+      function currentSliderId() {
+        return [parseFloat(sliderR.value), parseFloat(sliderG.value), parseFloat(sliderB.value)];
+      }
+
+      function updateSliderReadout() {
+        valueR.textContent = parseFloat(sliderR.value).toFixed(2);
+        valueG.textContent = parseFloat(sliderG.value).toFixed(2);
+        valueB.textContent = parseFloat(sliderB.value).toFixed(2);
+        valueSwatch.style.background = toRgb(currentSliderId());
+      }
+
+      function currentParams() {
+        return {
+          modulationEnabled: modulationToggle.checked,
+          tensionStiffness: parseFloat(sliderStiffness.value),
+          tensionRangeMultiplier: parseFloat(sliderRange.value),
+          settleStiffness: parseFloat(sliderCollision.value),
+        };
+      }
+
+      function selectNode(node) {
+        selectedNode = node;
+        nodeValueHeading.textContent = node ? "Editing selected node" : "New node ID vector";
+        editHint.style.display = node ? "none" : "block";
+        deselectBtn.style.display = node ? "block" : "none";
+        if (node) {
+          sliderR.value = node.id[0];
+          sliderG.value = node.id[1];
+          sliderB.value = node.id[2];
+          updateSliderReadout();
+        }
+      }
+
+      [sliderR, sliderG, sliderB].forEach((el) =>
+        el.addEventListener("input", () => {
+          updateSliderReadout();
+          if (selectedNode) {
+            selectedNode.id = currentSliderId();
+            render();
+          }
+        })
+      );
+
+      [sliderStiffness, sliderRange, sliderCollision].forEach((el) =>
+        el.addEventListener("input", () => {
+          valueStiffness.textContent = parseFloat(sliderStiffness.value).toFixed(2);
+          valueRange.textContent = parseFloat(sliderRange.value).toFixed(2);
+          valueCollision.textContent = parseFloat(sliderCollision.value).toFixed(2);
+          render();
+        })
+      );
+      modulationToggle.addEventListener("change", render);
+
+      deselectBtn.addEventListener("click", () => selectNode(null));
+
+      document.getElementById("clear-btn").addEventListener("click", () => {
+        nodes = [];
+        selectNode(null);
+        render();
+      });
+
+      document.getElementById("jitter-btn").addEventListener("click", () => {
+        const STD = 0.2;
+        for (const n of nodes) {
+          if (n.pinned) continue;
+          n.x += gaussian() * STD;
+          n.y += gaussian() * STD;
+        }
+        render();
+      });
+
+      // ---- gaussian noise (Box-Muller) ----
+      function gaussian() {
+        let u = 0,
+          v = 0;
+        while (u === 0) u = Math.random();
+        while (v === 0) v = Math.random();
+        return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+      }
+
+      // ---- affinity metric ----
+      // Mean clipped-cosine-similarity between each node and its
+      // physically-neighboring nodes (within the current tension range),
+      // independent of the modulation toggle — a measurement of how well
+      // space is organized by identity, not of what force is applied.
+      function computeAffinityIndex() {
+        const n = nodes.length;
+        if (n < 2) return null;
+        const idVectors = nodes.map((nd) => nd.id);
+        const compat = tensionCompatibility(idVectors, true);
+        const tensionRange = CONTACT_DISTANCE * parseFloat(sliderRange.value);
+        const { dist } = pairwise(nodes);
+        let total = 0,
+          counted = 0;
+        for (let i = 0; i < n; i++) {
+          let sum = 0,
+            count = 0;
+          for (let j = 0; j < n; j++) {
+            if (i === j) continue;
+            if (dist[i][j] <= tensionRange) {
+              sum += compat[i][j];
+              count++;
+            }
+          }
+          if (count > 0) {
+            total += sum / count;
+            counted++;
+          }
+        }
+        return counted > 0 ? total / counted : null;
+      }
+
+      function fmtAffinity(v) {
+        return v === null ? "—" : v.toFixed(3);
+      }
+
+      // ---- continuous simulation loop ----
+      // Runs every animation frame, forever, reading whatever nodes/
+      // params currently are — there's no discrete "start/stop a
+      // relax," just a running/paused flag. This is what makes slider
+      // tweaks, id edits, and dragging all show their effect live.
+      playPauseBtn.addEventListener("click", () => {
+        running = !running;
+        playPauseBtn.textContent = running ? "⏸ Pause" : "▶ Play";
+      });
+
+      sliderSpeed.addEventListener("input", () => {
+        valueSpeed.textContent = sliderSpeed.value;
+      });
+
+      function frameLoop() {
+        if (running && nodes.length >= 2) {
+          const params = currentParams();
+          const substeps = parseInt(sliderSpeed.value, 10);
+          // The node currently being dragged is treated as transiently
+          // pinned so the pointer, not the solver, has the final say on
+          // its position while the drag is in progress.
+          const freeMask = nodes.map((n) => n !== draggingNode && !n.pinned);
+          const idVectors = nodes.map((n) => n.id);
+          let positions = nodes.map((n) => ({ x: n.x, y: n.y }));
+          for (let s = 0; s < substeps; s++) {
+            positions = physicsSubstep(positions, freeMask, idVectors, params);
+          }
+          for (let i = 0; i < nodes.length; i++) {
+            nodes[i].x = positions[i].x;
+            nodes[i].y = positions[i].y;
+          }
+        }
+        render();
+        affinityLive.textContent = fmtAffinity(computeAffinityIndex());
+        requestAnimationFrame(frameLoop);
+      }
+
+      // ---- pointer interaction ----
+      const HIT_RADIUS = RADIUS + 0.1;
+
+      function findHit(world) {
+        let hit = null;
+        let bestDist = HIT_RADIUS;
+        for (const node of nodes) {
+          const d = Math.hypot(node.x - world.x, node.y - world.y);
+          if (d < bestDist) {
+            bestDist = d;
+            hit = node;
+          }
+        }
+        return hit;
+      }
+
+      canvas.addEventListener("pointerdown", (ev) => {
+        if (ev.button !== 0) return;
+        const rect = canvas.getBoundingClientRect();
+        const world = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+        const hit = findHit(world);
+
+        if (hit && ev.shiftKey) {
+          hit.pinned = !hit.pinned;
+          updateCounts();
+          render();
+          return;
+        }
+        if (hit) {
+          draggingNode = hit;
+          dragMoved = false;
+          selectNode(hit);
+        } else {
+          const node = { x: world.x, y: world.y, id: currentSliderId(), pinned: false };
+          nodes.push(node);
+          updateCounts();
+          render();
+        }
+      });
+
+      canvas.addEventListener("pointermove", (ev) => {
+        const rect = canvas.getBoundingClientRect();
+        const world = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+        if (draggingNode) {
+          draggingNode.x = world.x;
+          draggingNode.y = world.y;
+          dragMoved = true;
+          render();
+          return;
+        }
+        hoverNode = findHit(world);
+        renderFrame();
+      });
+
+      window.addEventListener("pointerup", () => {
+        draggingNode = null;
+      });
+
+      canvas.addEventListener("pointerleave", () => {
+        hoverNode = null;
+        renderFrame();
+      });
+
+      canvas.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const world = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+        const hit = findHit(world);
+        if (hit) {
+          nodes = nodes.filter((n) => n !== hit);
+          if (selectedNode === hit) selectNode(null);
+          if (hoverNode === hit) hoverNode = null;
+          updateCounts();
+          render();
+        }
+      });
+
+      function updateCounts() {
+        nodeCountEl.textContent = nodes.length;
+        pinnedCountEl.textContent = nodes.filter((n) => n.pinned).length;
+      }
+
+      // ---- presets ----
+      const ID_A = [1, -1, -1]; // reddish
+      const ID_B = [-1, 1, -1]; // greenish
+      const ID_C = [-1, -1, 1]; // blueish
+
+      function hexCluster(cx, cy, radius, idFn) {
+        const spacing = CONTACT_DISTANCE;
+        const rowHeight = spacing * (Math.sqrt(3) / 2);
+        const rows = Math.ceil(radius / rowHeight) + 1;
+        const out = [];
+        for (let row = -rows; row <= rows; row++) {
+          const y = row * rowHeight;
+          const xOffset = row % 2 !== 0 ? spacing / 2 : 0;
+          const cols = Math.ceil(radius / spacing) + 1;
+          for (let col = -cols; col <= cols; col++) {
+            const x = xOffset + col * spacing;
+            if (Math.hypot(x, y) <= radius) {
+              out.push({
+                x: cx + x + gaussian() * 0.03,
+                y: cy + y + gaussian() * 0.03,
+                id: idFn(cx + x, cy + y),
+                pinned: false,
+              });
+            }
+          }
+        }
+        return out;
+      }
+
+      // A straight-edge slab (regular grid, not hex-packed) instead of
+      // hexCluster's disk — gives exact control over the boundary gap
+      // between two slabs, which hexCluster's sparse, curved edge
+      // doesn't. `nearEdgeX` is where the slab's boundary-facing edge
+      // sits; `direction` (-1/+1) is which way it grows from there.
+      function membraneSlab(nearEdgeX, direction, cols, rows, id) {
+        const spacing = CONTACT_DISTANCE * 1.02;
+        const out = [];
+        for (let row = -rows; row <= rows; row++) {
+          const y = row * spacing;
+          for (let col = 0; col < cols; col++) {
+            out.push({
+              x: nearEdgeX + direction * col * spacing,
+              y,
+              id: [...id],
+              pinned: false,
+            });
+          }
+        }
+        return out;
+      }
+
+      function loadPreset(newNodes, hint) {
+        nodes = newNodes;
+        selectNode(null);
+        hoverNode = null;
+        presetHint.textContent = hint;
+        updateCounts();
+        render();
+      }
+
+      document.getElementById("preset-uniform").addEventListener("click", () => {
+        loadPreset(
+          hexCluster(0, 0, 3, () => [...ID_A]),
+          "Every node shares one id, so compatibility is 1 everywhere — identical to modulation " +
+            "being off. It's already relaxing live; compare the settled shape against " +
+            "experiment 2's outcome as a baseline."
+        );
+      });
+
+      document.getElementById("preset-sorting").addEventListener("click", () => {
+        loadPreset(
+          hexCluster(0, 0, 3.2, () => (Math.random() < 0.5 ? [...ID_A] : [...ID_B])),
+          "A random 50/50 mix of two opposed ids (cos similarity clips to 0 across groups). " +
+            "Watch it self-sort live — the affinity index should climb noticeably. Once it's " +
+            "settled, flip the modulation toggle off and watch the two groups pull back into one " +
+            "blob in real time; flip it back on and they re-sort."
+        );
+      });
+
+      document.getElementById("preset-boundary").addEventListener("click", () => {
+        // Gap kept well under TENSION_RANGE (1.15x contact distance) with
+        // margin: each slab's own internal cohesion tugs it slightly as
+        // it settles, which can nudge the boundary gap outward by a few
+        // percent — too close to 1.15x and that drift alone pushes the
+        // interface out of range, and it never feels a force again no
+        // matter what the modulation toggle is set to.
+        const gap = CONTACT_DISTANCE * 1.05;
+        const left = membraneSlab(-gap / 2, -1, 5, 6, ID_A);
+        const right = membraneSlab(gap / 2, 1, 5, 6, ID_B);
+        loadPreset(
+          left.concat(right),
+          "Two already-sorted slabs placed edge to edge with a small gap, inside tension range " +
+            "but not touching. Collision keeps them from overlapping but nothing pulls the " +
+            "boundary shut, so it stays a sharp interface — a 'membrane'. Toggle modulation off " +
+            "and watch the two slabs merge into one blob live; toggle it back on and the " +
+            "boundary re-forms."
+        );
+      });
+
+      document.getElementById("preset-chain").addEventListener("click", () => {
+        const N = 22;
+        const chain = [];
+        let i = 0;
+        while (i < N) {
+          const segLen = 3 + Math.floor(Math.random() * 4); // 3..6
+          const segId = [gaussian() * 0.7, gaussian() * 0.7, gaussian() * 0.7];
+          for (let k = 0; k < segLen && i < N; k++, i++) {
+            chain.push({
+              x: (i - N / 2) * CONTACT_DISTANCE,
+              y: gaussian() * 0.4, // pre-jittered so segment boundaries are already at risk
+              id: [...segId],
+              pinned: false,
+            });
+          }
+        }
+        loadPreset(
+          chain,
+          "A straight chain built from random-length same-id segments, already jittered off the " +
+            "line. Watch it live: within a segment (matching id) nodes snap back together; at a " +
+            "segment boundary (unrelated random ids ≈ no compatibility) there's nothing to pull " +
+            "them back, so the chain fragments into color-pure pieces. Hit 'Jitter positions' " +
+            "again afterward to push it further while it keeps running."
+        );
+      });
+
+      document.getElementById("preset-zero").addEventListener("click", () => {
+        const gapWorld = CONTACT_DISTANCE * 1.08; // inside tension range, outside contact
+        const zeroPair = [
+          { x: -3, y: 1, id: [0, 0, 0], pinned: false },
+          { x: -3 + gapWorld, y: 1, id: [0, 0, 0], pinned: false },
+        ];
+        const normalPair = [
+          { x: -3, y: -1, id: [...ID_C], pinned: false },
+          { x: -3 + gapWorld, y: -1, id: [...ID_C], pinned: false },
+        ];
+        loadPreset(
+          zeroPair.concat(normalPair),
+          "Top pair: both nodes have id=[0,0,0] — same value, but a zero vector has no direction " +
+            "so its cosine similarity (even to itself) falls back to 0, not 1. Bottom pair: both " +
+            "share a normal nonzero id. Both pairs start at the same gap (inside tension range, " +
+            "outside contact). Watch live: the bottom pair snaps together immediately, the top " +
+            "('matching') pair just sits still."
+        );
+      });
+
+      // ---- rendering ----
+      const baseCanvas = document.createElement("canvas");
+      baseCanvas.width = canvas.width;
+      baseCanvas.height = canvas.height;
+      const baseCtx = baseCanvas.getContext("2d");
+
+      function drawTensionLinks() {
+        if (nodes.length < 2) return;
+        const idVectors = nodes.map((n) => n.id);
+        const compat = tensionCompatibility(idVectors, modulationToggle.checked);
+        const tensionRange = CONTACT_DISTANCE * parseFloat(sliderRange.value);
+        const { dist } = pairwise(nodes);
+        for (let i = 0; i < nodes.length; i++) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            const d = dist[i][j];
+            if (d > tensionRange) continue;
+            const a = worldToScreen(nodes[i].x, nodes[i].y);
+            const b = worldToScreen(nodes[j].x, nodes[j].y);
+            const c = compat[i][j];
+            baseCtx.beginPath();
+            baseCtx.moveTo(a.x, a.y);
+            baseCtx.lineTo(b.x, b.y);
+            if (d < CONTACT_DISTANCE) {
+              baseCtx.strokeStyle = "rgba(255,120,120,0.55)";
+              baseCtx.lineWidth = 1.5;
+              baseCtx.setLineDash([]);
+            } else if (c > 0.001) {
+              baseCtx.strokeStyle = `rgba(120,220,255,${0.15 + 0.7 * c})`;
+              baseCtx.lineWidth = 1 + 2 * c;
+              baseCtx.setLineDash([]);
+            } else {
+              baseCtx.strokeStyle = "rgba(255,255,255,0.12)";
+              baseCtx.lineWidth = 1;
+              baseCtx.setLineDash([3, 3]);
+            }
+            baseCtx.stroke();
+            baseCtx.setLineDash([]);
+          }
+        }
+      }
+
+      function drawNodes() {
+        const r = RADIUS * scale;
+        for (const node of nodes) {
+          const s = worldToScreen(node.x, node.y);
+          const isSelected = node === selectedNode;
+          const isHover = node === hoverNode;
+          baseCtx.beginPath();
+          baseCtx.arc(s.x, s.y, r, 0, Math.PI * 2);
+          baseCtx.fillStyle = toRgb(node.id);
+          baseCtx.fill();
+          baseCtx.lineWidth = isSelected ? 2.5 : 1.5;
+          baseCtx.strokeStyle = isSelected
+            ? "#ffffff"
+            : isHover
+              ? "rgba(255,255,255,0.9)"
+              : "rgba(255,255,255,0.6)";
+          baseCtx.stroke();
+          if (node.pinned) {
+            baseCtx.beginPath();
+            baseCtx.setLineDash([2, 2]);
+            baseCtx.arc(s.x, s.y, r + 5, 0, Math.PI * 2);
+            baseCtx.strokeStyle = "#ffd166";
+            baseCtx.lineWidth = 1.5;
+            baseCtx.stroke();
+            baseCtx.setLineDash([]);
+          }
+        }
+      }
+
+      function updateInspector() {
+        if (!hoverNode || nodes.length < 2) {
+          inspectorReadout.innerHTML =
+            '<p class="empty-hint">Hover a node to see its active tension links.</p>';
+          return;
+        }
+        const idVectors = nodes.map((n) => n.id);
+        const compat = tensionCompatibility(idVectors, true);
+        const tensionRange = CONTACT_DISTANCE * parseFloat(sliderRange.value);
+        const i = nodes.indexOf(hoverNode);
+        const neighbors = [];
+        for (let j = 0; j < nodes.length; j++) {
+          if (j === i) continue;
+          const d = Math.hypot(nodes[j].x - nodes[i].x, nodes[j].y - nodes[i].y);
+          if (d <= tensionRange) {
+            neighbors.push({ j, d, c: compat[i][j] });
+          }
+        }
+        neighbors.sort((a, b) => a.d - b.d);
+        let html = `
+          <div class="stat-row"><span>id</span><span>${hoverNode.id.map((v) => v.toFixed(2)).join(", ")}</span></div>
+          <div class="stat-row"><span>pinned</span><span>${hoverNode.pinned ? "yes" : "no"}</span></div>
+          <div class="stat-row"><span>links in range</span><span>${neighbors.length}</span></div>
+        `;
+        if (neighbors.length === 0) {
+          html += '<p class="empty-hint">No node within tension range.</p>';
+        } else {
+          for (const nb of neighbors.slice(0, 8)) {
+            const inContact = nb.d < CONTACT_DISTANCE;
+            html += `<div class="neighbor-row">
+              <span><span class="swatch-sm" style="background:${toRgb(nodes[nb.j].id)}"></span>dist ${nb.d.toFixed(2)}${inContact ? " (touching)" : ""}</span>
+              <span>compat ${nb.c.toFixed(2)}</span>
+            </div>`;
+          }
+          if (neighbors.length > 8) {
+            html += `<p class="empty-hint">+${neighbors.length - 8} more</p>`;
+          }
+        }
+        inspectorReadout.innerHTML = html;
+      }
+
+      function renderBase() {
+        baseCtx.fillStyle = "#0c0d10";
+        baseCtx.fillRect(0, 0, canvas.width, canvas.height);
+        drawTensionLinks();
+        drawNodes();
+      }
+
+      function renderFrame() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(baseCanvas, 0, 0);
+        updateInspector();
+      }
+
+      function render() {
+        renderBase();
+        renderFrame();
+      }
+
+      updateSliderReadout();
+      valueStiffness.textContent = parseFloat(sliderStiffness.value).toFixed(2);
+      valueRange.textContent = parseFloat(sliderRange.value).toFixed(2);
+      valueCollision.textContent = parseFloat(sliderCollision.value).toFixed(2);
+      valueSpeed.textContent = sliderSpeed.value;
+      requestAnimationFrame(frameLoop);
+    </script>
+  </body>
+</html>

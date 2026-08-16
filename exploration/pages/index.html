@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Exploration</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #111318;
+        color: #e8eaed;
+        margin: 0;
+        padding: 40px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 20px;
+      }
+      ul {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      li {
+        margin-bottom: 16px;
+        max-width: 480px;
+      }
+      a {
+        color: #4f8cff;
+        text-decoration: none;
+        font-size: 14px;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      p {
+        color: #9aa0ab;
+        font-size: 13px;
+        margin: 2px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Exploration</h1>
+    <ul>
+      <li>
+        <a href="gradient-field.html">gradient-field</a>
+        <p>
+          Interactive sandbox: drop nodes with a 3-channel value, see the resulting field
+          and its analytic gradient — same math as backend/substrate.py, 3 channels shown
+          as RGB.
+        </p>
+      </li>
+      <li>
+        <a href="id-adhesion.html">id-adhesion</a>
+        <p>
+          Interactive sandbox: a faithful port of backend/physics.py's relax() (Jacobi surface
+          tension + collision), with id-modulated adhesion shown live. Five built-in experiments
+          (cell sorting, membrane boundary, chain fragmentation, zero-id edge case) plus a
+          sorting-affinity metric and per-node tension-link inspector.
+        </p>
+      </li>
+      <li>
+        <a href="distance-sandbox.html">distance-sandbox</a>
+        <p>
+          Interactive sandbox: click to place nodes (held together by tension + collision
+          physics), load a real target from the trainer backend or fall back to a built-in
+          circle, and drag it around — the Chamfer distance (the actual training fitness
+          metric) updates live, with optional nearest-neighbor pair lines showing what's
+          driving the number.
+        </p>
+      </li>
+    </ul>
+  </body>
+</html>

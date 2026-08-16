@@ -1,0 +1,675 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Distance Sandbox</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #111318;
+        color: #e8eaed;
+        display: flex;
+      }
+      .panel {
+        width: 300px;
+        flex-shrink: 0;
+        padding: 20px;
+        background: #1a1c22;
+        border-right: 1px solid #2a2d35;
+        overflow-y: auto;
+      }
+      .panel h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+      .panel .subtitle {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 0 0 20px;
+      }
+      .panel section {
+        margin-bottom: 20px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #2a2d35;
+      }
+      .panel section:last-child {
+        border-bottom: none;
+      }
+      .panel h2 {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #9aa0ab;
+        margin: 0 0 10px;
+      }
+      .tabs {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      .tabs button {
+        flex: 1;
+        padding: 8px 10px;
+        border: none;
+        border-radius: 6px;
+        background: #2a2d35;
+        color: #e8eaed;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .tabs button.active {
+        background: #4f8cff;
+        color: white;
+      }
+      .tabs button:hover {
+        filter: brightness(1.15);
+      }
+      button.full {
+        width: 100%;
+        padding: 8px 12px;
+        border: none;
+        border-radius: 6px;
+        background: #2a2d35;
+        color: #e8eaed;
+        font-size: 13px;
+        cursor: pointer;
+        margin-top: 6px;
+      }
+      button.full:hover {
+        filter: brightness(1.15);
+      }
+      button.danger:hover {
+        background: #7f1d1d;
+      }
+      .hint {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 8px 0 0;
+      }
+      .stat-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 13px;
+        margin-bottom: 6px;
+      }
+      .stat-row span:first-child {
+        color: #9aa0ab;
+      }
+      label.check {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        cursor: pointer;
+        margin-top: 8px;
+      }
+      .target-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 260px;
+        overflow-y: auto;
+      }
+      .target-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px;
+        border: 1px solid transparent;
+        border-radius: 8px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+      }
+      .target-row:hover {
+        background: #22252d;
+      }
+      .target-row.selected {
+        border-color: #4f8cff;
+        background: #1e2733;
+      }
+      .target-preview {
+        width: 36px;
+        height: 36px;
+        flex-shrink: 0;
+        background: #111318;
+        border-radius: 6px;
+      }
+      .target-info {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .target-name {
+        font-size: 13px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .target-meta {
+        font-size: 11px;
+        color: #9aa0ab;
+      }
+      .viewport {
+        flex: 1;
+        position: relative;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: crosshair;
+        touch-action: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>Distance Sandbox</h1>
+      <p class="subtitle">
+        Place nodes — held together by the same tension + collision physics as the real
+        system (no chemistry/identity here, just geometry). Load or drag a target point
+        cloud around and watch the Chamfer distance (the training fitness metric) respond
+        live.
+      </p>
+
+      <section>
+        <h2>Tool</h2>
+        <div class="tabs">
+          <button id="tool-add" class="active">Add node</button>
+          <button id="tool-move">Move target</button>
+        </div>
+        <p class="hint" id="tool-hint">
+          Click empty space to drop a node. Physics settles the whole cluster after every
+          placement.
+        </p>
+        <button class="full danger" id="clear-nodes">Clear nodes</button>
+      </section>
+
+      <section>
+        <h2>Target</h2>
+        <div class="target-list" id="target-list">
+          <p class="hint">Loading…</p>
+        </div>
+        <button class="full" id="reset-offset">Center target</button>
+      </section>
+
+      <section>
+        <h2>Distance</h2>
+        <div id="distance-readout">
+          <p class="hint">Add nodes and a target to see the Chamfer distance.</p>
+        </div>
+        <label class="check">
+          <input type="checkbox" id="show-lines" checked />
+          Show nearest-neighbor pairs
+        </label>
+      </section>
+
+      <section>
+        <h2>Stats</h2>
+        <div class="stat-row"><span>Nodes</span><span id="stat-nodes">0</span></div>
+        <div class="stat-row"><span>Target points</span><span id="stat-target">0</span></div>
+      </section>
+
+      <p class="hint">Scroll to zoom, right-drag to pan.</p>
+    </div>
+
+    <div class="viewport">
+      <canvas id="canvas"></canvas>
+    </div>
+
+    <script>
+      const TRAINER_API = "http://localhost:8000";
+
+      // ---- physics: simplified port of sim/physics.ts (tension +
+      // collision only — no id-based compatibility, since this sandbox
+      // has no node identity concept, just geometry) ----
+      const RADIUS = 0.5;
+      const CONTACT_DISTANCE = 2 * RADIUS;
+      const TENSION_RANGE = CONTACT_DISTANCE * 1.15;
+      const TENSION_STIFFNESS = 0.3;
+      const SETTLE_STIFFNESS = 0.5;
+      const SETTLE_ITERATIONS = 60;
+      const CLEANUP_ITERATIONS = 150;
+      const CONVERGENCE_TOL = 1e-4;
+
+      function pairStep(pos, freeMask, activeFn) {
+        const n = pos.length;
+        const correction = Array.from({ length: n }, () => [0, 0]);
+        for (let i = 0; i < n; i++) {
+          if (!freeMask[i]) continue;
+          let sx = 0,
+            sy = 0,
+            count = 0;
+          for (let j = 0; j < n; j++) {
+            if (i === j) continue;
+            const dx = pos[j][0] - pos[i][0];
+            const dy = pos[j][1] - pos[i][1];
+            const d = Math.hypot(dx, dy);
+            const stiffness = activeFn(d);
+            if (stiffness === null) continue;
+            const dSafe = d < 1e-9 ? 1e-9 : d;
+            const magnitude = (d - CONTACT_DISTANCE) * stiffness;
+            sx += (dx / dSafe) * magnitude;
+            sy += (dy / dSafe) * magnitude;
+            count++;
+          }
+          if (count > 0) {
+            correction[i][0] = sx / count;
+            correction[i][1] = sy / count;
+          }
+        }
+        return correction;
+      }
+
+      function maxNorm(correction) {
+        let m = 0;
+        for (const [x, y] of correction) m = Math.max(m, Math.hypot(x, y));
+        return m;
+      }
+
+      function applyCorrection(pos, correction) {
+        return pos.map(([x, y], i) => [x + correction[i][0], y + correction[i][1]]);
+      }
+
+      function relax(positions, pinned) {
+        let pos = positions.map(([x, y]) => [x, y]);
+        const n = pos.length;
+        if (n < 2) return pos;
+        const freeMask = pos.map((_, i) => !pinned.has(i));
+
+        for (let iter = 0; iter < SETTLE_ITERATIONS; iter++) {
+          const correction = pairStep(pos, freeMask, (d) => {
+            if (d < CONTACT_DISTANCE) return SETTLE_STIFFNESS;
+            if (d <= TENSION_RANGE) return TENSION_STIFFNESS;
+            return null;
+          });
+          pos = applyCorrection(pos, correction);
+          if (maxNorm(correction) < CONVERGENCE_TOL) break;
+        }
+        for (let iter = 0; iter < CLEANUP_ITERATIONS; iter++) {
+          const correction = pairStep(pos, freeMask, (d) => (d < CONTACT_DISTANCE ? 1.0 : null));
+          pos = applyCorrection(pos, correction);
+          if (maxNorm(correction) < CONVERGENCE_TOL) break;
+        }
+        return pos;
+      }
+
+      // ---- chamfer distance: direct port of distance.py, brute-force
+      // nearest neighbor (fine at this tool's scale — tens of nodes,
+      // low hundreds of target points) ----
+      function nearest(p, others) {
+        let bestDist = Infinity,
+          bestIndex = -1;
+        for (let i = 0; i < others.length; i++) {
+          const d = Math.hypot(p[0] - others[i][0], p[1] - others[i][1]);
+          if (d < bestDist) {
+            bestDist = d;
+            bestIndex = i;
+          }
+        }
+        return { dist: bestDist, index: bestIndex };
+      }
+
+      function mean(arr) {
+        return arr.length === 0 ? Infinity : arr.reduce((a, b) => a + b, 0) / arr.length;
+      }
+
+      function chamferDistance(points, targetPoints) {
+        if (points.length === 0 || targetPoints.length === 0) {
+          return {
+            pointsToTarget: Infinity,
+            targetToPoints: Infinity,
+            chamfer: Infinity,
+            nearestForPoints: [],
+            nearestForTarget: [],
+          };
+        }
+        const nearestForPoints = points.map((p) => nearest(p, targetPoints));
+        const nearestForTarget = targetPoints.map((p) => nearest(p, points));
+        const pointsToTarget = mean(nearestForPoints.map((r) => r.dist));
+        const targetToPoints = mean(nearestForTarget.map((r) => r.dist));
+        return {
+          pointsToTarget,
+          targetToPoints,
+          chamfer: pointsToTarget + targetToPoints,
+          nearestForPoints,
+          nearestForTarget,
+        };
+      }
+
+      // ---- state ----
+      let nodes = []; // [x, y][]
+      let pinned = new Set();
+      let targetName = null;
+      let targetPoints = []; // raw, un-offset
+      let targetOffset = [0, 0];
+      let tool = "add";
+
+      function builtinCircleTarget() {
+        const points = [];
+        const r = 4;
+        for (let x = -r; x <= r; x++) {
+          for (let y = -r; y <= r; y++) {
+            if (x * x + y * y <= r * r) points.push([x, y]);
+          }
+        }
+        return points;
+      }
+
+      // ---- canvas / view ----
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const view = { scale: 50, panX: 0, panY: 0 };
+
+      function resize() {
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+        draw();
+      }
+      new ResizeObserver(resize).observe(canvas);
+
+      function worldToScreen(x, y) {
+        return {
+          x: canvas.width / 2 + view.panX + x * view.scale,
+          y: canvas.height / 2 + view.panY - y * view.scale,
+        };
+      }
+      function screenToWorld(sx, sy) {
+        return {
+          x: (sx - canvas.width / 2 - view.panX) / view.scale,
+          y: -(sy - canvas.height / 2 - view.panY) / view.scale,
+        };
+      }
+
+      function offsetTargetPoints() {
+        return targetPoints.map(([x, y]) => [x + targetOffset[0], y + targetOffset[1]]);
+      }
+
+      // ---- rendering ----
+      function draw() {
+        ctx.fillStyle = "#111318";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // faint grid
+        ctx.strokeStyle = "rgba(255,255,255,0.04)";
+        ctx.lineWidth = 1;
+        const origin = worldToScreen(0, 0);
+        const startX = ((origin.x % view.scale) + view.scale) % view.scale;
+        const startY = ((origin.y % view.scale) + view.scale) % view.scale;
+        for (let x = startX; x < canvas.width; x += view.scale) {
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, canvas.height);
+          ctx.stroke();
+        }
+        for (let y = startY; y < canvas.height; y += view.scale) {
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo(canvas.width, y);
+          ctx.stroke();
+        }
+
+        const target = offsetTargetPoints();
+        const result = chamferDistance(nodes, target);
+
+        // nearest-neighbor pair lines, underneath everything else
+        if (document.getElementById("show-lines").checked) {
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = "rgba(79,140,255,0.25)";
+          result.nearestForPoints.forEach((r, i) => {
+            if (r.index < 0) return;
+            const a = worldToScreen(nodes[i][0], nodes[i][1]);
+            const b = worldToScreen(target[r.index][0], target[r.index][1]);
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          });
+          ctx.strokeStyle = "rgba(239,68,68,0.25)";
+          result.nearestForTarget.forEach((r, i) => {
+            if (r.index < 0) return;
+            const a = worldToScreen(target[i][0], target[i][1]);
+            const b = worldToScreen(nodes[r.index][0], nodes[r.index][1]);
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          });
+        }
+
+        // target points
+        ctx.fillStyle = "rgba(239,68,68,0.75)";
+        for (const [x, y] of target) {
+          const s = worldToScreen(x, y);
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // nodes
+        const screenRadius = RADIUS * view.scale;
+        for (let i = 0; i < nodes.length; i++) {
+          const s = worldToScreen(nodes[i][0], nodes[i][1]);
+          ctx.fillStyle = pinned.has(i) ? "#4ade80" : "#4f8cff";
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, screenRadius, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        renderDistance(result);
+      }
+
+      function renderDistance(result) {
+        const el = document.getElementById("distance-readout");
+        if (!isFinite(result.chamfer)) {
+          el.innerHTML = '<p class="hint">Add at least one node and a target.</p>';
+          return;
+        }
+        el.innerHTML = `
+          <div class="stat-row"><span>Chamfer</span><span>${result.chamfer.toFixed(3)}</span></div>
+          <div class="stat-row"><span>Nodes → target</span><span>${result.pointsToTarget.toFixed(3)}</span></div>
+          <div class="stat-row"><span>Target → nodes</span><span>${result.targetToPoints.toFixed(3)}</span></div>
+        `;
+      }
+
+      // ---- node placement ----
+      function addNode(x, y) {
+        nodes.push([x, y]);
+        if (nodes.length === 1) pinned.add(0);
+        nodes = relax(nodes, pinned);
+        document.getElementById("stat-nodes").textContent = nodes.length;
+        draw();
+      }
+
+      document.getElementById("clear-nodes").addEventListener("click", () => {
+        nodes = [];
+        pinned = new Set();
+        document.getElementById("stat-nodes").textContent = 0;
+        draw();
+      });
+
+      document.getElementById("reset-offset").addEventListener("click", () => {
+        targetOffset = [0, 0];
+        draw();
+      });
+
+      // ---- tool switching ----
+      const toolAddBtn = document.getElementById("tool-add");
+      const toolMoveBtn = document.getElementById("tool-move");
+      const toolHint = document.getElementById("tool-hint");
+      function setTool(next) {
+        tool = next;
+        toolAddBtn.classList.toggle("active", tool === "add");
+        toolMoveBtn.classList.toggle("active", tool === "move");
+        toolHint.textContent =
+          tool === "add"
+            ? "Click empty space to drop a node. Physics settles the whole cluster after every placement."
+            : "Click and drag anywhere to move the whole target.";
+        canvas.style.cursor = tool === "add" ? "crosshair" : "grab";
+      }
+      toolAddBtn.addEventListener("click", () => setTool("add"));
+      toolMoveBtn.addEventListener("click", () => setTool("move"));
+
+      // ---- pointer interaction: left click = tool action, right/middle
+      // drag = pan, wheel = zoom (same convention as the main app) ----
+      let panDrag = null;
+      let targetDrag = null;
+
+      canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+      canvas.addEventListener("pointerdown", (e) => {
+        if (e.button === 2 || e.button === 1) {
+          panDrag = { x: e.clientX, y: e.clientY, panX: view.panX, panY: view.panY };
+          e.preventDefault();
+          return;
+        }
+        if (e.button !== 0) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const world = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+
+        if (tool === "add") {
+          addNode(world.x, world.y);
+        } else {
+          targetDrag = { x: e.clientX, y: e.clientY, offset: [...targetOffset] };
+          canvas.style.cursor = "grabbing";
+        }
+      });
+
+      canvas.addEventListener("pointermove", (e) => {
+        if (panDrag) {
+          view.panX = panDrag.panX + (e.clientX - panDrag.x);
+          view.panY = panDrag.panY + (e.clientY - panDrag.y);
+          draw();
+          return;
+        }
+        if (targetDrag) {
+          const dx = (e.clientX - targetDrag.x) / view.scale;
+          const dy = -(e.clientY - targetDrag.y) / view.scale;
+          targetOffset = [targetDrag.offset[0] + dx, targetDrag.offset[1] + dy];
+          draw();
+        }
+      });
+
+      window.addEventListener("pointerup", () => {
+        panDrag = null;
+        if (targetDrag) {
+          targetDrag = null;
+          canvas.style.cursor = tool === "add" ? "crosshair" : "grab";
+        }
+      });
+
+      canvas.addEventListener(
+        "wheel",
+        (e) => {
+          e.preventDefault();
+          const rect = canvas.getBoundingClientRect();
+          const sx = e.clientX - rect.left;
+          const sy = e.clientY - rect.top;
+          const before = screenToWorld(sx, sy);
+
+          const oldScale = view.scale;
+          const factor = Math.exp(-e.deltaY * 0.001);
+          const newScale = Math.min(300, Math.max(8, oldScale * factor));
+
+          view.panX += before.x * (oldScale - newScale);
+          view.panY -= before.y * (oldScale - newScale);
+          view.scale = newScale;
+          draw();
+        },
+        { passive: false }
+      );
+
+      document.getElementById("show-lines").addEventListener("change", draw);
+
+      // ---- target list ----
+      function selectTarget(name, points) {
+        targetName = name;
+        targetPoints = points;
+        targetOffset = [0, 0];
+        document.getElementById("stat-target").textContent = points.length;
+        renderTargetList();
+        draw();
+      }
+
+      let availableTargets = [];
+
+      function renderTargetList() {
+        const el = document.getElementById("target-list");
+        if (availableTargets.length === 0) {
+          el.innerHTML = '<p class="hint">No targets found — using a built-in circle instead.</p>';
+          return;
+        }
+        el.innerHTML = "";
+        for (const t of availableTargets) {
+          const row = document.createElement("button");
+          row.className = "target-row" + (t.name === targetName ? " selected" : "");
+          row.innerHTML = `
+            <svg class="target-preview" viewBox="-1 -1 2 2"></svg>
+            <div class="target-info">
+              <span class="target-name">${t.name}</span>
+              <span class="target-meta">${t.points.length} points</span>
+            </div>
+          `;
+          row.addEventListener("click", () => selectTarget(t.name, t.points));
+          el.appendChild(row);
+
+          const svg = row.querySelector("svg");
+          const xs = t.points.map((p) => p[0]);
+          const ys = t.points.map((p) => p[1]);
+          const minX = Math.min(...xs),
+            maxX = Math.max(...xs);
+          const minY = Math.min(...ys),
+            maxY = Math.max(...ys);
+          const size = Math.max(maxX - minX, maxY - minY, 1e-6);
+          const pad = size * 0.15;
+          svg.setAttribute("viewBox", `${minX - pad} ${-maxY - pad} ${size + pad * 2} ${size + pad * 2}`);
+          for (const [x, y] of t.points) {
+            const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+            c.setAttribute("cx", x);
+            c.setAttribute("cy", -y);
+            c.setAttribute("r", size * 0.015);
+            c.setAttribute("fill", "#ef4444");
+            svg.appendChild(c);
+          }
+        }
+      }
+
+      async function loadTargetList() {
+        try {
+          const res = await fetch(`${TRAINER_API}/targets`);
+          if (!res.ok) throw new Error(`status ${res.status}`);
+          const data = await res.json();
+          availableTargets = data.targets.map((t) => ({ name: t.name, points: t.preview }));
+        } catch (err) {
+          console.warn(
+            "[distance-sandbox] couldn't reach trainer backend at " + TRAINER_API + " — using a built-in target instead.",
+            err
+          );
+          availableTargets = [{ name: "circle (built-in)", points: builtinCircleTarget() }];
+        }
+        renderTargetList();
+        if (availableTargets.length > 0) {
+          selectTarget(availableTargets[0].name, availableTargets[0].points);
+        }
+      }
+
+      resize();
+      loadTargetList();
+    </script>
+  </body>
+</html>

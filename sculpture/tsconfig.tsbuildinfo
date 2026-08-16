@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/pixel/pixelgrid.ts","./src/pixel/exportjson.ts","./src/render/pixelcanvas.tsx","./src/ui/controls.tsx"],"version":"5.9.3"}

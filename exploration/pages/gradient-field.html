@@ -1,0 +1,593 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Gradient Field Sandbox</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #111318;
+        color: #e8eaed;
+        display: flex;
+      }
+      .panel {
+        width: 300px;
+        flex-shrink: 0;
+        padding: 20px;
+        background: #1a1c22;
+        border-right: 1px solid #2a2d35;
+        overflow-y: auto;
+      }
+      .panel h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+      .panel .subtitle {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 0 0 20px;
+      }
+      .panel section {
+        margin-bottom: 20px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #2a2d35;
+      }
+      .panel section:last-child {
+        border-bottom: none;
+      }
+      .panel h2 {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #9aa0ab;
+        margin: 0 0 10px;
+      }
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-size: 12px;
+      }
+      .slider-row label {
+        width: 56px;
+        flex-shrink: 0;
+        color: #9aa0ab;
+      }
+      .slider-row input[type="range"] {
+        flex: 1;
+      }
+      .slider-row .value {
+        width: 40px;
+        flex-shrink: 0;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        color: #e8eaed;
+      }
+      .swatch {
+        width: 100%;
+        height: 28px;
+        border-radius: 6px;
+        border: 1px solid #2a2d35;
+        margin-bottom: 10px;
+      }
+      button {
+        width: 100%;
+        padding: 8px 12px;
+        border: none;
+        border-radius: 6px;
+        background: #2a2d35;
+        color: #e8eaed;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button:hover {
+        filter: brightness(1.15);
+      }
+      button.danger:hover {
+        background: #7f1d1d;
+      }
+      .checks {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 12px;
+      }
+      .checks label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+      }
+      .stat-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        margin-bottom: 4px;
+        color: #c9c9d1;
+      }
+      .stat-row span:first-child {
+        color: #9aa0ab;
+      }
+      .hint {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 0;
+      }
+      .empty-hint {
+        font-size: 12px;
+        color: #666b76;
+        font-style: italic;
+      }
+      .viewport {
+        flex: 1;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0c0d10;
+      }
+      canvas {
+        cursor: crosshair;
+        border: 1px solid #2a2d35;
+        touch-action: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>Gradient Field Sandbox</h1>
+      <p class="subtitle">
+        Each node emits a Gaussian bump weighted by its 3-channel value (shown as RGB). The
+        background is the resulting field; arrows are its exact analytic gradient — the same
+        math as <code>backend/substrate.py</code>'s <code>weighted_field_and_gradient</code>,
+        just 3 channels instead of 12 so it can be seen directly as color.
+      </p>
+
+      <section>
+        <h2 id="node-value-heading">New node value</h2>
+        <div class="swatch" id="value-swatch"></div>
+        <div class="slider-row">
+          <label>R (ch 0)</label>
+          <input type="range" id="slider-r" min="-1" max="1" step="0.01" value="1" />
+          <span class="value" id="value-r">1.00</span>
+        </div>
+        <div class="slider-row">
+          <label>G (ch 1)</label>
+          <input type="range" id="slider-g" min="-1" max="1" step="0.01" value="0.2" />
+          <span class="value" id="value-g">0.20</span>
+        </div>
+        <div class="slider-row">
+          <label>B (ch 2)</label>
+          <input type="range" id="slider-b" min="-1" max="1" step="0.01" value="-0.4" />
+          <span class="value" id="value-b">-0.40</span>
+        </div>
+        <p class="hint" id="edit-hint">
+          Click empty space to drop a node with this value. Click an existing node to select
+          and edit it here instead — right-click a node to delete it.
+        </p>
+        <button id="deselect-btn" style="display: none; margin-top: 8px">Done editing</button>
+      </section>
+
+      <section>
+        <h2>Field settings</h2>
+        <div class="slider-row">
+          <label>Sigma</label>
+          <input type="range" id="slider-sigma" min="0.2" max="4" step="0.05" value="1.15" />
+          <span class="value" id="value-sigma">1.15</span>
+        </div>
+        <p class="hint">
+          Kernel bandwidth. The real system's chemical-sensing default (<code>SENSING_SIGMA</code>)
+          is 1.15.
+        </p>
+      </section>
+
+      <section>
+        <h2>Display</h2>
+        <div class="checks">
+          <label><input type="checkbox" id="show-field" checked /> Field (background color)</label>
+          <label><input type="checkbox" id="show-grid" checked /> Gradient grid</label>
+          <label><input type="checkbox" id="show-r" checked /> — channel R arrows</label>
+          <label><input type="checkbox" id="show-g" checked /> — channel G arrows</label>
+          <label><input type="checkbox" id="show-b" checked /> — channel B arrows</label>
+          <label><input type="checkbox" id="show-probe" checked /> Cursor probe</label>
+        </div>
+      </section>
+
+      <section>
+        <h2>Cursor probe</h2>
+        <div id="probe-readout">
+          <p class="empty-hint">Move over the canvas to sample the field.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Nodes (<span id="node-count">0</span>)</h2>
+        <button id="clear-btn" class="danger">Clear all</button>
+      </section>
+    </div>
+
+    <div class="viewport">
+      <canvas id="canvas" width="700" height="700"></canvas>
+    </div>
+
+    <script>
+      // ---- math: mirrors backend/substrate.py's weighted_field_and_gradient,
+      // just with a single fixed sigma and 3 channels instead of N. ----
+      function fieldAndGradientAt(x, y, nodes, sigma) {
+        const values = [0, 0, 0];
+        const grad = [
+          [0, 0],
+          [0, 0],
+          [0, 0],
+        ];
+        const sigma2 = sigma * sigma;
+        for (const node of nodes) {
+          const dx = x - node.x;
+          const dy = y - node.y;
+          const sqDist = dx * dx + dy * dy;
+          const kernel = Math.exp(-sqDist / (2 * sigma2));
+          for (let c = 0; c < 3; c++) {
+            const v = node.value[c];
+            values[c] += v * kernel;
+            const w = (v * kernel) / sigma2;
+            grad[c][0] += -w * dx;
+            grad[c][1] += -w * dy;
+          }
+        }
+        return { values, grad };
+      }
+
+      // ---- world <-> screen mapping ----
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const WORLD_HALF_EXTENT = 6; // world units visible from center to edge
+      const scale = canvas.width / (WORLD_HALF_EXTENT * 2);
+
+      function screenToWorld(sx, sy) {
+        return {
+          x: (sx - canvas.width / 2) / scale,
+          y: -(sy - canvas.height / 2) / scale,
+        };
+      }
+      function worldToScreen(x, y) {
+        return {
+          x: canvas.width / 2 + x * scale,
+          y: canvas.height / 2 - y * scale,
+        };
+      }
+
+      // ---- state ----
+      let nodes = []; // { x, y, value: [r,g,b] }
+      let nextId = 0;
+      let selectedNode = null; // reference into `nodes`, or null
+      let hoverWorld = null; // { x, y } or null
+
+      const sliderR = document.getElementById("slider-r");
+      const sliderG = document.getElementById("slider-g");
+      const sliderB = document.getElementById("slider-b");
+      const sliderSigma = document.getElementById("slider-sigma");
+      const valueR = document.getElementById("value-r");
+      const valueG = document.getElementById("value-g");
+      const valueB = document.getElementById("value-b");
+      const valueSigma = document.getElementById("value-sigma");
+      const valueSwatch = document.getElementById("value-swatch");
+      const nodeValueHeading = document.getElementById("node-value-heading");
+      const editHint = document.getElementById("edit-hint");
+      const deselectBtn = document.getElementById("deselect-btn");
+      const nodeCountEl = document.getElementById("node-count");
+      const probeReadout = document.getElementById("probe-readout");
+
+      const showField = document.getElementById("show-field");
+      const showGrid = document.getElementById("show-grid");
+      const showR = document.getElementById("show-r");
+      const showG = document.getElementById("show-g");
+      const showB = document.getElementById("show-b");
+      const showProbe = document.getElementById("show-probe");
+
+      function currentSliderValue() {
+        return [parseFloat(sliderR.value), parseFloat(sliderG.value), parseFloat(sliderB.value)];
+      }
+
+      function toRgb(value) {
+        // [-1, 1] -> [0, 255] via tanh squashing, so overlapping fields
+        // saturate toward a color instead of clipping harshly
+        const squash = (v) => Math.round(((Math.tanh(v) + 1) / 2) * 255);
+        return `rgb(${squash(value[0])}, ${squash(value[1])}, ${squash(value[2])})`;
+      }
+
+      function updateSliderReadout() {
+        valueR.textContent = parseFloat(sliderR.value).toFixed(2);
+        valueG.textContent = parseFloat(sliderG.value).toFixed(2);
+        valueB.textContent = parseFloat(sliderB.value).toFixed(2);
+        valueSwatch.style.background = toRgb(currentSliderValue());
+      }
+
+      function selectNode(node) {
+        selectedNode = node;
+        nodeValueHeading.textContent = node ? `Editing node ${node.id}` : "New node value";
+        editHint.style.display = node ? "none" : "block";
+        deselectBtn.style.display = node ? "block" : "none";
+        if (node) {
+          sliderR.value = node.value[0];
+          sliderG.value = node.value[1];
+          sliderB.value = node.value[2];
+          updateSliderReadout();
+        }
+      }
+
+      [sliderR, sliderG, sliderB].forEach((el) =>
+        el.addEventListener("input", () => {
+          updateSliderReadout();
+          if (selectedNode) {
+            selectedNode.value = currentSliderValue();
+            render();
+          }
+        })
+      );
+
+      sliderSigma.addEventListener("input", () => {
+        valueSigma.textContent = parseFloat(sliderSigma.value).toFixed(2);
+        render();
+      });
+
+      deselectBtn.addEventListener("click", () => selectNode(null));
+
+      document.getElementById("clear-btn").addEventListener("click", () => {
+        nodes = [];
+        selectNode(null);
+        render();
+      });
+
+      [showField, showGrid, showR, showG, showB, showProbe].forEach((el) =>
+        el.addEventListener("change", render)
+      );
+
+      const HIT_RADIUS = 0.22; // world units
+
+      canvas.addEventListener("pointerdown", (ev) => {
+        if (ev.button !== 0) return; // left click only for add/select
+        const rect = canvas.getBoundingClientRect();
+        const world = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+
+        let hit = null;
+        let bestDist = HIT_RADIUS;
+        for (const node of nodes) {
+          const d = Math.hypot(node.x - world.x, node.y - world.y);
+          if (d < bestDist) {
+            bestDist = d;
+            hit = node;
+          }
+        }
+
+        if (hit) {
+          selectNode(hit);
+        } else {
+          const node = { id: nextId++, x: world.x, y: world.y, value: currentSliderValue() };
+          nodes.push(node);
+          nodeCountEl.textContent = nodes.length;
+          render();
+        }
+      });
+
+      canvas.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const world = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+
+        let hit = null;
+        let bestDist = HIT_RADIUS;
+        for (const node of nodes) {
+          const d = Math.hypot(node.x - world.x, node.y - world.y);
+          if (d < bestDist) {
+            bestDist = d;
+            hit = node;
+          }
+        }
+        if (hit) {
+          nodes = nodes.filter((n) => n !== hit);
+          if (selectedNode === hit) selectNode(null);
+          nodeCountEl.textContent = nodes.length;
+          render();
+        }
+      });
+
+      canvas.addEventListener("pointermove", (ev) => {
+        const rect = canvas.getBoundingClientRect();
+        hoverWorld = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+        renderFrame();
+      });
+      canvas.addEventListener("pointerleave", () => {
+        hoverWorld = null;
+        renderFrame();
+      });
+
+      // ---- rendering ----
+      // Field/grid/nodes only need to be recomputed when nodes, sigma, or
+      // a display toggle changes — drawn once into this offscreen base
+      // layer. Pure mouse movement (the probe) is cheap by comparison, so
+      // it redraws every tick by blitting the cached base and drawing the
+      // probe on top, rather than recomputing the whole field each time.
+      const baseCanvas = document.createElement("canvas");
+      baseCanvas.width = canvas.width;
+      baseCanvas.height = canvas.height;
+      const baseCtx = baseCanvas.getContext("2d");
+
+      const FIELD_RES = 140; // low-res field grid, upscaled for a smooth look
+      const fieldCanvas = document.createElement("canvas");
+      fieldCanvas.width = FIELD_RES;
+      fieldCanvas.height = FIELD_RES;
+      const fieldCtx = fieldCanvas.getContext("2d");
+
+      function drawField(sigma) {
+        const imageData = fieldCtx.createImageData(FIELD_RES, FIELD_RES);
+        for (let py = 0; py < FIELD_RES; py++) {
+          for (let px = 0; px < FIELD_RES; px++) {
+            // sample at pixel center, mapped to world space
+            const sx = ((px + 0.5) / FIELD_RES) * canvas.width;
+            const sy = ((py + 0.5) / FIELD_RES) * canvas.height;
+            const world = screenToWorld(sx, sy);
+            const { values } = fieldAndGradientAt(world.x, world.y, nodes, sigma);
+            const idx = (py * FIELD_RES + px) * 4;
+            const squash = (v) => Math.round(((Math.tanh(v) + 1) / 2) * 255);
+            imageData.data[idx] = squash(values[0]);
+            imageData.data[idx + 1] = squash(values[1]);
+            imageData.data[idx + 2] = squash(values[2]);
+            imageData.data[idx + 3] = 255;
+          }
+        }
+        fieldCtx.putImageData(imageData, 0, 0);
+        baseCtx.imageSmoothingEnabled = true;
+        baseCtx.drawImage(fieldCanvas, 0, 0, canvas.width, canvas.height);
+      }
+
+      function drawArrow(targetCtx, x0, y0, x1, y1, color, headSize) {
+        targetCtx.strokeStyle = color;
+        targetCtx.fillStyle = color;
+        targetCtx.lineWidth = 1.5;
+        targetCtx.beginPath();
+        targetCtx.moveTo(x0, y0);
+        targetCtx.lineTo(x1, y1);
+        targetCtx.stroke();
+
+        const angle = Math.atan2(y1 - y0, x1 - x0);
+        targetCtx.beginPath();
+        targetCtx.moveTo(x1, y1);
+        targetCtx.lineTo(
+          x1 - headSize * Math.cos(angle - Math.PI / 6),
+          y1 - headSize * Math.sin(angle - Math.PI / 6)
+        );
+        targetCtx.lineTo(
+          x1 - headSize * Math.cos(angle + Math.PI / 6),
+          y1 - headSize * Math.sin(angle + Math.PI / 6)
+        );
+        targetCtx.closePath();
+        targetCtx.fill();
+      }
+
+      const GRID_STEPS = 16;
+      const MAX_ARROW_LEN = 22; // screen px, so arrows near a source don't dominate
+
+      function drawGradientGrid(sigma) {
+        const channelColors = ["rgba(255,90,90,0.85)", "rgba(90,255,120,0.85)", "rgba(110,160,255,0.9)"];
+        const channelToggles = [showR.checked, showG.checked, showB.checked];
+
+        for (let gy = 0; gy < GRID_STEPS; gy++) {
+          for (let gx = 0; gx < GRID_STEPS; gx++) {
+            const sx = ((gx + 0.5) / GRID_STEPS) * canvas.width;
+            const sy = ((gy + 0.5) / GRID_STEPS) * canvas.height;
+            const world = screenToWorld(sx, sy);
+            const { grad } = fieldAndGradientAt(world.x, world.y, nodes, sigma);
+
+            for (let c = 0; c < 3; c++) {
+              if (!channelToggles[c]) continue;
+              const [gxWorld, gyWorld] = grad[c];
+              const mag = Math.hypot(gxWorld, gyWorld);
+              if (mag < 1e-4) continue;
+              const len = Math.min(MAX_ARROW_LEN, mag * 40);
+              const nx = gxWorld / mag;
+              const ny = -gyWorld / mag; // world y-up -> screen y-down
+              drawArrow(baseCtx, sx, sy, sx + nx * len, sy + ny * len, channelColors[c], 4);
+            }
+          }
+        }
+      }
+
+      function drawNodes() {
+        for (const node of nodes) {
+          const s = worldToScreen(node.x, node.y);
+          const isSelected = node === selectedNode;
+          baseCtx.beginPath();
+          baseCtx.arc(s.x, s.y, isSelected ? 9 : 7, 0, Math.PI * 2);
+          baseCtx.fillStyle = toRgb(node.value);
+          baseCtx.fill();
+          baseCtx.lineWidth = isSelected ? 2.5 : 1.5;
+          baseCtx.strokeStyle = isSelected ? "#ffffff" : "rgba(255,255,255,0.6)";
+          baseCtx.stroke();
+        }
+      }
+
+      function drawProbe(sigma) {
+        if (!hoverWorld) {
+          probeReadout.innerHTML = '<p class="empty-hint">Move over the canvas to sample the field.</p>';
+          return;
+        }
+        const { values, grad } = fieldAndGradientAt(hoverWorld.x, hoverWorld.y, nodes, sigma);
+        const channelColors = ["#ff5a5a", "#5aff78", "#6ea0ff"];
+        const s = worldToScreen(hoverWorld.x, hoverWorld.y);
+
+        if (showProbe.checked) {
+          for (let c = 0; c < 3; c++) {
+            const [gxWorld, gyWorld] = grad[c];
+            const mag = Math.hypot(gxWorld, gyWorld);
+            if (mag < 1e-4) continue;
+            const len = Math.min(60, mag * 50);
+            const nx = gxWorld / mag;
+            const ny = -gyWorld / mag;
+            drawArrow(ctx, s.x, s.y, s.x + nx * len, s.y + ny * len, channelColors[c], 6);
+          }
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = "#ffffff";
+          ctx.fill();
+        }
+
+        probeReadout.innerHTML = `
+          <div class="stat-row"><span>Position</span><span>${hoverWorld.x.toFixed(2)}, ${hoverWorld.y.toFixed(2)}</span></div>
+          <div class="swatch" style="height:20px;margin-bottom:8px;background:${toRgb(values)}"></div>
+          <div class="stat-row"><span>Value R</span><span>${values[0].toFixed(3)}</span></div>
+          <div class="stat-row"><span>Value G</span><span>${values[1].toFixed(3)}</span></div>
+          <div class="stat-row"><span>Value B</span><span>${values[2].toFixed(3)}</span></div>
+          <div class="stat-row"><span>&nabla;R</span><span>${grad[0][0].toFixed(3)}, ${grad[0][1].toFixed(3)}</span></div>
+          <div class="stat-row"><span>&nabla;G</span><span>${grad[1][0].toFixed(3)}, ${grad[1][1].toFixed(3)}</span></div>
+          <div class="stat-row"><span>&nabla;B</span><span>${grad[2][0].toFixed(3)}, ${grad[2][1].toFixed(3)}</span></div>
+        `;
+      }
+
+      // Expensive: recomputes the field image + gradient grid + nodes
+      // into the offscreen base layer. Call only when nodes/sigma/toggles
+      // actually change.
+      function renderBase() {
+        const sigma = parseFloat(sliderSigma.value);
+        baseCtx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (showField.checked) {
+          drawField(sigma);
+        } else {
+          baseCtx.fillStyle = "#111318";
+          baseCtx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        if (showGrid.checked) drawGradientGrid(sigma);
+        drawNodes();
+      }
+
+      // Cheap: blits the cached base layer and draws only the probe on
+      // top. Safe to call on every pointermove tick.
+      function renderFrame() {
+        const sigma = parseFloat(sliderSigma.value);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(baseCanvas, 0, 0);
+        drawProbe(sigma);
+      }
+
+      function render() {
+        renderBase();
+        renderFrame();
+      }
+
+      updateSliderReadout();
+      valueSigma.textContent = parseFloat(sliderSigma.value).toFixed(2);
+      render();
+    </script>
+  </body>
+</html>

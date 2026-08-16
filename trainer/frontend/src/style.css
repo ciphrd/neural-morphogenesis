@@ -1,0 +1,454 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #e8eaed;
+}
+
+.app {
+  position: relative;
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+.mode-switch {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  background: #1a1c22;
+  border: 1px solid #2a2d35;
+  border-radius: 8px;
+}
+
+.mode-switch button {
+  padding: 6px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #9aa0ab;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mode-switch button.active {
+  background: #4f8cff;
+  color: white;
+}
+
+.mode-switch button:hover:not(.active) {
+  background: #22252d;
+}
+
+.controls {
+  width: 280px;
+  flex-shrink: 0;
+  padding: 20px;
+  background: #1a1c22;
+  border-right: 1px solid #2a2d35;
+  overflow-y: auto;
+}
+
+.controls h1 {
+  font-size: 20px;
+  margin: 0 0 4px;
+}
+
+.controls .subtitle {
+  font-size: 13px;
+  color: #9aa0ab;
+  margin: 0 0 20px;
+}
+
+.controls h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #9aa0ab;
+  margin: 0 0 10px;
+}
+
+.controls section {
+  margin-bottom: 24px;
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.hint {
+  font-size: 13px;
+  color: #9aa0ab;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.target-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.target-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.target-row:hover {
+  background: #22252d;
+}
+
+.target-row.selected {
+  border-color: #4f8cff;
+  background: #1e2733;
+}
+
+.target-preview {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  background: #111318;
+  border-radius: 6px;
+}
+
+.target-preview-empty {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  background: #111318;
+  border-radius: 6px;
+}
+
+.target-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.target-name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.target-meta {
+  font-size: 11px;
+  color: #9aa0ab;
+}
+
+.tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.tabs button {
+  flex: 1;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 6px;
+  background: #2a2d35;
+  color: #e8eaed;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tabs button.active {
+  background: #4f8cff;
+  color: white;
+}
+
+.tabs button:hover {
+  filter: brightness(1.1);
+}
+
+.select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #2a2d35;
+  border-radius: 6px;
+  background: #22252d;
+  color: #e8eaed;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: #e8eaed;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  cursor: pointer;
+}
+
+.viewport {
+  flex: 1;
+  position: relative;
+}
+
+/* Training view only: a full-height column (controls+viewport row on top,
+   a full-width timeline strip docked at the bottom) rendered as .app's
+   single flex-row child — InteractiveView doesn't use this, it still
+   renders .controls/.viewport as direct .app children. */
+.training-layout {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.training-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.training-timeline {
+  flex-shrink: 0;
+  padding: 16px 24px;
+  background: #1a1c22;
+  border-top: 1px solid #2a2d35;
+}
+
+.inspector {
+  border-right: none;
+  border-left: 1px solid #2a2d35;
+  /* clears the floating .mode-switch toggle, which sits top-right of .app
+     and would otherwise overlap this panel's own top-right corner */
+  padding-top: 64px;
+}
+
+.channel-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.channel-row {
+  display: grid;
+  grid-template-columns: 44px 1fr 40px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.channel-label {
+  color: #9aa0ab;
+}
+
+.channel-track {
+  position: relative;
+  height: 8px;
+  background: #22252d;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.channel-fill {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: #4f8cff;
+  border-radius: 4px;
+}
+
+.channel-value {
+  text-align: right;
+  color: #9aa0ab;
+  font-variant-numeric: tabular-nums;
+}
+
+.bindability-arrow {
+  display: block;
+  margin: 0 auto;
+}
+
+.graph-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.fitness-chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 170px;
+}
+
+.fitness-chart-legend {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #9aa0ab;
+}
+
+.fitness-chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fitness-chart-legend-swatch {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.fitness-chart-legend-spacer {
+  flex: 1;
+}
+
+.fitness-chart-live-button {
+  padding: 4px 10px;
+  border: 1px solid #2a2d35;
+  border-radius: 6px;
+  background: #22252d;
+  color: #e8eaed;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fitness-chart-live-button:hover {
+  filter: brightness(1.15);
+}
+
+.fitness-chart-live-indicator {
+  color: #e8eaed;
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-chart-live-indicator.is-live {
+  color: #4ade80;
+}
+
+.fitness-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  cursor: pointer;
+}
+
+.fitness-chart-grid {
+  stroke: #2a2d35;
+  stroke-width: 1;
+}
+
+.fitness-chart-axis {
+  stroke: #383a42;
+  stroke-width: 1;
+}
+
+.fitness-chart-crosshair {
+  stroke: #9aa0ab;
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.fitness-chart-pointer {
+  stroke: #7dd3fc;
+  stroke-width: 2;
+}
+
+.fitness-chart-pointer.is-live {
+  stroke: #4ade80;
+}
+
+.fitness-chart-pointer-head {
+  fill: #7dd3fc;
+}
+
+.fitness-chart-pointer-head.is-live {
+  fill: #4ade80;
+}
+
+.fitness-chart-dot {
+  stroke: #111318;
+  stroke-width: 2;
+}
+
+.fitness-chart-tick {
+  fill: #898781;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-chart-tooltip {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #1a1c22;
+  border: 1px solid #2a2d35;
+  border-radius: 6px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+.fitness-chart-tooltip-title {
+  color: #9aa0ab;
+}
+
+.fitness-chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.fitness-chart-tooltip-key {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.fitness-chart-tooltip-value {
+  color: #e8eaed;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-chart-tooltip-label {
+  color: #9aa0ab;
+}
+
+.fitness-chart-tooltip-hint {
+  color: #666b76;
+  font-style: italic;
+  margin-left: auto;
+}
