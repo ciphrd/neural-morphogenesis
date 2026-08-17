@@ -23,6 +23,14 @@ same thing:
   scatter-add is the mathematical transpose of grid_sample's gather —
   same 4 corners, same weights, opposite direction.
 
+The grid is toroidal: both axes wrap. There is no edge — position (-1, y)
+and (width-1, y) are the same point, and sensing/deposit/diffusion all
+treat it that way (no agent ever "hits a wall"; a Sobel/blur neighborhood
+that would run off one side reads in from the other). This is why
+sampling and deposit are hand-rolled bilinear gather/scatter below
+instead of grid_sample: torch's grid_sample has no circular padding
+mode, only zeros/border/reflection, none of which wrap.
+
 Gradient is computed once per step for the *entire* grid via a fixed 3x3
 Sobel-style depthwise convolution (one conv2d call, cost independent of
 agent count) rather than per-agent finite differences — the same trick
@@ -46,7 +54,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-DECAY = 0.98
+from constants import DECAY
 
 _SOBEL_X = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]) / 8.0
 _BLUR = torch.tensor([[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]]) / 16.0
@@ -76,21 +84,41 @@ class Environment:
         self._kernel_y = _SOBEL_X.t().contiguous().view(1, 1, 3, 3).repeat(channels, 1, 1, 1).to(device)
         self._blur_kernel = _BLUR.view(1, 1, 3, 3).repeat(channels, 1, 1, 1).to(device)
 
-    def _normalize(self, positions: torch.Tensor) -> torch.Tensor:
-        """(M,2) pixel coords -> grid_sample's (1,1,M,2) normalized-[-1,1]
-        coords. align_corners=True throughout this module so pixel index i
-        in [0, size-1] maps to exactly 2*i/(size-1) - 1 — the mapping
-        deposit()'s corner math below assumes."""
-        x = positions[:, 0]
-        y = positions[:, 1]
-        nx = 2.0 * x / (self.width - 1) - 1.0
-        ny = 2.0 * y / (self.height - 1) - 1.0
-        return torch.stack([nx, ny], dim=-1).view(1, 1, -1, 2)
+    def _corners(
+        self, positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(M,2) pixel coords -> the 4 surrounding integer cells + their
+        bilinear weights, corner indices wrapped (not clamped) into
+        [0, size) — the one piece of index math sample_value_and_gradient
+        and deposit share, since (per module docstring) they're the
+        mathematical transpose of each other and must agree on exactly
+        which 4 cells a given position touches. `%` here is torch's
+        floor-style remainder (always non-negative for a positive
+        divisor), so this is correct even for the not-actually-expected
+        case of a negative coordinate, not just the [0, size) values
+        simulation.py's own wrap already guarantees."""
+        x, y = positions[:, 0], positions[:, 1]
+        x0f = torch.floor(x)
+        y0f = torch.floor(y)
+        wx1 = x - x0f
+        wx0 = 1.0 - wx1
+        wy1 = y - y0f
+        wy0 = 1.0 - wy1
+        x0i = x0f.long() % self.width
+        x1i = (x0f.long() + 1) % self.width
+        y0i = y0f.long() % self.height
+        y1i = (y0f.long() + 1) % self.height
+        return x0i, x1i, y0i, y1i, wx0, wx1, wy0, wy1
 
-    def _sample_grid(self, grid_1chw: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        coords = self._normalize(positions)
-        sampled = F.grid_sample(grid_1chw, coords, mode="bilinear", padding_mode="border", align_corners=True)
-        return sampled.view(grid_1chw.shape[1], -1).T  # (M, C)
+    def _sample_grid(self, grid_chw: torch.Tensor, corners) -> torch.Tensor:
+        x0i, x1i, y0i, y1i, wx0, wx1, wy0, wy1 = corners
+        flat = grid_chw.reshape(self.channels, -1)  # (C, H*W)
+        v00 = flat[:, y0i * self.width + x0i]
+        v10 = flat[:, y0i * self.width + x1i]
+        v01 = flat[:, y1i * self.width + x0i]
+        v11 = flat[:, y1i * self.width + x1i]
+        out = v00 * (wx0 * wy0) + v10 * (wx1 * wy0) + v01 * (wx0 * wy1) + v11 * (wx1 * wy1)
+        return out.T  # (M, C)
 
     def sample_value_and_gradient(
         self, positions: torch.Tensor
@@ -102,11 +130,13 @@ class Environment:
         gradient), same reasoning as the old project: this module doesn't
         know anything about headings."""
         g = self.grid.unsqueeze(0)
-        gx = F.conv2d(g, self._kernel_x, padding=1, groups=self.channels)
-        gy = F.conv2d(g, self._kernel_y, padding=1, groups=self.channels)
-        value = self._sample_grid(g, positions)
-        grad_x = self._sample_grid(gx, positions)
-        grad_y = self._sample_grid(gy, positions)
+        g_wrapped = F.pad(g, (1, 1, 1, 1), mode="circular")
+        gx = F.conv2d(g_wrapped, self._kernel_x, groups=self.channels).squeeze(0)
+        gy = F.conv2d(g_wrapped, self._kernel_y, groups=self.channels).squeeze(0)
+        corners = self._corners(positions)
+        value = self._sample_grid(self.grid, corners)
+        grad_x = self._sample_grid(gx, corners)
+        grad_y = self._sample_grid(gy, corners)
         return value, grad_x, grad_y
 
     def deposit(self, positions: torch.Tensor, values: torch.Tensor) -> None:
@@ -115,20 +145,7 @@ class Environment:
         docstring. Multiple agents landing in the same cell simply sum,
         the same "contributions add" convention the old
         weighted_field_and_gradient used."""
-        x, y = positions[:, 0], positions[:, 1]
-        x0 = torch.floor(x)
-        y0 = torch.floor(y)
-        x1 = x0 + 1
-        y1 = y0 + 1
-        wx1 = x - x0
-        wx0 = 1.0 - wx1
-        wy1 = y - y0
-        wy0 = 1.0 - wy1
-        x0i = x0.long().clamp(0, self.width - 1)
-        x1i = x1.long().clamp(0, self.width - 1)
-        y0i = y0.long().clamp(0, self.height - 1)
-        y1i = y1.long().clamp(0, self.height - 1)
-
+        x0i, x1i, y0i, y1i, wx0, wx1, wy0, wy1 = self._corners(positions)
         grid_flat = self.grid.view(self.channels, -1)
         values_t = values.T  # (C, M)
         for yi, xi, w in (
@@ -145,5 +162,6 @@ class Environment:
         module docstring's "Diffusion + decay" section for why this
         exists at all."""
         g = self.grid.unsqueeze(0)
-        blurred = F.conv2d(g, self._blur_kernel, padding=1, groups=self.channels)
+        g_wrapped = F.pad(g, (1, 1, 1, 1), mode="circular")
+        blurred = F.conv2d(g_wrapped, self._blur_kernel, groups=self.channels)
         self.grid = (blurred * self.decay).squeeze(0)

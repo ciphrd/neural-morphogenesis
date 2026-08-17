@@ -1,14 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { acquireGpuDevice, watchDeviceLoss } from "../gpu/device";
 import { DEFAULT_INTENSITY } from "../gpu/render";
 import type { SpawnDistribution } from "../gpu/rng";
 import { GpuSimulation } from "../gpu/simulation";
-import type { BackgroundMode, SimulationConfig } from "../gpu/types";
+import type { BackgroundMode, PhysicsSettings, SimulationConfig } from "../gpu/types";
 
 interface GridCanvasProps {
   config: SimulationConfig | null;
   targetPoints: readonly (readonly [number, number])[] | null;
   backgroundMode: BackgroundMode;
+  // Live decay/maxSpeed/maxAccel/maxStrafe for the "Physics" panel's
+  // sliders — the caller (TrainingView) always resolves this to a
+  // concrete value once a config is loaded (either config's own trained
+  // values, or the user's in-progress override); null only means nothing
+  // has loaded yet. Applied via a plain uniform-buffer write
+  // (GpuSimulation.setPhysics()), never a rebuild, so dragging a slider
+  // never disturbs the rollout in flight.
+  physics: PhysicsSettings | null;
   // Contrast multiplier for the substrate colorize pass — see
   // gpu/render.ts's setIntensity() for what it actually does (shrinks
   // the EMA-tracked scale before upload, so pixels saturate to full
@@ -29,6 +37,21 @@ interface GridCanvasProps {
   // if it kept going," e.g. to check whether a trained shape holds up or
   // degrades past its trained horizon.
   loopAtTrainedSteps?: boolean;
+  // Freezes the simulation in place — sim.step() (and the loop-at-limit
+  // check, which depends on stepping having happened) are skipped while
+  // true, but rendering keeps running every frame regardless, so other
+  // live controls (background mode, intensity) still take effect
+  // immediately on a paused frame instead of only on the next step.
+  paused?: boolean;
+}
+
+export interface GridCanvasHandle {
+  /** Reloads the currently-active generation from step 0 — since
+   * loadGeneration() always re-seeds with `config.seed` (the *original*
+   * seed, not loopCurrentGeneration()'s derived-per-loop one), this is a
+   * literal, deterministic replay of the exact same rollout from the
+   * start, not a fresh random look. */
+  restart(): void;
 }
 
 type Status = "loading" | "ready" | "unsupported" | "lost";
@@ -43,33 +66,48 @@ type Status = "loading" | "ready" | "unsupported" | "lost";
  * frame — the faithful default, no ticksPerFrame control, since there's
  * no realtime/batch distinction here (unlike trainer/frontend's
  * Training tab). */
-export function GridCanvas({
-  config,
-  targetPoints,
-  backgroundMode,
-  intensity = DEFAULT_INTENSITY,
-  spawnDistribution = "default",
-  onStep,
-  loopAtTrainedSteps = true,
-}: GridCanvasProps) {
+export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function GridCanvas(
+  {
+    config,
+    targetPoints,
+    backgroundMode,
+    physics,
+    intensity = DEFAULT_INTENSITY,
+    spawnDistribution = "default",
+    onStep,
+    loopAtTrainedSteps = true,
+    paused = false,
+  },
+  ref
+) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simulationRef = useRef<GpuSimulation | null>(null);
   const contextRef = useRef<GPUCanvasContext | null>(null);
   const configRef = useRef<SimulationConfig | null>(null);
+  const physicsRef = useRef(physics);
   const backgroundModeRef = useRef(backgroundMode);
   const intensityRef = useRef(intensity);
   const spawnDistributionRef = useRef(spawnDistribution);
   const onStepRef = useRef(onStep);
   const loopAtTrainedStepsRef = useRef(loopAtTrainedSteps);
+  const pausedRef = useRef(paused);
   const [status, setStatus] = useState<Status>("loading");
   const [statusMessage, setStatusMessage] = useState<string>("");
 
   configRef.current = config;
+  physicsRef.current = physics;
   backgroundModeRef.current = backgroundMode;
   intensityRef.current = intensity;
   spawnDistributionRef.current = spawnDistribution;
   onStepRef.current = onStep;
   loopAtTrainedStepsRef.current = loopAtTrainedSteps;
+  pausedRef.current = paused;
+
+  useImperativeHandle(ref, () => ({
+    restart: () => {
+      if (configRef.current) simulationRef.current?.loadGeneration(configRef.current);
+    },
+  }));
 
   // Acquire device + configure the canvas context once. StrictMode-safe:
   // if this effect is torn down (dev double-invoke, or a real unmount)
@@ -114,6 +152,7 @@ export function GridCanvas({
       simulation.setIntensity(intensityRef.current);
       simulation.setSpawnDistribution(spawnDistributionRef.current);
       if (configRef.current) simulation.loadGeneration(configRef.current);
+      if (physicsRef.current) simulation.setPhysics(physicsRef.current);
       simulationRef.current = simulation;
 
       setStatus("ready");
@@ -160,6 +199,10 @@ export function GridCanvas({
   }, [config]);
 
   useEffect(() => {
+    if (physics) simulationRef.current?.setPhysics(physics);
+  }, [physics]);
+
+  useEffect(() => {
     simulationRef.current?.setBackgroundMode(backgroundMode);
   }, [backgroundMode]);
 
@@ -182,9 +225,11 @@ export function GridCanvas({
       const activeConfig = configRef.current;
       const canvas = canvasRef.current;
       if (sim?.ready && context && activeConfig && canvas) {
-        sim.step();
-        if (loopAtTrainedStepsRef.current && sim.currentStep >= sim.steps) {
-          sim.loopCurrentGeneration(activeConfig);
+        if (!pausedRef.current) {
+          sim.step();
+          if (loopAtTrainedStepsRef.current && sim.currentStep >= sim.steps) {
+            sim.loopCurrentGeneration(activeConfig);
+          }
         }
         sim.render(context, canvas.width, canvas.height);
         onStepRef.current?.(sim.currentStep);
@@ -218,4 +263,4 @@ export function GridCanvas({
       )}
     </div>
   );
-}
+});

@@ -11,8 +11,13 @@ body,
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  color: #e8eaed;
-  background: #111318;
+  color: #e8e8e8;
+  /* Neutral black (R=G=B), not the earlier #111318 — that had a
+     slightly higher blue channel, which read as "dark blue" rather
+     than true black/gray. Every surface color below is neutral for the
+     same reason; only the deliberate accent colors (selection blue,
+     live green) carry any hue. */
+  background: #000000;
 }
 
 .app {
@@ -26,8 +31,17 @@ body {
   width: 280px;
   flex-shrink: 0;
   padding: 20px;
-  background: #1a1c22;
-  border-right: 1px solid #2a2d35;
+  background: #0d0d0d;
+  border-right: 1px solid #2a2a2a;
+  overflow-y: auto;
+}
+
+.controls-right {
+  width: 280px;
+  flex-shrink: 0;
+  padding: 20px;
+  background: #0d0d0d;
+  border-left: 1px solid #2a2a2a;
   overflow-y: auto;
 }
 
@@ -38,7 +52,7 @@ body {
 
 .controls .subtitle {
   font-size: 13px;
-  color: #9aa0ab;
+  color: #9a9a9a;
   margin: 0 0 20px;
 }
 
@@ -46,7 +60,7 @@ body {
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #9aa0ab;
+  color: #9a9a9a;
   margin: 0 0 10px;
 }
 
@@ -63,7 +77,7 @@ body {
 
 .hint {
   font-size: 13px;
-  color: #9aa0ab;
+  color: #9a9a9a;
   line-height: 1.5;
   margin: 0;
 }
@@ -71,10 +85,10 @@ body {
 .select {
   width: 100%;
   padding: 8px 10px;
-  border: 1px solid #2a2d35;
+  border: 1px solid #2a2a2a;
   border-radius: 6px;
-  background: #22252d;
-  color: #e8eaed;
+  background: #1a1a1a;
+  color: #e8e8e8;
   font-size: 13px;
   cursor: pointer;
 }
@@ -96,7 +110,7 @@ body {
   width: 100%;
   aspect-ratio: 1;
   background: #000000;
-  border: 1px solid #2a2d35;
+  border: 1px solid #2a2a2a;
   border-radius: 4px;
   /* the target/agent rasters are small pixel-art-scale bitmaps (see
      debug_images.py) — scaling them up with the browser's default
@@ -107,7 +121,7 @@ body {
 
 .snapshot-label {
   font-size: 11px;
-  color: #9aa0ab;
+  color: #9a9a9a;
   text-align: center;
 }
 
@@ -123,22 +137,24 @@ body {
   width: 36px;
   height: 36px;
   padding: 0;
-  border: 1px solid #2a2d35;
+  border: 1px solid #2a2a2a;
   border-radius: 6px;
-  background: #22252d;
-  color: #9aa0ab;
+  background: #1a1a1a;
+  color: #9a9a9a;
   cursor: pointer;
 }
 
 .icon-toggle-button:hover {
-  color: #e8eaed;
-  border-color: #383a42;
+  color: #e8e8e8;
+  border-color: #3a3a3a;
 }
 
 .icon-toggle-button.is-active {
+  /* Neutral fill, colored border/icon only — no tinted background, so
+     the "active" state reads as an accent, not a theme color. */
   color: #7dd3fc;
   border-color: #7dd3fc;
-  background: #1c2b33;
+  background: #1c1c1c;
 }
 
 .checkbox-row {
@@ -168,7 +184,7 @@ body {
 .slider-value {
   min-width: 34px;
   text-align: right;
-  color: #9aa0ab;
+  color: #9a9a9a;
   font-variant-numeric: tabular-nums;
 }
 
@@ -188,6 +204,10 @@ body {
   min-height: 0;
 }
 
+.training-layout h1 {
+  margin-bottom: 1em;
+}
+
 .training-main {
   flex: 1;
   display: flex;
@@ -197,8 +217,8 @@ body {
 .training-timeline {
   flex-shrink: 0;
   padding: 16px 24px;
-  background: #1a1c22;
-  border-top: 1px solid #2a2d35;
+  background: #0d0d0d;
+  border-top: 1px solid #2a2a2a;
 }
 
 /* --- GridCanvas: the WebGPU viewport --- */
@@ -224,7 +244,7 @@ body {
   gap: 6px;
   padding: 24px;
   text-align: center;
-  background: #111318;
+  background: #000000;
 }
 
 .webgpu-banner p {
@@ -245,7 +265,7 @@ body {
   gap: 16px;
   margin-bottom: 8px;
   font-size: 12px;
-  color: #9aa0ab;
+  color: #9a9a9a;
 }
 
 .fitness-chart-legend-item {
@@ -266,20 +286,41 @@ body {
 
 .fitness-chart-live-button {
   padding: 4px 10px;
-  border: 1px solid #2a2d35;
+  border: 1px solid #2a2a2a;
   border-radius: 6px;
-  background: #22252d;
-  color: #e8eaed;
+  background: #1a1a1a;
+  color: #e8e8e8;
   font-size: 12px;
   cursor: pointer;
 }
 
 .fitness-chart-live-button:hover {
-  filter: brightness(1.15);
+  filter: brightness(1.3);
+}
+
+.playback-buttons {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.playback-button {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #e8e8e8;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.playback-button:hover {
+  filter: brightness(1.3);
 }
 
 .fitness-chart-live-indicator {
-  color: #e8eaed;
+  color: #e8e8e8;
   font-variant-numeric: tabular-nums;
 }
 
@@ -295,17 +336,17 @@ body {
 }
 
 .fitness-chart-grid {
-  stroke: #2a2d35;
+  stroke: #2a2a2a;
   stroke-width: 1;
 }
 
 .fitness-chart-axis {
-  stroke: #383a42;
+  stroke: #3a3a3a;
   stroke-width: 1;
 }
 
 .fitness-chart-crosshair {
-  stroke: #9aa0ab;
+  stroke: #9a9a9a;
   stroke-width: 1;
   stroke-dasharray: 3 3;
 }
@@ -328,12 +369,12 @@ body {
 }
 
 .fitness-chart-dot {
-  stroke: #111318;
+  stroke: #0d0d0d;
   stroke-width: 2;
 }
 
 .fitness-chart-tick {
-  fill: #898781;
+  fill: #8a8a8a;
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
@@ -342,36 +383,190 @@ body {
    hover panel) rather than an HTML element below it, so it never changes
    the page's layout height while hovering. */
 .fitness-chart-tooltip-bg {
-  fill: #1a1c22;
-  stroke: #2a2d35;
+  fill: #121212;
+  stroke: #2a2a2a;
   stroke-width: 1;
 }
 
 .fitness-chart-tooltip-image-bg {
   fill: #000000;
-  stroke: #2a2d35;
+  stroke: #2a2a2a;
   stroke-width: 1;
 }
 
 .fitness-chart-tooltip-title {
-  fill: #9aa0ab;
+  fill: #9a9a9a;
   font-size: 11px;
 }
 
 .fitness-chart-tooltip-value {
-  fill: #e8eaed;
+  fill: #e8e8e8;
   font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
 .fitness-chart-tooltip-label {
-  fill: #9aa0ab;
+  fill: #9a9a9a;
   font-size: 11px;
 }
 
 .fitness-chart-tooltip-hint {
-  fill: #666b76;
+  fill: #6e6e6e;
   font-size: 10px;
   font-style: italic;
+}
+
+.run-picker {
+  position: relative;
+}
+
+.run-picker-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 320px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background: #0d0d0d;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.run-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px;
+  margin-top: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #e8e8e8;
+  text-align: left;
+  cursor: pointer;
+}
+
+.run-picker-item + .run-picker-item {
+  margin-top: 2px;
+}
+
+.run-picker-item:hover {
+  background: #1a1a1a;
+}
+
+.run-picker-item.is-active {
+  border-color: #7dd3fc;
+  background: #1c1c1c;
+}
+
+.run-picker-preview {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: #0a0a0a;
+  object-fit: cover;
+}
+
+.run-picker-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.run-picker-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.run-picker-live {
+  text-transform: none;
+  color: #4ade80;
+}
+
+.run-picker-meta {
+  font-size: 12px;
+  color: #9a9a9a;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- PhysicsPanel: collapsible "Physics" sliders section --- */
+
+.physics-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.physics-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  /* h2 already carries the section-title styling (uppercase, muted,
+     letter-spacing) — this button just wraps it so the whole row toggles,
+     not just the chevron glyph. */
+}
+
+.physics-panel-toggle h2 {
+  margin: 0;
+}
+
+.physics-panel-chevron {
+  display: inline-block;
+  color: #9a9a9a;
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.physics-panel-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.physics-panel-body {
+  margin-top: 10px;
+}
+
+.physics-panel-body .slider-row:first-child {
+  margin-top: 0;
+}
+
+.icon-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #9a9a9a;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) {
+  color: #e8e8e8;
+  border-color: #3a3a3a;
+}
+
+.icon-button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }

@@ -3,9 +3,13 @@ import type { GenerationStat } from "../charts/FitnessChart";
 import type { SimulationConfig } from "../gpu/types";
 
 /** Everything the client-side WebGPU replay (gpu/) needs to reproduce
- * this generation's winner. */
+ * this generation's winner, plus `target` (see RawGenerationMessage's
+ * own comment on it — not itself replay data, but net/runs.ts's picker
+ * needs to know which target's points to fetch for whatever run/
+ * generation is currently active). */
 export interface LatestGeneration extends SimulationConfig {
   generation: number;
+  target: string;
 }
 
 export interface TrainingSocketState {
@@ -20,7 +24,7 @@ export interface TrainingSocketState {
   configByGeneration: Map<number, LatestGeneration>;
 }
 
-const EMPTY_STATE: TrainingSocketState = { history: [], latest: null, configByGeneration: new Map() };
+export const EMPTY_STATE: TrainingSocketState = { history: [], latest: null, configByGeneration: new Map() };
 
 // History is capped so a long run doesn't grow the chart's render cost
 // (and the array) without bound — the most recent generations are what's
@@ -29,12 +33,23 @@ const EMPTY_STATE: TrainingSocketState = { history: [], latest: null, configByGe
 // bounds configByGeneration.
 const MAX_HISTORY = 500;
 
-interface RawGenerationMessage extends SimulationConfig {
+// Exported: net/runs.ts's archived-run loading builds the exact same
+// TrainingSocketState shape from a REST fetch instead of a live socket
+// (see buildRunState()), so the rest of the app (FitnessChart,
+// GridCanvas) doesn't need to know or care whether it's looking at the
+// live run or a past one.
+export interface RawGenerationMessage extends SimulationConfig {
   generation: number;
   best: number;
   mean: number;
   worst: number;
   allTimeBest: number;
+  // Not part of SimulationConfig (a WebGPU replay doesn't need to know
+  // its own target's *name*, just its points, fetched separately) — but
+  // net/runs.ts's run picker needs it to fetch the *right* target's
+  // points when browsing an archived run trained on a different target
+  // than whatever this server's own --target currently is.
+  target: string;
 }
 
 // Both the REST backfill (on mount, from train_server.py's saved
@@ -44,9 +59,10 @@ interface RawGenerationMessage extends SimulationConfig {
 // message have no guaranteed order relative to each other) without
 // corrupting state: keyed by generation number and re-sorted on every
 // update rather than assumed to already arrive in order.
-function applyGeneration(prev: TrainingSocketState, message: RawGenerationMessage): TrainingSocketState {
+export function applyGeneration(prev: TrainingSocketState, message: RawGenerationMessage): TrainingSocketState {
   const entry: LatestGeneration = {
     generation: message.generation,
+    target: message.target,
     weights: message.weights,
     gridWidth: message.gridWidth,
     gridHeight: message.gridHeight,
@@ -58,7 +74,6 @@ function applyGeneration(prev: TrainingSocketState, message: RawGenerationMessag
     maxSpeed: message.maxSpeed,
     maxAccel: message.maxAccel,
     maxStrafe: message.maxStrafe,
-    edgeMargin: message.edgeMargin,
     hiddenDim: message.hiddenDim,
     seed: message.seed,
   };

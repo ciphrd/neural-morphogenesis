@@ -30,9 +30,6 @@ GPU-resident, 512x512):
   substantial separate subsystem — adding it here (in grid-space, on GPU)
   is a reasonable next step but a distinct piece of work.
 - No `id` vector / adhesion — see agent_state.py's docstring.
-- Positions are clamped to stay inside the grid (there's a hard edge here
-  the old project's boundless graph-space never had), rather than any
-  more sophisticated boundary handling (wrap-around, reflection).
 """
 
 from __future__ import annotations
@@ -42,21 +39,14 @@ from typing import Optional
 import torch
 
 from agent_state import AgentState
+from constants import MAX_ACCEL, MAX_SPEED, MAX_STRAFE
 from environment import Environment
-from update_rule import MAX_ACCEL, MAX_SPEED, MAX_STRAFE, UpdateRule
+from update_rule import UpdateRule
 
 # Population size and seed-cluster jitter — see agent_state.py's seed()
 # for why a nonzero spread matters.
 DEFAULT_POPULATION = 1000
 DEFAULT_SPAWN_SPREAD = 4.0
-
-# Keeps every agent's sampled/deposited position strictly inside the
-# grid's interior — see environment.py's deposit(), whose corner math
-# assumes x1 = floor(x)+1 and y1 = floor(y)+1 are always valid indices.
-# Public (not `_`-prefixed) so train_server.py can forward it to the
-# frontend, which needs the exact same clamp to replicate this
-# simulation's positions bit-for-bit.
-EDGE_MARGIN = 1.001
 
 
 class Simulation:
@@ -75,10 +65,16 @@ class Simulation:
         center = (env.width / 2.0, env.height / 2.0)
         self.agents = AgentState.seed(population, center, spawn_spread, device, rng=rng)
 
-    def _clamp_to_grid(self, positions: torch.Tensor) -> torch.Tensor:
+    def _wrap_to_grid(self, positions: torch.Tensor) -> torch.Tensor:
+        """Toroidal wrap, not a clamp — the grid has no edge (see
+        environment.py's module docstring). torch.remainder is
+        floor-style (result always in [0, size)), so this is a true wrap
+        even for a position that overshot by more than one grid width in
+        a single step (never expected given MAX_SPEED/MAX_STRAFE are both
+        tiny relative to grid size, but correct regardless)."""
         positions = positions.clone()
-        positions[:, 0] = positions[:, 0].clamp(0.0, self.env.width - EDGE_MARGIN)
-        positions[:, 1] = positions[:, 1].clamp(0.0, self.env.height - EDGE_MARGIN)
+        positions[:, 0] = torch.remainder(positions[:, 0], self.env.width)
+        positions[:, 1] = torch.remainder(positions[:, 1], self.env.height)
         return positions
 
     @torch.no_grad()
@@ -102,7 +98,9 @@ class Simulation:
         grad_forward = grad_x * cos_h + grad_y * sin_h
         grad_lateral = -grad_x * sin_h + grad_y * cos_h
 
-        env_write, local_accel, local_strafe = self.update_rule(value, grad_forward, grad_lateral)
+        env_write, local_accel, local_strafe = self.update_rule(
+            value, grad_forward, grad_lateral, cos_h, sin_h
+        )
 
         # Local-frame acceleration -> world, exact inverse of the sensing
         # rotation above, then clamp the *magnitude* (not each component)
@@ -143,7 +141,7 @@ class Simulation:
             dim=-1,
         )
 
-        new_positions = self._clamp_to_grid(agents.positions + new_velocity + strafe_world)
+        new_positions = self._wrap_to_grid(agents.positions + new_velocity + strafe_world)
 
         agents.velocity = new_velocity
         agents.positions = new_positions

@@ -10,14 +10,10 @@ const WIDTH: u32 = __WIDTH__u;
 const HEIGHT: u32 = __HEIGHT__u;
 const HIDDEN: u32 = __HIDDEN__u;
 const AGENT_COUNT: u32 = __AGENT_COUNT__u;
-const IN: u32 = 3u * CHANNELS;
+const IN: u32 = 3u * CHANNELS + 2u;
 const OUT: u32 = CHANNELS + 4u;
 const PLANE_SIZE: u32 = CHANNELS * HEIGHT * WIDTH;
 
-const MAX_SPEED: f32 = __MAX_SPEED__;
-const MAX_ACCEL: f32 = __MAX_ACCEL__;
-const MAX_STRAFE: f32 = __MAX_STRAFE__;
-const EDGE_MARGIN: f32 = __EDGE_MARGIN__;
 
 // Combined weights buffer layout — fc1w, fc1b, fc2w, fc2b back to back,
 // row-major (out_features, in_features) per nn.Linear's own convention
@@ -42,6 +38,21 @@ const DEPOSIT_CLAMP: f32 = 1073741824.0; // 2^30
 @group(0) @binding(4) var<storage, read_write> positions: array<vec2<f32>>;
 @group(0) @binding(5) var<storage, read_write> velocity: array<vec2<f32>>;
 
+// Live-adjustable, unlike CHANNELS/WIDTH/HEIGHT/HIDDEN/AGENT_COUNT above
+// (those are compile-time consts sizing arrays/dispatches/buffers — see
+// this file's header). A real uniform buffer so the frontend's "Physics"
+// panel can push new values on every slider tick via a cheap
+// queue.writeBuffer, without recompiling this pipeline or touching
+// positions/velocity — see gpu/agents.ts's setPhysics(). Initialized
+// from the training run's own MAX_SPEED/MAX_ACCEL/MAX_STRAFE
+// (constants.py).
+struct AgentPhysics {
+  maxSpeed: f32,
+  maxAccel: f32,
+  maxStrafe: f32,
+}
+@group(0) @binding(6) var<uniform> physics: AgentPhysics;
+
 fn gridIndex(c: u32, y: u32, x: u32) -> u32 {
   return c * HEIGHT * WIDTH + y * WIDTH + x;
 }
@@ -57,11 +68,14 @@ struct BilinearWeights {
   w11: f32,
 };
 
-// Matches PyTorch grid_sample(align_corners=True, padding_mode="border")
-// exactly: corner indices clamp to the nearest edge texel rather than
-// wrapping or zero-padding (a different convention from the
-// zero-padded convolutions in environment.wgsl — see this project's own
-// design notes on why the two must not be conflated).
+// Toroidal: corner indices wrap around each axis rather than clamping to
+// an edge texel — mirrors environment.py's Environment._corners() (torch
+// doesn't offer a circular padding_mode for grid_sample, which is why
+// both that method and this one hand-roll the gather instead). `%` on a
+// non-negative i32 is exact modulo, and x0i/y0i here are always
+// non-negative since px/py arrive already wrapped into [0, WIDTH)/
+// [0, HEIGHT) by this same shader's own position wrap below (and by
+// rng.ts's spawn seeding on the very first step).
 fn bilinearWeights(px: f32, py: f32) -> BilinearWeights {
   let x0f = floor(px);
   let y0f = floor(py);
@@ -72,10 +86,10 @@ fn bilinearWeights(px: f32, py: f32) -> BilinearWeights {
   let wy1 = py - y0f;
   let wy0 = 1.0 - wy1;
   var out: BilinearWeights;
-  out.x0 = u32(clamp(x0i, 0, i32(WIDTH) - 1));
-  out.x1 = u32(clamp(x0i + 1, 0, i32(WIDTH) - 1));
-  out.y0 = u32(clamp(y0i, 0, i32(HEIGHT) - 1));
-  out.y1 = u32(clamp(y0i + 1, 0, i32(HEIGHT) - 1));
+  out.x0 = u32(x0i % i32(WIDTH));
+  out.x1 = u32((x0i + 1) % i32(WIDTH));
+  out.y0 = u32(y0i % i32(HEIGHT));
+  out.y1 = u32((y0i + 1) % i32(HEIGHT));
   out.w00 = wx0 * wy0;
   out.w10 = wx1 * wy0;
   out.w01 = wx0 * wy1;
@@ -162,7 +176,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // empirically-proven-safe primitive here rather than a comparison.
   // Bounding to MAX_SPEED is also just correct on its own terms: valid
   // velocity is never supposed to exceed it anyway.
-  let vel = clamp(velocity[i], vec2<f32>(-MAX_SPEED), vec2<f32>(MAX_SPEED));
+  let vel = clamp(velocity[i], vec2<f32>(-physics.maxSpeed), vec2<f32>(physics.maxSpeed));
 
   // heading never stored — derived fresh from velocity every step, same
   // convention as simulation.py (atan2(0,0) = 0, a resting agent has
@@ -198,6 +212,11 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     inputVec[CHANNELS + c] = gx * cosH + gy * sinH;
     inputVec[2u * CHANNELS + c] = -gx * sinH + gy * cosH;
   }
+  // Heading, world-frame (cos, sin) — same convention/rationale as
+  // update_rule.py's forward(): trades away rotation-equivariant sensing
+  // on purpose, see that module's own "Heading" docstring section.
+  inputVec[3u * CHANNELS] = cosH;
+  inputVec[3u * CHANNELS + 1u] = sinH;
 
   // fc1 -> tanh
   var hidden: array<f32, HIDDEN>;
@@ -222,7 +241,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // local_accel: per-component tanh squash, then scale — distinct from
   // strafe's magnitude-based squash below, see update_rule.py/
   // simulation.py for why these two conventions differ.
-  let accelLocal = vec2<f32>(safeTanh(outVec[CHANNELS]) * MAX_ACCEL, safeTanh(outVec[CHANNELS + 1u]) * MAX_ACCEL);
+  let accelLocal = vec2<f32>(safeTanh(outVec[CHANNELS]) * physics.maxAccel, safeTanh(outVec[CHANNELS + 1u]) * physics.maxAccel);
   let accelWorld = vec2<f32>(
     accelLocal.x * cosH - accelLocal.y * sinH,
     accelLocal.x * sinH + accelLocal.y * cosH
@@ -232,22 +251,28 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // down) — not each component independently.
   var newVel = vel + accelWorld;
   let speedSafe = max(length(newVel), 1e-9);
-  newVel = newVel * min(MAX_SPEED / speedSafe, 1.0);
+  newVel = newVel * min(physics.maxSpeed / speedSafe, 1.0);
 
   // local_strafe: magnitude-based tanh squash, direction preserved —
   // applied straight to position this step, never to velocity, never
   // persisted (recomputed fresh every step).
   let strafeRaw = vec2<f32>(outVec[CHANNELS + 2u], outVec[CHANNELS + 3u]);
   let strafeMagSafe = max(length(strafeRaw), 1e-9);
-  let strafeLocal = strafeRaw * (safeTanh(strafeMagSafe) * MAX_STRAFE / strafeMagSafe);
+  let strafeLocal = strafeRaw * (safeTanh(strafeMagSafe) * physics.maxStrafe / strafeMagSafe);
   let strafeWorld = vec2<f32>(
     strafeLocal.x * cosH - strafeLocal.y * sinH,
     strafeLocal.x * sinH + strafeLocal.y * cosH
   );
 
+  // Toroidal wrap, not a clamp — see simulation.py's _wrap_to_grid() and
+  // environment.py's module docstring for why the grid has no edge.
+  // `x - floor(x / w) * w` is true (always-non-negative) mathematical
+  // mod, unlike WGSL's `%` on floats (which, like C's fmod, can return a
+  // negative result for a negative operand) — matches torch.remainder's
+  // semantics exactly.
   var newPos = pos + newVel + strafeWorld;
-  newPos.x = clamp(newPos.x, 0.0, f32(WIDTH) - EDGE_MARGIN);
-  newPos.y = clamp(newPos.y, 0.0, f32(HEIGHT) - EDGE_MARGIN);
+  newPos.x = newPos.x - floor(newPos.x / f32(WIDTH)) * f32(WIDTH);
+  newPos.y = newPos.y - floor(newPos.y / f32(HEIGHT)) * f32(HEIGHT);
 
   positions[i] = newPos;
   velocity[i] = newVel;

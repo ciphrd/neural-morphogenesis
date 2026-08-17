@@ -28,6 +28,10 @@ export class GpuEnvironment {
   readonly gridB: GPUBuffer;
   readonly gradient: GPUBuffer;
   readonly depositScratch: GPUBuffer;
+  // decay, live-adjustable — see setDecay() and environment.wgsl's own
+  // EnvPhysics comment for why this is a real uniform buffer rather than
+  // a templateShader() const like width/height/channels above.
+  readonly physicsUniform: GPUBuffer;
 
   readonly clearScratchPipeline: GPUComputePipeline;
   readonly computeGradientPipeline: GPUComputePipeline;
@@ -68,8 +72,13 @@ export class GpuEnvironment {
       size: planeSize * 4,
       usage: GPUBufferUsage.STORAGE,
     });
+    this.physicsUniform = device.createBuffer({
+      size: 4, // EnvPhysics: 1x f32 (decay)
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    writeFloat32(device, this.physicsUniform, 0, new Float32Array([decay]));
 
-    const source = templateShader(shaderSrc, { CHANNELS: channels, WIDTH: width, HEIGHT: height, DECAY: decay });
+    const source = templateShader(shaderSrc, { CHANNELS: channels, WIDTH: width, HEIGHT: height });
     const module = device.createShaderModule({ code: source });
 
     this.clearScratchPipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "clearScratch" } });
@@ -122,6 +131,7 @@ export class GpuEnvironment {
         entries: [
           { binding: 0, resource: { buffer: this.gridA } },
           { binding: 3, resource: { buffer: this.gridB } },
+          { binding: 4, resource: { buffer: this.physicsUniform } },
         ],
       }),
       device.createBindGroup({
@@ -129,6 +139,7 @@ export class GpuEnvironment {
         entries: [
           { binding: 0, resource: { buffer: this.gridB } },
           { binding: 3, resource: { buffer: this.gridA } },
+          { binding: 4, resource: { buffer: this.physicsUniform } },
         ],
       }),
     ];
@@ -150,10 +161,19 @@ export class GpuEnvironment {
     writeFloat32(this.device, this.gridB, 0, this.zeroPlane);
   }
 
+  /** Live-updates the EnvPhysics uniform — a plain buffer write, no
+   * pipeline recreation and no effect on the grid's current contents, so
+   * this is safe to call on every tick of a "Physics" panel slider
+   * without disturbing the rollout currently in flight. */
+  setDecay(decay: number): void {
+    writeFloat32(this.device, this.physicsUniform, 0, new Float32Array([decay]));
+  }
+
   destroy(): void {
     this.gridA.destroy();
     this.gridB.destroy();
     this.gradient.destroy();
     this.depositScratch.destroy();
+    this.physicsUniform.destroy();
   }
 }

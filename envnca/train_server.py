@@ -22,19 +22,21 @@ import shutil
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import numpy as np
 import torch
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
+from constants import DECAY, HIDDEN_DIM, MAX_ACCEL, MAX_SPEED, MAX_STRAFE
 from debug_images import save_agents_image, save_raster_image
 from device import pick_device
-from environment import DECAY
 from evolve import (
     CHECKPOINTS_DIR,
+    TARGETS_DIR,
     build_arg_parser,
     get_weights,
     load_target,
@@ -44,8 +46,8 @@ from evolve import (
     set_weights,
 )
 from raster import build_target_distance_field, build_target_raster, training_raster_distance
-from simulation import EDGE_MARGIN
-from update_rule import HIDDEN_DIM, MAX_ACCEL, MAX_SPEED, MAX_STRAFE, UpdateRule
+from target import TargetShape
+from update_rule import UpdateRule
 
 parser = build_arg_parser()
 parser.add_argument("--port", type=int, default=8002)
@@ -88,14 +90,14 @@ MAX_HISTORY = 500
 RUNS_DIR = CHECKPOINTS_DIR / "runs"
 
 # End-of-generation debug snapshots (see _save_generation_images()),
-# served directly to the frontend via the /images static mount below —
-# archived by _archive_previous_run() the same way history.jsonl/
-# best.npy are, so a fresh run doesn't inherit a previous run's images
-# under generation numbers that collide with its own. Created eagerly
-# (not lazily inside _save_generation_images(), which also does this)
-# because StaticFiles requires the directory to already exist at mount
-# time, which happens below at import time, before any generation has
-# actually run.
+# served to the frontend via GET /runs/{run_id}/images/{filename} below
+# (run_id="current" reads straight from here; anything else reads an
+# archived run's own copy) — archived by _archive_previous_run() the
+# same way history.jsonl/best.npy are, so a fresh run doesn't inherit a
+# previous run's images under generation numbers that collide with its
+# own. Created eagerly (not lazily inside _save_generation_images(),
+# which also does this) just so it reliably exists from the moment this
+# module is imported, before any generation has actually run.
 IMAGES_DIR = CHECKPOINTS_DIR / "generation_images"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -133,11 +135,8 @@ def _archive_previous_run() -> None:
 
     if IMAGES_DIR.is_dir() and any(IMAGES_DIR.iterdir()):
         shutil.move(str(IMAGES_DIR), str(archive_dir / "generation_images"))
-        # /images is mounted (at import time) against this exact path —
-        # StaticFiles resolves files from it lazily on each request, not
-        # a directory handle captured at mount time, so recreating the
-        # path here is enough for the mount to keep working once
-        # _save_generation_images() starts writing into it again.
+        # Recreated immediately — _save_generation_images() expects this
+        # directory to already exist the next time it's called.
         IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"[train_server] archived previous run to {archive_dir}")
@@ -211,13 +210,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# Serves gen_{N:05d}_{target,agents,raster}.png directly by filename —
-# see _save_generation_images() for what's actually in here. Plain
-# <img>/SVG <image> tags don't need CORS to render a cross-origin image
-# (that only gates *programmatic* access to the response, e.g. reading
-# pixels back out via canvas), so this doesn't need any extra handling
-# beyond the blanket CORSMiddleware already applied above.
-app.mount("/images", StaticFiles(directory=IMAGES_DIR), name="images")
 
 connections: set[WebSocket] = set()
 latest_generation_message: Optional[dict] = None
@@ -328,7 +320,6 @@ async def _training_loop_body() -> None:
             "maxSpeed": MAX_SPEED,
             "maxAccel": MAX_ACCEL,
             "maxStrafe": MAX_STRAFE,
-            "edgeMargin": EDGE_MARGIN,
             "hiddenDim": HIDDEN_DIM,
             # Everything above is simulation config — what a WebGPU replay
             # needs to reproduce this generation's winner (SimulationConfig).
@@ -375,6 +366,21 @@ async def _training_loop_body() -> None:
                         "outside_weight": args.outside_weight,
                         "seed": args.seed,
                         "winner_seed": winner_seed,
+                        # Not CLI args (nothing above this line is) — the
+                        # constants.py values this run actually simulated
+                        # under. Every generation in history.jsonl already
+                        # carries these too (see latest_generation_message
+                        # above), so a full replay never depended on this
+                        # file for them; recorded here as well purely so
+                        # this "metadata" file is a complete, standalone
+                        # description of the run on its own, without
+                        # requiring a history.jsonl read to answer "what
+                        # was this run's MAX_SPEED".
+                        "decay": DECAY,
+                        "hidden_dim": HIDDEN_DIM,
+                        "max_speed": MAX_SPEED,
+                        "max_accel": MAX_ACCEL,
+                        "max_strafe": MAX_STRAFE,
                     },
                     indent=2,
                 )
@@ -400,6 +406,157 @@ def history() -> dict:
 def target_points() -> dict:
     """This server only ever has the one target it was launched with."""
     return {"points": target.points.tolist()}
+
+
+@app.get("/targets/{name}/points")
+def named_target_points(name: str, grid_size: int) -> dict:
+    """Like /target/points, but for *any* target by name at any grid
+    size — needed because an archived run (see /runs below) may have
+    been trained against a different --target than this server's own
+    (args.target), so the frontend's "Load run" picker can't always rely
+    on the fixed /target/points response when browsing history."""
+    path = TARGETS_DIR / f"{name}.json"
+    if not path.is_file():
+        raise HTTPException(404, f"unknown target '{name}'")
+    loaded = TargetShape.from_export(json.loads(path.read_text()), grid_size)
+    return {"points": loaded.points.tolist()}
+
+
+def _find_latest_preview(images_dir: Path) -> Optional[Path]:
+    """Highest-generation-numbered raster (falling back to agents) image
+    in `images_dir`, found by scanning actual files rather than trusting
+    a run's best_meta.json — _save_generation_images() runs every
+    generation, but best_meta.json only updates at --checkpoint-every
+    boundaries, so a run stopped between checkpoints can have images
+    saved past whatever generation number the metadata last reported.
+    Filenames are zero-padded (gen_00042_....png), so lexicographic sort
+    is numeric sort."""
+    if not images_dir.is_dir():
+        return None
+    for pattern in ("gen_*_raster.png", "gen_*_agents.png"):
+        candidates = sorted(images_dir.glob(pattern))
+        if candidates:
+            return candidates[-1]
+    return None
+
+
+def _run_dir_for_id(run_id: str) -> Optional[Path]:
+    """Resolves an archived run id (an archive directory's own name — see
+    _archive_previous_run()) to its path, rejecting anything that isn't
+    literally a direct child of RUNS_DIR. run_id arrives as a URL path
+    segment from the browser; this is the only thing standing between it
+    and path traversal (a run_id of e.g. "../../etc")."""
+    if not run_id or "/" in run_id or "\\" in run_id:
+        return None
+    candidate = RUNS_DIR / run_id
+    if candidate.is_dir() and candidate.parent == RUNS_DIR:
+        return candidate
+    return None
+
+
+@app.get("/runs")
+def list_runs() -> dict:
+    """Every archived run (checkpoints/runs/*) plus the current one (if
+    training has produced at least one generation so far), newest first
+    — what the frontend's "Load run" picker shows. Each entry is enough
+    to render a list item (label, target, generation, fitness, preview
+    thumbnail URL) without fetching that run's full history."""
+    runs = []
+    if latest_generation_message is not None:
+        runs.append(
+            {
+                "id": "current",
+                "isLive": True,
+                "label": "Current run",
+                "target": latest_generation_message["target"],
+                "generation": latest_generation_message["generation"],
+                "bestFitness": latest_generation_message["allTimeBest"],
+                "previewUrl": "/runs/current/preview.png",
+            }
+        )
+
+    if RUNS_DIR.is_dir():
+        for run_dir in sorted(RUNS_DIR.iterdir(), reverse=True):
+            if not run_dir.is_dir():
+                continue
+            meta_path = run_dir / "best_meta.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = json.loads(meta_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            runs.append(
+                {
+                    "id": run_dir.name,
+                    "isLive": False,
+                    "label": run_dir.name,
+                    "target": meta.get("target"),
+                    "generation": meta.get("generation"),
+                    "bestFitness": meta.get("fitness"),
+                    "previewUrl": f"/runs/{run_dir.name}/preview.png",
+                }
+            )
+
+    return {"runs": runs}
+
+
+@app.get("/runs/{run_id}/history")
+def run_history(run_id: str) -> dict:
+    """Same shape as /history, for one specific run — "current" is just
+    /history itself (the live, in-progress run); anything else reads
+    that archived run's own copy of checkpoints/history.jsonl (moved,
+    not copied, by _archive_previous_run() — see its own docstring, so
+    this is the exact same file the live run itself would have served
+    from at the point it got archived)."""
+    if run_id == "current":
+        return history()
+    run_dir = _run_dir_for_id(run_id)
+    if run_dir is None:
+        raise HTTPException(404, f"unknown run '{run_id}'")
+    history_path = run_dir / "history.jsonl"
+    if not history_path.is_file():
+        return {"generations": []}
+    lines = [line for line in history_path.read_text().splitlines() if line]
+    return {"generations": [json.loads(line) for line in lines[-MAX_HISTORY:]]}
+
+
+def _images_dir_for_run(run_id: str) -> Path:
+    """Shared by run_preview() and run_image() below — "current" is the
+    live, in-progress run's own IMAGES_DIR; anything else must resolve to
+    an actual archived run (raises 404 otherwise, via _run_dir_for_id's
+    path-traversal-safe validation)."""
+    if run_id == "current":
+        return IMAGES_DIR
+    run_dir = _run_dir_for_id(run_id)
+    if run_dir is None:
+        raise HTTPException(404, f"unknown run '{run_id}'")
+    return run_dir / "generation_images"
+
+
+@app.get("/runs/{run_id}/preview.png")
+def run_preview(run_id: str) -> FileResponse:
+    path = _find_latest_preview(_images_dir_for_run(run_id))
+    if path is None:
+        raise HTTPException(404, "no preview image available yet")
+    return FileResponse(path)
+
+
+@app.get("/runs/{run_id}/images/{filename}")
+def run_image(run_id: str, filename: str) -> FileResponse:
+    """A specific gen_{N:05d}_{target,agents,raster}.png from a specific
+    run — net/images.ts's generationImageUrl() builds this URL. Replaces
+    an earlier flat StaticFiles mount at /images (which only ever served
+    the live run's own IMAGES_DIR) now that the Snapshot panel and the
+    fitness chart's hover tooltip need to show images from whichever run
+    is currently being *viewed*, live or archived, not always the live
+    one specifically."""
+    if "/" in filename or "\\" in filename:
+        raise HTTPException(404)
+    path = _images_dir_for_run(run_id) / filename
+    if not path.is_file():
+        raise HTTPException(404)
+    return FileResponse(path)
 
 
 @app.websocket("/ws")

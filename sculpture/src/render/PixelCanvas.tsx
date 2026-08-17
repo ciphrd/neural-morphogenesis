@@ -1,11 +1,12 @@
 import { useEffect, useRef, type PointerEvent } from "react";
-import { PixelGrid } from "../pixel/PixelGrid";
+import { brushCells, PixelGrid } from "../pixel/PixelGrid";
 
 export const CANVAS_SIZE = 512;
 
 interface PixelCanvasProps {
   grid: PixelGrid;
   mode: "add" | "erase";
+  brushSize: number;
   /** Called once a paint stroke ends, so the parent can re-read grid.count()
    * etc. Painting itself mutates `grid` in place and redraws imperatively —
    * going through React state on every cell would be unnecessary churn
@@ -13,11 +14,16 @@ interface PixelCanvasProps {
   onChange: () => void;
 }
 
-export function PixelCanvas({ grid, mode, onChange }: PixelCanvasProps) {
+export function PixelCanvas({ grid, mode, brushSize, onChange }: PixelCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const paintingRef = useRef(false);
   const modeRef = useRef(mode);
   modeRef.current = mode;
+  const brushSizeRef = useRef(brushSize);
+  brushSizeRef.current = brushSize;
+  // Grid cell currently under the pointer (null when the pointer isn't
+  // over the canvas at all) — drives the hover preview in draw() below.
+  const hoverRef = useRef<[number, number] | null>(null);
 
   const cellSize = CANVAS_SIZE / grid.nx;
 
@@ -46,32 +52,82 @@ export function PixelCanvas({ grid, mode, onChange }: PixelCanvasProps) {
       ctx.lineTo(CANVAS_SIZE, p);
       ctx.stroke();
     }
+
+    // Hover preview: exactly the cells brushCells() would paint, clipped
+    // to the grid — same call painting itself makes (see paintAt), so
+    // this can't drift out of sync with what a click actually does.
+    if (hoverRef.current) {
+      const [hx, hy] = hoverRef.current;
+      const cells = brushCells(hx, hy, brushSizeRef.current).filter(([x, y]) => grid.inBounds(x, y));
+      if (cells.length > 0) {
+        const accent = modeRef.current === "add" ? "#4f8cff" : "#ff5a5a";
+        ctx.fillStyle = modeRef.current === "add" ? "rgba(79,140,255,0.35)" : "rgba(255,90,90,0.35)";
+        for (const [x, y] of cells) {
+          ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+        }
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const [x, y] of cells) {
+          minX = Math.min(minX, x);
+          minY = Math.min(minY, y);
+          maxX = Math.max(maxX, x);
+          maxY = Math.max(maxY, y);
+        }
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(
+          minX * cellSize + 0.75,
+          minY * cellSize + 0.75,
+          (maxX - minX + 1) * cellSize - 1.5,
+          (maxY - minY + 1) * cellSize - 1.5
+        );
+      }
+    }
   };
 
-  useEffect(draw, [grid, cellSize]);
+  useEffect(draw, [grid, cellSize, brushSize, mode]);
 
-  const paintAt = (clientX: number, clientY: number) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+  const cellFromEvent = (clientX: number, clientY: number): [number, number] => {
+    const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
     const x = Math.floor(((clientX - rect.left) / rect.width) * grid.nx);
     const y = Math.floor(((clientY - rect.top) / rect.height) * grid.ny);
-    grid.set(x, y, modeRef.current === "add");
+    return [x, y];
+  };
+
+  const paintAt = (cx: number, cy: number) => {
+    for (const [x, y] of brushCells(cx, cy, brushSizeRef.current)) {
+      grid.set(x, y, modeRef.current === "add");
+    }
     draw();
   };
 
   const handlePointerDown = (e: PointerEvent<HTMLCanvasElement>) => {
+    const cell = cellFromEvent(e.clientX, e.clientY);
     paintingRef.current = true;
-    paintAt(e.clientX, e.clientY);
+    hoverRef.current = cell;
+    paintAt(cell[0], cell[1]);
   };
   const handlePointerMove = (e: PointerEvent<HTMLCanvasElement>) => {
-    if (!paintingRef.current) return;
-    paintAt(e.clientX, e.clientY);
+    const cell = cellFromEvent(e.clientX, e.clientY);
+    hoverRef.current = cell;
+    if (paintingRef.current) {
+      paintAt(cell[0], cell[1]);
+    } else {
+      draw();
+    }
   };
   const stopPainting = () => {
     if (!paintingRef.current) return;
     paintingRef.current = false;
     onChange();
+  };
+  const handlePointerLeave = () => {
+    hoverRef.current = null;
+    stopPainting();
+    draw();
   };
 
   return (
@@ -83,7 +139,7 @@ export function PixelCanvas({ grid, mode, onChange }: PixelCanvasProps) {
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={stopPainting}
-      onPointerLeave={stopPainting}
+      onPointerLeave={handlePointerLeave}
     />
   );
 }

@@ -2,7 +2,7 @@ import { GpuEnvironment } from "./environment";
 import { GpuAgents } from "./agents";
 import { DEFAULT_INTENSITY, GpuRender } from "./render";
 import type { SpawnDistribution } from "./rng";
-import type { BackgroundMode, SimulationConfig } from "./types";
+import type { BackgroundMode, PhysicsSettings, SimulationConfig } from "./types";
 
 function resetKeyFor(config: SimulationConfig): string {
   return [config.gridWidth, config.gridHeight, config.channels, config.agentCount, config.hiddenDim].join(":");
@@ -76,6 +76,18 @@ export class GpuSimulation {
     this.renderer?.setIntensity(intensity);
   }
 
+  /** Live-updates decay/maxSpeed/maxAccel/maxStrafe — plain uniform-
+   * buffer writes on the already-running environment/agents (see
+   * GpuEnvironment.setDecay()/GpuAgents.setPhysics()), never a rebuild().
+   * Safe to call on every tick of a "Physics" panel slider: doesn't touch
+   * the grid's contents or agent positions/velocity, so the rollout in
+   * flight keeps running exactly where it was, just under the new
+   * numbers from the next step onward. */
+  setPhysics(physics: PhysicsSettings): void {
+    this.environment?.setDecay(physics.decay);
+    this.agents?.setPhysics(physics.maxSpeed, physics.maxAccel, physics.maxStrafe);
+  }
+
   /** Changes the initial-spread shape used the next time a rollout
    * (re)starts. Also restarts the *currently loaded* generation right
    * away (reusing loopCurrentGeneration()'s re-seed-and-restart logic) so
@@ -139,7 +151,6 @@ export class GpuSimulation {
       maxSpeed: config.maxSpeed,
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
-      edgeMargin: config.edgeMargin,
     });
     this.agents.loadWeights(config.weights);
     this.renderer = new GpuRender(this.device, this.canvasFormat, this.environment, this.agents, {

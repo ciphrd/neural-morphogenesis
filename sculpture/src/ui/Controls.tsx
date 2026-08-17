@@ -3,6 +3,8 @@ interface ControlsProps {
   onResolutionChange: (value: number) => void;
   mode: "add" | "erase";
   onModeChange: (mode: "add" | "erase") => void;
+  brushSize: number;
+  onBrushSizeChange: (value: number) => void;
   pixelCount: number;
   onClear: () => void;
   onExport: () => void;
@@ -13,6 +15,8 @@ export function Controls({
   onResolutionChange,
   mode,
   onModeChange,
+  brushSize,
+  onBrushSizeChange,
   pixelCount,
   onClear,
   onExport,
@@ -50,6 +54,16 @@ export function Controls({
             Erase
           </button>
         </div>
+        <label>
+          Brush size ({brushSize}²)
+          <input
+            type="range"
+            min={1}
+            max={8}
+            value={brushSize}
+            onChange={(e) => onBrushSizeChange(Number(e.target.value))}
+          />
+        </label>
         <button onClick={onClear} className="secondary">
           Clear
         </button>

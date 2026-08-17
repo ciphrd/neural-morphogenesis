@@ -7,7 +7,6 @@
 const CHANNELS: u32 = __CHANNELS__u;
 const WIDTH: u32 = __WIDTH__u;
 const HEIGHT: u32 = __HEIGHT__u;
-const DECAY: f32 = __DECAY__;
 const PLANE_SIZE: u32 = CHANNELS * HEIGHT * WIDTH;
 
 // Must match agents.wgsl's DEPOSIT_SCALE exactly — see that file's
@@ -18,6 +17,21 @@ const DEPOSIT_SCALE: f32 = 4096.0;
 @group(0) @binding(1) var<storage, read_write> gradient: array<f32>; // gx plane [0,PLANE_SIZE), gy plane [PLANE_SIZE,2*PLANE_SIZE)
 @group(0) @binding(2) var<storage, read_write> depositScratch: array<atomic<i32>>;
 @group(0) @binding(3) var<storage, read_write> gridNext: array<f32>;
+
+// Live-adjustable, unlike CHANNELS/WIDTH/HEIGHT above (those are
+// compile-time consts because they size arrays/dispatches — a struct
+// shape change needs a real shader recompile). A real uniform buffer
+// instead, so the frontend's "Physics" panel can push a new value on
+// every slider tick via a cheap queue.writeBuffer — no pipeline
+// recreation, no touching grid/agent state. Only diffuseDecay below
+// actually reads this, so (per layout:"auto"'s reachability-based bind
+// group derivation) it's the only pipeline whose layout includes binding
+// 4 — see gpu/environment.ts's diffuseDecayBindGroups. Initialized from
+// the training run's own DECAY (constants.py); see setDecay().
+struct EnvPhysics {
+  decay: f32,
+}
+@group(0) @binding(4) var<uniform> physics: EnvPhysics;
 
 fn gridIndex(c: u32, y: u32, x: u32) -> u32 {
   return c * HEIGHT * WIDTH + y * WIDTH + x;
@@ -49,9 +63,13 @@ fn clearScratch(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicStore(&depositScratch[i], 0);
 }
 
-// Zero-padded 3x3 neighborhood (PyTorch conv2d(padding=1) default),
-// fused Sobel-X + Sobel-Y in one pass since both read the same
-// neighborhood.
+// Toroidal (wrapped, not zero-padded) 3x3 neighborhood — mirrors
+// environment.py's F.pad(mode="circular") + conv2d(padding=0). Fused
+// Sobel-X + Sobel-Y in one pass since both read the same neighborhood.
+// dy/dx are always in {-1,0,1} against y/x already in [0,HEIGHT)/
+// [0,WIDTH), so i32(y)+dy is always in [-1, HEIGHT] — adding HEIGHT/WIDTH
+// once before the i32 `%` is enough to land back in range, no loop
+// needed (same reasoning as agents.wgsl's own wrap).
 @compute @workgroup_size(16, 16, 1)
 fn computeGradient(@builtin(global_invocation_id) gid: vec3<u32>) {
   let x = gid.x;
@@ -62,12 +80,10 @@ fn computeGradient(@builtin(global_invocation_id) gid: vec3<u32>) {
     var gx: f32 = 0.0;
     var gy: f32 = 0.0;
     for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
-      let ny = i32(y) + dy;
-      if (ny < 0 || ny >= i32(HEIGHT)) { continue; }
+      let ny = u32((i32(y) + dy + i32(HEIGHT)) % i32(HEIGHT));
       for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
-        let nx = i32(x) + dx;
-        if (nx < 0 || nx >= i32(WIDTH)) { continue; }
-        let v = gridCurrent[gridIndex(c, u32(ny), u32(nx))];
+        let nx = u32((i32(x) + dx + i32(WIDTH)) % i32(WIDTH));
+        let v = gridCurrent[gridIndex(c, ny, nx)];
         let k = u32(dy + 1) * 3u + u32(dx + 1);
         gx = gx + v * SOBEL_X[k];
         gy = gy + v * SOBEL_Y[k];
@@ -90,10 +106,10 @@ fn mergeDeposit(@builtin(global_invocation_id) gid: vec3<u32>) {
   gridCurrent[i] = gridCurrent[i] + f32(raw) / DEPOSIT_SCALE;
 }
 
-// Mass-preserving blur (BLUR sums to 1) * DECAY, zero-padded — reads
-// gridCurrent (post-deposit), writes gridNext, since this is a spatial
-// convolution reading neighbors of the same array it would otherwise
-// write in place.
+// Mass-preserving blur (BLUR sums to 1) * DECAY, toroidally wrapped (see
+// computeGradient's own comment on the wrap formula) — reads gridCurrent
+// (post-deposit), writes gridNext, since this is a spatial convolution
+// reading neighbors of the same array it would otherwise write in place.
 @compute @workgroup_size(16, 16, 1)
 fn diffuseDecay(@builtin(global_invocation_id) gid: vec3<u32>) {
   let x = gid.x;
@@ -103,16 +119,14 @@ fn diffuseDecay(@builtin(global_invocation_id) gid: vec3<u32>) {
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
     var acc: f32 = 0.0;
     for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
-      let ny = i32(y) + dy;
-      if (ny < 0 || ny >= i32(HEIGHT)) { continue; }
+      let ny = u32((i32(y) + dy + i32(HEIGHT)) % i32(HEIGHT));
       for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
-        let nx = i32(x) + dx;
-        if (nx < 0 || nx >= i32(WIDTH)) { continue; }
-        let v = gridCurrent[gridIndex(c, u32(ny), u32(nx))];
+        let nx = u32((i32(x) + dx + i32(WIDTH)) % i32(WIDTH));
+        let v = gridCurrent[gridIndex(c, ny, nx)];
         let k = u32(dy + 1) * 3u + u32(dx + 1);
         acc = acc + v * BLUR[k];
       }
     }
-    gridNext[gridIndex(c, y, x)] = acc * DECAY;
+    gridNext[gridIndex(c, y, x)] = acc * physics.decay;
   }
 }

@@ -46,3 +46,28 @@ export class PixelGrid {
     }
   }
 }
+
+/** Every cell a `size`x`size` square brush centered at (roughly) `(cx, cy)`
+ * covers, for `size` >= 1 — odd sizes land exactly centered on `(cx, cy)`;
+ * even sizes extend one extra cell right/down rather than split a cell in
+ * half (the standard "even brush" convention most pixel editors use).
+ * Not bounds-checked against any particular grid — callers that need that
+ * (PixelCanvas's paint and preview both do) filter/clip themselves, since
+ * PixelGrid.set() already no-ops out-of-bounds and the hover preview wants
+ * to *see* a brush clipped at the edge, not have it silently shrink.
+ *
+ * The one and only place brush shape is defined — PixelCanvas's actual
+ * paint operation and its hover preview both call this, so the preview is
+ * guaranteed pixel-for-pixel identical to what painting will actually do,
+ * not a lookalike approximation of it. */
+export function brushCells(cx: number, cy: number, size: number): [number, number][] {
+  const lo = -Math.floor((size - 1) / 2);
+  const hi = size - 1 + lo;
+  const cells: [number, number][] = [];
+  for (let dy = lo; dy <= hi; dy++) {
+    for (let dx = lo; dx <= hi; dx++) {
+      cells.push([cx + dx, cy + dy]);
+    }
+  }
+  return cells;
+}

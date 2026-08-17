@@ -15,7 +15,6 @@ export interface AgentsConfig {
   maxSpeed: number;
   maxAccel: number;
   maxStrafe: number;
-  edgeMargin: number;
 }
 
 interface WeightLayout {
@@ -27,7 +26,7 @@ interface WeightLayout {
 }
 
 function computeWeightLayout(channels: number, hiddenDim: number): WeightLayout {
-  const inDim = 3 * channels;
+  const inDim = 3 * channels + 2; // value + grad_forward + grad_lateral + heading(cos,sin)
   const outDim = channels + 4;
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
@@ -65,6 +64,11 @@ export class GpuAgents {
   readonly positions: GPUBuffer;
   readonly velocity: GPUBuffer;
   readonly weights: GPUBuffer;
+  // maxSpeed/maxAccel/maxStrafe, live-adjustable — see setPhysics() and
+  // agents.wgsl's own AgentPhysics comment for why this is a real
+  // uniform buffer rather than a templateShader() const like
+  // width/height/hiddenDim above.
+  readonly physicsUniform: GPUBuffer;
 
   readonly pipeline: GPUComputePipeline;
   // index 0: gridCurrent=environment.gridA. index 1: gridCurrent=environment.gridB.
@@ -81,7 +85,7 @@ export class GpuAgents {
   constructor(device: GPUDevice, environment: GpuEnvironment, config: AgentsConfig) {
     this.device = device;
     this.config = config;
-    const { width, height, channels, hiddenDim, agentCount, maxSpeed, maxAccel, maxStrafe, edgeMargin } = config;
+    const { width, height, channels, hiddenDim, agentCount, maxSpeed, maxAccel, maxStrafe } = config;
 
     this.positions = device.createBuffer({
       size: agentCount * 2 * 4,
@@ -97,6 +101,11 @@ export class GpuAgents {
       size: this.weightLayout.totalFloats * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
+    this.physicsUniform = device.createBuffer({
+      size: 12, // AgentPhysics: 3x f32 (maxSpeed, maxAccel, maxStrafe)
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    writeFloat32(device, this.physicsUniform, 0, new Float32Array([maxSpeed, maxAccel, maxStrafe]));
 
     const source = templateShader(shaderSrc, {
       CHANNELS: channels,
@@ -104,10 +113,6 @@ export class GpuAgents {
       HEIGHT: height,
       HIDDEN: hiddenDim,
       AGENT_COUNT: agentCount,
-      MAX_SPEED: maxSpeed,
-      MAX_ACCEL: maxAccel,
-      MAX_STRAFE: maxStrafe,
-      EDGE_MARGIN: edgeMargin,
       FC1W_OFFSET: this.weightLayout.fc1wOffset,
       FC1B_OFFSET: this.weightLayout.fc1bOffset,
       FC2W_OFFSET: this.weightLayout.fc2wOffset,
@@ -127,6 +132,7 @@ export class GpuAgents {
           { binding: 3, resource: { buffer: this.weights } },
           { binding: 4, resource: { buffer: this.positions } },
           { binding: 5, resource: { buffer: this.velocity } },
+          { binding: 6, resource: { buffer: this.physicsUniform } },
         ],
       });
 
@@ -137,6 +143,14 @@ export class GpuAgents {
 
   loadWeights(weights: UpdateRuleWeights): void {
     writeFloat32(this.device, this.weights, 0, flattenWeights(weights, this.weightLayout));
+  }
+
+  /** Live-updates the AgentPhysics uniform — a plain buffer write, no
+   * pipeline recreation and no effect on positions/velocity, so this is
+   * safe to call on every tick of a "Physics" panel slider without
+   * disturbing the rollout currently in flight. */
+  setPhysics(maxSpeed: number, maxAccel: number, maxStrafe: number): void {
+    writeFloat32(this.device, this.physicsUniform, 0, new Float32Array([maxSpeed, maxAccel, maxStrafe]));
   }
 
   /** Re-seeds agent positions/velocity for a fresh rollout — jitter is a
@@ -159,5 +173,6 @@ export class GpuAgents {
     this.positions.destroy();
     this.velocity.destroy();
     this.weights.destroy();
+    this.physicsUniform.destroy();
   }
 }

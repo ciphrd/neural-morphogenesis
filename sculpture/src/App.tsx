@@ -12,6 +12,7 @@ export default function App() {
   const [resolution, setResolution] = useState(32);
   const [grid, setGrid] = useState<PixelGrid>(() => buildGrid(32));
   const [mode, setMode] = useState<"add" | "erase">("add");
+  const [brushSize, setBrushSize] = useState(2);
   const [, forceUpdate] = useState(0);
 
   const handleResolutionChange = (value: number) => {
@@ -35,12 +36,14 @@ export default function App() {
         onResolutionChange={handleResolutionChange}
         mode={mode}
         onModeChange={setMode}
+        brushSize={brushSize}
+        onBrushSizeChange={setBrushSize}
         pixelCount={grid.count()}
         onClear={handleClear}
         onExport={handleExport}
       />
       <div className="viewport">
-        <PixelCanvas grid={grid} mode={mode} onChange={() => forceUpdate((n) => n + 1)} />
+        <PixelCanvas grid={grid} mode={mode} brushSize={brushSize} onChange={() => forceUpdate((n) => n + 1)} />
       </div>
     </div>
   );
