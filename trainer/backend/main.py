@@ -146,6 +146,7 @@ def target_points():
 def node_state(node_id: int):
     if node_id < 0 or node_id >= len(graph.positions):
         raise HTTPException(status_code=404, detail=f"unknown node {node_id}")
+    vx, vy = graph.velocity[node_id]
     return {
         "id": node_id,
         "position": graph.positions[node_id].tolist(),
@@ -154,6 +155,13 @@ def node_state(node_id: int):
         "energy": graph.energy[node_id],
         "spawnDirection": graph.spawn_directions[node_id].tolist(),
         "splitProb": graph.split_probs[node_id],
+        # heading/speed are derived from velocity (see update_rule.py's
+        # step()), not read from separate stored state — computed here
+        # rather than exposing the raw velocity vector so the frontend
+        # doesn't need its own atan2/hypot to render the existing
+        # heading-arrow/speed-stat UI.
+        "heading": float(np.arctan2(vy, vx)),
+        "speed": float(np.hypot(vx, vy)),
     }
 
 
@@ -195,6 +203,17 @@ def serialize_state() -> dict:
                 "spawnDirection": graph.spawn_directions[i].tolist(),
                 "splitProb": graph.split_probs[i],
                 "energy": graph.energy[i],
+                # Raw vectors, not pre-derived heading/speed — the
+                # renderer draws both as separate direction ticks (see
+                # render/GraphRenderer.tsx), so it needs each one's
+                # actual direction *and* magnitude, not a collapsed
+                # angle. velocity is the persistent, integrated motion
+                # state; accel is this step's fresh network output
+                # (world-frame, after tanh-squash/MAX_ACCEL/rotation —
+                # see update_rule.py's step()) added onto it, not itself
+                # accumulated state.
+                "velocity": graph.velocity[i].tolist(),
+                "accel": graph.accel[i].tolist(),
             }
             for i, pos in enumerate(graph.positions)
         ],
@@ -219,8 +238,12 @@ async def ws_endpoint(websocket: WebSocket):
                 await websocket.send_json(serialize_state())
 
             elif message.get("type") == "step":
-                did_split = apply_update_rule(graph, update_rule)
-                if did_split:
+                # Almost always True now that every node strafes a tiny
+                # bit each step (see update_rule.step()'s docstring) —
+                # only False for an empty graph or the (currently
+                # impossible via this tool) all-pinned case.
+                changed = apply_update_rule(graph, update_rule)
+                if changed:
                     relaxed = relax(graph.positions_array(), graph.pinned, graph.id_array())
                     graph.set_positions(relaxed)
 

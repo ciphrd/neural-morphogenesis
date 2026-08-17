@@ -9,6 +9,8 @@ export interface NodeState {
   chemicals: number[];
   energy: number;
   spawnDirection: number[];
+  heading: number;
+  speed: number;
 }
 
 // Refetches whenever the selected node id changes, or the graph itself

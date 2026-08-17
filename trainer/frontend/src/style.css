@@ -212,6 +212,33 @@ body {
   cursor: pointer;
 }
 
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.slider-row label {
+  color: #9aa0ab;
+  flex-shrink: 0;
+}
+
+.slider-row input[type="range"] {
+  flex: 1;
+  accent-color: #4f8cff;
+  cursor: pointer;
+}
+
+.slider-value {
+  width: 18px;
+  flex-shrink: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #e8eaed;
+}
+
 .viewport {
   flex: 1;
   position: relative;
@@ -408,47 +435,34 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.fitness-chart-tooltip {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-top: 8px;
-  padding: 8px 10px;
-  background: #1a1c22;
-  border: 1px solid #2a2d35;
-  border-radius: 6px;
-  font-size: 12px;
-  flex-wrap: wrap;
+/* Drawn as an SVG overlay inside the chart itself (see FitnessChart.tsx's
+   hover panel) rather than an HTML element below it, so it never changes
+   the page's layout height while hovering. */
+.fitness-chart-tooltip-bg {
+  fill: #1a1c22;
+  stroke: #2a2d35;
+  stroke-width: 1;
 }
 
 .fitness-chart-tooltip-title {
-  color: #9aa0ab;
-}
-
-.fitness-chart-tooltip-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.fitness-chart-tooltip-key {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
+  fill: #9aa0ab;
+  font-size: 11px;
 }
 
 .fitness-chart-tooltip-value {
-  color: #e8eaed;
+  fill: #e8eaed;
+  font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
 .fitness-chart-tooltip-label {
-  color: #9aa0ab;
+  fill: #9aa0ab;
+  font-size: 11px;
 }
 
 .fitness-chart-tooltip-hint {
-  color: #666b76;
+  fill: #666b76;
+  font-size: 10px;
   font-style: italic;
-  margin-left: auto;
 }

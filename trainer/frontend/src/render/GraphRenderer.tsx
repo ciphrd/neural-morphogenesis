@@ -167,15 +167,22 @@ function drawField(
 // peaks at `d = sigma` with value `|v|*exp(-1/2)/sigma` — "the biggest
 // single-axis contribution one saturated node can produce, right where
 // it's strongest." Built from FIELD_COLOR_SCALE (== CHEMICAL_CLIP) and
-// DEFAULT_FIELD_SIGMA (== SENSING_SIGMA) rather than redefining them, so
-// this stays derived instead of a second number to keep in sync with
-// the first by hand. Several overlapping saturated nodes (routine once
-// packed at CONTACT_DISTANCE spacing, well inside one sigma of each
-// other) still push well past this ceiling — their contributions
-// genuinely stack, same reasoning as FIELD_COLOR_SCALE's own comment —
-// which is real signal, not a rendering bug to hide by inflating the
-// scale further.
-const GRADIENT_COMPONENT_SCALE = (FIELD_COLOR_SCALE * Math.exp(-0.5)) / DEFAULT_FIELD_SIGMA;
+// whichever `sigma` is actually live for this render (== the real
+// per-run SENSING_SIGMA — see fieldSigma's own doc comment), NOT a fixed
+// module constant: the peak is inversely proportional to sigma, so
+// hardcoding this from DEFAULT_FIELD_SIGMA silently drifted out of
+// calibration with the real value the moment a run used any other
+// sigma — confirmed live (tweaking SENSING_SIGMA and restarting
+// train_server.py changed the gradient values themselves but not this
+// scale, since it was only ever computed once at module load). Several
+// overlapping saturated nodes (routine once packed at CONTACT_DISTANCE
+// spacing, well inside one sigma of each other) still push well past
+// this ceiling — their contributions genuinely stack, same reasoning as
+// FIELD_COLOR_SCALE's own comment — which is real signal, not a
+// rendering bug to hide by inflating the scale further.
+function gradientComponentScale(sigma: number): number {
+  return (FIELD_COLOR_SCALE * Math.exp(-0.5)) / sigma;
+}
 
 // Same Gaussian-sum machinery as drawField, but accumulating each
 // channel's signed analytic gradient *component* along one axis
@@ -223,7 +230,7 @@ function drawFieldGradientComponent(
         g2 += ((n.chemicals[2] * kernel) / sigma2) * d;
       }
 
-      ctx.fillStyle = signedFieldColor([g0, g1, g2], GRADIENT_COMPONENT_SCALE);
+      ctx.fillStyle = signedFieldColor([g0, g1, g2], gradientComponentScale(sigma));
       ctx.fillRect(sx, sy, FIELD_CELL_PX, FIELD_CELL_PX);
     }
   }
@@ -294,6 +301,48 @@ function drawEnergyRing(
   ctx.arc(sx, sy, ringRadius, startAngle, startAngle + fraction * Math.PI * 2);
   ctx.stroke();
 }
+
+// A short dash sitting near the rim, both endpoints inside the circle
+// rather than a spoke from the center — the same visual language as a
+// knob/dial's position indicator. Drawn around *every* node regardless
+// of colorMode, same reasoning as drawEnergyRing above: motion is
+// orthogonal to whatever the fill is currently encoding. Direction-only
+// (unit vector), not scaled by the source vector's magnitude — velocity
+// and accel differ hugely in typical magnitude (accel is a per-step
+// nudge, velocity is what that accumulates into), so a shared fixed
+// length keeps both ticks equally legible instead of one routinely
+// dwarfing the other.
+const DIRECTION_TICK_INNER = 0.62; // fraction of screenRadius
+const DIRECTION_TICK_OUTER = 0.95;
+
+function drawDirectionTick(
+  ctx: CanvasRenderingContext2D,
+  sx: number,
+  sy: number,
+  screenRadius: number,
+  vector: number[] | undefined,
+  color: string,
+  width: number
+) {
+  if (!vector) return;
+  const [vx, vy] = vector;
+  const mag = Math.hypot(vx, vy);
+  if (mag < 1e-9) return; // no defined direction to point at rest
+  const ux = vx / mag;
+  const uy = -vy / mag; // world y-up -> screen y-down
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(sx + ux * screenRadius * DIRECTION_TICK_INNER, sy + uy * screenRadius * DIRECTION_TICK_INNER);
+  ctx.lineTo(sx + ux * screenRadius * DIRECTION_TICK_OUTER, sy + uy * screenRadius * DIRECTION_TICK_OUTER);
+  ctx.stroke();
+}
+
+const VELOCITY_TICK_COLOR = "#ef4444"; // matches targetPoints'/SPLIT_PROB_LOW's red
+const VELOCITY_TICK_WIDTH = 2.5; // "thin-but-thicker" — still a dash, just heavier than accel's
+const ACCEL_TICK_COLOR = "#60a5fa";
+const ACCEL_TICK_WIDTH = 1.25;
 
 export function GraphRenderer({
   nodes,
@@ -425,6 +474,12 @@ export function GraphRenderer({
       ctx.fill();
 
       drawEnergyRing(ctx, s.x, s.y, screenRadius, n.energy, maxEnergy);
+      // Accel drawn first (thinner) so velocity's thicker line stays on
+      // top and legible even when the two nearly overlap, which happens
+      // often — accel is what's currently nudging velocity, so they
+      // frequently point close to the same way.
+      drawDirectionTick(ctx, s.x, s.y, screenRadius, n.accel, ACCEL_TICK_COLOR, ACCEL_TICK_WIDTH);
+      drawDirectionTick(ctx, s.x, s.y, screenRadius, n.velocity, VELOCITY_TICK_COLOR, VELOCITY_TICK_WIDTH);
 
       // A literal tick pointing the vector's actual way makes "direction"
       // mode's spawn direction readable at a glance, on top of the fill

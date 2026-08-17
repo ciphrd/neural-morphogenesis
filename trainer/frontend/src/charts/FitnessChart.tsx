@@ -47,9 +47,37 @@ export function FitnessChart({ history, selectedGeneration, onSelectGeneration }
     );
   }
 
-  const maxValue = Math.max(...history.map((h) => h.worst), 1e-6) * 1.08;
+  // Linear scale, 0-anchored: the y-axis floor is always 0, not a
+  // computed minimum, so the plotted line's height is directly
+  // proportional to fitness rather than its log — trades away log
+  // scale's even use of vertical space across orders of magnitude (a
+  // converged late-run tail near 0 now reads as visually flat/compressed
+  // against an early-run spike) for an axis that means what it says:
+  // "half as tall" is actually "half the fitness," not "one fewer
+  // multiplicative order of magnitude." `worst` (and even `mean`, since
+  // np.mean([...]) is itself Infinity if any single candidate diverged)
+  // can legitimately be Infinity — evolve.py scores a numerically-
+  // diverged/emptied-out candidate that way rather than crashing the
+  // generation — so the upper bound is computed over finite values only,
+  // and any non-finite value is clamped into range when actually plotted
+  // (pinned to the top) rather than breaking the path.
+  const plottableValues = history.flatMap((h) => [h.best, h.mean, h.worst]).filter((v) => Number.isFinite(v));
+  const maxValue = (plottableValues.length > 0 ? Math.max(...plottableValues, 0) : 1) * 1.08 || 1;
+
   const xForIndex = (i: number) => (history.length > 1 ? (i / (history.length - 1)) * PLOT_WIDTH : PLOT_WIDTH / 2);
-  const yForValue = (v: number) => PLOT_HEIGHT - (v / maxValue) * PLOT_HEIGHT;
+  const yForValue = (v: number) => {
+    const clamped = Math.min(maxValue, Math.max(0, Number.isFinite(v) ? v : maxValue));
+    return PLOT_HEIGHT - (clamped / maxValue) * PLOT_HEIGHT;
+  };
+
+  const formatFitness = (v: number): string => {
+    if (!Number.isFinite(v)) return "∞";
+    if (v === 0) return "0";
+    if (v < 0.01) return v.toExponential(1);
+    if (v < 10) return v.toFixed(2);
+    if (v < 100) return v.toFixed(1);
+    return v.toFixed(0);
+  };
 
   const linePath = (key: "best" | "mean" | "worst") =>
     history.map((h, i) => `${i === 0 ? "M" : "L"} ${xForIndex(i)} ${yForValue(h[key])}`).join(" ");
@@ -130,7 +158,7 @@ export function FitnessChart({ history, selectedGeneration, onSelectGeneration }
             <g key={i}>
               <line x1={0} x2={PLOT_WIDTH} y1={yForValue(tick)} y2={yForValue(tick)} className="fitness-chart-grid" />
               <text x={-8} y={yForValue(tick)} textAnchor="end" dominantBaseline="middle" className="fitness-chart-tick">
-                {tick.toFixed(1)}
+                {formatFitness(tick)}
               </text>
             </g>
           ))}
@@ -196,22 +224,51 @@ export function FitnessChart({ history, selectedGeneration, onSelectGeneration }
                 className="fitness-chart-dot"
               />
             ))}
+
+          {/* Drawn inside the SVG, not as a sibling DOM element below it —
+              an external tooltip div appearing/disappearing on hover was
+              changing the page's layout height every time; this instead
+              overlays the fixed-size chart, so nothing around it ever
+              shifts. Anchored to the hovered x, flipped to the other side
+              of the crosshair when it would otherwise overflow the plot's
+              right edge. */}
+          {hovered && (
+            <g pointerEvents="none">
+              {(() => {
+                const rowHeight = 15;
+                const panelWidth = 128;
+                const panelHeight = 14 + rowHeight * (SERIES.length + 1) + 6;
+                const hoverX = xForIndex(hoverIndex!);
+                const overflowsRight = hoverX + 12 + panelWidth > PLOT_WIDTH;
+                const panelX = overflowsRight ? hoverX - 12 - panelWidth : hoverX + 12;
+                const panelY = 6;
+                return (
+                  <g transform={`translate(${panelX}, ${panelY})`}>
+                    <rect width={panelWidth} height={panelHeight} rx={6} className="fitness-chart-tooltip-bg" />
+                    <text x={10} y={16} className="fitness-chart-tooltip-title">
+                      Gen {hovered.generation}
+                    </text>
+                    {SERIES.map((s, i) => (
+                      <g key={s.key} transform={`translate(0, ${16 + rowHeight * (i + 1)})`}>
+                        <rect x={10} y={-8} width={8} height={8} rx={2} fill={s.color} />
+                        <text x={24} className="fitness-chart-tooltip-label">
+                          {s.label}
+                        </text>
+                        <text x={panelWidth - 10} textAnchor="end" className="fitness-chart-tooltip-value">
+                          {formatFitness(hovered[s.key])}
+                        </text>
+                      </g>
+                    ))}
+                    <text x={10} y={panelHeight - 6} className="fitness-chart-tooltip-hint">
+                      Click to view this generation
+                    </text>
+                  </g>
+                );
+              })()}
+            </g>
+          )}
         </g>
       </svg>
-
-      {hovered && (
-        <div className="fitness-chart-tooltip">
-          <span className="fitness-chart-tooltip-title">Gen {hovered.generation}</span>
-          {SERIES.map((s) => (
-            <span key={s.key} className="fitness-chart-tooltip-row">
-              <span className="fitness-chart-tooltip-key" style={{ background: s.color }} />
-              <span className="fitness-chart-tooltip-value">{hovered[s.key].toFixed(3)}</span>
-              <span className="fitness-chart-tooltip-label">{s.label}</span>
-            </span>
-          ))}
-          <span className="fitness-chart-tooltip-hint">Click to view this generation's replay</span>
-        </div>
-      )}
     </div>
   );
 }

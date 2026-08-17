@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import type { GraphNode } from "../net/socket";
 import type { LatestGeneration } from "../net/trainingSocket";
-import { RADIUS } from "./physics";
 import { replay, type DragRef } from "./runner";
+
+// Only ever shown while `nodes` is still empty (before any generation
+// has arrived) — the real radius comes from `latest.physics.radius`
+// once it does, so this never needs to track physics.py; nothing
+// renders using it.
+const PRE_CONNECT_RADIUS = 0.5;
 
 /**
  * Drives the client-side replay (sim/runner.ts) for whatever generation
@@ -18,8 +23,15 @@ import { replay, type DragRef } from "./runner";
  * The ref is reset (not carried over) whenever a new replay starts,
  * since node IDs from the previous generation's seed-to-steps run are
  * meaningless once a fresh graph is seeded.
+ *
+ * `enabled` (default true) skips starting the replay loop entirely —
+ * for a caller (TrainingView's realtime-growth checkbox) that wants
+ * this hook mounted but idle while a *different* driver
+ * (useRealtimeSimulation) is the one actually animating, so the two
+ * don't both run a full replay/tick loop off the same `latest` at once
+ * for no reason.
  */
-export function useLocalSimulation(latest: LatestGeneration | null) {
+export function useLocalSimulation(latest: LatestGeneration | null, enabled = true) {
   const [nodes, setNodes] = useState<GraphNode[]>([]);
   const [step, setStep] = useState(0);
   const dragRef = useRef<DragRef["current"]>(null);
@@ -27,7 +39,7 @@ export function useLocalSimulation(latest: LatestGeneration | null) {
   useEffect(() => {
     dragRef.current = null;
     setStep(0);
-    if (!latest) return;
+    if (!latest || !enabled) return;
     let cancelled = false;
 
     (async () => {
@@ -41,7 +53,7 @@ export function useLocalSimulation(latest: LatestGeneration | null) {
     return () => {
       cancelled = true;
     };
-  }, [latest]);
+  }, [latest, enabled]);
 
   const dragNode = (nodeId: number, position: [number, number]) => {
     dragRef.current = { nodeId, position };
@@ -51,5 +63,5 @@ export function useLocalSimulation(latest: LatestGeneration | null) {
     dragRef.current = null;
   };
 
-  return { nodes, radius: RADIUS, dragNode, releaseNode, step };
+  return { nodes, radius: latest?.physics.radius ?? PRE_CONNECT_RADIUS, dragNode, releaseNode, step };
 }

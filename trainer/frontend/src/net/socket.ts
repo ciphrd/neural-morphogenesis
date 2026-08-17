@@ -16,6 +16,15 @@ export interface GraphNode {
   spawnDirection?: number[];
   splitProb?: number;
   energy?: number;
+  // Raw [vx, vy] — velocity is persistent, integrated motion state;
+  // accel is the fresh world-frame acceleration the network's last
+  // invocation produced (added onto velocity, not itself accumulated).
+  // Broadcast for every node (see main.py's serialize_state /
+  // sim/runner.ts's toGraphNodes) since GraphRenderer always draws both
+  // as direction ticks regardless of colorMode, not just in a specific
+  // data-driven mode.
+  velocity?: number[];
+  accel?: number[];
 }
 
 export interface GraphState {

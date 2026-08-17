@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import traceback
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import AsyncIterator, Optional
 
 import numpy as np
@@ -43,15 +45,50 @@ from evolve import (
     run_generation,
     set_weights,
 )
+from physics import (
+    CLEANUP_CONVERGENCE_TOL,
+    CLEANUP_ITERATIONS,
+    CONTACT_DISTANCE,
+    ENABLE_COLLISION,
+    RADIUS,
+    SETTLE_CONVERGENCE_TOL,
+    SETTLE_ITERATIONS,
+    SETTLE_STIFFNESS,
+    TENSION_RANGE,
+    TENSION_STIFFNESS,
+)
 from update_rule import (
+    CHEMICAL_CLIP,
     ENERGY_INJECTION,
     ENERGY_INJECTION_NOISE,
+    MAX_ACCEL,
     MAX_ENERGY,
     MAX_NODES,
+    MAX_SPEED,
     MIN_SPLIT_ENERGY,
     SENSING_SIGMA,
     UpdateRule,
 )
+
+# Sent once per generation message (see PHYSICS_CONFIG usage below)
+# rather than re-read from the physics/update_rule modules on every
+# message — these are module-level constants, not runtime state, so
+# there's nothing to gain from re-fetching them every generation, and
+# building the dict once makes it obvious at a glance that this is meant
+# to be the frontend's *only* source for these values (sim/physics.ts no
+# longer hardcodes its own copies — see that file's own comment).
+PHYSICS_CONFIG = {
+    "radius": RADIUS,
+    "contactDistance": CONTACT_DISTANCE,
+    "tensionRange": TENSION_RANGE,
+    "tensionStiffness": TENSION_STIFFNESS,
+    "settleStiffness": SETTLE_STIFFNESS,
+    "settleIterations": SETTLE_ITERATIONS,
+    "cleanupIterations": CLEANUP_ITERATIONS,
+    "settleConvergenceTol": SETTLE_CONVERGENCE_TOL,
+    "cleanupConvergenceTol": CLEANUP_CONVERGENCE_TOL,
+    "collisionEnabled": ENABLE_COLLISION,
+}
 
 parser = build_arg_parser()
 parser.add_argument("--port", type=int, default=8001)
@@ -74,6 +111,52 @@ target = load_target(args.target)
 # the life of one run.
 HISTORY_PATH = CHECKPOINTS_DIR / "history.jsonl"
 MAX_HISTORY = 500
+
+# Where a previous run's history.jsonl/best.npy/best_meta.json get moved
+# before this run starts overwriting those same fixed filenames — see
+# _archive_previous_run()'s own docstring for why this exists.
+RUNS_DIR = CHECKPOINTS_DIR / "runs"
+
+
+def _archive_previous_run() -> None:
+    """Moves the previous run's history.jsonl/best.npy/best_meta.json
+    into a timestamped RUNS_DIR subdirectory before this run starts
+    overwriting them. Without this, every restart of train_server.py
+    silently discarded whatever the last run had produced —
+    training_loop() always truncates HISTORY_PATH fresh (generation
+    numbers restart at 0 each invocation, so appending onto a previous
+    run's log would collide rather than continue a meaningful timeline),
+    and best.npy/best_meta.json share one fixed filename with no per-run
+    distinction at all. Only archives if there's actually something to
+    keep — a missing or empty history.jsonl (the very first run ever, or
+    a previous run that crashed before its first generation) has nothing
+    worth preserving."""
+    if not HISTORY_PATH.is_file() or HISTORY_PATH.stat().st_size == 0:
+        return
+
+    # best_meta.json (if the previous run got far enough to write one)
+    # carries its target/generation, which makes a far more useful
+    # directory name than a bare timestamp — falls back to just the
+    # timestamp if that metadata isn't there for some reason.
+    meta_path = CHECKPOINTS_DIR / "best_meta.json"
+    label = None
+    if meta_path.is_file():
+        try:
+            meta = json.loads(meta_path.read_text())
+            label = f"{meta.get('target', 'unknown')}_gen{meta.get('generation', '?')}"
+        except (json.JSONDecodeError, OSError):
+            label = None
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_dir = RUNS_DIR / (f"{timestamp}_{label}" if label else timestamp)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    for name in ("history.jsonl", "best.npy", "best_meta.json"):
+        src = CHECKPOINTS_DIR / name
+        if src.is_file():
+            shutil.move(str(src), str(archive_dir / name))
+
+    print(f"[train_server] archived previous run to {archive_dir}")
 
 
 @asynccontextmanager
@@ -130,9 +213,11 @@ async def _training_loop_body() -> None:
     population = [get_weights(UpdateRule()) for _ in range(args.population)]
 
     CHECKPOINTS_DIR.mkdir(exist_ok=True)
+    _archive_previous_run()
     # Fresh log for this run — generation numbers restart at 0 each
     # invocation, so appending onto a previous run's log would collide
-    # rather than continue a meaningful timeline.
+    # rather than continue a meaningful timeline. Whatever was here
+    # before is now safely under RUNS_DIR, not discarded.
     HISTORY_PATH.write_text("")
     best_fitness = float("inf")
     best_weights = population[0]
@@ -183,6 +268,10 @@ async def _training_loop_body() -> None:
                 "maxEnergy": MAX_ENERGY,
                 "energyInjection": ENERGY_INJECTION,
                 "energyInjectionNoise": ENERGY_INJECTION_NOISE,
+                "chemicalClip": CHEMICAL_CLIP,
+                "maxAccel": MAX_ACCEL,
+                "maxSpeed": MAX_SPEED,
+                "physics": PHYSICS_CONFIG,
             }
             with HISTORY_PATH.open("a") as f:
                 f.write(json.dumps(latest_generation_message) + "\n")

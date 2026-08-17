@@ -45,6 +45,10 @@ interface RawGenerationMessage {
   maxEnergy: number;
   energyInjection: number;
   energyInjectionNoise: number;
+  chemicalClip: number;
+  maxAccel: number;
+  maxSpeed: number;
+  physics: ReplayConfig["physics"];
 }
 
 // Both the REST backfill (on mount, from train_server.py's saved
@@ -66,6 +70,10 @@ function applyGeneration(prev: TrainingSocketState, message: RawGenerationMessag
     maxEnergy: message.maxEnergy,
     energyInjection: message.energyInjection,
     energyInjectionNoise: message.energyInjectionNoise,
+    chemicalClip: message.chemicalClip,
+    maxAccel: message.maxAccel,
+    maxSpeed: message.maxSpeed,
+    physics: message.physics,
   };
 
   const weightsByGeneration = new Map(prev.weightsByGeneration);

@@ -67,6 +67,24 @@ export function NodeInspector({ node }: NodeInspectorProps) {
               <span>Energy</span>
               <span>{node.energy.toFixed(1)}</span>
             </div>
+            <div className="stat-row">
+              <span>Speed</span>
+              <span>{node.speed.toFixed(4)}</span>
+            </div>
+          </section>
+
+          <section>
+            <h2>Heading</h2>
+            <Vector2Arrow vector={[Math.cos(node.heading), Math.sin(node.heading)]} />
+            <p className="hint">
+              Which way this node is currently facing — derived from its own velocity
+              (atan2(vy, vx)), not stored separately, and the frame its own chemical-gradient
+              sensing is expressed in (forward/lateral), not world x/y. Arrow length is always
+              1 regardless of speed; see the "Speed" stat above (velocity's magnitude) for how
+              fast it's actually moving in this direction. The network accelerates velocity
+              directly (in this same local frame), so heading only changes once the node is
+              actually moving somewhere.
+            </p>
           </section>
 
           <section>

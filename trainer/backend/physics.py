@@ -59,7 +59,7 @@ from scipy.spatial import cKDTree
 RADIUS = 0.5
 CONTACT_DISTANCE = 2 * RADIUS
 TENSION_RANGE = CONTACT_DISTANCE * 1.15
-TENSION_STIFFNESS = 0.3
+TENSION_STIFFNESS = 0.2
 SETTLE_STIFFNESS = 0.5  # collision stiffness *within* the settle pass
 SETTLE_ITERATIONS = 100
 CLEANUP_ITERATIONS = 400
@@ -90,6 +90,20 @@ CLEANUP_ITERATIONS = 400
 #   tight its tolerance is. Left untouched.
 SETTLE_CONVERGENCE_TOL = 5e-3
 CLEANUP_CONVERGENCE_TOL = 1e-4
+
+# Experiment toggle: False removes the hard "circles never overlap"
+# guarantee entirely — no cleanup pass, and settle's own per-pair
+# stiffness selection stops special-casing already-overlapping pairs
+# (SETTLE_STIFFNESS), folding them into the *same* compatibility-gated
+# tension spring as any other in-range pair. The tension formula still
+# naturally pushes an overlapping pair back toward CONTACT_DISTANCE when
+# compatibility is high (magnitude = (dist - target) * stiffness is
+# negative when dist < target, same spring either direction) — but a
+# pair with near-zero compatibility now has *nothing* pushing it apart,
+# and can sit stacked on the same position indefinitely. That's the
+# actual thing being tried: collision becomes chemistry-gated instead of
+# a universal geometric guarantee, not just "weaker."
+ENABLE_COLLISION = True
 
 # target.py scales pixel targets so 1 pixel spacing = 1 unit of graph
 # space; keep that convention meaningful without target.py needing to
@@ -194,9 +208,15 @@ def relax(positions: np.ndarray, pinned: set[int], id_vectors: np.ndarray) -> np
             break
 
         i, j = pairs[:, 0], pairs[:, 1]
-        dist = np.linalg.norm(pos[j] - pos[i], axis=1)
-        collision = dist < CONTACT_DISTANCE
-        stiffness = np.where(collision, SETTLE_STIFFNESS, TENSION_STIFFNESS * compatibility[i, j])
+        if ENABLE_COLLISION:
+            dist = np.linalg.norm(pos[j] - pos[i], axis=1)
+            collision = dist < CONTACT_DISTANCE
+            stiffness = np.where(collision, SETTLE_STIFFNESS, TENSION_STIFFNESS * compatibility[i, j])
+        else:
+            # No collision special-case: every in-range pair, overlapping
+            # or not, uses the same compatibility-gated tension spring —
+            # see ENABLE_COLLISION's own comment.
+            stiffness = TENSION_STIFFNESS * compatibility[i, j]
         target = np.full(pairs.shape[0], CONTACT_DISTANCE)
 
         correction = _pair_corrections(pos, pairs, target, stiffness, free_mask)
@@ -207,7 +227,9 @@ def relax(positions: np.ndarray, pinned: set[int], id_vectors: np.ndarray) -> np
             break
 
     # Hard guarantee, decoupled from the soft settling above: circles
-    # never overlap, full stop.
-    pos = _resolve_collisions(pos, free_mask)
+    # never overlap, full stop. Skipped entirely when ENABLE_COLLISION
+    # is False — see that constant's own comment.
+    if ENABLE_COLLISION:
+        pos = _resolve_collisions(pos, free_mask)
 
     return pos

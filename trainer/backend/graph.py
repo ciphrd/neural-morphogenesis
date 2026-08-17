@@ -43,6 +43,25 @@ class Graph:
     # treatment as spawn_directions and for the same reason: it's not
     # something the network reads back next step.
     split_probs: list[float] = field(default_factory=list)
+    # Persistent, accumulated state — same footing as id_vectors/chemicals,
+    # not a fresh-every-step reading like spawn_directions/split_probs.
+    # Each entry is a (2,) array [vx, vy] in world coordinates — the
+    # *only* motion state stored; there is no separate heading field.
+    # "Which way is this node facing" is always derived on demand as
+    # atan2(vy, vx) (see update_rule.py's step()), never read from here
+    # directly. See update_rule.py's "Velocity & heading" docstring
+    # section for the full mechanism.
+    velocity: list[np.ndarray] = field(default_factory=list)
+    # Latest world-frame acceleration reading per node — the network's
+    # raw per-step output (after tanh-squash + MAX_ACCEL scaling +
+    # local-to-world rotation, see update_rule.py's step()), *before*
+    # it's added to velocity. Same "fresh reading every step, not
+    # accumulated state" treatment as spawn_directions/split_probs — this
+    # value itself isn't read back next step, only used to derive the
+    # new velocity, which *is* the accumulated state. Exists purely for
+    # display (see render/GraphRenderer.tsx's always-on heading/accel
+    # ticks) — nothing computational reads it back from here.
+    accel: list[np.ndarray] = field(default_factory=list)
     pinned: set[int] = field(default_factory=set)
 
     @classmethod
@@ -65,6 +84,8 @@ class Graph:
         chemicals: Optional[np.ndarray] = None,
         energy: Optional[float] = None,
         spawn_direction: Optional[np.ndarray] = None,
+        velocity: Optional[np.ndarray] = None,
+        accel: Optional[np.ndarray] = None,
         rng: Optional[np.random.Generator] = None,
     ) -> int:
         node_id = len(self.positions)
@@ -82,6 +103,13 @@ class Graph:
             else np.zeros(SPAWN_DIR_DIM)
         )
         self.split_probs.append(0.0)
+        # Every new node starts at rest (velocity (0, 0), no randomness)
+        # — heading being purely derived means there's no separate
+        # "facing" to randomize the way random_id/random_chemical
+        # randomize identity/chemicals; a stationary node's heading is
+        # just atan2(0, 0) = 0 until it actually starts accelerating.
+        self.velocity.append(np.asarray(velocity, dtype=np.float64) if velocity is not None else np.zeros(2))
+        self.accel.append(np.asarray(accel, dtype=np.float64) if accel is not None else np.zeros(2))
         return node_id
 
     def add_child(
@@ -106,7 +134,14 @@ class Graph:
         (see random_id's docstring for why this matters for evolve.py) —
         drawn from numpy's Generator rather than the stdlib `random`
         module so it shares the same seeded stream as everything else a
-        caller like update_rule.step() controls."""
+        caller like update_rule.step() controls.
+
+        The child starts at rest (velocity (0, 0)) regardless of which
+        way `unit` pointed it — heading being purely derived from
+        velocity means there's no "facing" to inherit separately from
+        motion the way an earlier design had; it'll pick up its own
+        heading the moment it actually starts accelerating, same as
+        every other node."""
         origin = self.positions[parent_id]
         unit = None
         if direction is not None:
@@ -119,7 +154,11 @@ class Graph:
             unit = np.array([math.cos(angle), math.sin(angle)])
         offset = unit * CONTACT_DISTANCE
         return self._add_node(
-            origin + offset, id_vector=id_vector, chemicals=chemicals, energy=energy, rng=rng
+            origin + offset,
+            id_vector=id_vector,
+            chemicals=chemicals,
+            energy=energy,
+            rng=rng,
         )
 
     def split_node(self, node_id: int) -> Optional[int]:
@@ -158,6 +197,8 @@ class Graph:
         self.energy = [self.energy[i] for i in keep]
         self.spawn_directions = [self.spawn_directions[i] for i in keep]
         self.split_probs = [self.split_probs[i] for i in keep]
+        self.velocity = [self.velocity[i] for i in keep]
+        self.accel = [self.accel[i] for i in keep]
         self.pinned = {remap[i] for i in self.pinned}
 
     def positions_array(self) -> np.ndarray:
@@ -182,6 +223,11 @@ class Graph:
         if not self.spawn_directions:
             return np.zeros((0, SPAWN_DIR_DIM))
         return np.stack(self.spawn_directions)
+
+    def velocity_array(self) -> np.ndarray:
+        if not self.velocity:
+            return np.zeros((0, 2))
+        return np.stack(self.velocity)
 
     def set_positions(self, positions: np.ndarray) -> None:
         self.positions = [positions[i] for i in range(positions.shape[0])]
