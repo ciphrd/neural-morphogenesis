@@ -10,9 +10,15 @@ const WIDTH: u32 = __WIDTH__u;
 const HEIGHT: u32 = __HEIGHT__u;
 const HIDDEN: u32 = __HIDDEN__u;
 const AGENT_COUNT: u32 = __AGENT_COUNT__u;
-const IN: u32 = 3u * CHANNELS + 2u;
+const IN: u32 = 3u * CHANNELS;
 const OUT: u32 = CHANNELS + 4u;
 const PLANE_SIZE: u32 = CHANNELS * HEIGHT * WIDTH;
+
+// repulsion.wgsl's own field resolution — independent of (and coarser
+// than) WIDTH/HEIGHT above, see that file's header comment. Only needed
+// here for sampleRepulsionGradient()'s bilinear lookup below.
+const REPULSION_RESOLUTION: u32 = __REPULSION_RESOLUTION__u;
+const REPULSION_FIELD_SIZE: u32 = REPULSION_RESOLUTION * REPULSION_RESOLUTION;
 
 
 // Combined weights buffer layout — fc1w, fc1b, fc2w, fc2b back to back,
@@ -23,11 +29,11 @@ const FC1B_OFFSET: u32 = __FC1B_OFFSET__u;
 const FC2W_OFFSET: u32 = __FC2W_OFFSET__u;
 const FC2B_OFFSET: u32 = __FC2B_OFFSET__u;
 
-// Must match environment.wgsl's DEPOSIT_SCALE. env_write is the network's
-// raw, unsquashed output (no tanh bounds it), so headroom matters more
-// than for accel/strafe — see gpu/agents.ts's own comment for the
-// overflow-budget reasoning behind this constant and the pre-add clamp
-// below.
+// Must match environment.wgsl's DEPOSIT_SCALE. env_write is tanh-squashed
+// to physics.maxEnvWrite before it ever reaches depositScatter() below
+// (see AgentPhysics), but this headroom is kept generous regardless — see
+// gpu/agents.ts's own comment for the overflow-budget reasoning behind
+// this constant and the pre-add clamp below.
 const DEPOSIT_SCALE: f32 = 4096.0;
 const DEPOSIT_CLAMP: f32 = 1073741824.0; // 2^30
 
@@ -37,6 +43,12 @@ const DEPOSIT_CLAMP: f32 = 1073741824.0; // 2^30
 @group(0) @binding(3) var<storage, read> weights: array<f32>;
 @group(0) @binding(4) var<storage, read_write> positions: array<vec2<f32>>;
 @group(0) @binding(5) var<storage, read_write> velocity: array<vec2<f32>>;
+// Owned by gpu/repulsion.ts's GpuRepulsion, computed in the passes
+// immediately before this one each step (see gpu/simulation.ts's own
+// step()) — gx plane [0,REPULSION_FIELD_SIZE), gy plane
+// [REPULSION_FIELD_SIZE, 2*REPULSION_FIELD_SIZE), same two-plane layout
+// as `gradient` above.
+@group(0) @binding(7) var<storage, read> repulsionGradient: array<f32>;
 
 // Live-adjustable, unlike CHANNELS/WIDTH/HEIGHT/HIDDEN/AGENT_COUNT above
 // (those are compile-time consts sizing arrays/dispatches/buffers — see
@@ -50,6 +62,23 @@ struct AgentPhysics {
   maxSpeed: f32,
   maxAccel: f32,
   maxStrafe: f32,
+  // Ceiling on env_write, deposited into the grid below — see
+  // constants.MAX_ENV_WRITE's own docstring (simulation.py) for why this
+  // needed to be bounded at all: unbounded, it accumulates over a
+  // rollout (the grid decays slowly) until the network's own first
+  // Linear -> Tanh layer saturates, killing gradient-descent training
+  // dead (a failure mode evolutionary training is immune to, which is
+  // why this wasn't caught until GD training was attempted). Squashed
+  // here the same way accel/strafe already are, not left raw.
+  maxEnvWrite: f32,
+  // repulsion.wgsl's splatRepulsion reads this same field from this same
+  // buffer (see gpu/repulsion.ts's bindAgents()) — struct layout must
+  // match that file's own (separately declared) AgentPhysics exactly.
+  repulsionSigma: f32,
+  // Scales sampleRepulsionGradient()'s result before it's folded into
+  // velocity below — 0 (the default) means exactly zero repulsion force,
+  // not just a small one.
+  repulsionStrength: f32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -118,6 +147,46 @@ fn sampleGradY(c: u32, w: BilinearWeights) -> f32 {
        + w.w11 * gradient[PLANE_SIZE + gridIndex(c, w.y1, w.x1)];
 }
 
+// Always-non-negative modulo — same reasoning as repulsion.wgsl's own
+// wrapIndex (WGSL's `%` on a negative i32 keeps its sign, unlike
+// Python's), needed here because a corner index one cell past
+// REPULSION_RESOLUTION-1 must wrap back to 0, not go negative.
+fn wrapRepulsionIndex(v: i32, m: i32) -> u32 {
+  return u32(((v % m) + m) % m);
+}
+
+// Same bilinear-corner pattern as bilinearWeights()/sampleGrid() above,
+// against repulsionGradient's own (independent, coarser) resolution
+// instead of WIDTH/HEIGHT — see repulsion.wgsl's header comment for why
+// that field has its own resolution at all.
+fn sampleRepulsionGradient(px: f32, py: f32) -> vec2<f32> {
+  let scale = f32(REPULSION_RESOLUTION) / f32(WIDTH); // assumes a square grid, WIDTH == HEIGHT
+  let fx = px * scale;
+  let fy = py * scale;
+  let x0f = floor(fx);
+  let y0f = floor(fy);
+  let x0i = i32(x0f);
+  let y0i = i32(y0f);
+  let wx1 = fx - x0f;
+  let wx0 = 1.0 - wx1;
+  let wy1 = fy - y0f;
+  let wy0 = 1.0 - wy1;
+  let x0 = wrapRepulsionIndex(x0i, i32(REPULSION_RESOLUTION));
+  let x1 = wrapRepulsionIndex(x0i + 1, i32(REPULSION_RESOLUTION));
+  let y0 = wrapRepulsionIndex(y0i, i32(REPULSION_RESOLUTION));
+  let y1 = wrapRepulsionIndex(y0i + 1, i32(REPULSION_RESOLUTION));
+
+  let gx = wx0 * wy0 * repulsionGradient[y0 * REPULSION_RESOLUTION + x0]
+         + wx1 * wy0 * repulsionGradient[y0 * REPULSION_RESOLUTION + x1]
+         + wx0 * wy1 * repulsionGradient[y1 * REPULSION_RESOLUTION + x0]
+         + wx1 * wy1 * repulsionGradient[y1 * REPULSION_RESOLUTION + x1];
+  let gy = wx0 * wy0 * repulsionGradient[REPULSION_FIELD_SIZE + y0 * REPULSION_RESOLUTION + x0]
+         + wx1 * wy0 * repulsionGradient[REPULSION_FIELD_SIZE + y0 * REPULSION_RESOLUTION + x1]
+         + wx0 * wy1 * repulsionGradient[REPULSION_FIELD_SIZE + y1 * REPULSION_RESOLUTION + x0]
+         + wx1 * wy1 * repulsionGradient[REPULSION_FIELD_SIZE + y1 * REPULSION_RESOLUTION + x1];
+  return vec2<f32>(gx, gy);
+}
+
 // Scatter-add is the mathematical transpose of the gather above: same
 // 4 corners, same weights, opposite direction — collisions (multiple
 // agents landing on/near the same texel) are a real, expected, per-step
@@ -147,11 +216,10 @@ fn depositScatter(w: BilinearWeights, c: u32, value: f32) {
 // closes off a real failure mode confirmed on this GPU backend: a
 // naive tanh built on (e^2x-1)/(e^2x+1) produces NaN, not ±1, once
 // e^2x itself overflows to Infinity for large |x| (Infinity/Infinity).
-// env_write is raw/unbounded (see this module's own docstring), and
-// once deposited it can reappear as a large-but-finite *sensed* value
-// on a later step (grid_current itself never overflows — only the raw,
-// pre-tanh dot product computed from it can) — so this only has to
-// handle attacker-scale inputs, not typical ones.
+// Even with env_write now squashed by physics.maxEnvWrite (see
+// AgentPhysics), the raw pre-tanh dot product feeding *this* tanh call
+// can still be large for an adversarial/diverged weight set — so this
+// still only has to handle attacker-scale inputs, not typical ones.
 fn safeTanh(x: f32) -> f32 {
   return tanh(clamp(x, -20.0, 20.0));
 }
@@ -212,11 +280,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     inputVec[CHANNELS + c] = gx * cosH + gy * sinH;
     inputVec[2u * CHANNELS + c] = -gx * sinH + gy * cosH;
   }
-  // Heading, world-frame (cos, sin) — same convention/rationale as
-  // update_rule.py's forward(): trades away rotation-equivariant sensing
-  // on purpose, see that module's own "Heading" docstring section.
-  inputVec[3u * CHANNELS] = cosH;
-  inputVec[3u * CHANNELS + 1u] = sinH;
+  // Heading (cosH/sinH) is NOT fed into the network — see
+  // update_rule.py's own "Heading" docstring section. Still used above
+  // (sensing rotation) and below (accel/strafe rotation back to world).
 
   // fc1 -> tanh
   var hidden: array<f32, HIDDEN>;
@@ -228,7 +294,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     hidden[j] = safeTanh(acc);
   }
 
-  // fc2 (raw, unsquashed) -> env_write(C) | local_accel(2) | local_strafe(2)
+  // fc2 (raw) -> env_write(C) | local_accel(2) | local_strafe(2) — env_write
+  // gets squashed below (physics.maxEnvWrite), accel/strafe further down.
   var outVec: array<f32, OUT>;
   for (var j: u32 = 0u; j < OUT; j = j + 1u) {
     var acc: f32 = weights[FC2B_OFFSET + j];
@@ -247,9 +314,16 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     accelLocal.x * sinH + accelLocal.y * cosH
   );
 
+  // Repulsion force, from this same pre-move `pos` snapshot (see
+  // gpu/simulation.ts's step() for why the splat/gradient passes feeding
+  // repulsionGradient run before this one) — world-frame already (no
+  // heading-relative notion for this force, unlike accel/strafe), so it
+  // folds straight into velocity below with no rotation step of its own.
+  let repulsionWorld = sampleRepulsionGradient(pos.x, pos.y) * -physics.repulsionStrength;
+
   // Integrate velocity, then clamp its MAGNITUDE (never scales up, only
   // down) — not each component independently.
-  var newVel = vel + accelWorld;
+  var newVel = vel + accelWorld + repulsionWorld;
   let speedSafe = max(length(newVel), 1e-9);
   newVel = newVel * min(physics.maxSpeed / speedSafe, 1.0);
 
@@ -277,11 +351,14 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   positions[i] = newPos;
   velocity[i] = newVel;
 
-  // Deposit env_write (raw, unclamped) at the NEW (post-move) position —
-  // matches simulation.py's ordering (deposit after motion, diffuse+decay
-  // runs after all agents have deposited).
+  // Deposit env_write, squashed by physics.maxEnvWrite (matches
+  // simulation.py's step(): torch.tanh(env_write) * MAX_ENV_WRITE), at
+  // the NEW (post-move) position — matches simulation.py's ordering
+  // (deposit after motion, diffuse+decay runs after all agents have
+  // deposited).
   let depositWeights = bilinearWeights(newPos.x, newPos.y);
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-    depositScatter(depositWeights, c, outVec[c]);
+    let envWrite = safeTanh(outVec[c]) * physics.maxEnvWrite;
+    depositScatter(depositWeights, c, envWrite);
   }
 }

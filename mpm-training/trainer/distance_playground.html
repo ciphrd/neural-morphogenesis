@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>distance playground</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #e8e8e8;
+    background: #000000;
+    display: flex;
+  }
+  .sidebar, .results {
+    width: 300px;
+    flex-shrink: 0;
+    padding: 20px;
+    overflow-y: auto;
+  }
+  .sidebar { background: #0d0d0d; border-right: 1px solid #2a2a2a; }
+  .results { background: #0d0d0d; border-left: 1px solid #2a2a2a; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #9a9a9a;
+    margin: 20px 0 10px;
+  }
+  section:first-of-type h2, .results h2:first-child { margin-top: 0; }
+  .hint { font-size: 12px; color: #9a9a9a; line-height: 1.5; margin: 0 0 16px; }
+  .select {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    background: #1a1a1a;
+    color: #e8e8e8;
+    font-size: 13px;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    margin-top: 10px;
+  }
+  .row span:first-child { width: 90px; flex-shrink: 0; color: #9a9a9a; }
+  .row input[type="range"] { flex: 1; }
+  .row-value { width: 40px; text-align: right; font-variant-numeric: tabular-nums; }
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 13px;
+    margin-bottom: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-row.emphasis { font-weight: 600; color: #7dd3fc; }
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 8px;
+    margin-top: 8px;
+    border: 1px solid #2a2a2a;
+    border-radius: 6px;
+    background: #1a1a1a;
+    color: #e8e8e8;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .btn:hover { background: #1c1c1c; border-color: #3a3a3a; }
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    margin-top: 12px;
+    cursor: pointer;
+  }
+  .main {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  canvas {
+    background: #000;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    cursor: crosshair;
+  }
+  .raster-row { display: flex; gap: 8px; }
+  .raster-item { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .raster-item img {
+    width: 100%;
+    aspect-ratio: 1;
+    background: #000;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    image-rendering: pixelated;
+  }
+  .raster-item span { font-size: 10px; color: #9a9a9a; text-align: center; }
+  .legend { font-size: 11px; color: #9a9a9a; margin-top: 16px; line-height: 1.6; }
+  .legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+</style>
+</head>
+<body>
+  <div class="sidebar">
+    <h1>distance playground</h1>
+    <p class="hint">
+      Chamfer distance vs. rasterized-diff, side by side, against a real target shape.
+      Click the canvas to add a particle; click near an existing one to remove it.
+    </p>
+
+    <section>
+      <h2>Target</h2>
+      <select class="select" id="targetSelect"></select>
+    </section>
+
+    <section>
+      <h2>Raster settings</h2>
+      <label class="row"><span>Resolution</span><input type="range" id="resolution" min="32" max="256" step="8" value="128" /><span class="row-value" id="resolutionValue">128</span></label>
+      <label class="row"><span>Sigma</span><input type="range" id="sigma" min="0.3" max="4" step="0.1" value="1.5" /><span class="row-value" id="sigmaValue">1.5</span></label>
+      <label class="row"><span>Outside weight</span><input type="range" id="outsideWeight" min="0" max="4" step="0.1" value="1" /><span class="row-value" id="outsideWeightValue">1.0</span></label>
+    </section>
+
+    <section>
+      <h2>Particles</h2>
+      <div class="stat-row"><span>Count</span><span id="particleCount">0</span></div>
+      <button class="btn" id="clearBtn">Clear particles</button>
+      <button class="btn" id="randomBtn">Scatter 20 random</button>
+      <label class="checkbox-row"><input type="checkbox" id="showAligned" checked /> Show best-rotation overlay</label>
+    </section>
+
+    <div class="legend">
+      <div><span class="dot" style="background:#4a4a4a"></span>target points</div>
+      <div><span class="dot" style="background:#7dd3fc"></span>your particles</div>
+      <div><span class="dot" style="background:#fb923c"></span>best-rotation placement</div>
+    </div>
+  </div>
+
+  <div class="main">
+    <canvas id="canvas" width="560" height="560"></canvas>
+  </div>
+
+  <div class="results">
+    <h2>Chamfer distance</h2>
+    <div class="stat-row"><span>Raw (as placed)</span><span id="chamferRaw">—</span></div>
+    <div class="stat-row emphasis"><span>Best rotation</span><span id="chamferAligned">—</span></div>
+
+    <h2>Raster distance</h2>
+    <div class="stat-row"><span>Raw coverage (MSE)</span><span id="rasterCoverage">—</span></div>
+    <div class="stat-row"><span>Raw outside penalty</span><span id="rasterPenalty">—</span></div>
+    <div class="stat-row"><span>Raw combined</span><span id="rasterRawDistance">—</span></div>
+    <div class="stat-row emphasis"><span>Best rotation combined</span><span id="rasterAligned">—</span></div>
+
+    <h2>Rasters (what the metric sees)</h2>
+    <div class="raster-row">
+      <div class="raster-item"><img id="targetRasterImg" /><span>Target</span></div>
+      <div class="raster-item"><img id="candidateRawImg" /><span>Raw</span></div>
+      <div class="raster-item"><img id="candidateAlignedImg" /><span>Best rotation</span></div>
+    </div>
+  </div>
+
+<script>
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const SIZE = canvas.width; // square, domain [0,1]^2
+const REMOVE_RADIUS = 0.025; // domain units — click-near-a-particle-to-remove threshold
+
+let targets = [];
+let targetPoints = [];
+let particles = [];
+let alignedPoints = [];
+let lastScore = null;
+let scoreTimer = null;
+
+const targetSelect = document.getElementById("targetSelect");
+const resolutionInput = document.getElementById("resolution");
+const sigmaInput = document.getElementById("sigma");
+const outsideWeightInput = document.getElementById("outsideWeight");
+const resolutionValue = document.getElementById("resolutionValue");
+const sigmaValue = document.getElementById("sigmaValue");
+const outsideWeightValue = document.getElementById("outsideWeightValue");
+const particleCountEl = document.getElementById("particleCount");
+const showAlignedInput = document.getElementById("showAligned");
+
+// Domain [0,1]^2, y-up (MpmCore's own convention — gravity pulls toward
+// y=0) <-> canvas pixels, y-down. Mirrors mpm-training/viewer's own
+// render/GridCanvas.tsx domainPos() flip, same reasoning.
+function domainToCanvas(x, y) {
+  return [x * SIZE, (1 - y) * SIZE];
+}
+function canvasToDomain(px, py) {
+  return [px / SIZE, 1 - py / SIZE];
+}
+
+function nearestParticleIndex(x, y) {
+  let best = -1;
+  let bestDist = Infinity;
+  for (let i = 0; i < particles.length; i++) {
+    const dx = particles[i][0] - x;
+    const dy = particles[i][1] - y;
+    const d = Math.sqrt(dx * dx + dy * dy);
+    if (d < bestDist) { bestDist = d; best = i; }
+  }
+  return bestDist <= REMOVE_RADIUS ? best : -1;
+}
+
+canvas.addEventListener("click", (ev) => {
+  const rect = canvas.getBoundingClientRect();
+  const px = ((ev.clientX - rect.left) / rect.width) * SIZE;
+  const py = ((ev.clientY - rect.top) / rect.height) * SIZE;
+  const [x, y] = canvasToDomain(px, py);
+
+  const hit = nearestParticleIndex(x, y);
+  if (hit >= 0) {
+    particles.splice(hit, 1);
+  } else {
+    particles.push([x, y]);
+  }
+  particleCountEl.textContent = particles.length;
+  draw();
+  scheduleScore();
+});
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  particles = [];
+  particleCountEl.textContent = 0;
+  draw();
+  scheduleScore();
+});
+
+document.getElementById("randomBtn").addEventListener("click", () => {
+  for (let i = 0; i < 20; i++) {
+    particles.push([0.15 + Math.random() * 0.7, 0.15 + Math.random() * 0.7]);
+  }
+  particleCountEl.textContent = particles.length;
+  draw();
+  scheduleScore();
+});
+
+showAlignedInput.addEventListener("change", draw);
+
+for (const [input, valueEl, decimals] of [
+  [resolutionInput, resolutionValue, 0],
+  [sigmaInput, sigmaValue, 1],
+  [outsideWeightInput, outsideWeightValue, 1],
+]) {
+  input.addEventListener("input", () => {
+    valueEl.textContent = Number(input.value).toFixed(decimals);
+    scheduleScore();
+  });
+}
+
+function draw() {
+  ctx.clearRect(0, 0, SIZE, SIZE);
+
+  // Background: the target's own raster (exactly what raster_distance
+  // compares against) at reduced opacity — this IS the metric's own
+  // view of the target, not a stylized redraw of it.
+  if (lastScore && lastScore.images.target) {
+    ctx.globalAlpha = 0.55;
+    ctx.drawImage(targetRasterCache, 0, 0, SIZE, SIZE);
+    ctx.globalAlpha = 1;
+  }
+
+  // Target points, for precise reference beneath the raster heatmap.
+  ctx.fillStyle = "#8a8a8a";
+  for (const [x, y] of targetPoints) {
+    const [px, py] = domainToCanvas(x, y);
+    ctx.beginPath();
+    ctx.arc(px, py, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Best-rotation overlay, if enabled — shows exactly where
+  // alignment/raster's own rotation search decided this placement fits
+  // best, so the "raw vs. best rotation" numbers have a visual referent.
+  if (showAlignedInput.checked && alignedPoints.length) {
+    ctx.fillStyle = "#fb923c";
+    for (const [x, y] of alignedPoints) {
+      const [px, py] = domainToCanvas(x, y);
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // User-placed particles, on top.
+  ctx.fillStyle = "#7dd3fc";
+  for (const [x, y] of particles) {
+    const [px, py] = domainToCanvas(x, y);
+    ctx.beginPath();
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+const targetRasterCache = new Image();
+targetRasterCache.onload = draw;
+
+function fmt(v) {
+  return Number.isFinite(v) ? v.toFixed(5) : "∞";
+}
+
+function scheduleScore() {
+  clearTimeout(scoreTimer);
+  scoreTimer = setTimeout(runScore, 120);
+}
+
+async function runScore() {
+  const body = {
+    target: targetSelect.value,
+    points: particles,
+    raster_resolution: Number(resolutionInput.value),
+    raster_sigma: Number(sigmaInput.value),
+    outside_weight: Number(outsideWeightInput.value),
+  };
+  const res = await fetch("/score", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return;
+  const data = await res.json();
+  lastScore = data;
+  alignedPoints = data.alignedPoints;
+
+  document.getElementById("chamferRaw").textContent = fmt(data.chamfer.raw);
+  document.getElementById("chamferAligned").textContent = fmt(data.chamfer.aligned);
+  document.getElementById("rasterCoverage").textContent = fmt(data.raster.raw.coverage);
+  document.getElementById("rasterPenalty").textContent = fmt(data.raster.raw.penalty);
+  document.getElementById("rasterRawDistance").textContent = fmt(data.raster.raw.distance);
+  document.getElementById("rasterAligned").textContent = fmt(data.raster.aligned.distance);
+
+  document.getElementById("targetRasterImg").src = data.images.target;
+  document.getElementById("candidateRawImg").src = data.images.candidateRaw;
+  document.getElementById("candidateAlignedImg").src = data.images.candidateAligned || "";
+
+  targetRasterCache.src = data.images.target;
+}
+
+async function loadTarget(name) {
+  const res = await fetch(`/target/${encodeURIComponent(name)}`);
+  const data = await res.json();
+  targetPoints = data.points;
+  draw();
+  scheduleScore();
+}
+
+async function init() {
+  const res = await fetch("/targets");
+  const data = await res.json();
+  targets = data.targets;
+  for (const name of targets) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    targetSelect.appendChild(opt);
+  }
+  targetSelect.addEventListener("change", () => loadTarget(targetSelect.value));
+  if (targets.length) await loadTarget(targets[0]);
+}
+
+init();
+</script>
+</body>
+</html>

@@ -218,6 +218,7 @@ export function TrainingView() {
               }
             >
               <option value="substrate">Chemical substrate</option>
+              <option value="repulsion">Repulsion field</option>
               <option value="gray">Gray</option>
               <option value="black">Black</option>
             </select>

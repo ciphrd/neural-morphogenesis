@@ -5,10 +5,11 @@ import { templateShader } from "./shaderTemplate";
 import { writeFloat32 } from "./gpuUtil";
 import type { GpuEnvironment } from "./environment";
 import type { GpuAgents } from "./agents";
+import type { GpuRepulsion } from "./repulsion";
 import type { BackgroundMode } from "./types";
 
-// Must match colorize.wgsl's MODE_GRAY/MODE_BLACK/MODE_SUBSTRATE.
-const BACKGROUND_MODE_CODE: Record<BackgroundMode, number> = { gray: 0, black: 1, substrate: 2 };
+// Must match colorize.wgsl's MODE_GRAY/MODE_BLACK/MODE_SUBSTRATE/MODE_REPULSION.
+const BACKGROUND_MODE_CODE: Record<BackgroundMode, number> = { gray: 0, black: 1, substrate: 2, repulsion: 3 };
 
 export interface RenderConfig {
   width: number;
@@ -80,6 +81,10 @@ export class GpuRender {
   private readonly backgroundPipeline: GPURenderPipeline;
   private readonly backgroundBindGroup: GPUBindGroup;
   private readonly markerPipeline: GPURenderPipeline;
+  // Separate pipeline from markerPipeline above: an oriented triangle
+  // (agentMarkerVertex in present.wgsl), not the plain axis-aligned quad
+  // target points still use — see that shader's own comment for why.
+  private readonly agentMarkerPipeline: GPURenderPipeline;
   private readonly agentMarkerBindGroup: GPUBindGroup;
   private readonly agentMarkerUniform: GPUBuffer;
   private readonly targetMarkerUniform: GPUBuffer;
@@ -110,6 +115,7 @@ export class GpuRender {
     canvasFormat: GPUTextureFormat,
     environment: GpuEnvironment,
     agents: GpuAgents,
+    repulsion: GpuRepulsion,
     config: RenderConfig
   ) {
     this.device = device;
@@ -187,7 +193,12 @@ export class GpuRender {
     this.outputTextureView = this.outputTexture.createView();
 
     const colorizeModule = device.createShaderModule({
-      code: templateShader(colorizeSrc, { CHANNELS: channels, WIDTH: width, HEIGHT: height }),
+      code: templateShader(colorizeSrc, {
+        CHANNELS: channels,
+        WIDTH: width,
+        HEIGHT: height,
+        REPULSION_RESOLUTION: repulsion.resolution,
+      }),
     });
     this.colorizePipeline = device.createComputePipeline({
       layout: "auto",
@@ -200,6 +211,7 @@ export class GpuRender {
           { binding: 0, resource: { buffer: environment.gridA } },
           { binding: 1, resource: { buffer: this.scaleUniformBuffer } },
           { binding: 2, resource: this.outputTextureView },
+          { binding: 3, resource: { buffer: repulsion.density } },
         ],
       }),
       device.createBindGroup({
@@ -208,6 +220,7 @@ export class GpuRender {
           { binding: 0, resource: { buffer: environment.gridB } },
           { binding: 1, resource: { buffer: this.scaleUniformBuffer } },
           { binding: 2, resource: this.outputTextureView },
+          { binding: 3, resource: { buffer: repulsion.density } },
         ],
       }),
     ];
@@ -243,6 +256,13 @@ export class GpuRender {
       primitive: { topology: "triangle-list" },
     });
 
+    this.agentMarkerPipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: presentModule, entryPoint: "agentMarkerVertex" },
+      fragment: { module: presentModule, entryPoint: "markerFragment", targets: [{ format: canvasFormat }] },
+      primitive: { topology: "triangle-list" },
+    });
+
     // MarkerUniforms: vec4 color + f32 halfSizePixels + f32 gridWidth + f32 gridHeight + f32 _pad = 32 bytes.
     this.agentMarkerUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     writeFloat32(
@@ -252,10 +272,11 @@ export class GpuRender {
       new Float32Array([1, 1, 1, 1, AGENT_HALF_SIZE_PX, width, height, 0])
     );
     this.agentMarkerBindGroup = device.createBindGroup({
-      layout: this.markerPipeline.getBindGroupLayout(0),
+      layout: this.agentMarkerPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: agents.positions } },
         { binding: 1, resource: { buffer: this.agentMarkerUniform } },
+        { binding: 2, resource: { buffer: agents.velocity } },
       ],
     });
 
@@ -412,9 +433,9 @@ export class GpuRender {
     // Agents drawn before target points, not after — target dots stay
     // visible as a reference outline even where agents currently
     // overlap them, rather than getting covered up.
-    renderPass.setPipeline(this.markerPipeline);
+    renderPass.setPipeline(this.agentMarkerPipeline);
     renderPass.setBindGroup(0, this.agentMarkerBindGroup);
-    renderPass.draw(6, agentDispatchCount);
+    renderPass.draw(3, agentDispatchCount);
 
     if (this.targetMarkerBindGroup) {
       renderPass.setPipeline(this.markerPipeline);

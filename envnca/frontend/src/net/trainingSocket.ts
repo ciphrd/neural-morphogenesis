@@ -74,6 +74,9 @@ export function applyGeneration(prev: TrainingSocketState, message: RawGeneratio
     maxSpeed: message.maxSpeed,
     maxAccel: message.maxAccel,
     maxStrafe: message.maxStrafe,
+    maxEnvWrite: message.maxEnvWrite,
+    repulsionSigma: message.repulsionSigma,
+    repulsionStrength: message.repulsionStrength,
     hiddenDim: message.hiddenDim,
     seed: message.seed,
   };

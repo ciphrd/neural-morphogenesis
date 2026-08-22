@@ -1,0 +1,490 @@
+"""The evolved per-particle policy, GPU-resident — Python (wgpu-py) port
+of ../viewer/src/gpu/agents.ts, wrapping the exact same shared shader
+module (../core/agents.wgsl) mpm_core.py already loads its own
+core/*.wgsl passes from. Replaces update_rule.py's own UpdateRule.forward()
+in the hot per-candidate training path — see training_sim.py's own
+module docstring for why (eliminating the torch/MPS<->wgpu/Metal host
+round-trip that dominated the old per-macro-step cost). UpdateRule/torch
+itself isn't gone — evolve.py still uses it for random weight
+initialization and checkpoint JSON export, both one-off/off-hot-path
+uses that don't need a live forward pass.
+
+One instance is built ONCE per training run (like MpmCore/EnvironmentGPU
+— see evolve.py's own module docstring on why rebuilding wgpu pipelines
+per candidate is real, avoidable overhead) and load_weights()/
+reset_heading() are called per candidate/rollout instead, mirroring
+agents.ts's own instance lifetime (rebuilt only when particle/channel/
+field/hidden-dim shape changes, which never happens mid-run here since
+those are fixed CLI args)."""
+from __future__ import annotations
+
+import numpy as np
+import wgpu
+
+from environment_gpu import EnvironmentGPU, ceil_div
+from mpm_core import MpmCore
+from shader_template import load_core_shader
+
+WORKGROUP = 64
+
+
+def _hash_u32(x: np.ndarray) -> np.ndarray:
+    """Bit-exact, portable integer hash (Chris Wellons' "lowbias32" —
+    public domain), mirrored exactly by ../viewer/src/gpu/rng.ts's own
+    hashU32() — see that function's own comment for why growth's own
+    seed needs this instead of drawing from `rng` (numpy's own
+    Generator/PCG64 has no TS-side equivalent, unlike this: only uint32
+    add/xor/shift/multiply-with-wraparound, which numpy's own uint32
+    dtype and JS's Math.imul/>>> 0 both wrap mod 2**32 identically).
+    Vectorized over an array of u32 rather than called per-scalar,
+    matching every other per-particle draw in reset_heading() below."""
+    x = x.astype(np.uint32)
+    x ^= x >> np.uint32(16)
+    x *= np.uint32(0x7FEB352D)
+    x ^= x >> np.uint32(15)
+    x *= np.uint32(0x846CA68B)
+    x ^= x >> np.uint32(16)
+    return x
+
+
+def _growth_seed(seed: int, count: int) -> np.ndarray:
+    """growthState.rng's own initial per-particle seed — bit-exact with
+    ../viewer/src/gpu/rng.ts's own growthSeed(seed, index), see that
+    function's own comment. `seed` is the rollout's own raw seed
+    (evolve.py's own rollout(seed, ...) argument / render_rollout.py's
+    own meta["seed"]) — the ENTIRE rollout's starting condition (this,
+    reset_heading()'s own heading fill below, and training_sim.py's own
+    seed_blob()/back-to-back theta) is now a pure function of this one
+    integer, no numpy Generator/mulberry32 involved anywhere in the
+    seeding path — see _spawn_uniform01()'s own comment for why growth
+    keeps its own SEPARATE hash domain from that function rather than
+    sharing it (near-critical branching process, chaotically sensitive
+    to its own seed stream — the two are never meant to correlate
+    regardless). Low=1 for any hash that comes out 0 — xorshift32's own
+    fixed point, same guarantee reset_heading() used to get from
+    rng.integers(1, ...) before this was hash-based."""
+    index = np.arange(count, dtype=np.uint32)
+    combined = np.uint32(seed) ^ _hash_u32(index + np.uint32(1))
+    hashed = _hash_u32(combined)
+    hashed[hashed == 0] = np.uint32(1)
+    return hashed
+
+
+# Magic domain-separator XOR'd into the index before hashing — keeps
+# _spawn_uniform01() below's own output space disjoint from
+# _growth_seed() above even when both happen to be called with the same
+# (seed, index) pair (training_sim.py's own spawn-jitter/heading indices
+# are small integers, the same range _growth_seed() iterates particle
+# slots over) — same "don't reuse one stream for two kinds of
+# randomness" reasoning this project already applies elsewhere (e.g.
+# growth's own child-reseeding, core/agents.wgsl's own agentStep()
+# comment). Arbitrary, just needs to be nonzero.
+_SPAWN_HASH_DOMAIN = np.uint32(0xC0FFEE00)
+
+
+def _spawn_uniform01(seed: int, index: int) -> float:
+    """One deterministic float in [0,1), bit-exact with
+    ../viewer/src/gpu/rng.ts's own spawnUniform01(seed, index) — the
+    portable hash EVERY piece of a rollout's own starting-condition
+    randomness that ISN'T growth now goes through: training_sim.py's own
+    seed_blob() (spawn-position jitter) and back-to-back theta, and
+    reset_heading() below's own per-slot heading fill. Domain-separated
+    from _growth_seed() above via _SPAWN_HASH_DOMAIN (see that constant's
+    own comment). Top 24 bits of the hash -> a uniform float, same "use
+    every bit of f32 mantissa precision" convention core/agents.wgsl's
+    own xorshift32-derived draw already uses
+    (`f32(rngNext >> 8u) * (1.0/16777216.0)`)."""
+    combined = np.uint32(seed) ^ _hash_u32(np.array([_SPAWN_HASH_DOMAIN ^ np.uint32(index)]))[0]
+    hashed = _hash_u32(np.array([combined]))[0]
+    return float(hashed >> np.uint32(8)) / 16777216.0
+
+
+def _spawn_uniform01_batch(seed: int, indices: np.ndarray) -> np.ndarray:
+    """Vectorized _spawn_uniform01() — same formula, called once over an
+    array of indices rather than per-scalar, for reset_heading() below's
+    own per-slot fill (up to max_active_particles draws every rollout)."""
+    indices = indices.astype(np.uint32)
+    combined = np.uint32(seed) ^ _hash_u32(_SPAWN_HASH_DOMAIN ^ indices)
+    hashed = _hash_u32(combined)
+    return (hashed >> np.uint32(8)).astype(np.float64) / 16777216.0
+
+
+def weight_layout(channels: int, hidden_dim: int) -> dict[str, int]:
+    # +2 == core/agents.wgsl's own IN_DIM (value+grad_forward+grad_lateral
+    # per channel, +2 for the agent's own spawn-center-relative (x,y)
+    # position, appended after the per-channel triples — see that
+    # constant's own comment) — hardcoded rather than imported, same
+    # convention out_dim's own "+5" below already follows.
+    in_dim = channels * 3 + 2
+    # 4 == core/agents.wgsl's own SPOTS / simulation_settings.py's own
+    # DEPOSIT_SPOTS (env_write, one per channel per deposit spot) + 5 ==
+    # ANGULAR_DIM(1) + ACCEL_DIM(2) + STRAFE_DIM(2) — hardcoded rather
+    # than imported, matching how the "+5" tail was already hardcoded
+    # here before DEPOSIT_SPOTS existed.
+    out_dim = channels * 4 + 5
+    fc1w_offset = 0
+    fc1b_offset = fc1w_offset + hidden_dim * in_dim
+    fc2w_offset = fc1b_offset + hidden_dim
+    fc2b_offset = fc2w_offset + out_dim * hidden_dim
+    total_floats = fc2b_offset + out_dim
+    return {
+        "in_dim": in_dim,
+        "out_dim": out_dim,
+        "fc1w_offset": fc1w_offset,
+        "fc1b_offset": fc1b_offset,
+        "fc2w_offset": fc2w_offset,
+        "fc2b_offset": fc2b_offset,
+        "total_floats": total_floats,
+    }
+
+
+class AgentsGPU:
+    def __init__(
+        self,
+        device: wgpu.GPUDevice,
+        core: MpmCore,
+        environment: EnvironmentGPU,
+        channels: int,
+        hidden_dim: int,
+        max_accel: float,
+        max_strafe: float,
+        max_env_write: float,
+        max_angular_accel: float,
+        angular_damping: float,
+        max_angular_velocity: float,
+        chirality: bool,
+        deposit_distance: float,
+        max_active_particles: int,
+        split_displacement: float,
+        division_cooldown: float,
+        friction: float,
+        deposit_sigma: float,
+        spawn_x: float,
+        spawn_y: float,
+    ) -> None:
+        self.device = device
+        self.channels = channels
+        self.hidden_dim = hidden_dim
+        self._max_active_particles = max_active_particles
+
+        layout = weight_layout(channels, hidden_dim)
+        self._total_floats = layout["total_floats"]
+        self._weights_buffer = device.create_buffer(
+            size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
+        )
+        # 52 bytes — core/agents.wgsl's own AgentPhysics struct is 13 f32
+        # fields (see that struct's own definition for the exact order
+        # set_physics() below must match) — the last 2 (spawnX/spawnY) are
+        # NOT written by set_physics() below; see set_spawn_center()'s own
+        # docstring for why those get a separate setter into this same
+        # buffer instead.
+        self._physics_uniform = device.create_buffer(size=52, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self.set_physics(
+            max_accel,
+            max_strafe,
+            max_env_write,
+            max_angular_accel,
+            angular_damping,
+            max_angular_velocity,
+            deposit_distance,
+            split_displacement,
+            division_cooldown,
+            friction,
+            deposit_sigma,
+        )
+        self.set_spawn_center(spawn_x, spawn_y)
+
+        # Persistent per-particle heading/angularVelocity/growthState
+        # state — owned here (not MpmCore, not EnvironmentGPU), zeroed at
+        # creation (randomized/reseeded properly once reset_heading() is
+        # called with a real rng — once per rollout, see training_sim.py's
+        # own TrainingRollout.__init__) and whenever reset_heading() is
+        # called again after that. Sized to max_active_particles, NOT the
+        # single particle every rollout actually starts with — growth
+        # (core/agents.wgsl's own agentStep()) can write heading[newIndex]/
+        # angularVelocity[newIndex]/growthState[newIndex] for any newIndex
+        # up to max_active_particles, at runtime, with no rebuild (mirrors
+        # agents.ts's own reasoning for sizing THOSE buffers to
+        # MAX_PARTICLES, for the "Add Particle" tool's own runtime growth
+        # — same underlying need, smaller ceiling since this class has no
+        # such interactive tool of its own).
+        state_size = max(max_active_particles, 1) * 4
+        self._heading_buffer = device.create_buffer(size=state_size, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
+        self._angular_velocity_buffer = device.create_buffer(size=state_size, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
+        # Growth's own rng (u32) + cooldown (f32) — packed into ONE 8-
+        # bytes-per-particle buffer (core/agents.wgsl's own GrowthState
+        # struct: {rng: u32, cooldown: f32}), not two separate buffers,
+        # purely to stay under this shader's own 10-storage-buffer
+        # ceiling now that `velocities` is bound too — see that file's
+        # own module docstring for why. reset_heading() writes both
+        # fields interleaved via a numpy structured dtype matching this
+        # exact layout.
+        self._growth_state_dtype = np.dtype([("rng", "<u4"), ("cooldown", "<f4")])
+        self._growth_state_buffer = device.create_buffer(
+            size=max(max_active_particles, 1) * self._growth_state_dtype.itemsize,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+        )
+        # Growth's own atomic "next free slot" counter — a single u32,
+        # kept in sync with the "official" activeCount by set_active_count()
+        # below (not just at construction) — see core/agents.wgsl's own
+        # module docstring for the full design. COPY_SRC so
+        # read_grown_count() can read it back.
+        self._growth_count_buffer = device.create_buffer(
+            size=4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC
+        )
+        # Every rollout always starts with exactly ONE particle and grows
+        # via splitting from there (training_sim.py's own
+        # TrainingRollout.__init__ calls set_active_count(1) again itself,
+        # every rollout — this is just a construction-time placeholder so
+        # there's a sane dispatch size before the first rollout ever
+        # starts) — see evolve.py's own module docstring for why
+        # --particles is now a CAP, not a fixed starting count.
+        self.set_active_count(1)
+
+        module = device.create_shader_module(
+            code=load_core_shader(
+                "agents.wgsl",
+                {
+                    "CHANNELS": channels,
+                    "HIDDEN_DIM": hidden_dim,
+                    "FIELD_WIDTH": environment.width,
+                    "FIELD_HEIGHT": environment.height,
+                    "MAX_ACTIVE_PARTICLES": max_active_particles,
+                    # WGSL wants lowercase `true`/`false` — Python's own
+                    # str(bool) gives "True"/"False", invalid WGSL syntax,
+                    # so this can't just be passed through as-is.
+                    "CHIRALITY": "true" if chirality else "false",
+                },
+            )
+        )
+        self._pipeline = device.create_compute_pipeline(layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "agentStep"})
+
+        def bind_group(p: int):
+            env_buf = environment.buffers[p]
+            return device.create_bind_group(
+                layout=self._pipeline.get_bind_group_layout(0),
+                entries=[
+                    {"binding": 0, "resource": {"buffer": self._weights_buffer, "offset": 0, "size": self._weights_buffer.size}},
+                    {"binding": 1, "resource": {"buffer": core.positions, "offset": 0, "size": core.positions.size}},
+                    {"binding": 2, "resource": {"buffer": core.active_count_uniform, "offset": 0, "size": core.active_count_uniform.size}},
+                    {"binding": 3, "resource": {"buffer": env_buf, "offset": 0, "size": env_buf.size}},
+                    {"binding": 4, "resource": {"buffer": environment.gradient, "offset": 0, "size": environment.gradient.size}},
+                    {"binding": 5, "resource": {"buffer": environment.deposit_scratch, "offset": 0, "size": environment.deposit_scratch.size}},
+                    {"binding": 6, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
+                    {"binding": 7, "resource": {"buffer": self._heading_buffer, "offset": 0, "size": self._heading_buffer.size}},
+                    {
+                        "binding": 8,
+                        "resource": {"buffer": self._angular_velocity_buffer, "offset": 0, "size": self._angular_velocity_buffer.size},
+                    },
+                    {"binding": 9, "resource": {"buffer": self._growth_count_buffer, "offset": 0, "size": self._growth_count_buffer.size}},
+                    {"binding": 10, "resource": {"buffer": self._growth_state_buffer, "offset": 0, "size": self._growth_state_buffer.size}},
+                    {"binding": 11, "resource": {"buffer": core.velocities, "offset": 0, "size": core.velocities.size}},
+                ],
+            )
+
+        self._bind_groups = [bind_group(0), bind_group(1)]
+
+    @property
+    def max_active_particles(self) -> int:
+        """The growth cap this instance was constructed with (--particles
+        — see evolve.py's own module docstring) — training_sim.py's own
+        TrainingRollout reads this rather than taking a redundant
+        constructor parameter of its own, so there's exactly one source
+        of truth for "how many slots does this instance's own
+        heading/angularVelocity/growthState buffers actually have"."""
+        return self._max_active_particles
+
+    def load_weights(self, flat_weights: np.ndarray) -> None:
+        """`flat_weights` is a flat (total_floats,) float array already
+        laid out fc1w/fc1b/fc2w/fc2b, row-major within each — exactly
+        torch.nn.utils.parameters_to_vector(UpdateRule(...).parameters())'s
+        own output shape: nn.Linear registers `weight` before `bias`,
+        nn.Sequential visits fc1 before fc2, and parameters_to_vector
+        concatenates each parameter tensor's own row-major .view(-1) — the
+        same fc1w/fc1b/fc2w/fc2b order and row-major layout agents.wgsl's
+        own FC1W_OFFSET/FC1B_OFFSET/FC2W_OFFSET/FC2B_OFFSET indexing
+        expects. evolve.py's own get_weights()/mutate() already produce
+        exactly this representation (that's what parameters_to_vector
+        gives them), so this is a straight write_buffer, no restructuring
+        — unlike agents.ts's own flattenWeights(), which has to convert
+        *from* UpdateRuleWeights' nested JSON shape (export_weights()'s
+        own format), a shape this hot path never produces or needs."""
+        assert flat_weights.shape[0] == self._total_floats, (
+            f"expected {self._total_floats} floats, got {flat_weights.shape[0]}"
+        )
+        self.device.queue.write_buffer(self._weights_buffer, 0, flat_weights.astype(np.float32))
+
+    def set_physics(
+        self,
+        max_accel: float,
+        max_strafe: float,
+        max_env_write: float,
+        max_angular_accel: float,
+        angular_damping: float,
+        max_angular_velocity: float,
+        deposit_distance: float,
+        split_displacement: float,
+        division_cooldown: float,
+        friction: float,
+        deposit_sigma: float,
+    ) -> None:
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            0,
+            np.array(
+                [
+                    max_accel,
+                    max_strafe,
+                    max_env_write,
+                    max_angular_accel,
+                    angular_damping,
+                    max_angular_velocity,
+                    deposit_distance,
+                    split_displacement,
+                    division_cooldown,
+                    friction,
+                    deposit_sigma,
+                ],
+                dtype=np.float32,
+            ),
+        )
+
+    def set_spawn_center(self, spawn_x: float, spawn_y: float) -> None:
+        """Writes AgentPhysics.spawnX/spawnY — offset 44 (bytes), the last
+        2 of the struct's own 13 f32 fields, past everything set_physics()
+        above writes. A separate setter (not folded into set_physics())
+        since spawn center is fixed for a whole rollout, not something
+        PhysicsPanel-style live tuning ever touches — call once per
+        rollout (training_sim.py's own TrainingRollout.__init__), not on
+        every physics-slider tick the way set_physics() is. See
+        core/agents.wgsl's own AgentPhysics.spawnX/spawnY field comment
+        for what this drives (the NN's own position input, agentStep()'s
+        own inputVec population — relative to spawn center, not the
+        domain's own fixed (0.5,0.5))."""
+        self.device.queue.write_buffer(self._physics_uniform, 44, np.array([spawn_x, spawn_y], dtype=np.float32))
+
+    def set_active_count(self, active_count: int) -> None:
+        """Updates this class's own agentStep() dispatch size AND
+        growth's own atomic "next free slot" counter (core/agents.wgsl's
+        own module docstring), which always needs to start from the
+        current active_count — called once per rollout (training_sim.py's
+        own TrainingRollout.__init__) and again every macro step growth
+        actually changes the count (that module's own macro_step(), after
+        reading read_grown_count() back). Deliberately does NOT touch
+        core.active_count_uniform itself — MpmCore.set_active_count() (a
+        distinct method, on a distinct object) owns that, since it's
+        shared with p2g/gridUpdate-adjacent/g2p/repulsion too, not just
+        this class's own dispatch."""
+        self._dispatch = ceil_div(active_count, WORKGROUP)
+        self.device.queue.write_buffer(self._growth_count_buffer, 0, np.array([active_count], dtype=np.uint32))
+
+    def read_grown_count(self) -> int:
+        """Reads back growth's own atomic counter (core/agents.wgsl's own
+        module docstring) — a real, deliberate 4-byte host round-trip,
+        once per macro step (training_sim.py's own macro_step() is the
+        only caller), needed because dispatch sizing for EVERY pass
+        (P2G/gridUpdate/G2P/repulsion, and this class's own next
+        agentStep()) is decided on the CPU, from a CPU-cached count nothing
+        else updates automatically when growth happens purely on the GPU.
+        Blocks until every previously-submitted command (including the
+        agentStep() pass that may have grown this count) has actually
+        run — same "reading anything back necessarily waits for the
+        queue's own timeline to catch up" property mpm_core.py's own
+        step() already relies on for its per-chunk sync."""
+        raw = self.device.queue.read_buffer(self._growth_count_buffer, 0, 4)
+        return int(np.frombuffer(raw, dtype=np.uint32)[0])
+
+    def reset_heading(self, seed: int) -> None:
+        """Randomizes persistent heading state (uniform over [-pi, pi],
+        one independent draw per particle slot) and zeroes
+        angularVelocity/growthState.cooldown, EVERY slot up to
+        max_active_particles (not just the currently-active ones — growth
+        can claim any of them later in this same rollout, and agentStep()
+        overwrites whatever a claimed slot's own heading/angularVelocity/
+        growthState already held anyway, so pre-resetting the full range
+        costs nothing extra and needs no separate "which slots are real
+        yet" bookkeeping here). Also reseeds growth's own persistent
+        per-particle growthState.rng (nonzero — see core/agents.wgsl's own
+        xorshift32() for why) — bundled into this same method (despite
+        the name) rather than a separate one since every caller already
+        calls this once per rollout, with a real seed, at exactly the
+        right time; matches this method's own existing "resetHeading also
+        resets angularVelocity" precedent for outgrowing its own name
+        slightly. Call at the start of every rollout, same as agents.ts's
+        own resetHeading() (simulation.ts's own restartRollout() calls it
+        every time a rollout restarts, for the same reason: fresh
+        policy-side state, not carried over from whatever the previous
+        rollout left it at). Heading is randomized (not zeroed) so every
+        particle in a rollout doesn't start out facing an identical,
+        seed-independent direction — via _spawn_uniform01_batch(seed,
+        5 + slot_index) (index 5+, not 0 — see training_sim.py's own
+        seed_blob()/theta for what already claims indices 0-4 off this
+        same `seed`; see _spawn_uniform01()'s own comment for why this
+        stays a DIFFERENT hash domain from growthState.rng below despite
+        both iterating the same slot-index range), bit-exact with
+        agents.ts's own resetHeading() — not just a *plausible* replay
+        the way this used to be (numpy Generator vs TS mulberry32, an
+        accepted gap this project carried for a while: for THIS specific
+        field it never actually mattered in practice, since every slot's
+        own pre-filled heading here gets immediately overwritten either
+        by training_sim.py's own set_headings() call right after (slots
+        0/1) or by growth itself copying from its own parent's live
+        heading the moment a slot is actually claimed (core/agents.wgsl's
+        own agentStep()) — but leaving that as a standing "doesn't matter
+        today" caveat was fragile, so it's bit-exact now too, same as
+        everything else this rollout's starting condition depends on).
+        angularVelocity stays zeroed regardless — a random *turn rate*
+        would just be an initial spin, not a meaningfully different
+        starting condition the way a random facing direction is. cooldown
+        is zeroed too — "not on cooldown," so a fresh rollout's own
+        starting particle can split as soon as its own draw/probability
+        allow, same as before cooldown existed.
+
+        growthState.rng is seeded via `seed` through _growth_seed()
+        instead (a deliberately SEPARATE hash domain from heading's own
+        _spawn_uniform01_batch() above, despite both being bit-exact now
+        — see _growth_seed()'s own comment for why the two are never
+        meant to correlate): growth is a near-critical branching process
+        (agentStep()'s own split-decision logic), so even a merely-
+        correlated seed stream (as opposed to a genuinely independent
+        one) risks a systematic bias in which particles tend to split
+        together."""
+        count = self._heading_buffer.size // 4
+        headings = (
+            _spawn_uniform01_batch(seed, np.arange(count, dtype=np.uint32) + np.uint32(5)) * (2.0 * np.pi) - np.pi
+        ).astype(np.float32)
+        zeros = np.zeros(count, dtype=np.float32)
+        self.device.queue.write_buffer(self._heading_buffer, 0, headings)
+        self.device.queue.write_buffer(self._angular_velocity_buffer, 0, zeros)
+        # Interleaved rng(u32)/cooldown(f32) pairs, matching
+        # core/agents.wgsl's own GrowthState struct exactly (see this
+        # class's own __init__ comment for why they're packed together).
+        growth_state = np.zeros(count, dtype=self._growth_state_dtype)
+        growth_state["rng"] = _growth_seed(seed, count)
+        # growth_state["cooldown"] is already 0.0 from np.zeros — "not on
+        # cooldown."
+        self.device.queue.write_buffer(self._growth_state_buffer, 0, growth_state.tobytes())
+
+    def set_headings(self, headings: np.ndarray) -> None:
+        """Overwrites the FIRST len(headings) heading slots directly, a
+        small follow-up write on top of whatever reset_heading() above
+        just wrote there (every slot, independently randomized) — for
+        callers that need a handful of slots' own heading coordinated
+        with each other instead of independent (currently: training_sim.py's
+        own TrainingRollout, hardcoded 2-particle "back to back" start).
+        Not folded into reset_heading() itself, which stays a general,
+        per-slot-independent utility."""
+        self.device.queue.write_buffer(self._heading_buffer, 0, headings.astype(np.float32))
+
+    def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int) -> None:
+        """Encodes the NN forward pass — reads environment's current
+        parity buffer (must match `parity`), writes a strafe-driven
+        acceleration straight into MpmCore's own velocities buffer and
+        env_write into environment's deposit scratch (see core/agents.wgsl's
+        own module docstring for the full strafe/velocity history). Does
+        not submit."""
+        p = encoder.begin_compute_pass()
+        p.set_pipeline(self._pipeline)
+        p.set_bind_group(0, self._bind_groups[parity])
+        p.dispatch_workgroups(self._dispatch)
+        p.end()

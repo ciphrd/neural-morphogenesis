@@ -69,6 +69,28 @@
           driving the number.
         </p>
       </li>
+      <li>
+        <a href="mpm-distance-compare.html">mpm-distance-compare</a>
+        <p>
+          Side-by-side comparison of mpm-training's two fitness metrics — distance.py's Chamfer
+          distance vs. raster.py's Gaussian-splat raster distance (coverage + outside-shape
+          penalty) — against the same particle placement. Pick a target (circle/line/donut),
+          apply a preset distribution (jittered match, ring, cluster, scatter, offset, single
+          point) or click particles by hand, and watch both numbers respond, with a live preview
+          of the actual raster each metric scores against.
+        </p>
+      </li>
+      <li>
+        <a href="repulsion-field.html">repulsion-field</a>
+        <p>
+          Live particle sandbox for a cheap O(N) alternative to pairwise repulsion: agents
+          splat a Gaussian blob onto a low-res density field, a finite-difference gradient is
+          computed on that field once, and each agent moves down its own negative gradient —
+          away from local density, without ever looking at another agent directly. Built to
+          test whether this breaks envnca's agent-collapse failure mode (all agents converging
+          onto a single point, a stable fixed point that gradient descent alone can't escape).
+        </p>
+      </li>
     </ul>
   </body>
 </html>

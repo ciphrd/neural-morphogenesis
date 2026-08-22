@@ -144,7 +144,19 @@ class Environment:
         bilinearly splatted across the 4 surrounding cells — see module
         docstring. Multiple agents landing in the same cell simply sum,
         the same "contributions add" convention the old
-        weighted_field_and_gradient used."""
+        weighted_field_and_gradient used.
+
+        Builds the updated grid via the *out-of-place* `index_add` (not
+        `index_add_`) and reassigns `self.grid` to the result, rather
+        than scattering into the existing tensor's storage in place.
+        Purely a training-time concern: once a step's forward pass is
+        part of an autograd graph (see simulation.py's step(), no longer
+        unconditionally @torch.no_grad()), mutating `self.grid`'s
+        storage in place — while an earlier step's graph still holds a
+        reference to it — is exactly what corrupts or blocks
+        backpropagation through time. Functionally identical output
+        either way; this is the one place deposit's implementation had
+        to change for gradients to be safe to enable at all."""
         x0i, x1i, y0i, y1i, wx0, wx1, wy0, wy1 = self._corners(positions)
         grid_flat = self.grid.view(self.channels, -1)
         values_t = values.T  # (C, M)
@@ -155,7 +167,8 @@ class Environment:
             (y1i, x1i, wx1 * wy1),
         ):
             flat_idx = yi * self.width + xi
-            grid_flat.index_add_(1, flat_idx, values_t * w)
+            grid_flat = grid_flat.index_add(1, flat_idx, values_t * w)
+        self.grid = grid_flat.view(self.channels, self.height, self.width)
 
     def step_dynamics(self) -> None:
         """Mass-preserving blur (kernel sums to 1) then a flat decay — see

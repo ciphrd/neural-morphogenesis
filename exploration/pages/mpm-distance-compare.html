@@ -1,0 +1,827 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>MPM Distance Compare</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #111318;
+        color: #e8eaed;
+        display: flex;
+      }
+      .panel {
+        width: 300px;
+        flex-shrink: 0;
+        padding: 20px;
+        background: #1a1c22;
+        border-right: 1px solid #2a2d35;
+        overflow-y: auto;
+      }
+      .panel h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+      .panel .subtitle {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 0 0 20px;
+      }
+      .panel section {
+        margin-bottom: 20px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #2a2d35;
+      }
+      .panel section:last-child {
+        border-bottom: none;
+      }
+      .panel h2 {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #9aa0ab;
+        margin: 0 0 10px;
+      }
+      .tabs {
+        display: flex;
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      .tabs button {
+        flex: 1;
+        padding: 8px 6px;
+        border: none;
+        border-radius: 6px;
+        background: #2a2d35;
+        color: #e8eaed;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .tabs button.active {
+        background: #4f8cff;
+        color: white;
+      }
+      .tabs button:hover {
+        filter: brightness(1.15);
+      }
+      .preset-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+      button.full,
+      .preset-grid button {
+        padding: 8px 10px;
+        border: none;
+        border-radius: 6px;
+        background: #2a2d35;
+        color: #e8eaed;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      button.full {
+        width: 100%;
+        margin-top: 6px;
+      }
+      .preset-grid button:hover,
+      button.full:hover {
+        filter: brightness(1.2);
+      }
+      button.danger:hover {
+        background: #7f1d1d;
+      }
+      .hint {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 8px 0 0;
+      }
+      .checkbox-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      .checkbox-row + .hint {
+        margin-top: 6px;
+      }
+      .stat-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        font-size: 13px;
+        margin-bottom: 6px;
+      }
+      .stat-row span:first-child {
+        color: #9aa0ab;
+      }
+      .stat-row.emphasis span:last-child {
+        font-weight: 600;
+        color: #4f8cff;
+      }
+      .stat-group-label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+        color: #6b7280;
+        margin: 12px 0 6px;
+      }
+      .stat-group-label:first-child {
+        margin-top: 0;
+      }
+      .viewport {
+        flex: 1;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      canvas#main {
+        border: 1px solid #2a2d35;
+        border-radius: 4px;
+        cursor: crosshair;
+        touch-action: none;
+      }
+      .rasters {
+        width: 300px;
+        flex-shrink: 0;
+        padding: 20px;
+        background: #1a1c22;
+        border-left: 1px solid #2a2d35;
+        overflow-y: auto;
+      }
+      .rasters h2 {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #9aa0ab;
+        margin: 0 0 10px;
+      }
+      .raster-row {
+        display: flex;
+        gap: 8px;
+      }
+      .raster-item {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+      }
+      .raster-item canvas {
+        width: 100%;
+        aspect-ratio: 1;
+        background: #000;
+        border: 1px solid #2a2d35;
+        border-radius: 4px;
+        image-rendering: pixelated;
+      }
+      .raster-item span {
+        font-size: 10px;
+        color: #9aa0ab;
+      }
+      .legend {
+        font-size: 11px;
+        color: #9aa0ab;
+        margin-top: 16px;
+        line-height: 1.7;
+      }
+      .legend .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 6px;
+      }
+      .rasters h2.sweep-heading {
+        margin-top: 24px;
+      }
+      .sweep-chart {
+        display: block;
+        width: 100%;
+        height: auto;
+        background: #000;
+        border: 1px solid #2a2d35;
+        border-radius: 4px;
+      }
+      .sweep-label {
+        font-size: 10px;
+        color: #9aa0ab;
+        text-align: center;
+        margin: 4px 0 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>MPM Distance Compare</h1>
+      <p class="subtitle">
+        Side-by-side comparison of mpm-training's two fitness metrics — distance.py's Chamfer
+        (symmetric nearest-neighbor) vs. raster.py's Gaussian-splat raster distance (coverage MSE
+        + an outside-the-shape penalty) — against the SAME particle placement. Best-match rotation
+        search on by default (see the Distance section below), matching how training actually
+        scores a candidate; switch it off to see the raw, as-placed distance instead.
+      </p>
+
+      <section>
+        <h2>Target</h2>
+        <div class="tabs" id="target-tabs">
+          <button data-target="circle">Circle</button>
+          <button data-target="line">Line</button>
+          <button data-target="donut">Donut</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Distribution</h2>
+        <div class="preset-grid">
+          <button data-preset="jittered">Jittered match</button>
+          <button data-preset="ring">Ring around</button>
+          <button data-preset="cluster">Cluster center</button>
+          <button data-preset="scatter">Scatter random</button>
+          <button data-preset="offset">Offset copy</button>
+          <button data-preset="single">Single point</button>
+        </div>
+        <button class="full danger" id="clear-particles">Clear particles</button>
+        <p class="hint">Or click the canvas to place a particle by hand — click near one to remove it.</p>
+      </section>
+
+      <section>
+        <h2>Distance</h2>
+        <label class="checkbox-row">
+          <input type="checkbox" id="use-best-match" checked />
+          Best-match (rotation search)
+        </label>
+        <p class="hint">
+          Searches 16 rotation angles about the target's own centroid and keeps the lowest score —
+          the SAME thing alignment.py's best_alignment() and raster.py's training_raster_distance()
+          actually do in training, since nothing pins a grown blob's pose to the target's own.
+          Unchecked shows the raw, as-placed distance instead.
+        </p>
+        <div id="distance-readout">
+          <p class="hint">Pick a distribution or click the canvas.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Stats</h2>
+        <div class="stat-row"><span>Particles</span><span id="stat-particles">0</span></div>
+        <div class="stat-row"><span>Target points</span><span id="stat-target">0</span></div>
+      </section>
+
+      <div class="legend">
+        <div><span class="dot" style="background: #6b7280"></span>target points</div>
+        <div><span class="dot" style="background: #4f8cff"></span>your particles</div>
+        <div><span class="dot" style="background: #fb923c"></span>best-fit rotation (Chamfer's own winner — raster.py's own search runs independently and may pick a different angle; its own winning candidate is what the raster preview panel shows)</div>
+      </div>
+    </div>
+
+    <div class="viewport">
+      <canvas id="main" width="640" height="640"></canvas>
+    </div>
+
+    <div class="rasters">
+      <h2>Rasters (what raster.py sees)</h2>
+      <div class="raster-row">
+        <div class="raster-item"><canvas id="raster-target" width="128" height="128"></canvas><span>Target</span></div>
+        <div class="raster-item"><canvas id="raster-candidate" width="128" height="128"></canvas><span>Candidate</span></div>
+      </div>
+
+      <h2 class="sweep-heading">Radius sweep</h2>
+      <p class="hint" style="margin: 0 0 10px">
+        A filled disk of dots, centered on the target's own centroid, growing from a point out to
+        2.2× the target's own radius — shows each metric's own raw sensitivity to size (a disk's
+        rotationally symmetric about its own center, so this is independent of the best-match
+        checkbox above; always the raw form). The dashed line marks the target's own radius.
+        Re-runs whenever the target changes.
+      </p>
+      <svg id="sweep-chamfer" class="sweep-chart" viewBox="0 0 260 120"></svg>
+      <div class="sweep-label">Chamfer</div>
+      <svg id="sweep-raster" class="sweep-chart" viewBox="0 0 260 120"></svg>
+      <div class="sweep-label">Raster (coverage + outside penalty, combined)</div>
+    </div>
+
+    <script>
+      // ==== constants — mirror trainer/targets.py / trainer/raster.py /
+      // trainer/evolve.py exactly (same names, same defaults) ====
+      const TARGET_SPAN_FRACTION = 0.5; // targets.py
+      const RESOLUTION = 128; // evolve.py's own --raster-resolution default
+      const SIGMA = 1.5; // evolve.py's own --raster-sigma default
+      const OUTSIDE_WEIGHT = 1.0; // evolve.py's own --outside-weight default
+      const EXTENT = [0, 1, 0, 1]; // evolve.py's own RASTER_EXTENT — MpmCore's fixed [0,1]^2 domain
+
+      // ==== targets.py's own TargetShape.from_export(), ported ====
+      function targetShapeFromExport(data) {
+        const nx = data.nx,
+          ny = data.ny;
+        const centers = data.pixels.map((p) => [p.x + 0.5, p.y + 0.5]);
+        const cx = centers.reduce((s, p) => s + p[0], 0) / centers.length;
+        const cy = centers.reduce((s, p) => s + p[1], 0) / centers.length;
+        const span = Math.max(nx, ny);
+        const scale = TARGET_SPAN_FRACTION / span;
+        const points = centers.map(([x, y]) => [(x - cx) * scale + 0.5, (y - cy) * scale + 0.5]);
+        return { points, texelSize: TARGET_SPAN_FRACTION / span };
+      }
+
+      // ==== distance.py's own chamfer_distance(), ported verbatim (no
+      // rotation search — see this page's own subtitle) ====
+      function chamferDistance(a, b) {
+        if (a.length === 0 || b.length === 0) return Infinity;
+        const meanNearest = (from, to) => {
+          let sum = 0;
+          for (const p of from) {
+            let best = Infinity;
+            for (const q of to) {
+              const d = Math.hypot(p[0] - q[0], p[1] - q[1]);
+              if (d < best) best = d;
+            }
+            sum += best;
+          }
+          return sum / from.length;
+        };
+        return meanNearest(a, b) + meanNearest(b, a);
+      }
+
+      // ==== raster.py's own rasterize_points()/rasterize_points_sum(),
+      // ported and unified — mode "max" (target: flat-topped square +
+      // forced-1.0 nearest pixel, matches rasterize_points) or "sum"
+      // (candidate: plain peaked Gaussian, matches rasterize_points_sum,
+      // called here with halfSize=0 always). ====
+      function rasterize(points, resolution, extent, sigma, halfSize, mode) {
+        const [xmin, xmax, ymin, ymax] = extent;
+        const scaleX = (resolution - 1) / (xmax - xmin);
+        const scaleY = (resolution - 1) / (ymax - ymin);
+        const grid = new Float64Array(resolution * resolution);
+        const halfSizePx = halfSize * scaleX;
+        const radius = Math.max(1, Math.ceil(halfSizePx + 3 * sigma));
+
+        for (const [px, py] of points) {
+          const cx = (px - xmin) * scaleX;
+          const cy = (py - ymin) * scaleY;
+          const ix = Math.round(cx);
+          const iy = Math.round(cy);
+          for (let dy = -radius; dy <= radius; dy++) {
+            const row = iy + dy;
+            if (row < 0 || row >= resolution) continue;
+            const dyOut = Math.max(0, Math.abs(row - cy) - halfSizePx);
+            for (let dx = -radius; dx <= radius; dx++) {
+              const col = ix + dx;
+              if (col < 0 || col >= resolution) continue;
+              const dxOut = Math.max(0, Math.abs(col - cx) - halfSizePx);
+              const kernel = Math.exp(-(dyOut * dyOut + dxOut * dxOut) / (2 * sigma * sigma));
+              const idx = row * resolution + col;
+              if (mode === "max") grid[idx] = Math.max(grid[idx], kernel);
+              else grid[idx] += kernel;
+            }
+          }
+          if (mode === "max" && ix >= 0 && ix < resolution && iy >= 0 && iy < resolution) {
+            grid[iy * resolution + ix] = 1.0;
+          }
+        }
+        return grid;
+      }
+
+      // ==== raster.py's own raster_distance() — plain MSE ====
+      function rasterDistanceMSE(a, b) {
+        let sum = 0;
+        for (let i = 0; i < a.length; i++) {
+          const d = a[i] - b[i];
+          sum += d * d;
+        }
+        return sum / a.length;
+      }
+
+      // ==== raster.py's own outside_shape_penalty(), computed directly
+      // against the target raster's own "inside" pixels (raster > 0.5)
+      // rather than a precomputed distance_transform_edt field — that
+      // field only exists in Python as a cheap way to answer the same
+      // "nearest inside-footprint pixel" query many times across a whole
+      // training run; this page re-evaluates it once, on a handful of
+      // particles, so a direct brute-force nearest-inside-pixel search is
+      // simpler and exactly as correct, not an approximation. ====
+      function insidePixels(targetRaster, resolution, threshold) {
+        const pts = [];
+        for (let row = 0; row < resolution; row++) {
+          for (let col = 0; col < resolution; col++) {
+            if (targetRaster[row * resolution + col] > threshold) pts.push([col, row]);
+          }
+        }
+        return pts;
+      }
+
+      function outsideShapePenalty(points, insidePx, resolution, extent) {
+        if (points.length === 0) return 0;
+        const [xmin, xmax, ymin, ymax] = extent;
+        const scaleX = (resolution - 1) / (xmax - xmin);
+        const scaleY = (resolution - 1) / (ymax - ymin);
+        let sum = 0;
+        for (const [px, py] of points) {
+          const cx = (px - xmin) * scaleX;
+          const cy = (py - ymin) * scaleY;
+          let best = insidePx.length === 0 ? 0 : Infinity;
+          for (const [ix, iy] of insidePx) {
+            const d = Math.hypot(ix - cx, iy - cy);
+            if (d < best) best = d;
+          }
+          const dExtentFraction = best / scaleX / (xmax - xmin);
+          sum += dExtentFraction * dExtentFraction;
+        }
+        return sum / points.length;
+      }
+
+      function centroid(pts) {
+        return [pts.reduce((s, p) => s + p[0], 0) / pts.length, pts.reduce((s, p) => s + p[1], 0) / pts.length];
+      }
+
+      // ==== rotation search — mirrors alignment.py's own best_alignment()
+      // / raster.py's own training_raster_distance() exactly: `points` is
+      // re-centered on its OWN centroid, then rotated through NUM_ANGLES
+      // steps and re-placed at the TARGET's centroid — translation is
+      // always optimal (centroid-matched) by construction, only rotation
+      // is actually searched. ====
+      const NUM_ANGLES = 16; // alignment.py's/raster.py's own TRAIN_NUM_ANGLES
+
+      function rotateAbout(points, theta, targetCentroid) {
+        if (points.length === 0) return points;
+        const [ox, oy] = centroid(points);
+        const c = Math.cos(theta),
+          s = Math.sin(theta);
+        return points.map(([x, y]) => {
+          const dx = x - ox,
+            dy = y - oy;
+          return [dx * c - dy * s + targetCentroid[0], dx * s + dy * c + targetCentroid[1]];
+        });
+      }
+
+      // alignment.py's own best_alignment()
+      function bestAlignmentChamfer(points, target, numAngles) {
+        if (points.length === 0 || target.length === 0) return { distance: Infinity, points };
+        const tc = centroid(target);
+        let best = Infinity,
+          bestPoints = points;
+        for (let i = 0; i < numAngles; i++) {
+          const rotated = rotateAbout(points, (2 * Math.PI * i) / numAngles, tc);
+          const d = chamferDistance(rotated, target);
+          if (d < best) {
+            best = d;
+            bestPoints = rotated;
+          }
+        }
+        return { distance: best, points: bestPoints };
+      }
+
+      // raster.py's own training_raster_distance() (track_best_raster=true)
+      function bestRotationRaster(points, target, targetRaster, insidePx, resolution, extent, sigma, outsideWeight, numAngles) {
+        if (points.length === 0 || target.length === 0) return { distance: Infinity, coverage: Infinity, penalty: Infinity, raster: null };
+        const tc = centroid(target);
+        let best = Infinity,
+          bestCoverage = 0,
+          bestPenalty = 0,
+          bestRaster = null;
+        for (let i = 0; i < numAngles; i++) {
+          const rotated = rotateAbout(points, (2 * Math.PI * i) / numAngles, tc);
+          const candidateRaster = rasterize(rotated, resolution, extent, sigma, 0, "sum");
+          const coverage = rasterDistanceMSE(targetRaster, candidateRaster);
+          const penalty = outsideShapePenalty(rotated, insidePx, resolution, extent);
+          const dist = coverage + outsideWeight * penalty;
+          if (dist < best) {
+            best = dist;
+            bestCoverage = coverage;
+            bestPenalty = penalty;
+            bestRaster = candidateRaster;
+          }
+        }
+        return { distance: best, coverage: bestCoverage, penalty: bestPenalty, raster: bestRaster };
+      }
+
+      // ==== state ====
+      let targetName = "circle";
+      let targetPoints = [];
+      let texelSize = 0;
+      let particles = [];
+      // Best-fit rotation preview (Chamfer's own winning angle — see the
+      // legend's own note) — null when the best-match checkbox is off, or
+      // there's nothing to align yet.
+      let alignedPreview = null;
+      const REMOVE_RADIUS = 0.02;
+
+      const targetCache = {};
+      async function loadTarget(name) {
+        if (!targetCache[name]) {
+          const res = await fetch(`targets/${name}.json`);
+          const data = await res.json();
+          targetCache[name] = targetShapeFromExport(data);
+        }
+        targetName = name;
+        const shape = targetCache[name];
+        targetPoints = shape.points;
+        texelSize = shape.texelSize;
+        document.getElementById("stat-target").textContent = targetPoints.length;
+        document
+          .querySelectorAll("#target-tabs button")
+          .forEach((b) => b.classList.toggle("active", b.dataset.target === name));
+        recompute();
+        runRadiusSweep();
+      }
+
+      // ==== distribution presets — "various distributions" against
+      // whichever target is currently selected, so switching target
+      // keeps testing the SAME shape of placement against a different
+      // footprint. ====
+      function targetCentroid() {
+        const cx = targetPoints.reduce((s, p) => s + p[0], 0) / targetPoints.length;
+        const cy = targetPoints.reduce((s, p) => s + p[1], 0) / targetPoints.length;
+        return [cx, cy];
+      }
+      function targetRadius(centroid) {
+        return Math.max(...targetPoints.map((p) => Math.hypot(p[0] - centroid[0], p[1] - centroid[1])));
+      }
+
+      function applyPreset(kind) {
+        const [cx, cy] = targetCentroid();
+        const n = Math.min(targetPoints.length, 120) || 40;
+        if (kind === "jittered") {
+          particles = targetPoints.map(([x, y]) => [x + (Math.random() - 0.5) * 0.015, y + (Math.random() - 0.5) * 0.015]);
+        } else if (kind === "ring") {
+          const r = targetRadius([cx, cy]) * 1.15;
+          particles = Array.from({ length: n }, (_, i) => {
+            const a = (i / n) * Math.PI * 2;
+            return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+          });
+        } else if (kind === "cluster") {
+          particles = Array.from({ length: n }, () => [cx + (Math.random() - 0.5) * 0.01, cy + (Math.random() - 0.5) * 0.01]);
+        } else if (kind === "scatter") {
+          const r = targetRadius([cx, cy]) * 1.6;
+          particles = Array.from({ length: n }, () => [cx + (Math.random() * 2 - 1) * r, cy + (Math.random() * 2 - 1) * r]);
+        } else if (kind === "offset") {
+          const r = targetRadius([cx, cy]);
+          particles = targetPoints.map(([x, y]) => [x + r * 0.5, y]);
+        } else if (kind === "single") {
+          particles = [[cx, cy]];
+        }
+        document.getElementById("stat-particles").textContent = particles.length;
+        recompute();
+      }
+
+      // ==== canvas: fixed [0,1]^2 viewport, y-up (MpmCore's own domain
+      // convention) — no pan/zoom needed, unlike distance-sandbox.html's
+      // own unbounded node-physics space, since every point here already
+      // lives in this fixed, small domain (targets.py's own recentering
+      // puts everything around (0.5, 0.5)). ====
+      const canvas = document.getElementById("main");
+      const ctx = canvas.getContext("2d");
+      const SIZE = canvas.width;
+      const MARGIN = 0.15; // domain-fraction margin so points near the edge stay visible
+
+      function domainToCanvas(x, y) {
+        const t = (v) => ((v + MARGIN) / (1 + 2 * MARGIN)) * SIZE;
+        return [t(x), SIZE - t(y)];
+      }
+      function canvasToDomain(px, py) {
+        const inv = (v) => (v / SIZE) * (1 + 2 * MARGIN) - MARGIN;
+        return [inv(px), inv(SIZE - py)];
+      }
+
+      function draw() {
+        ctx.fillStyle = "#0a0b0e";
+        ctx.fillRect(0, 0, SIZE, SIZE);
+
+        ctx.fillStyle = "#6b7280";
+        for (const [x, y] of targetPoints) {
+          const [px, py] = domainToCanvas(x, y);
+          ctx.beginPath();
+          ctx.arc(px, py, 2, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = "#4f8cff";
+        for (const [x, y] of particles) {
+          const [px, py] = domainToCanvas(x, y);
+          ctx.beginPath();
+          ctx.arc(px, py, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        if (alignedPreview) {
+          ctx.fillStyle = "#fb923c";
+          for (const [x, y] of alignedPreview) {
+            const [px, py] = domainToCanvas(x, y);
+            ctx.beginPath();
+            ctx.arc(px, py, 3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+
+      canvas.addEventListener("pointerdown", (ev) => {
+        const rect = canvas.getBoundingClientRect();
+        const px = ((ev.clientX - rect.left) / rect.width) * SIZE;
+        const py = ((ev.clientY - rect.top) / rect.height) * SIZE;
+        const [x, y] = canvasToDomain(px, py);
+
+        let hit = -1;
+        let bestDist = Infinity;
+        for (let i = 0; i < particles.length; i++) {
+          const d = Math.hypot(particles[i][0] - x, particles[i][1] - y);
+          if (d < bestDist) {
+            bestDist = d;
+            hit = i;
+          }
+        }
+        if (hit >= 0 && bestDist <= REMOVE_RADIUS) particles.splice(hit, 1);
+        else particles.push([x, y]);
+
+        document.getElementById("stat-particles").textContent = particles.length;
+        recompute();
+      });
+
+      // ==== raster previews ====
+      function drawRasterPreview(canvasEl, grid, resolution) {
+        const c = canvasEl.getContext("2d");
+        const img = c.createImageData(resolution, resolution);
+        for (let row = 0; row < resolution; row++) {
+          // row-flip — raster.py's own rasterize_points() maps row 0 to
+          // domain-y=0, but this page's own domain is y-up (see draw()'s
+          // own convention) — same flip debug_images.py's own
+          // save_raster_image() applies, for the same reason.
+          const srcRow = resolution - 1 - row;
+          for (let col = 0; col < resolution; col++) {
+            const v = Math.min(1, Math.max(0, grid[srcRow * resolution + col]));
+            const idx = (row * resolution + col) * 4;
+            const byte = Math.round(v * 255);
+            img.data[idx] = byte;
+            img.data[idx + 1] = byte;
+            img.data[idx + 2] = byte;
+            img.data[idx + 3] = 255;
+          }
+        }
+        c.putImageData(img, 0, 0);
+      }
+
+      // ==== recompute both metrics + redraw everything ====
+      function fmt(v) {
+        return Number.isFinite(v) ? v.toFixed(5) : "∞";
+      }
+
+      function recompute() {
+        if (targetPoints.length === 0) {
+          alignedPreview = null;
+          draw();
+          return;
+        }
+
+        const targetRaster = rasterize(targetPoints, RESOLUTION, EXTENT, SIGMA, texelSize / 2, "max");
+        const inside = insidePixels(targetRaster, RESOLUTION, 0.5);
+        const useBestMatch = document.getElementById("use-best-match").checked;
+
+        let chamfer, coverage, penalty, combined, candidateRaster;
+        if (useBestMatch) {
+          const ca = bestAlignmentChamfer(particles, targetPoints, NUM_ANGLES);
+          chamfer = ca.distance;
+          alignedPreview = particles.length > 0 ? ca.points : null;
+
+          const ra = bestRotationRaster(particles, targetPoints, targetRaster, inside, RESOLUTION, EXTENT, SIGMA, OUTSIDE_WEIGHT, NUM_ANGLES);
+          coverage = ra.coverage;
+          penalty = ra.penalty;
+          combined = ra.distance;
+          candidateRaster = ra.raster ?? new Float64Array(RESOLUTION * RESOLUTION);
+        } else {
+          alignedPreview = null;
+          chamfer = chamferDistance(particles, targetPoints);
+          candidateRaster = rasterize(particles, RESOLUTION, EXTENT, SIGMA, 0, "sum");
+          coverage = rasterDistanceMSE(targetRaster, candidateRaster);
+          penalty = outsideShapePenalty(particles, inside, RESOLUTION, EXTENT);
+          combined = coverage + OUTSIDE_WEIGHT * penalty;
+        }
+
+        draw();
+        drawRasterPreview(document.getElementById("raster-target"), targetRaster, RESOLUTION);
+        drawRasterPreview(document.getElementById("raster-candidate"), candidateRaster, RESOLUTION);
+
+        document.getElementById("distance-readout").innerHTML = `
+          <div class="stat-group-label">Chamfer</div>
+          <div class="stat-row emphasis"><span>Distance</span><span>${fmt(chamfer)}</span></div>
+          <div class="stat-group-label">Raster</div>
+          <div class="stat-row"><span>Coverage (MSE)</span><span>${fmt(coverage)}</span></div>
+          <div class="stat-row"><span>Outside penalty</span><span>${fmt(penalty)}</span></div>
+          <div class="stat-row emphasis"><span>Combined</span><span>${fmt(combined)}</span></div>
+        `;
+      }
+
+      // ==== radius sweep: a filled disk of dots, centered on the
+      // target's own centroid, growing from near-0 out to
+      // SWEEP_MAX_RADIUS_FACTOR × the target's own radius — shows each
+      // metric's own raw sensitivity to size. Always the raw (no rotation
+      // search) form: a disk is rotationally symmetric about its own
+      // center, and already centroid-matched by construction, so a
+      // rotation search would find the exact same score at every angle —
+      // pure wasted computation, not a meaningful toggle for this
+      // specific sweep. ====
+      const SWEEP_STEPS = 36;
+      const SWEEP_MAX_RADIUS_FACTOR = 2.2;
+
+      function buildDiskGrid(center, maxRadius, gridStep) {
+        const [cx, cy] = center;
+        const pts = [];
+        for (let x = -maxRadius; x <= maxRadius; x += gridStep) {
+          for (let y = -maxRadius; y <= maxRadius; y += gridStep) {
+            const r = Math.hypot(x, y);
+            if (r <= maxRadius) pts.push({ x: cx + x, y: cy + y, r });
+          }
+        }
+        return pts;
+      }
+
+      function runRadiusSweep() {
+        if (targetPoints.length === 0) return;
+        const tc = centroid(targetPoints);
+        const targetR = targetRadius(tc);
+        const maxRadius = targetR * SWEEP_MAX_RADIUS_FACTOR;
+        // Grid step calibrated so a disk at the TARGET's own radius has
+        // roughly the same point density (points per unit area) as the
+        // target itself — "circle full of dots" at a scale actually
+        // comparable to what's being matched against, not an arbitrary
+        // density.
+        const gridStep = Math.sqrt((Math.PI * targetR * targetR) / Math.max(targetPoints.length, 1));
+        const grid = buildDiskGrid(tc, maxRadius, gridStep);
+
+        const targetRaster = rasterize(targetPoints, RESOLUTION, EXTENT, SIGMA, texelSize / 2, "max");
+        const inside = insidePixels(targetRaster, RESOLUTION, 0.5);
+
+        const radii = [];
+        const chamferValues = [];
+        const rasterValues = [];
+        for (let i = 1; i <= SWEEP_STEPS; i++) {
+          const r = (maxRadius * i) / SWEEP_STEPS;
+          const pts = grid.filter((p) => p.r <= r).map((p) => [p.x, p.y]);
+          radii.push(r);
+          chamferValues.push(chamferDistance(pts, targetPoints));
+          const candidateRaster = rasterize(pts, RESOLUTION, EXTENT, SIGMA, 0, "sum");
+          const coverage = rasterDistanceMSE(targetRaster, candidateRaster);
+          const penalty = outsideShapePenalty(pts, inside, RESOLUTION, EXTENT);
+          rasterValues.push(coverage + OUTSIDE_WEIGHT * penalty);
+        }
+
+        drawSweepChart(document.getElementById("sweep-chamfer"), radii, chamferValues, "#4f8cff", targetR);
+        drawSweepChart(document.getElementById("sweep-raster"), radii, rasterValues, "#fb923c", targetR);
+      }
+
+      // Small, self-contained SVG line chart — filled in via innerHTML
+      // (legal here: the parent <svg> element already establishes the
+      // SVG namespace context for its own children), not worth a
+      // dependency for two tiny charts.
+      function drawSweepChart(svgEl, xs, ys, color, targetR) {
+        const W = 260,
+          H = 120,
+          M = { l: 40, r: 8, t: 8, b: 20 };
+        const pw = W - M.l - M.r,
+          ph = H - M.t - M.b;
+        const finite = ys.filter((v) => Number.isFinite(v));
+        const minY = finite.length ? Math.min(...finite) : 0;
+        const maxY = finite.length ? Math.max(...finite) : 1;
+        const yRange = Math.max(maxY - minY, 1e-9);
+        const xMax = xs[xs.length - 1];
+
+        const X = (x) => M.l + (x / xMax) * pw;
+        const Y = (y) => M.t + ph - ((Number.isFinite(y) ? y - minY : yRange) / yRange) * ph;
+
+        const path = xs.map((x, i) => `${i === 0 ? "M" : "L"} ${X(x).toFixed(1)} ${Y(ys[i]).toFixed(1)}`).join(" ");
+        const targetX = X(targetR).toFixed(1);
+
+        svgEl.innerHTML = `
+          <line x1="${targetX}" x2="${targetX}" y1="${M.t}" y2="${M.t + ph}" stroke="#3a3d45" stroke-dasharray="3,3" />
+          <path d="${path}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" />
+          <line x1="${M.l}" x2="${M.l}" y1="${M.t}" y2="${M.t + ph}" stroke="#3a3d45" />
+          <line x1="${M.l}" x2="${M.l + pw}" y1="${M.t + ph}" y2="${M.t + ph}" stroke="#3a3d45" />
+          <text x="${M.l}" y="${H - 4}" font-size="9" fill="#6b7280">0</text>
+          <text x="${M.l + pw}" y="${H - 4}" text-anchor="end" font-size="9" fill="#6b7280">r=${xMax.toFixed(2)}</text>
+          <text x="4" y="${M.t + 8}" font-size="9" fill="#6b7280">${maxY.toFixed(3)}</text>
+          <text x="4" y="${M.t + ph}" font-size="9" fill="#6b7280">${minY.toFixed(3)}</text>
+          <text x="${targetX}" y="${M.t + 10}" font-size="9" fill="#6b7280" text-anchor="middle">target r</text>
+        `;
+      }
+
+      // ==== wiring ====
+      document.querySelectorAll("#target-tabs button").forEach((b) => b.addEventListener("click", () => loadTarget(b.dataset.target)));
+      document.querySelectorAll(".preset-grid button").forEach((b) => b.addEventListener("click", () => applyPreset(b.dataset.preset)));
+      document.getElementById("clear-particles").addEventListener("click", () => {
+        particles = [];
+        document.getElementById("stat-particles").textContent = 0;
+        recompute();
+      });
+      document.getElementById("use-best-match").addEventListener("change", recompute);
+
+      loadTarget("circle");
+    </script>
+  </body>
+</html>

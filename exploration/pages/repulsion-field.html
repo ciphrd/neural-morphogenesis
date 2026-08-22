@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Repulsion Field Sandbox</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #111318;
+        color: #e8eaed;
+        display: flex;
+      }
+      .panel {
+        width: 320px;
+        flex-shrink: 0;
+        padding: 20px;
+        background: #1a1c22;
+        border-right: 1px solid #2a2d35;
+        overflow-y: auto;
+      }
+      .panel h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+      .panel .subtitle {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 0 0 20px;
+      }
+      .panel section {
+        margin-bottom: 20px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid #2a2d35;
+      }
+      .panel section:last-child {
+        border-bottom: none;
+      }
+      .panel h2 {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #9aa0ab;
+        margin: 0 0 10px;
+      }
+      .slider-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-size: 12px;
+      }
+      .slider-row label {
+        width: 100px;
+        flex-shrink: 0;
+        color: #9aa0ab;
+      }
+      .slider-row input[type="range"] {
+        flex: 1;
+      }
+      .slider-row .value {
+        width: 44px;
+        flex-shrink: 0;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        color: #e8eaed;
+      }
+      button {
+        padding: 8px 12px;
+        border: none;
+        border-radius: 6px;
+        background: #2a2d35;
+        color: #e8eaed;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button:hover {
+        filter: brightness(1.15);
+      }
+      button.primary {
+        background: #2f5fdb;
+      }
+      .button-row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .button-row button {
+        flex: 1;
+      }
+      .checks {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 12px;
+      }
+      .checks label {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+      }
+      .stat-row {
+        display: flex;
+        justify-content: space-between;
+        font-size: 12px;
+        margin-bottom: 4px;
+        color: #c9c9d1;
+      }
+      .stat-row span:first-child {
+        color: #9aa0ab;
+      }
+      .hint {
+        font-size: 12px;
+        color: #9aa0ab;
+        line-height: 1.5;
+        margin: 0;
+      }
+      .viewport {
+        flex: 1;
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0c0d10;
+      }
+      canvas {
+        border: 1px solid #2a2d35;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>Repulsion Field Sandbox</h1>
+      <p class="subtitle">
+        Cheap O(N) stand-in for pairwise repulsion: every agent splats a Gaussian blob onto a
+        low-res density field, a finite-difference gradient is computed on that field once
+        (O(resolution&sup2;), not O(N&sup2;)), and each agent is nudged down its own negative
+        gradient — away from wherever density is locally high. No agent ever looks at another
+        agent directly.
+      </p>
+
+      <section>
+        <h2>Initial layout</h2>
+        <div class="button-row">
+          <button id="layout-collapsed">Collapsed</button>
+          <button id="layout-random">Random</button>
+          <button id="layout-ring">Ring</button>
+        </div>
+        <p class="hint">
+          "Collapsed" starts every agent within half a pixel of the exact same point — the
+          failure case this is meant to fix. A field's gradient is exactly zero at its own
+          peak, so agents need *some* asymmetry to ever start separating; the tiny built-in
+          jitter provides just enough for the (self-reinforcing, amplifying) repulsion to take
+          it from there.
+        </p>
+      </section>
+
+      <section>
+        <h2>Playback</h2>
+        <div class="button-row">
+          <button id="play-pause" class="primary">Pause</button>
+          <button id="reset-btn">Reset</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Agents</h2>
+        <div class="slider-row">
+          <label>Count</label>
+          <input type="range" id="slider-count" min="2" max="400" step="1" value="120" />
+          <span class="value" id="value-count">120</span>
+        </div>
+      </section>
+
+      <section>
+        <h2>Density field</h2>
+        <div class="slider-row">
+          <label>Splat sigma</label>
+          <input type="range" id="slider-sigma" min="2" max="40" step="0.5" value="14" />
+          <span class="value" id="value-sigma">14</span>
+        </div>
+        <div class="slider-row">
+          <label>Resolution</label>
+          <input type="range" id="slider-res" min="24" max="192" step="4" value="96" />
+          <span class="value" id="value-res">96</span>
+        </div>
+        <div class="slider-row">
+          <label>Decay</label>
+          <input type="range" id="slider-decay" min="0" max="0.95" step="0.01" value="0" />
+          <span class="value" id="value-decay">0.00</span>
+        </div>
+        <p class="hint">
+          Decay=0 recomputes the field from scratch every frame (pure current-position
+          repulsion). Higher decay blends in the previous frame's field before re-splatting —
+          a trailing, smoothed field with some memory, closer to how envnca's own chemical
+          grid persists (constants.DECAY=0.98) instead of a plain instantaneous force.
+        </p>
+      </section>
+
+      <section>
+        <h2>Repulsion</h2>
+        <div class="slider-row">
+          <label>Strength</label>
+          <input type="range" id="slider-strength" min="0" max="4000" step="20" value="1200" />
+          <span class="value" id="value-strength">1200</span>
+        </div>
+        <div class="slider-row">
+          <label>Max speed</label>
+          <input type="range" id="slider-maxspeed" min="1" max="60" step="1" value="18" />
+          <span class="value" id="value-maxspeed">18</span>
+        </div>
+        <div class="slider-row">
+          <label>Damping</label>
+          <input type="range" id="slider-damping" min="0.5" max="0.999" step="0.001" value="0.9" />
+          <span class="value" id="value-damping">0.900</span>
+        </div>
+        <div class="slider-row">
+          <label>Wander</label>
+          <input type="range" id="slider-wander" min="0" max="400" step="5" value="0" />
+          <span class="value" id="value-wander">0</span>
+        </div>
+        <p class="hint">
+          Wander adds a small random acceleration every step — a stand-in for "the agents also
+          have their own learned motion, repulsion isn't the only force acting on them," so you
+          can see whether repulsion still keeps a spread against ongoing perturbation, not just
+          against a one-off collapsed start.
+        </p>
+      </section>
+
+      <section>
+        <h2>Display</h2>
+        <div class="checks">
+          <label><input type="checkbox" id="show-field" checked /> Density field (background)</label>
+          <label><input type="checkbox" id="show-grad" /> Gradient arrows</label>
+        </div>
+      </section>
+
+      <section>
+        <h2>Stats</h2>
+        <div class="stat-row"><span>Step</span><span id="stat-step">0</span></div>
+        <div class="stat-row"><span>Mean dist. to centroid</span><span id="stat-spread">—</span></div>
+        <div class="stat-row"><span>Max density</span><span id="stat-maxdensity">—</span></div>
+      </section>
+    </div>
+
+    <div class="viewport">
+      <canvas id="canvas" width="700" height="700"></canvas>
+    </div>
+
+    <script>
+      const WORLD_SIZE = 700; // world units == canvas pixels, 1:1, no separate scale needed
+
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+
+      // ---- controls ----
+      const el = (id) => document.getElementById(id);
+      const sliderCount = el("slider-count");
+      const sliderSigma = el("slider-sigma");
+      const sliderRes = el("slider-res");
+      const sliderDecay = el("slider-decay");
+      const sliderStrength = el("slider-strength");
+      const sliderMaxSpeed = el("slider-maxspeed");
+      const sliderDamping = el("slider-damping");
+      const sliderWander = el("slider-wander");
+      const showField = el("show-field");
+      const showGrad = el("show-grad");
+      const playPauseBtn = el("play-pause");
+
+      function readout(slider, valueEl, digits) {
+        valueEl.textContent = parseFloat(slider.value).toFixed(digits);
+      }
+      function bindReadout(slider, valueEl, digits) {
+        slider.addEventListener("input", () => readout(slider, valueEl, digits));
+        readout(slider, valueEl, digits);
+      }
+      bindReadout(sliderCount, el("value-count"), 0);
+      bindReadout(sliderSigma, el("value-sigma"), 1);
+      bindReadout(sliderRes, el("value-res"), 0);
+      bindReadout(sliderDecay, el("value-decay"), 2);
+      bindReadout(sliderStrength, el("value-strength"), 0);
+      bindReadout(sliderMaxSpeed, el("value-maxspeed"), 0);
+      bindReadout(sliderDamping, el("value-damping"), 3);
+      bindReadout(sliderWander, el("value-wander"), 0);
+
+      // ---- field state (rebuilt whenever resolution changes) ----
+      let fieldRes = parseInt(sliderRes.value, 10);
+      let density = new Float32Array(fieldRes * fieldRes);
+      let densityPrev = new Float32Array(fieldRes * fieldRes);
+      let gradX = new Float32Array(fieldRes * fieldRes);
+      let gradY = new Float32Array(fieldRes * fieldRes);
+
+      function rebuildFieldBuffers() {
+        fieldRes = parseInt(sliderRes.value, 10);
+        density = new Float32Array(fieldRes * fieldRes);
+        densityPrev = new Float32Array(fieldRes * fieldRes);
+        gradX = new Float32Array(fieldRes * fieldRes);
+        gradY = new Float32Array(fieldRes * fieldRes);
+      }
+      sliderRes.addEventListener("change", rebuildFieldBuffers);
+
+      // ---- agents ----
+      let agents = []; // { x, y, vx, vy }
+      let stepCount = 0;
+      let layoutMode = "collapsed";
+
+      function spawnAgents() {
+        const n = parseInt(sliderCount.value, 10);
+        const cx = WORLD_SIZE / 2;
+        const cy = WORLD_SIZE / 2;
+        agents = [];
+        for (let i = 0; i < n; i++) {
+          let x, y;
+          if (layoutMode === "collapsed") {
+            // Within half a pixel of dead center — see the "Collapsed"
+            // button's own hint for why this specific jitter magnitude
+            // matters (a field's gradient is exactly zero at its own
+            // peak; *some* asymmetry is required for repulsion to ever
+            // get started at all).
+            x = cx + (Math.random() - 0.5) * 1.0;
+            y = cy + (Math.random() - 0.5) * 1.0;
+          } else if (layoutMode === "ring") {
+            const angle = (i / n) * Math.PI * 2;
+            const ringR = WORLD_SIZE * 0.05;
+            x = cx + Math.cos(angle) * ringR + (Math.random() - 0.5) * 4;
+            y = cy + Math.sin(angle) * ringR + (Math.random() - 0.5) * 4;
+          } else {
+            x = cx + (Math.random() - 0.5) * WORLD_SIZE * 0.3;
+            y = cy + (Math.random() - 0.5) * WORLD_SIZE * 0.3;
+          }
+          agents.push({ x, y, vx: 0, vy: 0 });
+        }
+        stepCount = 0;
+        density.fill(0);
+        densityPrev.fill(0);
+      }
+
+      el("layout-collapsed").addEventListener("click", () => {
+        layoutMode = "collapsed";
+        spawnAgents();
+      });
+      el("layout-random").addEventListener("click", () => {
+        layoutMode = "random";
+        spawnAgents();
+      });
+      el("layout-ring").addEventListener("click", () => {
+        layoutMode = "ring";
+        spawnAgents();
+      });
+      el("reset-btn").addEventListener("click", spawnAgents);
+      sliderCount.addEventListener("change", spawnAgents);
+
+      // ---- simulation: splat -> gradient -> move, all O(N) + O(resolution^2) ----
+      function splatDensity(sigma, decay) {
+        const scale = fieldRes / WORLD_SIZE; // world units -> field cells
+        const sigmaCells = Math.max(0.5, sigma * scale);
+        const radius = Math.max(1, Math.ceil(3.0 * sigmaCells));
+        const inv2sig2 = 1.0 / (2.0 * sigmaCells * sigmaCells);
+
+        densityPrev.set(density);
+        density.fill(0);
+
+        for (const a of agents) {
+          const cx = a.x * scale;
+          const cy = a.y * scale;
+          const ix = Math.round(cx);
+          const iy = Math.round(cy);
+          const yStart = Math.max(0, iy - radius);
+          const yEnd = Math.min(fieldRes - 1, iy + radius);
+          const xStart = Math.max(0, ix - radius);
+          const xEnd = Math.min(fieldRes - 1, ix + radius);
+          for (let py = yStart; py <= yEnd; py++) {
+            const dy = py - cy;
+            const dy2 = dy * dy;
+            const rowBase = py * fieldRes;
+            for (let px = xStart; px <= xEnd; px++) {
+              const dx = px - cx;
+              const k = Math.exp(-(dx * dx + dy2) * inv2sig2);
+              density[rowBase + px] += k;
+            }
+          }
+        }
+
+        if (decay > 0) {
+          for (let i = 0; i < density.length; i++) {
+            density[i] = density[i] + decay * densityPrev[i];
+          }
+        }
+      }
+
+      function computeGradient() {
+        for (let y = 0; y < fieldRes; y++) {
+          const ym = Math.max(0, y - 1) * fieldRes;
+          const yp = Math.min(fieldRes - 1, y + 1) * fieldRes;
+          const row = y * fieldRes;
+          for (let x = 0; x < fieldRes; x++) {
+            const xm = Math.max(0, x - 1);
+            const xp = Math.min(fieldRes - 1, x + 1);
+            gradX[row + x] = (density[row + xp] - density[row + xm]) * 0.5;
+            gradY[row + x] = (density[yp + x] - density[ym + x]) * 0.5;
+          }
+        }
+      }
+
+      // Bilinear sample of a field-space buffer at a WORLD-space position
+      // — agents live at continuous float positions, the field is a
+      // discrete lattice; nearest-cell sampling would give each agent a
+      // visibly quantized, jittery force as it crosses cell boundaries.
+      function bilinearSample(buf, worldX, worldY) {
+        const scale = fieldRes / WORLD_SIZE;
+        const fx = Math.min(Math.max(worldX * scale, 0), fieldRes - 1);
+        const fy = Math.min(Math.max(worldY * scale, 0), fieldRes - 1);
+        const x0 = Math.floor(fx);
+        const y0 = Math.floor(fy);
+        const x1 = Math.min(fieldRes - 1, x0 + 1);
+        const y1 = Math.min(fieldRes - 1, y0 + 1);
+        const tx = fx - x0;
+        const ty = fy - y0;
+        const v00 = buf[y0 * fieldRes + x0];
+        const v10 = buf[y0 * fieldRes + x1];
+        const v01 = buf[y1 * fieldRes + x0];
+        const v11 = buf[y1 * fieldRes + x1];
+        const top = v00 * (1 - tx) + v10 * tx;
+        const bottom = v01 * (1 - tx) + v11 * tx;
+        return top * (1 - ty) + bottom * ty;
+      }
+
+      function stepSimulation(dt) {
+        const sigma = parseFloat(sliderSigma.value);
+        const decay = parseFloat(sliderDecay.value);
+        const strength = parseFloat(sliderStrength.value);
+        const maxSpeed = parseFloat(sliderMaxSpeed.value);
+        const damping = parseFloat(sliderDamping.value);
+        const wander = parseFloat(sliderWander.value);
+
+        splatDensity(sigma, decay);
+        computeGradient();
+
+        for (const a of agents) {
+          const gx = bilinearSample(gradX, a.x, a.y);
+          const gy = bilinearSample(gradY, a.x, a.y);
+
+          // Repulsion: move AWAY from increasing density, i.e. down the
+          // negative gradient — one O(1) lookup per agent, no pairwise
+          // loop at all.
+          let fx = -gx * strength;
+          let fy = -gy * strength;
+
+          if (wander > 0) {
+            fx += (Math.random() - 0.5) * 2 * wander;
+            fy += (Math.random() - 0.5) * 2 * wander;
+          }
+
+          a.vx = (a.vx + fx * dt) * damping;
+          a.vy = (a.vy + fy * dt) * damping;
+
+          const speed = Math.hypot(a.vx, a.vy);
+          if (speed > maxSpeed) {
+            a.vx = (a.vx / speed) * maxSpeed;
+            a.vy = (a.vy / speed) * maxSpeed;
+          }
+
+          a.x += a.vx * dt;
+          a.y += a.vy * dt;
+
+          // Bounce off the canvas edge — this is a bounded sandbox, not
+          // envnca's own toroidal grid, so a hard wall is the simplest
+          // reasonable boundary here.
+          if (a.x < 0) {
+            a.x = 0;
+            a.vx *= -0.4;
+          } else if (a.x > WORLD_SIZE) {
+            a.x = WORLD_SIZE;
+            a.vx *= -0.4;
+          }
+          if (a.y < 0) {
+            a.y = 0;
+            a.vy *= -0.4;
+          } else if (a.y > WORLD_SIZE) {
+            a.y = WORLD_SIZE;
+            a.vy *= -0.4;
+          }
+        }
+
+        stepCount++;
+      }
+
+      // ---- rendering ----
+      const fieldCanvas = document.createElement("canvas");
+      const fieldCtx = fieldCanvas.getContext("2d");
+
+      function drawField() {
+        if (fieldCanvas.width !== fieldRes) {
+          fieldCanvas.width = fieldRes;
+          fieldCanvas.height = fieldRes;
+        }
+        const imageData = fieldCtx.createImageData(fieldRes, fieldRes);
+        let maxD = 1e-6;
+        for (let i = 0; i < density.length; i++) maxD = Math.max(maxD, density[i]);
+        for (let i = 0; i < density.length; i++) {
+          const t = Math.min(1, density[i] / maxD);
+          const v = Math.round(t * 255);
+          imageData.data[i * 4] = v;
+          imageData.data[i * 4 + 1] = Math.round(v * 0.85);
+          imageData.data[i * 4 + 2] = Math.round(v * 0.6);
+          imageData.data[i * 4 + 3] = 255;
+        }
+        fieldCtx.putImageData(imageData, 0, 0);
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(fieldCanvas, 0, 0, canvas.width, canvas.height);
+        return maxD;
+      }
+
+      const GRID_ARROW_STEPS = 20;
+      function drawGradientArrows() {
+        const step = fieldRes / GRID_ARROW_STEPS;
+        ctx.strokeStyle = "rgba(125, 211, 252, 0.8)";
+        ctx.fillStyle = "rgba(125, 211, 252, 0.8)";
+        ctx.lineWidth = 1;
+        const cellScreen = canvas.width / fieldRes;
+        for (let gy = 0; gy < GRID_ARROW_STEPS; gy++) {
+          for (let gx = 0; gx < GRID_ARROW_STEPS; gx++) {
+            const fxCell = Math.min(fieldRes - 1, Math.floor((gx + 0.5) * step));
+            const fyCell = Math.min(fieldRes - 1, Math.floor((gy + 0.5) * step));
+            const gxVal = -gradX[fyCell * fieldRes + fxCell];
+            const gyVal = -gradY[fyCell * fieldRes + fxCell];
+            const mag = Math.hypot(gxVal, gyVal);
+            if (mag < 1e-5) continue;
+            const sx = (fxCell + 0.5) * cellScreen;
+            const sy = (fyCell + 0.5) * cellScreen;
+            const len = Math.min(cellScreen * 3, mag * cellScreen * 40);
+            const nx = (gxVal / mag) * len;
+            const ny = (gyVal / mag) * len;
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(sx + nx, sy + ny);
+            ctx.stroke();
+          }
+        }
+      }
+
+      function drawAgents() {
+        ctx.fillStyle = "#ffffff";
+        for (const a of agents) {
+          const sx = (a.x / WORLD_SIZE) * canvas.width;
+          const sy = (a.y / WORLD_SIZE) * canvas.height;
+          ctx.beginPath();
+          ctx.arc(sx, sy, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function updateStats(maxD) {
+        el("stat-step").textContent = stepCount;
+        el("stat-maxdensity").textContent = maxD.toFixed(3);
+        if (agents.length === 0) {
+          el("stat-spread").textContent = "—";
+          return;
+        }
+        let cx = 0,
+          cy = 0;
+        for (const a of agents) {
+          cx += a.x;
+          cy += a.y;
+        }
+        cx /= agents.length;
+        cy /= agents.length;
+        let meanDist = 0;
+        for (const a of agents) meanDist += Math.hypot(a.x - cx, a.y - cy);
+        meanDist /= agents.length;
+        el("stat-spread").textContent = meanDist.toFixed(1);
+      }
+
+      function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let maxD = 1e-6;
+        if (showField.checked) {
+          maxD = drawField();
+        } else {
+          ctx.fillStyle = "#0c0d10";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          for (let i = 0; i < density.length; i++) maxD = Math.max(maxD, density[i]);
+        }
+        if (showGrad.checked) drawGradientArrows();
+        drawAgents();
+        updateStats(maxD);
+      }
+
+      // ---- main loop ----
+      let playing = true;
+      playPauseBtn.addEventListener("click", () => {
+        playing = !playing;
+        playPauseBtn.textContent = playing ? "Pause" : "Play";
+      });
+
+      const FIXED_DT = 1 / 60;
+      function frame() {
+        if (playing) {
+          stepSimulation(FIXED_DT);
+        }
+        render();
+        requestAnimationFrame(frame);
+      }
+
+      spawnAgents();
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

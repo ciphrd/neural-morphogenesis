@@ -1,6 +1,7 @@
 import { GpuEnvironment } from "./environment";
 import { GpuAgents } from "./agents";
 import { DEFAULT_INTENSITY, GpuRender } from "./render";
+import { DEFAULT_REPULSION_RESOLUTION, GpuRepulsion } from "./repulsion";
 import type { SpawnDistribution } from "./rng";
 import type { BackgroundMode, PhysicsSettings, SimulationConfig } from "./types";
 
@@ -21,6 +22,7 @@ export class GpuSimulation {
   private environment: GpuEnvironment | null = null;
   private agents: GpuAgents | null = null;
   private renderer: GpuRender | null = null;
+  private repulsion: GpuRepulsion | null = null;
 
   private resetKey: string | null = null;
   // Which grid buffer (0=gridA, 1=gridB) holds the CURRENT state — see
@@ -76,16 +78,24 @@ export class GpuSimulation {
     this.renderer?.setIntensity(intensity);
   }
 
-  /** Live-updates decay/maxSpeed/maxAccel/maxStrafe — plain uniform-
-   * buffer writes on the already-running environment/agents (see
-   * GpuEnvironment.setDecay()/GpuAgents.setPhysics()), never a rebuild().
-   * Safe to call on every tick of a "Physics" panel slider: doesn't touch
-   * the grid's contents or agent positions/velocity, so the rollout in
-   * flight keeps running exactly where it was, just under the new
-   * numbers from the next step onward. */
+  /** Live-updates decay/maxSpeed/maxAccel/maxStrafe/maxEnvWrite/
+   * repulsionSigma/repulsionStrength — plain uniform-buffer writes on the
+   * already-running environment/agents (see GpuEnvironment.setDecay()/
+   * GpuAgents.setPhysics()), never a rebuild(). Safe to call on every
+   * tick of a "Physics" panel slider: doesn't touch the grid's contents
+   * or agent positions/velocity, so the rollout in flight keeps running
+   * exactly where it was, just under the new numbers from the next step
+   * onward. */
   setPhysics(physics: PhysicsSettings): void {
     this.environment?.setDecay(physics.decay);
-    this.agents?.setPhysics(physics.maxSpeed, physics.maxAccel, physics.maxStrafe);
+    this.agents?.setPhysics(
+      physics.maxSpeed,
+      physics.maxAccel,
+      physics.maxStrafe,
+      physics.maxEnvWrite,
+      physics.repulsionSigma,
+      physics.repulsionStrength
+    );
   }
 
   /** Changes the initial-spread shape used the next time a rollout
@@ -134,6 +144,7 @@ export class GpuSimulation {
     this.environment?.destroy();
     this.agents?.destroy();
     this.renderer?.destroy();
+    this.repulsion?.destroy();
 
     this.environment = new GpuEnvironment(this.device, {
       width: config.gridWidth,
@@ -141,7 +152,18 @@ export class GpuSimulation {
       channels: config.channels,
       decay: config.decay,
     });
-    this.agents = new GpuAgents(this.device, this.environment, {
+    // Constructed before GpuAgents (and only partially — its own
+    // splatRepulsion bind group waits on bindAgents() below) — see
+    // GpuRepulsion's own docstring for why this two-phase order is
+    // required: agentStep binds repulsion.gradient, but splatRepulsion
+    // binds agents.positions/physicsUniform, a genuine circular
+    // dependency between the two classes' buffers.
+    this.repulsion = new GpuRepulsion(this.device, {
+      resolution: DEFAULT_REPULSION_RESOLUTION,
+      gridSize: config.gridWidth,
+      agentCount: config.agentCount,
+    });
+    this.agents = new GpuAgents(this.device, this.environment, this.repulsion.gradient, {
       width: config.gridWidth,
       height: config.gridHeight,
       channels: config.channels,
@@ -151,9 +173,14 @@ export class GpuSimulation {
       maxSpeed: config.maxSpeed,
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
+      maxEnvWrite: config.maxEnvWrite,
+      repulsionResolution: DEFAULT_REPULSION_RESOLUTION,
+      repulsionSigma: config.repulsionSigma,
+      repulsionStrength: config.repulsionStrength,
     });
+    this.repulsion.bindAgents(this.agents);
     this.agents.loadWeights(config.weights);
-    this.renderer = new GpuRender(this.device, this.canvasFormat, this.environment, this.agents, {
+    this.renderer = new GpuRender(this.device, this.canvasFormat, this.environment, this.agents, this.repulsion, {
       width: config.gridWidth,
       height: config.gridHeight,
       channels: config.channels,
@@ -171,19 +198,27 @@ export class GpuSimulation {
   }
 
   /** One full simulation step — clearScratch, computeGradient,
-   * agentStep, mergeDeposit, diffuseDecay. Each stage gets its own
-   * compute pass (not one pass with 5 dispatches) — deliberately, not
-   * for style: an earlier single-pass version let `depositScratch`'s
-   * atomic writes leak across steps (agentStep's atomicAdd sometimes
-   * running before clearScratch's atomicStore had taken visible effect,
-   * on this browser/driver), corrupting roughly half the population
-   * with unbounded deposit growth within the first few steps — a
-   * cross-dispatch synchronization gap that doesn't exist across pass
-   * boundaries. Pass creation itself is cheap; correctness comes first. */
+   * (clearRepulsionScratch, splatRepulsion, mergeRepulsionDensity,
+   * computeRepulsionGradient), agentStep, mergeDeposit, diffuseDecay.
+   * Each stage gets its own compute pass (not one pass with N
+   * dispatches) — deliberately, not for style: an earlier single-pass
+   * version let `depositScratch`'s atomic writes leak across steps
+   * (agentStep's atomicAdd sometimes running before clearScratch's
+   * atomicStore had taken visible effect, on this browser/driver),
+   * corrupting roughly half the population with unbounded deposit growth
+   * within the first few steps — a cross-dispatch synchronization gap
+   * that doesn't exist across pass boundaries. Pass creation itself is
+   * cheap; correctness comes first. The four repulsion passes run
+   * between clearScratch/computeGradient and agentStep specifically
+   * because agentStep needs to *sample* the finished repulsion gradient
+   * (see agents.wgsl's sampleRepulsionGradient()), computed here from
+   * this step's pre-move positions — same Jacobi-style "everyone acts on
+   * one consistent snapshot" ordering simulation.py's step() has. */
   step(): void {
-    if (!this.environment || !this.agents) return;
+    if (!this.environment || !this.agents || !this.repulsion) return;
     const env = this.environment;
     const agents = this.agents;
+    const repulsion = this.repulsion;
     const parity = this.parity;
 
     const encoder = this.device.createCommandEncoder();
@@ -199,6 +234,28 @@ export class GpuSimulation {
     gradientPass.setBindGroup(0, env.computeGradientBindGroups[parity]);
     gradientPass.dispatchWorkgroups(env.grid2DGroups[0], env.grid2DGroups[1]);
     gradientPass.end();
+
+    const clearRepulsionPass = encoder.beginComputePass();
+    clearRepulsionPass.setPipeline(repulsion.clearScratchPipeline);
+    clearRepulsionPass.setBindGroup(0, repulsion.clearScratchBindGroup);
+    clearRepulsionPass.dispatchWorkgroups(repulsion.clearScratchGroups);
+    clearRepulsionPass.end();
+
+    const splatRepulsionPass = encoder.beginComputePass();
+    repulsion.encodeSplat(splatRepulsionPass);
+    splatRepulsionPass.end();
+
+    const mergeRepulsionPass = encoder.beginComputePass();
+    mergeRepulsionPass.setPipeline(repulsion.mergeDensityPipeline);
+    mergeRepulsionPass.setBindGroup(0, repulsion.mergeDensityBindGroup);
+    mergeRepulsionPass.dispatchWorkgroups(repulsion.clearScratchGroups);
+    mergeRepulsionPass.end();
+
+    const repulsionGradientPass = encoder.beginComputePass();
+    repulsionGradientPass.setPipeline(repulsion.computeGradientPipeline);
+    repulsionGradientPass.setBindGroup(0, repulsion.computeGradientBindGroup);
+    repulsionGradientPass.dispatchWorkgroups(repulsion.fieldSquareGroups[0], repulsion.fieldSquareGroups[1]);
+    repulsionGradientPass.end();
 
     const agentPass = encoder.beginComputePass();
     agentPass.setPipeline(agents.pipeline);
@@ -237,5 +294,6 @@ export class GpuSimulation {
     this.environment?.destroy();
     this.agents?.destroy();
     this.renderer?.destroy();
+    this.repulsion?.destroy();
   }
 }

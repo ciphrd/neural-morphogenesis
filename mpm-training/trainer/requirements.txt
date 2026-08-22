@@ -1,0 +1,7 @@
+wgpu==0.32.0
+numpy>=1.26
+torch>=2.2
+scipy>=1.13
+Pillow>=10
+fastapi>=0.115
+uvicorn[standard]>=0.32

@@ -15,6 +15,15 @@ export interface AgentsConfig {
   maxSpeed: number;
   maxAccel: number;
   maxStrafe: number;
+  maxEnvWrite: number;
+  // Structural (sizes repulsionGradient's own buffer, via
+  // gpu/repulsion.ts's GpuRepulsion — templated into this shader only to
+  // size sampleRepulsionGradient()'s indexing, not any local array), same
+  // footing as width/height/channels above. Unlike repulsionSigma/
+  // repulsionStrength below, changing this needs a hard rebuild.
+  repulsionResolution: number;
+  repulsionSigma: number;
+  repulsionStrength: number;
 }
 
 interface WeightLayout {
@@ -26,7 +35,7 @@ interface WeightLayout {
 }
 
 function computeWeightLayout(channels: number, hiddenDim: number): WeightLayout {
-  const inDim = 3 * channels + 2; // value + grad_forward + grad_lateral + heading(cos,sin)
+  const inDim = 3 * channels; // value + grad_forward + grad_lateral
   const outDim = channels + 4;
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
@@ -64,7 +73,8 @@ export class GpuAgents {
   readonly positions: GPUBuffer;
   readonly velocity: GPUBuffer;
   readonly weights: GPUBuffer;
-  // maxSpeed/maxAccel/maxStrafe, live-adjustable — see setPhysics() and
+  // maxSpeed/maxAccel/maxStrafe/maxEnvWrite/repulsionSigma/repulsionStrength,
+  // live-adjustable — see setPhysics() and
   // agents.wgsl's own AgentPhysics comment for why this is a real
   // uniform buffer rather than a templateShader() const like
   // width/height/hiddenDim above.
@@ -82,10 +92,23 @@ export class GpuAgents {
   private readonly config: AgentsConfig;
   private readonly weightLayout: WeightLayout;
 
-  constructor(device: GPUDevice, environment: GpuEnvironment, config: AgentsConfig) {
+  constructor(device: GPUDevice, environment: GpuEnvironment, repulsionGradient: GPUBuffer, config: AgentsConfig) {
     this.device = device;
     this.config = config;
-    const { width, height, channels, hiddenDim, agentCount, maxSpeed, maxAccel, maxStrafe } = config;
+    const {
+      width,
+      height,
+      channels,
+      hiddenDim,
+      agentCount,
+      maxSpeed,
+      maxAccel,
+      maxStrafe,
+      maxEnvWrite,
+      repulsionResolution,
+      repulsionSigma,
+      repulsionStrength,
+    } = config;
 
     this.positions = device.createBuffer({
       size: agentCount * 2 * 4,
@@ -102,10 +125,19 @@ export class GpuAgents {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.physicsUniform = device.createBuffer({
-      size: 12, // AgentPhysics: 3x f32 (maxSpeed, maxAccel, maxStrafe)
+      // AgentPhysics: 6x f32 (maxSpeed, maxAccel, maxStrafe, maxEnvWrite,
+      // repulsionSigma, repulsionStrength) — must match repulsion.wgsl's
+      // own (separately declared) AgentPhysics struct exactly, see
+      // gpu/repulsion.ts's bindAgents().
+      size: 24,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    writeFloat32(device, this.physicsUniform, 0, new Float32Array([maxSpeed, maxAccel, maxStrafe]));
+    writeFloat32(
+      device,
+      this.physicsUniform,
+      0,
+      new Float32Array([maxSpeed, maxAccel, maxStrafe, maxEnvWrite, repulsionSigma, repulsionStrength])
+    );
 
     const source = templateShader(shaderSrc, {
       CHANNELS: channels,
@@ -113,6 +145,7 @@ export class GpuAgents {
       HEIGHT: height,
       HIDDEN: hiddenDim,
       AGENT_COUNT: agentCount,
+      REPULSION_RESOLUTION: repulsionResolution,
       FC1W_OFFSET: this.weightLayout.fc1wOffset,
       FC1B_OFFSET: this.weightLayout.fc1bOffset,
       FC2W_OFFSET: this.weightLayout.fc2wOffset,
@@ -133,6 +166,7 @@ export class GpuAgents {
           { binding: 4, resource: { buffer: this.positions } },
           { binding: 5, resource: { buffer: this.velocity } },
           { binding: 6, resource: { buffer: this.physicsUniform } },
+          { binding: 7, resource: { buffer: repulsionGradient } },
         ],
       });
 
@@ -149,8 +183,20 @@ export class GpuAgents {
    * pipeline recreation and no effect on positions/velocity, so this is
    * safe to call on every tick of a "Physics" panel slider without
    * disturbing the rollout currently in flight. */
-  setPhysics(maxSpeed: number, maxAccel: number, maxStrafe: number): void {
-    writeFloat32(this.device, this.physicsUniform, 0, new Float32Array([maxSpeed, maxAccel, maxStrafe]));
+  setPhysics(
+    maxSpeed: number,
+    maxAccel: number,
+    maxStrafe: number,
+    maxEnvWrite: number,
+    repulsionSigma: number,
+    repulsionStrength: number
+  ): void {
+    writeFloat32(
+      this.device,
+      this.physicsUniform,
+      0,
+      new Float32Array([maxSpeed, maxAccel, maxStrafe, maxEnvWrite, repulsionSigma, repulsionStrength])
+    );
   }
 
   /** Re-seeds agent positions/velocity for a fresh rollout — jitter is a

@@ -1,7 +1,7 @@
 // Presentation: a full-screen background quad sampling the colorized
-// grid texture, plus a shared instanced-quad pipeline drawn twice —
-// small white agent markers first, small red target-point markers last
-// (see gpu/render.ts's own draw-order comment for why: the target
+// grid texture, plus two instanced-marker pipelines drawn in order —
+// oriented agent-heading triangles first, small red target-point squares
+// last (see gpu/render.ts's own draw-order comment for why: the target
 // outline should stay visible as a reference even where agents
 // currently sit on top of it). No templated constants needed here: grid
 // dimensions arrive via MarkerUniforms at runtime rather than being
@@ -69,7 +69,10 @@ fn backgroundFragment(in: BackgroundVOut) -> @location(0) vec4<f32> {
   return textureSample(backgroundTex, backgroundSampler, in.uv);
 }
 
-// --- Markers: instanced quads for agents/target points, no vertex buffer ---
+// --- Target markers: instanced axis-aligned quads, no vertex buffer.
+// (Agent markers below use their own oriented-triangle pipeline instead
+// — target points have no heading to point in, so they keep this
+// simpler, unrotated shape.) ---
 
 var<private> quadOffsets: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
   vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
@@ -109,4 +112,61 @@ fn markerVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index
 @fragment
 fn markerFragment(in: MarkerVOut) -> @location(0) vec4<f32> {
   return in.color;
+}
+
+// --- Agent markers: an oriented, heading-squashed triangle instead of an
+// axis-aligned quad — a separate pipeline (own bindings, own vertex
+// entry point) from the target-point quads above, but reuses
+// MarkerVOut/markerFragment since the fragment stage is identical either
+// way (just pass the interpolated color through).
+
+// Local frame, pre-rotation/scale: apex points along local +X ("forward"
+// — this project's convention everywhere else too, see agents.wgsl's own
+// local->world rotation), base perpendicular to that. Narrower across
+// the base (±0.7) than long tip-to-base (1.6 to -0.9 = 2.5) — the
+// "horizontally squashed" look requested: a slim dart, not a fat
+// equilateral wedge, so the pointing direction reads clearly at a glance.
+var<private> agentTriOffsets: array<vec2<f32>, 3> = array<vec2<f32>, 3>(
+  vec2<f32>(1.6, 0.0),
+  vec2<f32>(-0.9, 0.7),
+  vec2<f32>(-0.9, -0.7),
+);
+
+@group(0) @binding(0) var<storage, read> agentPositions: array<vec2<f32>>;
+@group(0) @binding(1) var<uniform> agentMarker: MarkerUniforms;
+@group(0) @binding(2) var<storage, read> agentVelocity: array<vec2<f32>>;
+
+@vertex
+fn agentMarkerVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> MarkerVOut {
+  let center = agentPositions[instanceIndex];
+  let vel = agentVelocity[instanceIndex];
+  // heading never stored — derived fresh from velocity, exactly
+  // agents.wgsl's own convention (including the explicit zero-guard: an
+  // agent at rest has velocity exactly (0,0) at the very first frame —
+  // see agent_state.py's seed() — and unlike torch.atan2, WGSL leaves
+  // atan2(0,0) implementation-defined/NaN on at least one backend).
+  var heading: f32 = 0.0;
+  if (vel.x != 0.0 || vel.y != 0.0) {
+    heading = atan2(vel.y, vel.x);
+  }
+  let cosH = cos(heading);
+  let sinH = sin(heading);
+
+  // Rotate in pixel space (same +Y-down convention heading itself is
+  // defined in — see agents.wgsl), *before* the NDC Y-flip below, so the
+  // triangle's tip ends up pointing exactly where the agent is actually
+  // heading on screen rather than mirrored across Y.
+  let local = agentTriOffsets[vertexIndex];
+  let rotated = vec2<f32>(
+    local.x * cosH - local.y * sinH,
+    local.x * sinH + local.y * cosH
+  );
+  let px = center.x + rotated.x * agentMarker.halfSizePixels;
+  let py = center.y + rotated.y * agentMarker.halfSizePixels;
+  let ndcX = (px / agentMarker.gridWidth) * 2.0 - 1.0;
+  let ndcY = 1.0 - (py / agentMarker.gridHeight) * 2.0;
+  var out: MarkerVOut;
+  out.position = vec4<f32>(ndcX, ndcY, 0.0, 1.0);
+  out.color = agentMarker.color;
+  return out;
 }

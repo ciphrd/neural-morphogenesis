@@ -34,7 +34,7 @@ HIDDEN_DIM = 128
 # nudge," here expressed as a small fraction of one grid cell's diagonal
 # per step, and MAX_ACCEL keeps the same MAX_SPEED/4 relationship (reach
 # full speed from rest in ~4 steps of sustained acceleration).
-MAX_SPEED = 0.2
+MAX_SPEED = 0.01
 MAX_ACCEL = MAX_SPEED / 4.0
 
 # Strafe doesn't accumulate step to step the way accel -> velocity does
@@ -43,3 +43,53 @@ MAX_ACCEL = MAX_SPEED / 4.0
 # directly "how far can one step's strafe move an agent," same order of
 # magnitude as MAX_SPEED (the velocity cap) rather than MAX_ACCEL.
 MAX_STRAFE = 0.5
+
+# Ceiling on env_write (simulation.py's step(), right before
+# Environment.deposit()) — unlike local_accel/local_strafe, this one
+# wasn't squashed at all until a gradient-descent training run was
+# diagnosed plateauing hard: env_write is deposited every step into a
+# grid that decays at only 0.98/step (~50-step effective memory), and
+# with nothing bounding it, the sensed value agents read back
+# (environment.py's sample_value_and_gradient) grew over the course of
+# training until it saturated the network's own first Linear -> Tanh
+# layer (confirmed instrumentally: hidden-layer saturation climbed from
+# 0% to ~80% over 150 epochs, and the best loss stopped improving
+# entirely right around where saturation crossed ~50-60%) — a dead local
+# gradient that backprop can't do anything about, no matter the learning
+# rate. ES never hit this: it only needs the forward behavior to look
+# adequate, never a nonzero local gradient. A starting value, not a
+# carefully derived one — re-run the same hidden-saturation diagnostic
+# (train_gd.py/train_server_gd.py's UpdateRule.record_diagnostics
+# logging) after changing this to confirm it actually keeps saturation
+# down over a long run, and adjust if not.
+MAX_ENV_WRITE = 1.0
+
+# repulsion.RepulsionField's own dedicated density-field resolution —
+# deliberately independent of (and much coarser than) the main (C,H,W)
+# grid's own H/W, since a repulsion signal only needs "which direction is
+# crowded," not real sensing fidelity — see repulsion.py's module
+# docstring for the full O(N)-not-O(N^2) reasoning and why this exists
+# at all (a gradient-descent-trained policy was observed collapsing
+# every agent onto a single point — a stable fixed point no loss-
+# function change alone can break).
+REPULSION_RESOLUTION = 128
+
+# Gaussian splat width, in *this field's own* cells (REPULSION_RESOLUTION-
+# relative), not main-grid pixels — same "sigma is resolution-relative"
+# convention raster.py's own raster_sigma already uses. Tuned live via
+# the frontend's Physics panel (against REPULSION_RESOLUTION=128) before
+# landing here — no longer a placeholder.
+REPULSION_SIGMA = 0.4
+
+# Scales the repulsion force added into velocity alongside accel (see
+# simulation.py's step()) — participates in the same MAX_SPEED-clamped
+# budget as accel, so this is on the same order of magnitude as
+# MAX_ACCEL by design. Tuned live via the frontend's Physics panel
+# alongside REPULSION_SIGMA above — no longer a placeholder.
+# Set to 0.0 temporarily to A/B test performance impact — see
+# RepulsionField.compute()'s own docstring: strength==0.0 short-circuits
+# before the splat/Sobel-gradient work even runs, not just before the
+# resulting force is applied, so this genuinely disables the computation,
+# not just its effect. Restore to a nonzero value (0.005 was the last
+# live-tuned one) once the comparison is done.
+REPULSION_STRENGTH = 0.0

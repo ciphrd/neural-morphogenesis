@@ -31,7 +31,16 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from constants import DECAY, HIDDEN_DIM, MAX_ACCEL, MAX_SPEED, MAX_STRAFE
+from constants import (
+    DECAY,
+    HIDDEN_DIM,
+    MAX_ACCEL,
+    MAX_ENV_WRITE,
+    MAX_SPEED,
+    MAX_STRAFE,
+    REPULSION_SIGMA,
+    REPULSION_STRENGTH,
+)
 from debug_images import save_agents_image, save_raster_image
 from device import pick_device
 from evolve import (
@@ -46,6 +55,7 @@ from evolve import (
     set_weights,
 )
 from raster import build_target_distance_field, build_target_raster, training_raster_distance
+from raster_torch import target_rasters_to_torch
 from target import TargetShape
 from update_rule import UpdateRule
 
@@ -77,6 +87,13 @@ target_raster = build_target_raster(
 # Also fixed for the whole run — see raster.build_target_distance_field()'s
 # own docstring for what this feeds (the outside-shape penalty).
 target_distance_field = build_target_distance_field(target_raster)
+# Only needed for memetic refinement (evolve.gradient_refine()) — left
+# None for a plain --memetic-steps=0 run, same reasoning as evolve.py's
+# own main().
+target_points_t = target_raster_t = target_distance_field_t = None
+if args.memetic_steps > 0:
+    target_points_t = torch.tensor(target.points, dtype=torch.float32, device=device)
+    target_raster_t, target_distance_field_t = target_rasters_to_torch(target_raster, target_distance_field, device)
 
 # Every generation's full message (stats + weights) is appended here as
 # it happens, so a browser tab that connects mid-run — or reconnects
@@ -103,15 +120,24 @@ IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _archive_previous_run() -> None:
-    """Moves the previous run's history.jsonl/best.npy/best_meta.json
-    (plus IMAGES_DIR, if it has anything in it) into a timestamped
-    RUNS_DIR subdirectory before this run starts overwriting them — same
-    reasoning as trainer/backend/train_server.py's own version of this
-    function, extended to cover IMAGES_DIR too so a fresh run doesn't
-    silently inherit a previous run's PNGs under generation numbers that
-    collide with its own. Only archives if there's actually something to
-    keep (history.jsonl is the signal; a run that never got as far as
-    its first generation has nothing worth archiving)."""
+    """Moves the previous run's history.jsonl/best_meta.json/weight
+    checkpoint (plus IMAGES_DIR, if it has anything in it) into a
+    timestamped RUNS_DIR subdirectory before this run starts overwriting
+    them — same reasoning as trainer/backend/train_server.py's own
+    version of this function, extended to cover IMAGES_DIR too so a
+    fresh run doesn't silently inherit a previous run's PNGs under
+    generation numbers that collide with its own. Only archives if
+    there's actually something to keep (history.jsonl is the signal; a
+    run that never got as far as its first generation has nothing worth
+    archiving).
+
+    Every plain file directly under CHECKPOINTS_DIR gets archived —
+    globbed, not a hardcoded filename list — so this works the same
+    whether the previous run was this server's own ES checkpoint format
+    (best.npy) or train_server_gd.py's torch one (best_weights.pt) left
+    behind after switching training methods on this same port/directory.
+    Neither server needs to know the other's filenames for switching
+    between them to archive cleanly."""
     if not HISTORY_PATH.is_file() or HISTORY_PATH.stat().st_size == 0:
         return
 
@@ -128,10 +154,9 @@ def _archive_previous_run() -> None:
     archive_dir = RUNS_DIR / (f"{timestamp}_{label}" if label else timestamp)
     archive_dir.mkdir(parents=True, exist_ok=True)
 
-    for name in ("history.jsonl", "best.npy", "best_meta.json"):
-        src = CHECKPOINTS_DIR / name
-        if src.is_file():
-            shutil.move(str(src), str(archive_dir / name))
+    for path in CHECKPOINTS_DIR.iterdir():
+        if path.is_file():
+            shutil.move(str(path), str(archive_dir / path.name))
 
     if IMAGES_DIR.is_dir() and any(IMAGES_DIR.iterdir()):
         shutil.move(str(IMAGES_DIR), str(archive_dir / "generation_images"))
@@ -272,6 +297,9 @@ async def _training_loop_body() -> None:
             rng,
             device,
             update_rule,
+            target_points_t=target_points_t,
+            target_raster_t=target_raster_t,
+            target_distance_field_t=target_distance_field_t,
         )
 
         winner_weights = population[0]
@@ -320,6 +348,9 @@ async def _training_loop_body() -> None:
             "maxSpeed": MAX_SPEED,
             "maxAccel": MAX_ACCEL,
             "maxStrafe": MAX_STRAFE,
+            "maxEnvWrite": MAX_ENV_WRITE,
+            "repulsionSigma": REPULSION_SIGMA,
+            "repulsionStrength": REPULSION_STRENGTH,
             "hiddenDim": HIDDEN_DIM,
             # Everything above is simulation config — what a WebGPU replay
             # needs to reproduce this generation's winner (SimulationConfig).
@@ -334,6 +365,10 @@ async def _training_loop_body() -> None:
             "population": args.population,
             "elites": args.elites,
             "mutationSigma": args.mutation_sigma,
+            "memeticSteps": args.memetic_steps,
+            "memeticBpttSteps": args.memetic_bptt_steps,
+            "memeticLr": args.memetic_lr,
+            "memeticGradClip": args.memetic_grad_clip,
             "rasterResolution": args.raster_resolution,
             "rasterSigma": args.raster_sigma,
             "outsideWeight": args.outside_weight,
@@ -361,6 +396,10 @@ async def _training_loop_body() -> None:
                         "population": args.population,
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
+                        "memetic_steps": args.memetic_steps,
+                        "memetic_bptt_steps": args.memetic_bptt_steps,
+                        "memetic_lr": args.memetic_lr,
+                        "memetic_grad_clip": args.memetic_grad_clip,
                         "raster_resolution": args.raster_resolution,
                         "raster_sigma": args.raster_sigma,
                         "outside_weight": args.outside_weight,
@@ -381,6 +420,9 @@ async def _training_loop_body() -> None:
                         "max_speed": MAX_SPEED,
                         "max_accel": MAX_ACCEL,
                         "max_strafe": MAX_STRAFE,
+                        "max_env_write": MAX_ENV_WRITE,
+                        "repulsion_sigma": REPULSION_SIGMA,
+                        "repulsion_strength": REPULSION_STRENGTH,
                     },
                     indent=2,
                 )

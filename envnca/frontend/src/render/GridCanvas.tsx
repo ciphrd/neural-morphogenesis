@@ -16,6 +16,10 @@ interface GridCanvasProps {
   // has loaded yet. Applied via a plain uniform-buffer write
   // (GpuSimulation.setPhysics()), never a rebuild, so dragging a slider
   // never disturbs the rollout in flight.
+  // repulsionSigma/repulsionStrength are part of PhysicsSettings itself
+  // now (backend source of truth, constants.py — see gpu/repulsion.ts's
+  // own docstring), so they ride along with `physics` here rather than
+  // needing a separate prop.
   physics: PhysicsSettings | null;
   // Contrast multiplier for the substrate colorize pass — see
   // gpu/render.ts's setIntensity() for what it actually does (shrinks

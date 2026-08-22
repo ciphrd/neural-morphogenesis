@@ -55,11 +55,30 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
     { key: "maxSpeed", label: "Max speed", ...scaledRange(trained.maxSpeed, 3), format: (v) => v.toFixed(3) },
     { key: "maxAccel", label: "Max accel", ...scaledRange(trained.maxAccel, 3), format: (v) => v.toFixed(3) },
     { key: "maxStrafe", label: "Max strafe", ...scaledRange(trained.maxStrafe, 3), format: (v) => v.toFixed(3) },
+    {
+      key: "maxEnvWrite",
+      label: "Max env write",
+      ...scaledRange(trained.maxEnvWrite, 3),
+      format: (v) => v.toFixed(3),
+    },
+    {
+      key: "repulsionSigma",
+      label: "Repulsion sigma",
+      ...scaledRange(trained.repulsionSigma, 3),
+      format: (v) => v.toFixed(3),
+    },
+    {
+      key: "repulsionStrength",
+      label: "Repulsion strength",
+      ...scaledRange(trained.repulsionStrength, 3),
+      format: (v) => v.toFixed(4),
+    },
   ];
 }
 
 /** Collapsible "Physics" section (default closed) exposing
- * decay/maxSpeed/maxAccel/maxStrafe as live sliders — see
+ * decay/maxSpeed/maxAccel/maxStrafe/maxEnvWrite/repulsionSigma/
+ * repulsionStrength as live sliders — see
  * gpu/simulation.ts's setPhysics() for why moving one never disturbs the
  * rollout currently in flight (a plain uniform-buffer write, not a
  * pipeline rebuild). Deliberately doesn't include hiddenDim — see

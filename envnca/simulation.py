@@ -25,10 +25,16 @@ fixed-size-buffer-plus-alive-mask redesign to avoid it) — not free.
 Not built yet, on purpose — this remains a first cut, scoped to what was
 actually asked (env-based chemicals, gradient sensing, NN-driven writes,
 GPU-resident, 512x512):
-- No physics/collision pass. Agents can and will overlap; nothing pushes
-  them apart. trainer/backend/physics.py's tension+collision solver is a
-  substantial separate subsystem — adding it here (in grid-space, on GPU)
-  is a reasonable next step but a distinct piece of work.
+- No *real* physics/collision pass — trainer/backend/physics.py's
+  tension+collision solver is a substantial separate subsystem, still not
+  built here. What step() below does have, since repulsion.py: a cheap,
+  soft, field-mediated push-apart force (see that module's own docstring
+  for why this stopped being optional — a gradient-descent-trained
+  policy was observed collapsing every agent onto a single point, a
+  stable fixed point nothing else could break). Agents can still overlap
+  more than a real collision solver would ever allow; this only makes
+  full coincidence a repelled, unstable state instead of an attractive
+  one, not physically forbidden.
 - No `id` vector / adhesion — see agent_state.py's docstring.
 """
 
@@ -39,8 +45,17 @@ from typing import Optional
 import torch
 
 from agent_state import AgentState
-from constants import MAX_ACCEL, MAX_SPEED, MAX_STRAFE
+from constants import (
+    MAX_ACCEL,
+    MAX_ENV_WRITE,
+    MAX_SPEED,
+    MAX_STRAFE,
+    REPULSION_RESOLUTION,
+    REPULSION_SIGMA,
+    REPULSION_STRENGTH,
+)
 from environment import Environment
+from repulsion import RepulsionField
 from update_rule import UpdateRule
 
 # Population size and seed-cluster jitter — see agent_state.py's seed()
@@ -64,6 +79,11 @@ class Simulation:
         self.device = device
         center = (env.width / 2.0, env.height / 2.0)
         self.agents = AgentState.seed(population, center, spawn_spread, device, rng=rng)
+        # Own dedicated (coarser) field, independent of env's own (C,H,W)
+        # grid — see repulsion.py's module docstring for why. Assumes a
+        # square grid (env.width == env.height), same assumption the rest
+        # of this codebase's CLI/training already makes.
+        self.repulsion = RepulsionField(REPULSION_RESOLUTION, env.width, device)
 
     def _wrap_to_grid(self, positions: torch.Tensor) -> torch.Tensor:
         """Toroidal wrap, not a clamp — the grid has no edge (see
@@ -77,8 +97,22 @@ class Simulation:
         positions[:, 1] = torch.remainder(positions[:, 1], self.env.height)
         return positions
 
-    @torch.no_grad()
     def step(self) -> None:
+        """No longer wrapped in @torch.no_grad() — that decorator used to
+        make every call here untracked unconditionally, which is exactly
+        wrong for gradient-based (backprop-through-time) training: it
+        silently discarded the computation graph every step regardless
+        of what the caller actually wanted. Whether this step is tracked
+        is now the *caller's* choice, made the normal PyTorch way (an
+        ambient `torch.no_grad()`/`torch.inference_mode()` context), not
+        baked into this method. The existing evolutionary training path
+        (evolve.py's rollout()) explicitly opts back into the old
+        untracked-and-fast behavior by wrapping its own stepping loop in
+        `torch.no_grad()` — nothing about its performance or memory use
+        changes. A caller building a differentiable rollout instead calls
+        this with gradients enabled (the default) and never detaches
+        agents.positions/env.grid until it actually wants to stop
+        backpropagating through them."""
         agents = self.agents
         if agents.n == 0:
             return
@@ -98,9 +132,19 @@ class Simulation:
         grad_forward = grad_x * cos_h + grad_y * sin_h
         grad_lateral = -grad_x * sin_h + grad_y * cos_h
 
-        env_write, local_accel, local_strafe = self.update_rule(
-            value, grad_forward, grad_lateral, cos_h, sin_h
-        )
+        # cos_h/sin_h aren't passed into the network (see update_rule.py's
+        # own "Heading" docstring section) — they're only used here, for
+        # the sensing rotation above and the accel/strafe rotation below.
+        env_write, local_accel, local_strafe = self.update_rule(value, grad_forward, grad_lateral)
+
+        # Repulsion force, from this same pre-move snapshot of positions
+        # (same Jacobi-style "everyone acts on one consistent snapshot"
+        # semantics as sensing above) — see repulsion.py's own docstring.
+        # World-frame already (this force has no notion of an agent's own
+        # heading/local frame, unlike accel/strafe), so it's folded
+        # straight into accel_world below with no rotation step of its
+        # own.
+        repulsion_world = self.repulsion.compute(agents.positions, REPULSION_SIGMA, REPULSION_STRENGTH)
 
         # Local-frame acceleration -> world, exact inverse of the sensing
         # rotation above, then clamp the *magnitude* (not each component)
@@ -115,7 +159,7 @@ class Simulation:
             ],
             dim=-1,
         )
-        new_velocity_raw = agents.velocity + accel_world
+        new_velocity_raw = agents.velocity + accel_world + repulsion_world
         speed = torch.linalg.norm(new_velocity_raw, dim=1, keepdim=True)
         speed_safe = torch.clamp(speed, min=1e-9)
         scale = torch.clamp(MAX_SPEED / speed_safe, max=1.0)
@@ -149,6 +193,12 @@ class Simulation:
         # Write to the environment at each agent's *new* position, then
         # let the grid's own dynamics (diffuse + decay) run once — mirrors
         # the old project's ordering (state updates fully written back
-        # before anything downstream reacts to them).
-        self.env.deposit(new_positions, env_write)
+        # before anything downstream reacts to them). Squashed here, not
+        # inside UpdateRule.forward() — same division of labor
+        # local_accel/local_strafe already have (the network returns raw
+        # outputs, this method squashes/applies them) — see
+        # constants.MAX_ENV_WRITE's own docstring for why this needed to
+        # be bounded at all.
+        env_write_squashed = torch.tanh(env_write) * MAX_ENV_WRITE
+        self.env.deposit(new_positions, env_write_squashed)
         self.env.step_dynamics()

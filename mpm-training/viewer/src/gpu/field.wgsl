@@ -1,0 +1,454 @@
+// Field-visualize background — WGSL port of mls-mpm/src/gpu/field.wgsl's
+// own colorizeField compute pass + full-screen-quad present. Originally
+// scoped to just "density"/"speed" (the two modes computable from
+// ../core/'s own 3-channel gridAccum — see this file's own git history);
+// "deformation"/"pressure"/"shear" now read a SEPARATE diagnostics
+// buffer this project's own fieldDiagnostics.wgsl scatters (see that
+// file's own module docstring for why those three live outside
+// ../core/ rather than being added back to it), "substrate" reads
+// the chemical field environment.wgsl already maintains for the NN
+// policy's own sensing, and "growth" reads that SAME field's own LAST
+// channel specifically (this project's own growth probability substrate
+// — see colorizeGrowth()'s own comment).
+//
+// Three coloring conventions, per this project's own dataviz choice:
+//  - Single, non-negative *magnitude* fields (density, speed, shear —
+//    all "how much," never signed) use batlow(), a perceptually-uniform
+//    scientific sequential colormap (Fabio Crameri's, via the
+//    cmcrameri Python package — see BATLOW's own comment for exactly
+//    how this LUT was generated), faded up from BG at t=0 the same way
+//    this file's original single-hue ramps did.
+//  - Fields that can genuinely go negative (deformation = J-1,
+//    pressure, and every one of substrate's own chemical channels) use
+//    graypoint(): 0 maps to an exact 0.5 gray, growing toward black as
+//    the value goes negative and toward white as it goes positive —
+//    the same technique envnca/frontend/src/gpu/colorize.wgsl's own
+//    substrate mode already uses (`clamp(v,-s,s)/(2*s)+0.5`), applied
+//    here to every signed layer, not just substrate, per this project's
+//    own request to keep that one technique consistent everywhere it's
+//    needed. Distinct from "no material here" (which still fades to
+//    BG, same as ever): 0.5 gray means "material present, genuinely at
+//    zero," not "nothing measured."
+//  - growth specifically uses cividis() instead — a direct LUT lookup
+//    over the value's own clamped [-1,1] range, no BG-fade/gray-midpoint
+//    indirection — per this mode's own explicit request (see
+//    colorizeGrowth()'s own comment for why [-1,1] rather than [0,1]).
+//
+// Also includes the "repulsion" background mode's own present shader —
+// same full-screen-quad vertex shader, a separate fragment entry point
+// sampling MpmCore's own r32float density texture directly via
+// textureLoad (unfilterable by default, same reasoning
+// core/repulsion.wgsl's own applyRepulsion pass already documents),
+// mirroring mls-mpm/src/gpu/repulsion.wgsl's own repulsionFieldFragment.
+
+const GRID_N: u32 = __GRID_N__u;
+const NODES: u32 = GRID_N + 1u;
+
+const CH_MASS: u32 = 2u; // must match core/p2g.wgsl's own channel layout
+const SCALE: f32 = 65536.0; // must match core/p2g.wgsl's own fixed-point SCALE
+
+const MODE_NONE: u32 = 0u;
+const MODE_DENSITY: u32 = 1u;
+const MODE_SPEED: u32 = 2u;
+const MODE_DEFORMATION: u32 = 3u;
+const MODE_PRESSURE: u32 = 4u;
+const MODE_SHEAR: u32 = 5u;
+
+// Same background as this project's own particle-render clear color (see
+// render.wgsl) — kept identical so an "empty" cell under any field mode
+// reads the same as the canvas's own clear, same reasoning mls-mpm's own
+// field.wgsl gives for matching its clear color exactly.
+const BG: vec3<f32> = vec3<f32>(0.02, 0.02, 0.02);
+
+// Starting-guess scale constants (not derived from any actual data,
+// same "not tuned yet" caveat this project's own training constants
+// carry elsewhere) — a cell at or above this value saturates to the
+// mode's own full color. DEFORMATION_MAX/PRESSURE_MAX/SHEAR_MAX mirror
+// mls-mpm/src/gpu/field.wgsl's own values exactly ("implemented in the
+// same way," per this feature's own ask) — see that file's own comments
+// for the empirical reasoning behind each (DEFORMATION_MAX in
+// particular is deliberately far below the theoretical |J-1| extreme;
+// ordinary manipulation never reaches it).
+const DENSITY_MAX: f32 = 10.0;
+const SPEED_MAX: f32 = 4.0;
+const DEFORMATION_MAX: f32 = 0.15;
+const SHEAR_MAX: f32 = 1.0;
+const PRESSURE_MAX: f32 = 4000.0;
+const PRESSURE_SCALE: f32 = 2.0; // must match fieldDiagnostics.wgsl's own PRESSURE_SCALE
+
+// Below this, a node's own mass-weighted average is meaningless (no
+// particle actually contributed there) — same MIN_MASS guard mls-mpm's
+// own field.wgsl applies before dividing.
+const MIN_MASS: f32 = 1e-6;
+
+// --- batlow: Fabio Crameri's scientific colormap (scientificcolour
+// maps.net), chosen for single-scalar fields per this project's own
+// dataviz convention — perceptually uniform and colorblind-safe, unlike
+// this file's original single-hue BG->color ramps. This 32-stop LUT was
+// generated once, offline, via:
+//   from cmcrameri import cm; import numpy as np
+//   cm.batlow(np.linspace(0, 1, 32))[:, :3]
+// then pasted in below — not computed at runtime (no Python/matplotlib
+// dependency in this WebGPU project), and not the full-resolution
+// published LUT (a 32-stop table linearly interpolated in-shader is
+// visually indistinguishable from the real thing at this project's own
+// display resolution, same tradeoff a texture-based LUT would make at a
+// coarser size).
+const BATLOW_N: u32 = 32u;
+const BATLOW: array<vec3<f32>, 32> = array<vec3<f32>, 32>(
+  vec3<f32>(0.0052, 0.0982, 0.3498),
+  vec3<f32>(0.0321, 0.1468, 0.3582),
+  vec3<f32>(0.0494, 0.1911, 0.3658),
+  vec3<f32>(0.0592, 0.2298, 0.3723),
+  vec3<f32>(0.0679, 0.2671, 0.3782),
+  vec3<f32>(0.0771, 0.2970, 0.3824),
+  vec3<f32>(0.0903, 0.3257, 0.3849),
+  vec3<f32>(0.1097, 0.3531, 0.3842),
+  vec3<f32>(0.1413, 0.3812, 0.3771),
+  vec3<f32>(0.1778, 0.4030, 0.3638),
+  vec3<f32>(0.2201, 0.4219, 0.3443),
+  vec3<f32>(0.2662, 0.4386, 0.3201),
+  vec3<f32>(0.3208, 0.4560, 0.2898),
+  vec3<f32>(0.3709, 0.4711, 0.2621),
+  vec3<f32>(0.4225, 0.4861, 0.2345),
+  vec3<f32>(0.4762, 0.5013, 0.2081),
+  vec3<f32>(0.5402, 0.5186, 0.1831),
+  vec3<f32>(0.6005, 0.5336, 0.1706),
+  vec3<f32>(0.6627, 0.5475, 0.1740),
+  vec3<f32>(0.7243, 0.5596, 0.1954),
+  vec3<f32>(0.7906, 0.5714, 0.2362),
+  vec3<f32>(0.8457, 0.5817, 0.2826),
+  vec3<f32>(0.8958, 0.5938, 0.3379),
+  vec3<f32>(0.9378, 0.6096, 0.4023),
+  vec3<f32>(0.9708, 0.6324, 0.4833),
+  vec3<f32>(0.9864, 0.6555, 0.5571),
+  vec3<f32>(0.9923, 0.6790, 0.6283),
+  vec3<f32>(0.9930, 0.7020, 0.6958),
+  vec3<f32>(0.9914, 0.7276, 0.7703),
+  vec3<f32>(0.9891, 0.7510, 0.8380),
+  vec3<f32>(0.9860, 0.7753, 0.9084),
+  vec3<f32>(0.9814, 0.8004, 0.9813),
+);
+
+fn batlow(t: f32) -> vec3<f32> {
+  let c = clamp(t, 0.0, 1.0) * f32(BATLOW_N - 1u);
+  let i0 = u32(floor(c));
+  let i1 = min(i0 + 1u, BATLOW_N - 1u);
+  return mix(BATLOW[i0], BATLOW[i1], fract(c));
+}
+
+// --- cividis: matplotlib's own scientific colormap, used specifically
+// for the "growth" background mode (this project's own growth substrate
+// — the LAST chemical channel, see colorizeGrowth()'s own comment),
+// per this feature's own explicit request (was viridis(); swapped for
+// cividis() — same LUT-lookup technique, still perceptually-uniform,
+// additionally CVD-friendly by design, per that same request). Same
+// 32-stop-LUT-pasted-in technique BATLOW above already uses, generated
+// once, offline, via:
+//   import matplotlib.cm as cm; import numpy as np
+//   cm.cividis(np.linspace(0, 1, 32))[:, :3]
+const CIVIDIS_N: u32 = 32u;
+const CIVIDIS: array<vec3<f32>, 32> = array<vec3<f32>, 32>(
+  vec3<f32>(0.0000, 0.1351, 0.3048),
+  vec3<f32>(0.0000, 0.1579, 0.3575),
+  vec3<f32>(0.0000, 0.1788, 0.4148),
+  vec3<f32>(0.0179, 0.1985, 0.4412),
+  vec3<f32>(0.1107, 0.2232, 0.4351),
+  vec3<f32>(0.1597, 0.2452, 0.4295),
+  vec3<f32>(0.1998, 0.2671, 0.4255),
+  vec3<f32>(0.2351, 0.2888, 0.4233),
+  vec3<f32>(0.2716, 0.3133, 0.4228),
+  vec3<f32>(0.3022, 0.3350, 0.4242),
+  vec3<f32>(0.3315, 0.3567, 0.4271),
+  vec3<f32>(0.3599, 0.3786, 0.4315),
+  vec3<f32>(0.3912, 0.4035, 0.4381),
+  vec3<f32>(0.4184, 0.4257, 0.4456),
+  vec3<f32>(0.4451, 0.4482, 0.4549),
+  vec3<f32>(0.4715, 0.4710, 0.4664),
+  vec3<f32>(0.5032, 0.4969, 0.4723),
+  vec3<f32>(0.5328, 0.5201, 0.4724),
+  vec3<f32>(0.5630, 0.5437, 0.4705),
+  vec3<f32>(0.5936, 0.5677, 0.4664),
+  vec3<f32>(0.6286, 0.5951, 0.4596),
+  vec3<f32>(0.6601, 0.6199, 0.4515),
+  vec3<f32>(0.6920, 0.6451, 0.4415),
+  vec3<f32>(0.7243, 0.6709, 0.4292),
+  vec3<f32>(0.7611, 0.7004, 0.4126),
+  vec3<f32>(0.7943, 0.7272, 0.3950),
+  vec3<f32>(0.8280, 0.7546, 0.3743),
+  vec3<f32>(0.8621, 0.7825, 0.3500),
+  vec3<f32>(0.9012, 0.8146, 0.3170),
+  vec3<f32>(0.9367, 0.8438, 0.2809),
+  vec3<f32>(0.9731, 0.8736, 0.2347),
+  vec3<f32>(0.9957, 0.9093, 0.2178),
+);
+
+fn cividis(t: f32) -> vec3<f32> {
+  let c = clamp(t, 0.0, 1.0) * f32(CIVIDIS_N - 1u);
+  let i0 = u32(floor(c));
+  let i1 = min(i0 + 1u, CIVIDIS_N - 1u);
+  return mix(CIVIDIS[i0], CIVIDIS[i1], fract(c));
+}
+
+// Live-adjustable "accent" — a [0,2] exponential contrast curve applied
+// to EVERY background mode's own normalized value before color-mapping
+// (accentedMagnitude()/accentedSigned() below, which scalarColor()/
+// graypoint() and the growth/repulsion modes' own standalone code all
+// funnel through — see each call site for exactly how), per this
+// project's own explicit request: a single shared knob to make a mode's
+// own effect "more visible" without touching that mode's own MAX/scale
+// constant. accent=0 leaves every mode exactly as it already rendered
+// (identity curve); increasing toward 2 exaggerates faint signal
+// rapidly (see accentedMagnitude()'s own comment for the exact curve).
+// PhysicsPanel-style live uniform, not compile-time — plain buffer
+// write, no pipeline rebuild (gpu/render.ts's own setAccent()).
+@group(0) @binding(13) var<uniform> accent: f32;
+
+// Exponential accent curve for an UNSIGNED magnitude already normalized
+// to [0,1] (density/speed/shear via scalarColor() below, repulsion's
+// own standalone t) — accent=0 -> exponent 1.0 (exp(-0), identity);
+// increasing accent shrinks the exponent toward exp(-2)~=0.135, and
+// pow(t, exponent<1) pushes ANY nonzero t rapidly up toward 1 (a value
+// that would otherwise read as a faint tint saturates well before
+// accent reaches its own max) — exactly the "accentuates the effects
+// exponentially so they're more visible" behavior this slider was
+// requested for.
+fn accentedMagnitude(t: f32) -> f32 {
+  return pow(clamp(t, 0.0, 1.0), exp(-accent));
+}
+
+// Same curve as accentedMagnitude() above, applied SYMMETRICALLY around
+// 0 for a SIGNED value already normalized to [-1,1] (graypoint() below,
+// growth's own standalone t) — sign() preserves which side of 0 the
+// value was on; only its own magnitude gets accentuated, so 0 always
+// stays exactly 0 regardless of accent (consistent with graypoint()'s
+// own "0 is a real, measured value" convention — see this file's own
+// module docstring).
+fn accentedSigned(t: f32) -> f32 {
+  let c = clamp(t, -1.0, 1.0);
+  return sign(c) * pow(abs(c), exp(-accent));
+}
+
+// Single, non-negative magnitude fields: batlow, faded up from BG at
+// t=0 the same shape this file's original ramps used (mix() at the
+// SAME t that indexes into batlow, not just at t=0/1, so a barely-above-
+// zero cell reads as a faint tint rather than snapping straight to
+// batlow's own (fully-saturated-looking) t=0 color). `t` goes through
+// accentedMagnitude() first — see that function's own comment.
+fn scalarColor(t: f32) -> vec3<f32> {
+  let c = accentedMagnitude(t);
+  return mix(BG, batlow(c), c);
+}
+
+// Signed fields: 0 -> exact 0.5 gray, growing toward black (negative)
+// or white (positive) — see this file's own module docstring for why
+// this differs from BG-fade-out (0.5 gray means "measured, genuinely
+// zero," distinct from "nothing measured here"). `value/scale` goes
+// through accentedSigned() first — see that function's own comment.
+fn graypoint(value: f32, scale: f32) -> f32 {
+  let s = max(scale, 1e-6);
+  return accentedSigned(value / s) * 0.5 + 0.5;
+}
+
+// read_write, not read — WGSL requires atomic<T> storage variables to be
+// read_write regardless of whether a given entry point ever writes
+// through them (this pass never does; same "declared permissive, used
+// narrowly" convention core/repulsion.wgsl's own particlePos binding
+// already documents).
+@group(0) @binding(0) var<storage, read_write> gridAccum: array<atomic<i32>>;
+@group(0) @binding(1) var<storage, read> gridVel: array<vec2<f32>>;
+@group(0) @binding(2) var<uniform> mode: u32;
+@group(0) @binding(3) var outputTex: texture_storage_2d<rgba8unorm, write>;
+// fieldDiagnostics.wgsl's own accumulator (CH_J/CH_SHEAR/CH_PRESSURE/
+// CH_MASS — see that file's own header) — plain (non-atomic) read here
+// is legal even though it was written via atomics in that OTHER shader
+// module: atomicity is a per-shader-module access declaration on a
+// GPUBuffer resource, not a property of the buffer itself, and the pass
+// boundary between fieldDiagnostics.wgsl's own scatter pass and this
+// one already provides the memory-visibility guarantee.
+@group(0) @binding(7) var<storage, read> diagnostics: array<i32>;
+
+@compute @workgroup_size(16, 16)
+fn colorizeField(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  let j = gid.y;
+  if (i >= NODES || j >= NODES) { return; }
+  let idx = i * NODES + j;
+  let diagBase = idx * 4u;
+
+  var color = BG;
+  if (mode == MODE_DENSITY) {
+    let mass = f32(atomicLoad(&gridAccum[idx * 3u + CH_MASS])) / SCALE;
+    color = scalarColor(mass / DENSITY_MAX);
+  } else if (mode == MODE_SPEED) {
+    let speed = length(gridVel[idx]);
+    color = scalarColor(speed / SPEED_MAX);
+  } else if (mode == MODE_DEFORMATION || mode == MODE_PRESSURE || mode == MODE_SHEAR) {
+    let mass = f32(diagnostics[diagBase + 3u]) / SCALE;
+    if (mass > MIN_MASS) {
+      if (mode == MODE_DEFORMATION) {
+        let avgJ = (f32(diagnostics[diagBase + 0u]) / SCALE) / mass;
+        let g = graypoint(avgJ - 1.0, DEFORMATION_MAX);
+        color = vec3<f32>(g, g, g);
+      } else if (mode == MODE_PRESSURE) {
+        let avgPressure = (f32(diagnostics[diagBase + 2u]) / PRESSURE_SCALE) / mass;
+        let g = graypoint(avgPressure, PRESSURE_MAX);
+        color = vec3<f32>(g, g, g);
+      } else {
+        let avgShear = (f32(diagnostics[diagBase + 1u]) / SCALE) / mass;
+        color = scalarColor(avgShear / SHEAR_MAX);
+      }
+    }
+  }
+
+  textureStore(outputTex, vec2<i32>(i32(i), i32(j)), vec4<f32>(color, 1.0));
+}
+
+// --- Full-screen quad, shared by every present path below ---
+
+const QUAD_POSITIONS = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+  vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
+);
+
+struct QuadOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn fieldVertex(@builtin(vertex_index) vertexIndex: u32) -> QuadOut {
+  let p = QUAD_POSITIONS[vertexIndex];
+  var out: QuadOut;
+  out.position = vec4<f32>(p, 0.0, 1.0);
+  out.uv = (p + vec2<f32>(1.0)) * 0.5;
+  return out;
+}
+
+// Binding numbers here (and for repulsionFragment/colorizeSubstrate/
+// substrateFragment below) deliberately don't restart at 0 — every
+// @group/@binding declaration in a WGSL module shares one namespace
+// regardless of which entry point uses it (there's no per-entry-point
+// scoping the way there is for pipeline *layouts*, which layout:"auto"
+// does derive per entry point via reachability), so colliding with
+// colorizeField's own bindings 0-3/7 above would be a compile error even
+// though no single pipeline ever touches both sets at once.
+@group(0) @binding(4) var fieldTex: texture_2d<f32>;
+@group(0) @binding(5) var fieldSampler: sampler;
+
+@fragment
+fn fieldFragment(in: QuadOut) -> @location(0) vec4<f32> {
+  return textureSample(fieldTex, fieldSampler, in.uv);
+}
+
+// --- Repulsion background: same quad, samples MpmCore's own r32float
+// density texture directly (textureLoad — unfilterable by default) ---
+
+const REPULSION_FIELD_N: u32 = __REPULSION_FIELD_N__u;
+const REPULSION_DISPLAY_MAX: f32 = 3.0;
+
+@group(0) @binding(6) var repulsionTex: texture_2d<f32>;
+
+@fragment
+fn repulsionFragment(in: QuadOut) -> @location(0) vec4<f32> {
+  let texel = clamp(vec2<i32>(in.uv * f32(REPULSION_FIELD_N)), vec2<i32>(0), vec2<i32>(i32(REPULSION_FIELD_N) - 1));
+  let density = textureLoad(repulsionTex, texel, 0).r;
+  let t = accentedMagnitude(density / REPULSION_DISPLAY_MAX);
+  let color = mix(BG, vec3<f32>(1.0, 0.75, 0.35), t);
+  return vec4<f32>(color, 1.0);
+}
+
+// --- Substrate background: environment.wgsl's own chemical field
+// (gpu/environment.ts's ping-pong buffers), first 3 channels -> RGB via
+// graypoint() per channel independently — the exact technique
+// envnca/frontend/src/gpu/colorize.wgsl's own MODE_SUBSTRATE uses
+// (`clamp(v,-s,s)/(2*s)+0.5` per channel), just with a fixed scale
+// constant here rather than that project's live EMA-tracked one (this
+// project doesn't otherwise track a running per-channel magnitude
+// anywhere — a fixed starting-guess ceiling, same convention as
+// DENSITY_MAX/SPEED_MAX above, not a behavior regression from anything
+// this project already had). A genuinely negative channel darkens
+// toward black, positive lightens toward white, 0 is exact 0.5 gray —
+// per-channel, so with 3 differing channels the result is visibly
+// colored despite each channel individually being graypoint-mapped, not
+// literal grayscale (contrast MODE_DEFORMATION/MODE_PRESSURE above,
+// where the SAME one value feeds R=G=B, so those genuinely render
+// grayscale).
+//
+// Own output texture (SUBSTRATE_WIDTH x SUBSTRATE_HEIGHT — the chemical
+// field's own resolution, unrelated to GRID_N+1) and own compute pass,
+// not folded into colorizeField above: environment.ts's grid is a
+// different size than MpmCore's, and (unlike density/speed/deformation/
+// pressure/shear, which all read from a FIXED buffer object) which
+// buffer is "current" flips every macro step (see environment.ts's own
+// parity) — render.ts picks the right one of two precomputed bind
+// groups each frame, mirroring environment.ts's own parity-indexed
+// bind-group-array convention exactly.
+const SUBSTRATE_WIDTH: u32 = __SUBSTRATE_WIDTH__u;
+const SUBSTRATE_HEIGHT: u32 = __SUBSTRATE_HEIGHT__u;
+const SUBSTRATE_MAX: f32 = 2.0;
+
+fn substrateIndex(c: u32, y: u32, x: u32) -> u32 {
+  return c * SUBSTRATE_HEIGHT * SUBSTRATE_WIDTH + y * SUBSTRATE_WIDTH + x;
+}
+
+@group(0) @binding(8) var<storage, read> substrateGrid: array<f32>;
+@group(0) @binding(9) var substrateOutputTex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(16, 16)
+fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x;
+  let y = gid.y;
+  if (x >= SUBSTRATE_WIDTH || y >= SUBSTRATE_HEIGHT) { return; }
+
+  let r = substrateGrid[substrateIndex(0u, y, x)];
+  let g = substrateGrid[substrateIndex(1u, y, x)];
+  let b = substrateGrid[substrateIndex(2u, y, x)];
+  let color = vec3<f32>(graypoint(r, SUBSTRATE_MAX), graypoint(g, SUBSTRATE_MAX), graypoint(b, SUBSTRATE_MAX));
+
+  textureStore(substrateOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(color, 1.0));
+}
+
+@group(0) @binding(10) var substrateTex: texture_2d<f32>;
+
+@fragment
+fn substrateFragment(in: QuadOut) -> @location(0) vec4<f32> {
+  return textureSample(substrateTex, fieldSampler, in.uv);
+}
+
+// --- Growth background: the LAST chemical channel only (index
+// CHANNELS-1) — this project's own growth probability substrate, see
+// core/agents.wgsl's own module docstring for why that specific channel
+// doubles as a particle's own split probability, clamped to [0,1], each
+// macro step — mapped through cividis() over [-1,1] (NOT [0,1]: the
+// channel itself isn't bounded to [0,1] the way the split probability
+// derived from it is — see simulation_settings.py's own MAX_ENV_WRITE —
+// so this deliberately shows the full clamped range a policy could
+// actually be depositing, not just the sub-range that maps to "will
+// split"). Reuses colorizeSubstrate's own input buffer (`substrateGrid`,
+// binding 8 — same environment.ts ping-pong buffer, same per-macro-step
+// parity indexing — see that pass's own module docstring) rather than a
+// new binding, since it's the exact same source data; own output
+// texture/present pipeline (bindings 11/12) since this is a genuinely
+// different image from substrate's own 3-channel RGB composite.
+const GROWTH_CHANNEL: u32 = __CHANNELS__u - 1u;
+
+@group(0) @binding(11) var growthOutputTex: texture_storage_2d<rgba8unorm, write>;
+
+@compute @workgroup_size(16, 16)
+fn colorizeGrowth(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x;
+  let y = gid.y;
+  if (x >= SUBSTRATE_WIDTH || y >= SUBSTRATE_HEIGHT) { return; }
+
+  let v = substrateGrid[substrateIndex(GROWTH_CHANNEL, y, x)];
+  let t = (accentedSigned(v) + 1.0) * 0.5;
+  textureStore(growthOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(cividis(t), 1.0));
+}
+
+@group(0) @binding(12) var growthTex: texture_2d<f32>;
+
+@fragment
+fn growthFragment(in: QuadOut) -> @location(0) vec4<f32> {
+  return textureSample(growthTex, fieldSampler, in.uv);
+}

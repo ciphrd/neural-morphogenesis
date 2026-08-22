@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MLS-MPM</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="canvas" class="gpu-canvas"></canvas>
+      <div id="banner" class="banner hidden"></div>
+      <div id="controls" class="controls">
+        <div class="controls-title">MLS-MPM</div>
+        <!-- Buttons populated from tabs/index.ts's own TABS list by
+             main.ts, not hardcoded here — see that module for what each
+             tab actually scopes (which worlds its World dropdown offers). -->
+        <div id="tabBar" class="tab-bar"></div>
+        <label class="row">
+          <span>World</span>
+          <!-- Options populated from worlds/index.ts's own WORLDS list by
+               main.ts, not hardcoded here — that list is the single
+               source of truth for what worlds exist. -->
+          <select id="worldSelect" class="select"></select>
+        </label>
+        <label class="row">
+          <span>Tool</span>
+          <!-- Same pattern — options come from tools/types.ts's TOOLS. -->
+          <select id="toolSelect" class="select"></select>
+        </label>
+        <label class="row">
+          <span>Field</span>
+          <select id="fieldMode" class="select">
+            <option value="none">Material (default)</option>
+            <option value="density">Density</option>
+            <option value="speed">Speed</option>
+            <option value="deformation">Deformation (J)</option>
+            <option value="pressure">Pressure</option>
+            <option value="shear">Shear / distortion</option>
+            <option value="repulsion">Distance field (repulsion)</option>
+          </select>
+        </label>
+        <label class="row">
+          <span>Substeps/frame</span>
+          <!-- max/value here are placeholders — main.ts overwrites both
+               from gpu/mpm.ts's own DEFAULT_SUBSTEPS on load, since that
+               value depends on GRID_N (see DT's own comment in mpm.ts).
+               max is set generously past that default so the slider has
+               headroom either direction. -->
+          <input id="substeps" type="range" min="1" max="128" step="1" value="10" />
+          <span id="substepsValue" class="value">10</span>
+        </label>
+        <label class="row">
+          <span>Particle size</span>
+          <!-- Device-pixel radius of each rendered particle square — see
+               gpu/render.ts's own setPointRadiusPx()/DEFAULT_POINT_RADIUS_PX.
+               value here is a placeholder; main.ts overwrites it from
+               that same default (or a world's own particleSize
+               override — see worlds/types.ts's WorldDefaults) on load. -->
+          <input id="particleSize" type="range" min="1" max="16" step="1" value="1" />
+          <span id="particleSizeValue" class="value">1px</span>
+        </label>
+        <label class="row">
+          <span>Gravity</span>
+          <!-- value here is a placeholder — main.ts overwrites it from
+               gpu/mpm.ts's own DEFAULT_GRAVITY (0) on load, same as
+               every other slider with a world-overridable default. -->
+          <input id="gravity" type="range" min="0" max="400" step="10" value="0" />
+          <span id="gravityValue" class="value">0</span>
+        </label>
+        <!-- Expressed as %/frame lost, not gridUpdate.wgsl's own raw
+             per-substep multiplier — see gpu/mpm.ts's perSubstepDamping()
+             for why (a per-substep value like 0.999 means something
+             different depending on the current Substeps setting; a
+             per-frame percentage doesn't). value/max here are
+             placeholders — main.ts overwrites value from gpu/mpm.ts's own
+             DEFAULT_DAMPING. NOT a free stability improvement at any
+             setting: raising it calms at-rest jitter but measurably
+             destabilizes active dragging (a widened velocity mismatch
+             right at the drag boundary — see gridUpdate.wgsl's own
+             comment on the mechanism), confirmed live. Start low and
+             raise it gradually while watching how a body behaves both at
+             rest AND while being pulled, not just one or the other. -->
+        <label class="row">
+          <span>Damping</span>
+          <input id="damping" type="range" min="0" max="0.5" step="0.005" value="0.062" />
+          <span id="dampingValue" class="value">6.2%</span>
+        </label>
+        <div class="controls-subtitle">Repulsion</div>
+        <!-- gpu/repulsion.wgsl's whole mechanism: each particle splats a
+             Gaussian blob into a single-channel density texture (this
+             control picks that texture's own [res, res] resolution,
+             independent of the MPM grid's own GRID_N — see gpu/mpm.ts's
+             own FIELD_RESOLUTIONS comment for why), then gets pushed
+             downhill on that field's own gradient — a cheap O(particles)
+             alternative to genuine pairwise neighbor checks. Options
+             populated from gpu/mpm.ts's own FIELD_RESOLUTIONS by main.ts,
+             not hardcoded here (single source of truth, same pattern as
+             worldSelect/toolSelect above). Changing this rebuilds the
+             feature's own GPU resources (a real, if infrequent, cost —
+             see MpmSimulation.setFieldResolution()'s own docstring),
+             unlike every other control on this page which are cheap live
+             buffer writes. -->
+        <label class="row">
+          <span>Field resolution</span>
+          <select id="repulsionResolution" class="select"></select>
+        </label>
+        <!-- value/max here are placeholders — main.ts overwrites value
+             from gpu/mpm.ts's own DEFAULT_REPULSION_STRENGTH. 0 = off
+             (particles never push apart). NOT a free "push harder" knob
+             at any value: repulsion.wgsl's own applyRepulsion writes
+             directly to particle position (not just velocity, see that
+             function's own comment for why), which has no decay
+             mechanism the way velocity does — confirmed live that even
+             values well below this range's own max can fully disperse an
+             already-settled world given enough time, just more slowly.
+             The narrow 0-0.15 range and fine step here are deliberate,
+             not a placeholder guess — start low. -->
+        <label class="row">
+          <span>Repulsion strength</span>
+          <input id="repulsionStrength" type="range" min="0" max="0.15" step="0.005" value="0.1" />
+          <span id="repulsionStrengthValue" class="value">0.100</span>
+        </label>
+        <!-- Domain-space Gaussian sigma ([0,1] units, main.ts overwrites
+             value from gpu/mpm.ts's own DEFAULT_SPLAT_RADIUS) — how far
+             each particle's own "personal space" blob spreads before
+             repulsion.wgsl's own MAX_KERNEL_RADIUS_TEXELS clamp truncates
+             it (see that const's own comment: a large radius at a high
+             Field resolution truncates before the Gaussian's natural
+             3-sigma falloff, a deliberate bounded-cost tradeoff, not a
+             bug). -->
+        <label class="row">
+          <span>Splat radius</span>
+          <input id="splatRadius" type="range" min="0" max="0.01" step="0.001" value="0.006" />
+          <span id="splatRadiusValue" class="value">0.006</span>
+        </label>
+        <div class="controls-subtitle">Attraction</div>
+        <!-- gpu/attract.wgsl's own "Attract to Point" tool (tools/types.ts)
+             — a 2-click gesture (pick a particle, then pick where it
+             should drift to). This is that pull's own rate constant —
+             see gpu/mpm.ts's own DEFAULT_ATTRACT_STRENGTH docstring for
+             why no separate "damping" control is needed here (the
+             exponential-approach shape already settles it on its own).
+             max=100 gives headroom above the default for stiffer/denser
+             worlds; value here is a placeholder — main.ts overwrites it
+             from that same default. -->
+        <label class="row">
+          <span>Attraction strength</span>
+          <input id="attractStrength" type="range" min="0" max="100" step="1" value="30" />
+          <span id="attractStrengthValue" class="value">30</span>
+        </label>
+        <div class="controls-subtitle">Material</div>
+        <label class="row">
+          <span>Stiffness</span>
+          <input id="stiffness" type="range" min="1000" max="20000" step="500" value="10000" />
+          <span id="stiffnessValue" class="value">10000</span>
+        </label>
+        <label class="row">
+          <span>Poisson ratio</span>
+          <input id="poisson" type="range" min="0" max="0.45" step="0.01" value="0.2" />
+          <span id="poissonValue" class="value">0.20</span>
+        </label>
+        <!-- max=4 (default 3) is a real ceiling, not a round-number
+             guess: e = exp(hardening*(1-Jp)) grows fast, and Jp can
+             clamp down to 0.6 under real compression. An earlier,
+             looser range (0-11, matching roughly the reference's own
+             value of 10) let a subtler failure mode through: at this
+             project's own particle density (several times the
+             reference's own — see worlds/blocks.ts), a settled, dead-calm pile
+             would periodically have an isolated particle pop with a
+             sudden burst of speed, seemingly out of nowhere — a real
+             numerical artifact (confirmed via a long CPU-side port of
+             this exact algorithm run for thousands of frames), not a
+             rendering glitch, and not fixed by the position-clamp/
+             damping safety net alone (see g2p.wgsl/gridUpdate.wgsl's
+             own comments on those — they stop a pop from ejecting a
+             particle outside the domain, they don't stop the pop
+             itself). hardening=3 stayed clean through the same test;
+             5 already popped — so this range stops well short of that
+             threshold rather than inviting it back in. -->
+        <label class="row">
+          <span>Hardening</span>
+          <input id="hardening" type="range" min="0" max="4" step="0.25" value="3" />
+          <span id="hardeningValue" class="value">3</span>
+        </label>
+        <!-- 0 = the reference's own snow-tight plasticity clamp
+             (deformation beyond ~1% bakes in permanently); 1 = wide open
+             (up to 2x stretch/0.5x compression before that clamp
+             engages at all) — see gpu/mpm.ts's yieldBounds() for the
+             exact mapping. This is THE knob behind worlds/organism.ts's
+             whole premise ("deforms, then springs back") — a material
+             stays fully elastic (corotated stress pulling it back
+             toward rest) up to whichever bound this sets, and only
+             anything more extreme than that gets treated as permanent. -->
+        <label class="row">
+          <span>Elasticity</span>
+          <input id="elasticity" type="range" min="0" max="1" step="0.05" value="0" />
+          <span id="elasticityValue" class="value">0.00</span>
+        </label>
+        <div class="row">
+          <button id="pauseBtn">⏸ Pause</button>
+          <button id="resetBtn">↺ Reset</button>
+        </div>
+        <p id="toolHint" class="hint"></p>
+        <!-- Live readout of MpmSimulation.activeCount / MAX_PARTICLES,
+             updated every rendered frame by main.ts — most relevant to
+             the "Add Particles" tool but kept visible regardless of
+             which tool/world is active. -->
+        <p id="particleCount" class="hint"></p>
+        <p class="hint">
+          88-line MLS-MPM (<a href="https://github.com/yuanming-hu/taichi_mpm/blob/master/mls-mpm88-explained.cpp" target="_blank" rel="noreferrer">Hu et al.</a>), ported to a WebGPU compute pipeline.
+        </p>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

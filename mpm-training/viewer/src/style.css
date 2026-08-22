@@ -1,0 +1,704 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #e8e8e8;
+  /* Neutral black (R=G=B) — every surface color below is neutral for the
+     same reason; only the deliberate accent colors (selection blue, live
+     green) carry any hue. Same palette envnca/frontend/src/style.css
+     uses. */
+  background: #000000;
+}
+
+.controls {
+  width: 280px;
+  flex-shrink: 0;
+  padding: 20px;
+  background: #0d0d0d;
+  border-right: 1px solid #2a2a2a;
+  overflow-y: auto;
+}
+
+.controls-right {
+  width: 280px;
+  flex-shrink: 0;
+  padding: 20px;
+  background: #0d0d0d;
+  overflow-y: auto;
+}
+
+.controls h1 {
+  font-size: 20px;
+  margin: 0 0 4px;
+}
+
+.controls h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #9a9a9a;
+  margin: 0 0 10px;
+}
+
+.controls section {
+  margin-bottom: 24px;
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+
+.hint {
+  font-size: 13px;
+  color: #9a9a9a;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.select {
+  flex: 1;
+  padding: 4px 8px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #e8e8e8;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.snapshot-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.snapshot-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Grown (raw) sits below the target/agents comparison pair, spanning
+   both columns — see TrainingView.tsx's own comment on why that pair
+   comes first. */
+.snapshot-item-wide {
+  grid-column: 1 / -1;
+}
+
+.snapshot-image {
+  width: 100%;
+  aspect-ratio: 1;
+  background: #000000;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  /* the grown/target/agents images are small point-cloud or raster
+     renders (see debug_images.py) — scaling them up with the browser's
+     default smoothing would blur individual particle dots/raster
+     pixels. */
+  image-rendering: pixelated;
+}
+
+.snapshot-label {
+  font-size: 11px;
+  color: #9a9a9a;
+  text-align: center;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.checkbox-row + .hint {
+  margin-top: 8px;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+.slider-row input[type="range"] {
+  flex: 1;
+}
+
+.slider-value {
+  min-width: 34px;
+  text-align: right;
+  color: #9a9a9a;
+  font-variant-numeric: tabular-nums;
+}
+
+.nn-panel .nn-block {
+  margin-top: 16px;
+}
+
+.nn-panel .nn-block:first-of-type {
+  margin-top: 0;
+}
+
+.nn-block h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #9a9a9a;
+  margin: 0 0 8px;
+}
+
+.nn-group {
+  margin-bottom: 10px;
+}
+
+.nn-group-label {
+  display: block;
+  font-size: 10px;
+  color: #6a6a6a;
+  margin-bottom: 3px;
+}
+
+.nn-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+
+.nn-bar-label {
+  width: 42px;
+  flex-shrink: 0;
+  color: #9a9a9a;
+}
+
+.nn-bar-track {
+  flex: 1;
+  position: relative;
+  height: 10px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.nn-bar-zero {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #3a3a3a;
+}
+
+.nn-bar-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+}
+
+.nn-bar-value {
+  width: 48px;
+  flex-shrink: 0;
+  text-align: right;
+  color: #9a9a9a;
+  font-variant-numeric: tabular-nums;
+}
+
+.nn-hidden-grid {
+  display: block;
+  width: 100%;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+}
+
+.viewport {
+  flex: 1;
+  position: relative;
+}
+
+/* Training view: a full-height column (controls+viewport row on top, a
+   full-width timeline strip docked at the bottom) — the top-level layout
+   for this whole app (App.tsx renders it directly, no sibling tool
+   panel the way envnca's own .app flex row has). */
+.training-layout {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.training-layout h1 {
+  margin-bottom: 1em;
+}
+
+.training-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.training-timeline {
+  flex-shrink: 0;
+  padding: 16px 24px;
+  background: #0d0d0d;
+}
+
+/* --- GridCanvas: the WebGPU viewport --- */
+
+.grid-canvas-container {
+  position: absolute;
+  inset: 0;
+  /* GridCanvas.tsx's own applySquareSize() gives the canvas an explicit
+     square CSS box (fit to whichever of this container's own width/
+     height is smaller) — this is what centers that square within
+     whatever's left over on the wider axis, instead of it sitting
+     pinned to one corner. .webgpu-banner's own position:absolute;inset:0
+     below is unaffected by this — absolutely positioned children ignore
+     a flex parent's alignment and size from this container's own box
+     regardless. */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Matches gpu/render.ts's own WebGPU clearValue ({r:0.02,g:0.02,b:0.02}
+     = rgb(5,5,5)) exactly, NOT plain black — without this, this
+     container inherited body's own pure #000000 all the way up, so any
+     leftover slack around the centered square canvas (whichever axis
+     isn't exactly filled) showed that black butted directly against the
+     canvas's own slightly-lighter clear color, a real, visible seam
+     along the trailing edges where slack lands (reads as a thin gray
+     border, most often on the right/bottom). Matching this container's
+     own background to the canvas's own clear color makes any such gap
+     genuinely invisible, regardless of the exact geometric cause. */
+  background: #050505;
+}
+
+.gpu-canvas {
+  /* Explicit pixel width/height are set by GridCanvas.tsx's own
+     applySquareSize() — no width/height:100% here, which would just
+     stretch it back out to the (often non-square) container again. */
+  display: block;
+  /* A drag gesture routinely strays outside the canvas element itself
+     (see GridCanvas.tsx's own setPointerCapture() comment) — disabling
+     the browser's own touch scroll/zoom gestures here keeps that from
+     fighting a touch-driven drag. */
+  touch-action: none;
+}
+
+/* "Add"/"Move" tools (see render/GridCanvas.tsx's own Tool type) — cursor
+   hints only; the actual interaction is wired via Pointer Events on the
+   canvas itself. */
+.gpu-canvas-tool-add {
+  cursor: crosshair;
+}
+
+.gpu-canvas-tool-move {
+  cursor: grab;
+}
+
+.webgpu-banner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
+  background: #000000;
+}
+
+.webgpu-banner p {
+  margin: 0;
+}
+
+/* --- FitnessChart --- */
+
+.fitness-chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 170px;
+}
+
+.fitness-chart-legend {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: #9a9a9a;
+}
+
+.fitness-chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.fitness-chart-legend-item:hover {
+  color: #e8e8e8;
+}
+
+/* Hidden series' own label — swatch keeps its real color (still says
+   which series clicking this re-enables) but both it and the label text
+   dim, so "on" vs. "off" reads at a glance without needing a second
+   color or restyling the swatch's own shape. */
+.fitness-chart-legend-item.is-hidden {
+  color: #5a5a5a;
+}
+
+.fitness-chart-legend-item.is-hidden .fitness-chart-legend-swatch {
+  opacity: 0.35;
+}
+
+.fitness-chart-legend-swatch {
+  width: 10px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.fitness-chart-legend-spacer {
+  flex: 1;
+}
+
+.fitness-chart-live-button {
+  padding: 4px 10px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #e8e8e8;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fitness-chart-live-button:hover {
+  filter: brightness(1.3);
+}
+
+.playback-buttons {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.playback-button {
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #e8e8e8;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.playback-button:hover {
+  filter: brightness(1.3);
+}
+
+.playback-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Record button while actively capturing — red is the universal
+   "recording" convention, distinct from .fitness-chart-live-indicator's
+   own green "is-live" (a different meaning: connected/streaming, not
+   actively being recorded to a file). */
+.playback-button.is-recording {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.fitness-chart-live-indicator {
+  color: #e8e8e8;
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-chart-live-indicator.is-live {
+  color: #4ade80;
+}
+
+.fitness-chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  cursor: pointer;
+}
+
+.fitness-chart-grid {
+  stroke: #2a2a2a;
+  stroke-width: 1;
+}
+
+.fitness-chart-axis {
+  stroke: #3a3a3a;
+  stroke-width: 1;
+}
+
+.fitness-chart-crosshair {
+  stroke: #9a9a9a;
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.fitness-chart-pointer {
+  stroke: #7dd3fc;
+  stroke-width: 2;
+}
+
+.fitness-chart-pointer.is-live {
+  stroke: #4ade80;
+}
+
+.fitness-chart-pointer-head {
+  fill: #7dd3fc;
+}
+
+.fitness-chart-pointer-head.is-live {
+  fill: #4ade80;
+}
+
+.fitness-chart-dot {
+  stroke: #0d0d0d;
+  stroke-width: 2;
+}
+
+.fitness-chart-tick {
+  fill: #8a8a8a;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Drawn as an SVG overlay inside the chart itself (see FitnessChart.tsx's
+   hover panel) rather than an HTML element below it, so it never changes
+   the page's layout height while hovering. */
+.fitness-chart-tooltip-bg {
+  fill: #121212;
+  stroke: #2a2a2a;
+  stroke-width: 1;
+}
+
+.fitness-chart-tooltip-image-bg {
+  fill: #000000;
+  stroke: #2a2a2a;
+  stroke-width: 1;
+}
+
+.fitness-chart-tooltip-title {
+  fill: #9a9a9a;
+  font-size: 11px;
+}
+
+.fitness-chart-tooltip-value {
+  fill: #e8e8e8;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.fitness-chart-tooltip-label {
+  fill: #9a9a9a;
+  font-size: 11px;
+}
+
+.fitness-chart-tooltip-hint {
+  fill: #6e6e6e;
+  font-size: 10px;
+  font-style: italic;
+}
+
+.run-picker {
+  position: relative;
+}
+
+.run-picker-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: 320px;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background: #0d0d0d;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.run-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 6px;
+  margin-top: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #e8e8e8;
+  text-align: left;
+  cursor: pointer;
+}
+
+.run-picker-item + .run-picker-item {
+  margin-top: 2px;
+}
+
+.run-picker-item:hover {
+  background: #1a1a1a;
+}
+
+.run-picker-item.is-active {
+  border-color: #7dd3fc;
+  background: #1c1c1c;
+}
+
+.run-picker-preview {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: #0a0a0a;
+  object-fit: cover;
+}
+
+.run-picker-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.run-picker-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.run-picker-live {
+  text-transform: none;
+  color: #4ade80;
+}
+
+.run-picker-meta {
+  font-size: 12px;
+  color: #9a9a9a;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- PhysicsPanel: collapsible "Physics" sliders section --- */
+
+.physics-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.physics-panel-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.physics-panel-toggle h2 {
+  margin: 0;
+}
+
+.physics-panel-chevron {
+  display: inline-block;
+  color: #9a9a9a;
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.physics-panel-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.physics-panel-body {
+  margin-top: 10px;
+}
+
+.physics-panel-body .slider-row:first-child {
+  margin-top: 0;
+}
+
+.icon-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #9a9a9a;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) {
+  color: #e8e8e8;
+  border-color: #3a3a3a;
+}
+
+.icon-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Toggled-on state (see TrainingView.tsx's own "Tools" section) — same
+   accent color .run-picker-item.is-active already uses for "this one's
+   selected." */
+.icon-button.is-active {
+  border-color: #7dd3fc;
+  background: #1c2733;
+  color: #7dd3fc;
+}
+
+.icon-button.is-active:hover:not(:disabled) {
+  color: #7dd3fc;
+}
+
+.tool-buttons {
+  display: flex;
+  gap: 8px;
+}

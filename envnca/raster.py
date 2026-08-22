@@ -149,6 +149,76 @@ def rasterize_points(
     return raster
 
 
+def rasterize_points_sum(
+    points: np.ndarray,
+    resolution: int,
+    extent: tuple[float, float, float, float],
+    sigma: float,
+) -> np.ndarray:
+    """Agent-side counterpart to rasterize_points() above, differing in
+    exactly one way: overlapping points combine via *sum*, not max. See
+    training_raster_distance()'s own docstring for why this exists:
+    max-combine's whole point was making the coverage metric insensitive
+    to *how many* points landed near a pixel, so clustering couldn't
+    inflate a cell's score above what a single point there would already
+    give — but that same insensitivity let a genuinely bad failure mode
+    hide in plain sight. A trained policy can collapse every agent onto
+    one point (nothing but each agent's own tiny spawn jitter ever
+    differentiates one from another — see agent_state.py's seed()
+    docstring for that exact risk, named up front), and under max-combine
+    that collapse rasterizes as "one point's worth" of coverage instead
+    of the disaster it actually is — plausible enough to survive as a
+    stable, self-reinforcing local optimum instead of being trained away.
+    Sum-combine restores the missing penalty: N agents piled on one pixel
+    contribute ~N there, and squared-error against the target's own
+    peak-1 reference grows with the pile-up, not just with whether *a*
+    point is nearby. A properly spread candidate (agents each near a
+    distinct target texel, only mild kernel-tail overlap between
+    neighbors) still comes out close to the target's own ~1-per-covered-
+    pixel scale, so this doesn't meaningfully change what a *good*
+    placement scores — only what a collapsed one does.
+
+    No half_size parameter (unlike rasterize_points) and no "force
+    nearest pixel to 1.0" override — both belong to the target's *fixed*
+    footprint semantics, not to a live candidate raster where letting
+    density show through is now the entire point."""
+    raster = np.zeros((resolution, resolution), dtype=np.float64)
+    n = points.shape[0]
+    if n == 0:
+        return raster
+
+    xmin, xmax, ymin, ymax = extent
+    scale_x = (resolution - 1) / (xmax - xmin)
+    scale_y = (resolution - 1) / (ymax - ymin)
+    cx = (points[:, 0] - xmin) * scale_x
+    cy = (points[:, 1] - ymin) * scale_y
+
+    ix = np.round(cx).astype(np.int64)
+    iy = np.round(cy).astype(np.int64)
+
+    radius = max(1, int(np.ceil(3.0 * sigma)))
+    offsets = np.arange(-radius, radius + 1)
+    w = offsets.shape[0]
+
+    row_grid = iy[:, None] + offsets[None, :]
+    col_grid = ix[:, None] + offsets[None, :]
+    dy = row_grid - cy[:, None]
+    dx = col_grid - cx[:, None]
+
+    kernel = np.exp(-(dy[:, :, None] ** 2 + dx[:, None, :] ** 2) / (2.0 * sigma * sigma))
+    row_idx = np.broadcast_to(row_grid[:, :, None], (n, w, w))
+    col_idx = np.broadcast_to(col_grid[:, None, :], (n, w, w))
+
+    valid = (row_idx >= 0) & (row_idx < resolution) & (col_idx >= 0) & (col_idx < resolution)
+    # np.add.at, not plain fancy-index assignment — same reasoning as
+    # rasterize_points()'s np.maximum.at: overlapping points' windows
+    # routinely hit the same pixel, and only .at() correctly accumulates
+    # over repeated indices within one call.
+    np.add.at(raster, (row_idx[valid], col_idx[valid]), kernel[valid])
+
+    return raster
+
+
 def raster_distance(a: np.ndarray, b: np.ndarray) -> float:
     """Mean squared error between two same-shaped [0,1] rasters —
     resolution-independent (doesn't scale with pixel count), unlike a
@@ -286,11 +356,13 @@ def training_raster_distance(
     target_distance_field, instead of a KD-tree Chamfer distance.
 
     The returned score is `coverage + outside_weight * penalty`:
-    coverage (raster_distance) is what pulls agents *into* the shape and
-    spread across its whole footprint (a candidate clustered in one
-    corner of an otherwise-covered target still scores badly here, same
-    "coverage, not concentration" property rasterize_points()'s max-
-    combine gives it); penalty (outside_shape_penalty) is what actually
+    coverage (raster_distance, against a *sum*-combined candidate raster
+    — see rasterize_points_sum()'s own docstring for why agents are
+    rasterized differently than the target) is what pulls agents *into*
+    the shape, spread across its whole footprint, and now also
+    genuinely apart from each other (a candidate clustered in one corner
+    of an otherwise-covered target, or piled onto a single point,
+    scores badly here); penalty (outside_shape_penalty) is what actually
     punishes straying outside it, growing with distance rather than
     MSE's flat per-pixel contribution. The best-scoring rotation is
     chosen against this *combined* score, not coverage alone, so the
@@ -314,7 +386,7 @@ def training_raster_distance(
     for i in range(num_angles):
         theta = 2.0 * np.pi * i / num_angles
         rotated = centered @ _rotation_matrix(theta).T + target_centroid
-        candidate_raster = rasterize_points(rotated, resolution, extent, sigma)
+        candidate_raster = rasterize_points_sum(rotated, resolution, extent, sigma)
         coverage = raster_distance(target_raster, candidate_raster)
         penalty = outside_shape_penalty(rotated, target_distance_field, extent)
         dist = coverage + outside_weight * penalty

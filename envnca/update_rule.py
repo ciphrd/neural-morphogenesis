@@ -6,13 +6,13 @@ trainer/backend/update_rule.py (weights are randomly initialized and
 never optimized here — training is separate, later work), but the
 input/output contract is inverted to match where chemicals now live:
 
-- Input: value (C) + grad_forward (C) + grad_lateral (C) + heading_cos (1)
-  + heading_sin (1) — the agent's own chemical *state* is gone from the
-  input entirely (there isn't one anymore; see agent_state.py), replaced
-  one-for-one by what the environment reads at the agent's position.
-  3*C+2 total: the first 3*C match the old input's shape exactly (just a
-  different C-vector in the first third); the trailing 2 are new (see
-  "Heading" below).
+- Input: value (C) + grad_forward (C) + grad_lateral (C) — the agent's
+  own chemical *state* is gone from the input entirely (there isn't one
+  anymore; see agent_state.py), replaced one-for-one by what the
+  environment reads at the agent's position. 3*C total, matching the old
+  input's shape exactly (just a different C-vector in the first third).
+  Heading is *not* fed in as an input (see "Heading" below for why, and
+  what that trades away/buys back).
 - Output: env_write (C) + local_accel (2) + local_strafe (2). `env_write`
   replaces the old `chemical_delta` + `id_delta` — instead of updating
   its own persistent chemicals/id, the agent decides what to *deposit
@@ -42,24 +42,26 @@ one. Mirrors an equivalent mechanism trainer/backend used to have
 (direct self-motion, bypassing physics entirely) before that project
 replaced it with pure velocity/acceleration.
 
-Heading: `grad_forward`/`grad_lateral` are already rotated into each
-agent's own frame before reaching this module, which is what makes
-sensing rotation-*equivariant* — one learned "gradient forward-left
-means turn left" rule works at any absolute orientation, with nothing
-extra to learn per heading. Feeding heading itself back in as an input
-gives up that property on purpose: the network can now condition its
-behavior on which way it happens to be facing in *world* space (e.g. to
-develop a directional bias, or to break symmetry between two agents that
-sense identically but face different ways), at the cost of no longer
-being guaranteed to generalize across orientations the way a purely
-local-frame policy does. Encoded as (cos, sin) rather than a raw radian
-angle — atan2's ±π wrap would otherwise hand the network a sharp
-discontinuity between two headings that are actually adjacent. These are
-exactly `cos_h`/`sin_h`, already computed in simulation.py's step() to
-do the gradient rotation above — passed straight through, no extra work.
+Heading: `grad_forward`/`grad_lateral` are rotated into each agent's own
+frame before reaching this module (simulation.py's step(), using
+`cos_h`/`sin_h` derived from velocity), which is what makes sensing
+rotation-*equivariant* — one learned "gradient forward-left means turn
+left" rule works at any absolute orientation, with nothing extra to
+learn per heading. Heading itself is *not* fed in as an input (an
+earlier version of this module did, deliberately trading away that
+equivariance to let the network condition behavior on world-frame
+orientation) — with it removed, the policy is purely local-frame again:
+guaranteed to behave identically for two agents that sense the same
+thing regardless of which way they happen to be facing, and with two
+fewer inputs to learn a mapping for. `cos_h`/`sin_h` themselves are
+still computed and used in simulation.py's step() exactly as before
+(sensing rotation in, accel/strafe rotation back out) — only the "also
+hand it to the network as a raw feature" part was removed.
 """
 
 from __future__ import annotations
+
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -72,7 +74,7 @@ class UpdateRule(nn.Module):
     def __init__(self, num_channels: int) -> None:
         super().__init__()
         self.num_channels = num_channels
-        input_dim = 3 * num_channels + 2  # value + grad_forward + grad_lateral + heading(cos,sin)
+        input_dim = 3 * num_channels  # value + grad_forward + grad_lateral
         output_dim = num_channels + MOTION_DIM + STRAFE_DIM
         # tanh hidden activation for the same reason as trainer/backend's
         # UpdateRule: bounds a single dominant unit's contribution to the
@@ -84,26 +86,53 @@ class UpdateRule(nn.Module):
             nn.Linear(HIDDEN_DIM, output_dim),
         )
 
+        # Opt-in diagnostic capture — off by default (zero behavior/
+        # performance change for evolve.py's ES path, which never touches
+        # this), flipped on by train_gd.py/train_server_gd.py to check a
+        # specific hypothesis for why gradient-descent training was
+        # plateauing far above what ES reaches on the same target: env_write
+        # (below) is never squashed, deposited every step into a slowly-
+        # decaying (0.98/step, ~50-step effective memory) grid, then sensed
+        # straight back in as `value` with no normalization anywhere in
+        # forward() — if that accumulates to a large enough magnitude over a
+        # rollout, the first Linear -> Tanh saturates (local gradient -> 0),
+        # and backprop dies right there regardless of learning rate. ES is
+        # immune to this (it only needs the forward behavior to look
+        # adequate, never a nonzero local gradient), which is exactly why
+        # this wouldn't show up as a problem on that path. last_hidden/
+        # last_input are overwritten on every forward() call while this is
+        # on — callers read them once per window/step of interest, not
+        # accumulated history.
+        self.record_diagnostics = False
+        self.last_hidden: Optional[torch.Tensor] = None
+        self.last_input: Optional[torch.Tensor] = None
+
     def forward(
         self,
         value: torch.Tensor,
         grad_forward: torch.Tensor,
         grad_lateral: torch.Tensor,
-        heading_cos: torch.Tensor,
-        heading_sin: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """value/grad_forward/grad_lateral are (N, C); heading_cos/
-        heading_sin are (N, 1) — local-frame rotation of grad_forward/
-        grad_lateral, and the heading those two are derived from, are
-        both the caller's job (simulation.py), same as the old project —
-        this method is frame-agnostic, it just concatenates whatever it's
-        given. Returns (env_write, local_accel, local_strafe), all
-        raw/un-squashed — squashing and rotating both local_accel and
-        local_strafe into world coordinates is the caller's job
-        (simulation.py), same division of responsibility as the old
-        project."""
-        x = torch.cat([value, grad_forward, grad_lateral, heading_cos, heading_sin], dim=-1)
-        out = self.net(x)
+        """value/grad_forward/grad_lateral are (N, C) — the local-frame
+        rotation of grad_forward/grad_lateral is the caller's job
+        (simulation.py), same as the old project; this method is frame-
+        agnostic, it just concatenates whatever it's given. Heading
+        itself is deliberately not a parameter here — see this module's
+        own "Heading" docstring section. Returns (env_write, local_accel,
+        local_strafe), all raw/un-squashed — squashing env_write
+        (constants.MAX_ENV_WRITE) and squashing-and-rotating
+        local_accel/local_strafe into world coordinates are all the
+        caller's job (simulation.py), same division of responsibility as
+        the old project."""
+        x = torch.cat([value, grad_forward, grad_lateral], dim=-1)
+        # Decomposed from the equivalent self.net(x) one-liner purely so
+        # the hidden (post-Tanh) activation is a named value this method
+        # can inspect below — mathematically identical either way.
+        hidden = self.net[1](self.net[0](x))
+        out = self.net[2](hidden)
+        if self.record_diagnostics:
+            self.last_hidden = hidden.detach()
+            self.last_input = x.detach()
         c = self.num_channels
         env_write = out[:, :c]
         accel_end = c + MOTION_DIM
@@ -121,7 +150,7 @@ class UpdateRule(nn.Module):
         trainer/backend/update_rule.py's own export_weights()."""
         fc1, fc2 = self.net[0], self.net[2]
         return {
-            "fc1w": fc1.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels+2)
+            "fc1w": fc1.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels)
             "fc1b": fc1.bias.detach().cpu().tolist(),  # (HIDDEN_DIM,)
             "fc2w": fc2.weight.detach().cpu().tolist(),  # (num_channels+4, HIDDEN_DIM)
             "fc2b": fc2.bias.detach().cpu().tolist(),  # (num_channels+4,)

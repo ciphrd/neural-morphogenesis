@@ -27,6 +27,25 @@ candidates* into one shared GPU tensor dimension (the natural GPU-native
 analogue of process-level parallelism) is a real option if this ever
 becomes the bottleneck — not built here.
 
+Optional memetic (Lamarckian) refinement, --memetic-steps > 0 (0, the
+default, is pure Darwinian ES — nothing below changes): each candidate,
+before being scored, gets a short truncated-BPTT gradient-descent
+refinement pass (gradient_refine(), reusing train_gd.py's own per-window
+mechanics — differentiable rollout via raster_torch's loss, Adam,
+grad-clipping) applied directly to its weights. run_generation() then
+scores and selects on the *refined* result, not the pre-refinement one —
+"Lamarckian" in the classic memetic-algorithm sense: acquired
+improvement (from gradient descent) is what gets inherited, not just
+whatever survived random mutation + selection alone. This exists because
+plain gradient descent (train_gd.py) has no population and no selection
+pressure — a single trajectory that can only exploit whatever basin it's
+already in, never explore several at once the way ES's population does;
+plain ES, in turn, only ever finds a better basin through random
+mutation, never through following a local gradient once it's in one.
+Memetic refinement is meant to get both: ES's population-level breadth
+plus gradient descent's cheap, fast local convergence within whichever
+basin each individual already landed in.
+
 Headless — no window, no plot. An earlier pass of this had a live
 matplotlib fitness-chart-plus-replay window; that's been pulled out in
 favor of a separate web-based frontend (built elsewhere) driving this
@@ -43,6 +62,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import torch
@@ -51,6 +71,7 @@ from torch.nn.utils import parameters_to_vector, vector_to_parameters
 from device import pick_device
 from environment import Environment
 from raster import build_target_distance_field, build_target_raster, training_raster_distance
+from raster_torch import target_rasters_to_torch, training_raster_distance_torch
 from simulation import Simulation
 from target import TargetShape
 from update_rule import UpdateRule
@@ -170,10 +191,19 @@ def rollout(
     checkpoint_steps = {max(1, round(capture_steps * (1.0 - offset))) for offset in CAPTURE_OFFSETS}
     snapshots: list[np.ndarray] = []
 
-    for step in range(1, capture_steps + 1):
-        sim.step()
-        if step in checkpoint_steps:
-            snapshots.append(sim.agents.positions.detach().cpu().numpy())
+    # Explicit opt-out of gradient tracking — simulation.py's step() no
+    # longer forces this itself (see that method's own docstring), since
+    # it also now backs a differentiable training path elsewhere. This ES
+    # path never calls .backward() (fitness is scored as plain NumPy
+    # below), so tracking a graph through hundreds of untracked steps
+    # would be pure wasted memory/compute with zero benefit — this
+    # context is what keeps rollout()'s performance/memory profile
+    # identical to before.
+    with torch.no_grad():
+        for step in range(1, capture_steps + 1):
+            sim.step()
+            if step in checkpoint_steps:
+                snapshots.append(sim.agents.positions.detach().cpu().numpy())
 
     final_positions = snapshots[-1]
 
@@ -204,6 +234,84 @@ def rollout(
         fitness = max(fitness, distance)
 
     return (fitness, final_positions) if return_positions else fitness
+
+
+def gradient_refine(
+    weights: np.ndarray,
+    args: argparse.Namespace,
+    seed: int,
+    device: torch.device,
+    update_rule: UpdateRule,
+    target_points_t: torch.Tensor,
+    target_raster_t: torch.Tensor,
+    target_distance_field_t: torch.Tensor,
+) -> np.ndarray:
+    """The "acquired-trait" half of memetic/Lamarckian refinement — see
+    this module's own docstring. Runs `args.memetic_steps` of truncated-
+    BPTT gradient descent starting from `weights`, mirroring train_gd.py's
+    own per-window mechanics (windowed backward + detach, so the graph
+    never exceeds one window regardless of how many windows run — see
+    that module's own docstring for the full memory reasoning) rather
+    than importing it, since this needs its own fresh Adam optimizer per
+    call: each candidate here is a genuinely different individual, not a
+    continuation of whichever candidate last used this same scratch
+    `update_rule`, so no momentum should carry over between them.
+
+    Deliberately a *simpler*, cheaper rollout than this module's own
+    rollout() — no step-count jitter, no multi-point worst-of-5 capture
+    (see that function's own docstring for why that robustness matters
+    for scoring) — because this function's own loss is never what a
+    candidate gets selected or ranked on; run_generation() always
+    re-scores whatever this returns through the real, robust rollout()
+    afterward. This only has to be a reasonable *nudge* toward a better
+    local optimum, not a gameable fitness signal in its own right.
+
+    Returns the refined flat weight vector — or, if the rollout diverges
+    partway through (non-finite positions, an empty population), whatever
+    `update_rule` held at the last finite window, same "fail soft, don't
+    crash the generation" backstop rollout() has."""
+    set_weights(update_rule, weights, device)
+    optimizer = torch.optim.Adam(update_rule.parameters(), lr=args.memetic_lr)
+    rng = torch.Generator().manual_seed(seed)
+
+    env = Environment(height=args.grid_size, width=args.grid_size, channels=args.channels, device=device)
+    sim = Simulation(env, update_rule, device, population=args.agents, spawn_spread=args.spawn_spread, rng=rng)
+
+    step = 0
+    while step < args.memetic_steps:
+        window_end = min(step + args.memetic_bptt_steps, args.memetic_steps)
+        for _ in range(window_end - step):
+            sim.step()
+        step = window_end
+
+        positions = sim.agents.positions
+        if positions.shape[0] == 0 or not torch.isfinite(positions).all():
+            break
+
+        loss = training_raster_distance_torch(
+            positions,
+            target_points_t,
+            target_raster_t,
+            target_distance_field_t,
+            args.raster_resolution,
+            raster_extent(args.grid_size),
+            args.raster_sigma,
+            outside_weight=args.outside_weight,
+        )
+
+        optimizer.zero_grad()
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(update_rule.parameters(), args.memetic_grad_clip)
+        if torch.isfinite(grad_norm):
+            optimizer.step()
+
+        # Sever the graph before the next window — same reasoning as
+        # train_gd.py's own truncated-BPTT loop.
+        sim.agents.positions = sim.agents.positions.detach()
+        sim.agents.velocity = sim.agents.velocity.detach()
+        sim.env.grid = sim.env.grid.detach()
+
+    return get_weights(update_rule)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -246,6 +354,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "(0 disables it, falling back to raster coverage MSE alone) — see raster.outside_shape_penalty"
         ),
     )
+    parser.add_argument(
+        "--memetic-steps",
+        type=int,
+        default=0,
+        help=(
+            "if > 0, each candidate gets this many steps of gradient-descent refinement (truncated BPTT, "
+            "raster_torch loss, its own fresh Adam optimizer) before being scored — see gradient_refine()'s "
+            "own docstring and this module's own docstring for the memetic/Lamarckian reasoning. 0 (the "
+            "default) is pure Darwinian ES, unchanged from before this existed"
+        ),
+    )
+    parser.add_argument(
+        "--memetic-bptt-steps",
+        type=int,
+        default=20,
+        help="truncated-BPTT window size for memetic refinement — see train_gd.py's own module docstring "
+        "for what this trades off (only relevant when --memetic-steps > 0)",
+    )
+    parser.add_argument("--memetic-lr", type=float, default=2e-4, help="Adam learning rate for memetic refinement")
+    parser.add_argument(
+        "--memetic-grad-clip",
+        type=float,
+        default=0.25,
+        help="max gradient norm during memetic refinement — see train_gd.py's own --grad-clip for the same "
+        "BPTT-instability reasoning",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--checkpoint-every", type=int, default=10)
     return parser
@@ -260,6 +394,9 @@ def run_generation(
     rng: np.random.Generator,
     device: torch.device,
     update_rule: UpdateRule,
+    target_points_t: Optional[torch.Tensor] = None,
+    target_raster_t: Optional[torch.Tensor] = None,
+    target_distance_field_t: Optional[torch.Tensor] = None,
 ) -> tuple[list[np.ndarray], list[float], int]:
     """Evaluates every candidate in `population` (one rollout each,
     sequentially — see module docstring), sorts best-first, and refills
@@ -268,6 +405,16 @@ def run_generation(
     Each candidate's rollout gets its own seed, deterministically derived
     from the caller's `rng`, so a full run is reproducible given the same
     top-level --seed.
+
+    Memetic refinement (`args.memetic_steps > 0` — see gradient_refine()'s
+    own docstring): every candidate is gradient-refined *before* scoring,
+    using the same seed its scoring rollout will use, so what gets
+    selected/mutated below is already the refined weights, not the
+    pre-refinement ones — Lamarckian, not just Darwinian, inheritance.
+    Requires target_points_t/target_raster_t/target_distance_field_t (the
+    torch-side target constants — see raster_torch.target_rasters_to_torch);
+    callers that never enable memetic mode can leave them None (the
+    default) and nothing here changes.
 
     Returns `(next_population, fitnesses, winner_seed)` — `fitnesses` are
     for the population just evaluated, sorted best (lowest raster
@@ -278,6 +425,16 @@ def run_generation(
     generation's *actual* winning rollout, not just its weights,
     elsewhere (e.g. a browser replay seeded to match)."""
     seeds = rng.integers(0, 2**31 - 1, size=len(population))
+
+    if args.memetic_steps > 0:
+        assert target_points_t is not None and target_raster_t is not None and target_distance_field_t is not None, (
+            "run_generation() needs the torch-side target constants when --memetic-steps > 0"
+        )
+        population = [
+            gradient_refine(w, args, int(s), device, update_rule, target_points_t, target_raster_t, target_distance_field_t)
+            for w, s in zip(population, seeds)
+        ]
+
     fitnesses = [
         rollout(w, target, target_raster, target_distance_field, args, int(s), device, update_rule)
         for w, s in zip(population, seeds)
@@ -321,6 +478,13 @@ def main() -> None:
         half_size=target.texel_size(args.grid_size) / 2.0,
     )
     target_distance_field = build_target_distance_field(target_raster)
+    # Only needed for memetic refinement (gradient_refine()) — skipped
+    # (left None) for a plain --memetic-steps=0 run so a pure-ES
+    # invocation never pays for a torch tensor conversion it won't use.
+    target_points_t = target_raster_t = target_distance_field_t = None
+    if args.memetic_steps > 0:
+        target_points_t = torch.tensor(target.points, dtype=torch.float32, device=device)
+        target_raster_t, target_distance_field_t = target_rasters_to_torch(target_raster, target_distance_field, device)
     update_rule = UpdateRule(num_channels=args.channels).to(device)
     population = [get_weights(UpdateRule(num_channels=args.channels)) for _ in range(args.population)]
 
@@ -330,7 +494,17 @@ def main() -> None:
 
     for generation in range(args.generations):
         population, fitnesses, winner_seed = run_generation(
-            population, target, target_raster, target_distance_field, args, rng, device, update_rule
+            population,
+            target,
+            target_raster,
+            target_distance_field,
+            args,
+            rng,
+            device,
+            update_rule,
+            target_points_t=target_points_t,
+            target_raster_t=target_raster_t,
+            target_distance_field_t=target_distance_field_t,
         )
 
         if fitnesses[0] < best_fitness:
@@ -362,6 +536,10 @@ def main() -> None:
                         "raster_resolution": args.raster_resolution,
                         "raster_sigma": args.raster_sigma,
                         "outside_weight": args.outside_weight,
+                        "memetic_steps": args.memetic_steps,
+                        "memetic_bptt_steps": args.memetic_bptt_steps,
+                        "memetic_lr": args.memetic_lr,
+                        "memetic_grad_clip": args.memetic_grad_clip,
                         "seed": args.seed,
                         "winner_seed": winner_seed,
                     },
