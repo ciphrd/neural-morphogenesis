@@ -29,7 +29,7 @@ _GRID_N: int = _CORE_CONSTANTS["GRID_N"]
 
 # --- Policy architecture (UpdateRule) ---
 HIDDEN_DIM = 128
-CHEM_CHANNELS = 4
+CHEM_CHANNELS = 8  # last channel is always growth's own split-probability field
 ANGULAR_DIM = 1
 ACCEL_DIM = 2
 STRAFE_DIM = 2
@@ -39,8 +39,8 @@ FIELD_N = 256
 DECAY = 0.91
 
 # Motion
-MAX_ACCEL = 0.1 # not used rn
-MAX_STRAFE = 5.3
+MAX_ACCEL = 0.0 # 0.1 # not used rn
+MAX_STRAFE = 0.0 # 5.3
 FRICTION = 0.9
 MAX_ANGULAR_ACCEL = 1.4
 ANGULAR_DAMPING = 0.8

@@ -14,10 +14,12 @@ interface FitnessChartProps {
   getPreviewImageUrl?: (generation: number) => string;
 }
 
-// Wide and short — lives as a full-width strip at the bottom of the
-// page, not a small chart in a sidebar.
+// Wide and short — lives as a strip below the sim viewport, spanning
+// only the center column's own width now (not the full page — see
+// TrainingView.tsx's own .center-column), so a bit flatter than before
+// keeps it from eating too much of that narrower column's height.
 const WIDTH = 1400;
-const HEIGHT = 170;
+const HEIGHT = 130;
 const MARGIN = { top: 16, right: 20, bottom: 28, left: 48 };
 const PLOT_WIDTH = WIDTH - MARGIN.left - MARGIN.right;
 const PLOT_HEIGHT = HEIGHT - MARGIN.top - MARGIN.bottom;

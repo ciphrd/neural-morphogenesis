@@ -157,6 +157,15 @@ export function NetworkPanel({ probe, physics }: NetworkPanelProps) {
             ))}
           </div>
         ))}
+        {/* Spawn-center-relative (x,y) — appended after the 3 per-channel
+         * groups above (see NetworkProbe.input's own docstring), 2 fixed
+         * entries regardless of channel count, so it gets its own small
+         * group rather than trying to fold into the per-channel loop. */}
+        <div className="nn-group">
+          <span className="nn-group-label">Position</span>
+          <ActivationBar label="x" value={probe.input[3 * probe.channels]} domain={inputDomain} />
+          <ActivationBar label="y" value={probe.input[3 * probe.channels + 1]} domain={inputDomain} />
+        </div>
       </div>
 
       <div className="nn-block">

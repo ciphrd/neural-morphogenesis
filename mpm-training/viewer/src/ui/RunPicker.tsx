@@ -11,13 +11,17 @@ interface RunPickerProps {
 
 /** Button + dropdown panel listing every archived run (checkpoints/runs/*,
  * train_server.py's GET /runs) plus the current one (if training has
- * produced at least one generation), each with a preview thumbnail.
- * Fetched fresh every time the panel opens rather than once on mount or
- * kept live — the list only changes when a run finishes and gets
- * archived, and this is a rarely-opened panel, not something that needs
- * to track that in real time. Mirrors envnca/frontend/src/ui/RunPicker.tsx
- * near-verbatim (nothing about this component is training-mechanism-
- * specific). */
+ * produced at least one generation), each with a target-raster thumbnail
+ * next to its own best-result thumbnail (the same generation's own pair —
+ * see RunSummary's own targetPreviewUrl docstring) so shape correctness
+ * reads at a glance without opening the run. Clicking a row calls
+ * onSelectRun(), which TrainingView.tsx wires to fetchRunState() for that
+ * run's own full history. Fetched fresh every time the panel opens rather
+ * than once on mount or kept live — the list only changes when a run
+ * finishes and gets archived, and this is a rarely-opened panel, not
+ * something that needs to track that in real time. Mirrors
+ * envnca/frontend/src/ui/RunPicker.tsx near-verbatim (nothing about this
+ * component is training-mechanism-specific). */
 export function RunPicker({ apiUrl, activeRunId, onSelectRun }: RunPickerProps) {
   const [open, setOpen] = useState(false);
   const [runs, setRuns] = useState<RunSummary[] | null>(null);
@@ -66,14 +70,26 @@ export function RunPicker({ apiUrl, activeRunId, onSelectRun }: RunPickerProps) 
                   setOpen(false);
                 }}
               >
-                <img
-                  className="run-picker-preview"
-                  src={`${apiUrl}${run.previewUrl}`}
-                  alt=""
-                  onError={(e) => {
-                    e.currentTarget.style.visibility = "hidden";
-                  }}
-                />
+                <span className="run-picker-preview-pair">
+                  <img
+                    className="run-picker-preview"
+                    src={`${apiUrl}${run.targetPreviewUrl}`}
+                    alt="Target"
+                    title="Target"
+                    onError={(e) => {
+                      e.currentTarget.style.visibility = "hidden";
+                    }}
+                  />
+                  <img
+                    className="run-picker-preview"
+                    src={`${apiUrl}${run.previewUrl}`}
+                    alt="Best result"
+                    title="Best result"
+                    onError={(e) => {
+                      e.currentTarget.style.visibility = "hidden";
+                    }}
+                  />
+                </span>
                 <span className="run-picker-info">
                   <span className="run-picker-title">
                     {run.target ?? "unknown target"}

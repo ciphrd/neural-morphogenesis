@@ -1,6 +1,6 @@
-// Canvas rendering — particles (render.wgsl), a static domain-boundary
-// outline, and mls-mpm's own field-visualize background system
-// (field.wgsl), ported with the same options mls-mpm/src/gpu/render.ts
+// Canvas rendering — particles (render.wgsl) and mls-mpm's own
+// field-visualize background system (field.wgsl), ported with the same
+// options mls-mpm/src/gpu/render.ts
 // exposes: a Field-mode background dropdown, a particle-size control,
 // plus this project's own addition — a particle-shape toggle that draws
 // each particle as a triangle pointing along its own heading (Agents'
@@ -8,20 +8,28 @@
 // agents.wgsl's own module docstring) instead of a circle.
 //
 // Field modes: "none" | "density" | "speed" | "deformation" | "pressure"
-// | "shear" | "repulsion" | "substrate" | "growth" — the same set
-// mls-mpm/src/gpu/render.ts exposes, plus "substrate"/"growth" (this
-// project's own chemical field, mls-mpm has no equivalent of).
-// "deformation"/"pressure"/"shear" read gpu/fieldDiagnostics.wgsl's own
-// scatter pass, NOT core/p2g.wgsl's gridAccum (that shared physics core
-// was deliberately stripped of these diagnostic channels when it was
-// extracted from mls-mpm's sandbox — see fieldDiagnostics.wgsl's own
-// module docstring for why this project keeps them in a separate,
-// viewer-owned pass instead of adding them back). "growth" reads the
-// SAME chemical field "substrate" does, just one specific channel (the
-// LAST one — this project's own growth probability substrate, see
-// core/agents.wgsl's own module docstring) through a cividis colormap
-// over its own clamped [-1,1] range instead of substrate's 3-channel RGB
-// composite — see field.wgsl's own colorizeGrowth() comment.
+// | "shear" | "repulsion" | "substrate" | "growth" | "gradient" — the
+// same set mls-mpm/src/gpu/render.ts exposes, plus "substrate"/"growth"/
+// "gradient" (this project's own chemical field/repulsion density, mls-
+// mpm has no equivalent of). "deformation"/"pressure"/"shear" read
+// gpu/fieldDiagnostics.wgsl's own scatter pass, NOT core/p2g.wgsl's
+// gridAccum (that shared physics core was deliberately stripped of these
+// diagnostic channels when it was extracted from mls-mpm's sandbox — see
+// fieldDiagnostics.wgsl's own module docstring for why this project
+// keeps them in a separate, viewer-owned pass instead of adding them
+// back). "growth" reads the SAME chemical field "substrate" does, just
+// one specific channel (the LAST one — this project's own growth
+// probability substrate, see core/agents.wgsl's own module docstring)
+// through a cividis colormap over its own clamped [-1,1] range instead
+// of substrate's 3-channel RGB composite — see field.wgsl's own
+// colorizeGrowth() comment. "gradient" reads the REPULSION density
+// field's own spatial gradient instead (mpmCore.densityTexture — the
+// SAME field "repulsion" mode's own repulsionFragment samples, NOT the
+// chemical field), computed on the fly via a Sobel finite difference
+// (there's no precomputed gradient for repulsion the way
+// environment.wgsl's own computeGradient gives the chemical field one) —
+// a first step toward a "shape boundary" background, see field.wgsl's
+// own colorizeGradient() comment for the full reasoning.
 
 import fieldSrc from "./field.wgsl?raw";
 import fieldDiagnosticsSrc from "./fieldDiagnostics.wgsl?raw";
@@ -32,10 +40,10 @@ import type { Environment } from "./environment";
 import { DX, GRID_N, INV_DX, PARTICLE_MASS, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
-export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "substrate" | "growth";
+export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "substrate" | "growth" | "gradient";
 export type ParticleShape = "circle" | "triangle";
 
-const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "substrate" | "growth">, number> = {
+const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "substrate" | "growth" | "gradient">, number> = {
   none: 0,
   density: 1,
   speed: 2,
@@ -71,11 +79,10 @@ function alphaBlend(): GPUBlendState {
 export class Renderer {
   private readonly device: GPUDevice;
 
-  // --- particles/target/boundary (render.wgsl) ---
+  // --- particles/target (render.wgsl) ---
   private readonly pointLayout: GPUBindGroupLayout;
   private readonly circlePipeline: GPURenderPipeline;
   private readonly trianglePipeline: GPURenderPipeline;
-  private readonly boundaryPipeline: GPURenderPipeline;
 
   private readonly particleRadiusUniform: GPUBuffer;
   private readonly particleColorUniform: GPUBuffer;
@@ -147,6 +154,41 @@ export class Renderer {
   private readonly growthPresentPipeline: GPURenderPipeline;
   private readonly growthPresentBindGroup: GPUBindGroup;
 
+  // --- gradient background (field.wgsl's own blurDensity/colorizeGradient) ---
+  // Reads the REPULSION density field (mpmCore.densityTexture — the same
+  // one "repulsion" mode's own repulsionFragment samples), not the
+  // chemical field, so this has its own resolution (REPULSION_FIELD_N,
+  // NOT environment.width/height — see mpmCore.ts's own REPULSION_FIELD_N
+  // comment for why the two are unrelated) and its own dispatch, not
+  // substrate/growth's. Single bind groups throughout, not parity-
+  // indexed — mpmCore.densityTexture is one texture, rewritten in place
+  // every frame (MpmCore's own densityToTexture pass), never swapped.
+  //
+  // blurDensity runs FIRST each frame this mode is active, writing a
+  // blurred copy of the raw density into blurredDensityTexture;
+  // colorizeGradient then reads THAT (not repulsionTex directly) — see
+  // field.wgsl's own blurDensity() comment for why (raw per-particle
+  // density is too grainy for a clean shape-boundary gradient). setBlur()
+  // below controls blurSigmaUniform, the one knob between them.
+  private readonly blurredDensityTexture: GPUTexture;
+  private readonly blurDensityPipeline: GPUComputePipeline;
+  private readonly blurDensityBindGroup: GPUBindGroup;
+  private readonly blurSigmaUniform: GPUBuffer;
+  private readonly gradientTexture: GPUTexture;
+  private readonly gradientColorizePipeline: GPUComputePipeline;
+  private readonly gradientColorizeBindGroup: GPUBindGroup;
+  private readonly gradientPresentPipeline: GPURenderPipeline;
+  private readonly gradientPresentBindGroup: GPUBindGroup;
+  // colorizeGradient's own dedicated power curve (field.wgsl's own
+  // gradientExponent uniform) — NOT the shared accentUniform every other
+  // mode reaches through graypoint()/accentedSigned(); this mode stopped
+  // calling graypoint() entirely once it needed a magnitude-preserving-
+  // direction curve instead (see that pass' own comment), so accent
+  // isn't even reachable from its own auto-derived bind group layout
+  // anymore — setGradientExponent() below is the only knob this mode has.
+  private readonly gradientExponentUniform: GPUBuffer;
+  private readonly gradientDispatch: [number, number];
+
   private fieldMode: FieldMode = "none";
 
   constructor(device: GPUDevice, format: GPUTextureFormat, mpmCore: MpmCore, environment: Environment, agents: Agents) {
@@ -187,13 +229,6 @@ export class Renderer {
       vertex: { module: renderModule, entryPoint: "triangleVertex" },
       fragment: { module: renderModule, entryPoint: "triangleFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
-    });
-
-    this.boundaryPipeline = device.createRenderPipeline({
-      layout: "auto",
-      vertex: { module: renderModule, entryPoint: "boundaryVertex" },
-      fragment: { module: renderModule, entryPoint: "boundaryFragment", targets: [{ format }] },
-      primitive: { topology: "line-strip" },
     });
 
     this.particleRadiusUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -407,12 +442,71 @@ export class Renderer {
       ],
     });
 
+    // --- gradient background ---
+    this.blurredDensityTexture = device.createTexture({
+      size: [REPULSION_FIELD_N, REPULSION_FIELD_N, 1],
+      format: "r32float",
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.blurSigmaUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    writeFloat32(device, this.blurSigmaUniform, 0, new Float32Array([0]));
+    this.blurDensityPipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: fieldModule, entryPoint: "blurDensity" },
+    });
+    this.blurDensityBindGroup = device.createBindGroup({
+      layout: this.blurDensityPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 6, resource: mpmCore.densityTexture.createView() },
+        { binding: 14, resource: { buffer: this.blurSigmaUniform } },
+        { binding: 17, resource: this.blurredDensityTexture.createView() },
+      ],
+    });
+
+    this.gradientTexture = device.createTexture({
+      size: [REPULSION_FIELD_N, REPULSION_FIELD_N, 1],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.gradientExponentUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    writeFloat32(device, this.gradientExponentUniform, 0, new Float32Array([1]));
+    this.gradientColorizePipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: fieldModule, entryPoint: "colorizeGradient" },
+    });
+    this.gradientColorizeBindGroup = device.createBindGroup({
+      layout: this.gradientColorizePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 18, resource: this.blurredDensityTexture.createView() },
+        { binding: 15, resource: this.gradientTexture.createView() },
+        { binding: 19, resource: { buffer: this.gradientExponentUniform } },
+      ],
+    });
+    this.gradientDispatch = [ceilDiv(REPULSION_FIELD_N, 16), ceilDiv(REPULSION_FIELD_N, 16)];
+
+    this.gradientPresentPipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: fieldModule, entryPoint: "fieldVertex" },
+      fragment: { module: fieldModule, entryPoint: "gradientFragment", targets: [{ format }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.gradientPresentBindGroup = device.createBindGroup({
+      layout: this.gradientPresentPipeline.getBindGroupLayout(0),
+      // gradientFragment reuses fieldFragment's own fieldSampler (binding
+      // 5) too — same reasoning substratePresentBindGroup's own comment
+      // gives.
+      entries: [
+        { binding: 5, resource: fieldSampler },
+        { binding: 16, resource: this.gradientTexture.createView() },
+      ],
+    });
+
     this.setCanvasSizePx(512, 512);
   }
 
   setFieldMode(mode: FieldMode): void {
     this.fieldMode = mode;
-    if (mode !== "repulsion" && mode !== "substrate" && mode !== "growth") {
+    if (mode !== "repulsion" && mode !== "substrate" && mode !== "growth" && mode !== "gradient") {
       writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode]]));
     }
   }
@@ -425,6 +519,29 @@ export class Renderer {
    * fieldModeUniform write — safe to call every frame off a live slider. */
   setAccent(accent: number): void {
     writeFloat32(this.device, this.accentUniform, 0, new Float32Array([accent]));
+  }
+
+  /** Gaussian sigma (texels, [0, 2] — see field.wgsl's own BLUR_MAX_RADIUS
+   * for why this saturates rather than growing unboundedly) for the
+   * "gradient" mode's own blur pass — see that pass' own comment for why
+   * blurring the density field before differentiating it matters. 0 (the
+   * default) skips the blur entirely. A plain buffer write, no pipeline
+   * rebuild, same as setAccent() above — safe to call every frame off a
+   * live slider. */
+  setBlur(sigma: number): void {
+    writeFloat32(this.device, this.blurSigmaUniform, 0, new Float32Array([sigma]));
+  }
+
+  /** Power curve applied to the "gradient" mode's own gradient
+   * MAGNITUDE (direction is preserved exactly — see field.wgsl's own
+   * colorizeGradient() comment for why magnitude, not each of gx/gy
+   * independently). 1 = identity, the linear-normalized mapping this
+   * mode used before this knob existed; >1 sharpens onto strong edges,
+   * <1 brings out faint ones. A plain buffer write, no pipeline rebuild,
+   * same as setAccent()/setBlur() above — safe to call every frame off a
+   * live slider. */
+  setGradientExponent(exponent: number): void {
+    writeFloat32(this.device, this.gradientExponentUniform, 0, new Float32Array([exponent]));
   }
 
   setParticleShape(shape: ParticleShape): void {
@@ -513,6 +630,21 @@ export class Renderer {
       computePass.setBindGroup(0, this.growthColorizeBindGroups[this.environment.parity]);
       computePass.dispatchWorkgroups(...this.substrateDispatch);
       computePass.end();
+    } else if (this.fieldMode === "gradient") {
+      // blurDensity MUST run first — colorizeGradient reads its own
+      // output (blurredDensityTexture), not repulsionTex directly — see
+      // field.wgsl's own blurDensity() comment.
+      const blurPass = encoder.beginComputePass();
+      blurPass.setPipeline(this.blurDensityPipeline);
+      blurPass.setBindGroup(0, this.blurDensityBindGroup);
+      blurPass.dispatchWorkgroups(...this.gradientDispatch);
+      blurPass.end();
+
+      const computePass = encoder.beginComputePass();
+      computePass.setPipeline(this.gradientColorizePipeline);
+      computePass.setBindGroup(0, this.gradientColorizeBindGroup);
+      computePass.dispatchWorkgroups(...this.gradientDispatch);
+      computePass.end();
     }
 
     const pass = encoder.beginRenderPass({
@@ -542,10 +674,11 @@ export class Renderer {
       pass.setPipeline(this.growthPresentPipeline);
       pass.setBindGroup(0, this.growthPresentBindGroup);
       pass.draw(6);
+    } else if (this.fieldMode === "gradient") {
+      pass.setPipeline(this.gradientPresentPipeline);
+      pass.setBindGroup(0, this.gradientPresentBindGroup);
+      pass.draw(6);
     }
-
-    pass.setPipeline(this.boundaryPipeline);
-    pass.draw(5);
 
     if (this.targetBindGroup && this.targetCount > 0) {
       pass.setPipeline(this.circlePipeline);
@@ -581,5 +714,9 @@ export class Renderer {
     this.diagnosticsBuffer.destroy();
     this.substrateTexture.destroy();
     this.growthTexture.destroy();
+    this.blurredDensityTexture.destroy();
+    this.blurSigmaUniform.destroy();
+    this.gradientTexture.destroy();
+    this.gradientExponentUniform.destroy();
   }
 }

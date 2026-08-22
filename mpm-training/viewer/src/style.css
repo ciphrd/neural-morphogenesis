@@ -20,7 +20,7 @@ body {
 }
 
 .controls {
-  width: 280px;
+  width: 320px;
   flex-shrink: 0;
   padding: 20px;
   background: #0d0d0d;
@@ -33,6 +33,7 @@ body {
   flex-shrink: 0;
   padding: 20px;
   background: #0d0d0d;
+  border-left: 1px solid #2a2a2a;
   overflow-y: auto;
 }
 
@@ -117,11 +118,22 @@ body {
   text-align: center;
 }
 
+/* Same left-label/right-control shape as .slider-row — text (a bare
+   text node, DOM order: input then text) reads on the left, the
+   checkbox itself right-aligned. Achieved purely with flex direction/
+   justify-content (row-reverse flips visual order without touching
+   each usage's own markup, space-between spreads the two flex items to
+   either edge, matching .slider-row's own label-left/control-right
+   layout) rather than reordering the JSX at every call site. */
 .checkbox-row {
   display: flex;
+  flex-direction: row-reverse;
+  justify-content: space-between;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: #9a9a9a;
   cursor: pointer;
 }
 
@@ -135,6 +147,15 @@ body {
   gap: 8px;
   font-size: 13px;
   margin-top: 10px;
+}
+
+/* The title span (first child — e.g. "Gradient exponent", "Background")
+   — deliberately smaller than .slider-value's own numeric readout,
+   which stays at the row's own 13px for legibility. */
+.slider-row > span:first-child {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #9a9a9a;
 }
 
 .slider-row input[type="range"] {
@@ -235,14 +256,15 @@ body {
   position: relative;
 }
 
-/* Training view: a full-height column (controls+viewport row on top, a
-   full-width timeline strip docked at the bottom) — the top-level layout
-   for this whole app (App.tsx renders it directly, no sibling tool
-   panel the way envnca's own .app flex row has). */
+/* Training view: a full-height row — side panels (.controls/
+   .controls-right) stretch the full height on either side, a center
+   column (viewport + toolbar + fitness timeline, stacked) fills the
+   space between — the top-level layout for this whole app (App.tsx
+   renders it directly, no sibling tool panel the way envnca's own .app
+   flex row has). */
 .training-layout {
   height: 100vh;
   display: flex;
-  flex-direction: column;
   min-width: 0;
   min-height: 0;
 }
@@ -251,16 +273,58 @@ body {
   margin-bottom: 1em;
 }
 
-.training-main {
+/* Viewport on top, a toolbar strip, then the (now center-column-width,
+   not full-page-width) fitness timeline below — see .toolbar and
+   .training-timeline. */
+.center-column {
   flex: 1;
   display: flex;
+  flex-direction: column;
+  min-width: 0;
   min-height: 0;
+}
+
+/* Tool selector (left) / playback+randomize (right) icon-button groups,
+   docked below the sim viewport — see TrainingView.tsx's own ".toolbar"
+   markup. Buttons themselves reuse .icon-button (same look as the
+   Physics panel's own icon buttons), grouped via .tool-buttons (left)
+   and .toolbar-actions (right). */
+.toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #0d0d0d;
+  border-top: 1px solid #2a2a2a;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* "Loop" checkbox — sits to the left of the Randomize/Pause/Restart/
+   Record icon-buttons in .toolbar-actions, same 26px row height so it
+   lines up with them. */
+.toolbar-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 4px;
+  font-size: 13px;
+  color: #e8e8e8;
+  cursor: pointer;
 }
 
 .training-timeline {
   flex-shrink: 0;
-  padding: 16px 24px;
+  padding: 12px 20px;
   background: #0d0d0d;
+  border-top: 1px solid #2a2a2a;
 }
 
 /* --- GridCanvas: the WebGPU viewport --- */
@@ -268,17 +332,16 @@ body {
 .grid-canvas-container {
   position: absolute;
   inset: 0;
-  /* GridCanvas.tsx's own applySquareSize() gives the canvas an explicit
-     square CSS box (fit to whichever of this container's own width/
-     height is smaller) — this is what centers that square within
-     whatever's left over on the wider axis, instead of it sitting
-     pinned to one corner. .webgpu-banner's own position:absolute;inset:0
-     below is unaffected by this — absolutely positioned children ignore
-     a flex parent's alignment and size from this container's own box
-     regardless. */
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  /* No flex centering here anymore — GridCanvas.tsx's own
+     applySquareSize() positions .gpu-canvas itself (explicit
+     left/top, both floored to a whole CSS pixel, see that function's
+     own comment) rather than leaving centering to flexbox, which
+     computes leftover space from this container's own box — routinely
+     fractional itself (100vh math) — and lands the canvas at a
+     sub-pixel offset even when its own width/height are whole
+     numbers. Still `position: absolute` purely so
+     .webgpu-banner's own position:absolute;inset:0 overlay below
+     resolves against this container's box. */
   /* Matches gpu/render.ts's own WebGPU clearValue ({r:0.02,g:0.02,b:0.02}
      = rgb(5,5,5)) exactly, NOT plain black — without this, this
      container inherited body's own pure #000000 all the way up, so any
@@ -288,14 +351,18 @@ body {
      along the trailing edges where slack lands (reads as a thin gray
      border, most often on the right/bottom). Matching this container's
      own background to the canvas's own clear color makes any such gap
-     genuinely invisible, regardless of the exact geometric cause. */
+     invisible too, as defense in depth alongside the pixel-snapped
+     positioning above. */
   background: #050505;
 }
 
 .gpu-canvas {
-  /* Explicit pixel width/height are set by GridCanvas.tsx's own
-     applySquareSize() — no width/height:100% here, which would just
-     stretch it back out to the (often non-square) container again. */
+  /* Explicit pixel width/height/left/top are all set by
+     GridCanvas.tsx's own applySquareSize() — position:absolute (not
+     flex-centered by the container, see its own comment) so that
+     left/top can be floored to a whole CSS pixel independently of
+     the container's own often-fractional box. */
+  position: absolute;
   display: block;
   /* A drag gesture routinely strays outside the canvas element itself
      (see GridCanvas.tsx's own setPointerCapture() comment) — disabling
@@ -313,6 +380,26 @@ body {
 
 .gpu-canvas-tool-move {
   cursor: grab;
+}
+
+.gpu-canvas-tool-deform {
+  cursor: crosshair;
+}
+
+/* "Deform" tool's own hover preview (render/GridCanvas.tsx's own
+   syncDeformPreview()) — position/size are set directly via inline
+   style (left/top/width/height, recomputed on every pointermove), not
+   here; this only covers the circle's own fixed look. Positioned
+   relative to .grid-canvas-container (that rule's own position:absolute
+   is what left/top below resolve against). pointer-events:none so the
+   overlay itself never steals the canvas's own pointer/click handling —
+   it's a pure visual, not an interactive element. */
+.deform-preview {
+  position: absolute;
+  border-radius: 50%;
+  border: 1.5px solid #7dd3fc;
+  background: rgba(125, 211, 252, 0.12);
+  pointer-events: none;
 }
 
 .webgpu-banner {
@@ -338,7 +425,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 170px;
+  /* Matches FitnessChart.tsx's own HEIGHT constant, so there's no
+     layout jump the moment real data replaces this placeholder. */
+  height: 130px;
 }
 
 .fitness-chart-legend {
@@ -401,12 +490,9 @@ body {
   filter: brightness(1.3);
 }
 
-.playback-buttons {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 10px;
-}
-
+/* Only RunPicker's own "Run: …" dropdown toggle uses this now —
+   Pause/Restart/Record moved into the bottom toolbar as .icon-buttons
+   (see .icon-button.is-recording below for Record's own active state). */
 .playback-button {
   flex: 1;
   padding: 6px 10px;
@@ -425,15 +511,6 @@ body {
 .playback-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-/* Record button while actively capturing — red is the universal
-   "recording" convention, distinct from .fitness-chart-live-indicator's
-   own green "is-live" (a different meaning: connected/streaming, not
-   actively being recorded to a file). */
-.playback-button.is-recording {
-  border-color: #ef4444;
-  color: #ef4444;
 }
 
 .fitness-chart-live-indicator {
@@ -581,9 +658,19 @@ body {
   background: #1c1c1c;
 }
 
+/* Target raster + this run's own best-result raster, side by side — the
+   same generation's own pair (train_server.py's own run_target_preview()/
+   run_preview() derive both from one shared generation prefix), so
+   they're genuinely comparable at a glance without opening the run. */
+.run-picker-preview-pair {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
 .run-picker-preview {
-  width: 44px;
-  height: 44px;
+  width: 32px;
+  height: 32px;
   flex-shrink: 0;
   border-radius: 4px;
   background: #0a0a0a;
@@ -698,7 +785,48 @@ body {
   color: #7dd3fc;
 }
 
+/* Record button in the toolbar while actively capturing — red is the
+   universal "recording" convention, distinct from
+   .fitness-chart-live-indicator's own green "is-live" (a different
+   meaning: connected/streaming, not actively being recorded to a
+   file). */
+.icon-button.is-recording {
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.tool-buttons-wrap {
+  position: relative;
+}
+
 .tool-buttons {
   display: flex;
   gap: 8px;
+}
+
+/* The active tool's own contextual settings (see TrainingView.tsx's own
+   "Tool settings" popover) — pops up directly above the tool-selector
+   buttons, same anchored-popover pattern .run-picker-panel already uses
+   relative to .run-picker, just opening upward (bottom: 100%, not top)
+   since this lives at the BOTTOM of the center column, right above the
+   toolbar it belongs to. */
+.tool-settings-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 20;
+  width: 240px;
+  padding: 12px;
+  border: 1px solid #2a2a2a;
+  border-radius: 8px;
+  background: #0d0d0d;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.tool-settings-panel h3 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #9a9a9a;
+  margin: 0 0 8px;
 }

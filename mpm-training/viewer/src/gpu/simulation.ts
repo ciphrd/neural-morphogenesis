@@ -44,6 +44,7 @@
 // shape is just a cheap loadWeights() call.
 
 import { Agents } from "./agents";
+import { Deform, type DeformDirection, type DeformMode } from "./deform";
 import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MpmCore } from "./mpmCore";
@@ -64,6 +65,9 @@ export class GpuSimulation {
   // fresh instance per rebuild(), same as every other GPU object here,
   // since it binds MpmCore's own (also freshly rebuilt) buffers.
   private interact: Interact | null = null;
+  // "Deform" tool's own one-shot direction-injection (gpu/deform.ts) —
+  // same "fresh instance per rebuild()" reasoning as interact above.
+  private deform: Deform | null = null;
   // Network visualization's own live forward-pass readback (gpu/nnProbe.ts)
   // — same "fresh instance per rebuild()" reasoning as interact above.
   private nnProbe: NnProbe | null = null;
@@ -83,6 +87,14 @@ export class GpuSimulation {
   // accent uniform comment. Same "view-only, survives rebuild()" reasoning
   // pendingFieldMode above already has.
   private pendingAccent = 0;
+  // 0 = no blur — see gpu/render.ts's own setBlur()/field.wgsl's own
+  // blurDensity() comment. Same "view-only, survives rebuild()" reasoning
+  // pendingAccent above already has.
+  private pendingBlur = 0;
+  // 1 = identity — see gpu/render.ts's own setGradientExponent()/
+  // field.wgsl's own colorizeGradient() comment. Same "view-only,
+  // survives rebuild()" reasoning pendingAccent above already has.
+  private pendingGradientExponent = 1;
 
   // Bumped by anything that invalidates in-flight GPU state (rebuild(),
   // restartRollout(), destroy()) — step() captures this at its own start
@@ -200,8 +212,11 @@ export class GpuSimulation {
     renderer.setParticleShape(this.pendingParticleShape);
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
     renderer.setAccent(this.pendingAccent);
+    renderer.setBlur(this.pendingBlur);
+    renderer.setGradientExponent(this.pendingGradientExponent);
 
     const interact = new Interact(this.device, mpmCore);
+    const deform = new Deform(this.device, mpmCore);
 
     const nnProbe = new NnProbe(this.device, mpmCore, environment, agents, {
       channels: config.channels,
@@ -214,6 +229,7 @@ export class GpuSimulation {
     this.agents = agents;
     this.renderer = renderer;
     this.interact = interact;
+    this.deform = deform;
     this.nnProbe = nnProbe;
     this.config = config;
     this.applyPhysics(config);
@@ -449,6 +465,24 @@ export class GpuSimulation {
     this.renderer?.setAccent(accent);
   }
 
+  /** [0,2] — see gpu/render.ts's own setBlur()/field.wgsl's own
+   * blurDensity() comment. Only the "gradient" background mode's own
+   * blur pass reads this — harmless to set regardless of which mode is
+   * currently active, same as accent above. */
+  setBlur(sigma: number): void {
+    this.pendingBlur = sigma;
+    this.renderer?.setBlur(sigma);
+  }
+
+  /** See gpu/render.ts's own setGradientExponent()/field.wgsl's own
+   * colorizeGradient() comment. Only the "gradient" background mode's
+   * own colorize pass reads this — harmless to set regardless of which
+   * mode is currently active, same as accent/blur above. */
+  setGradientExponent(exponent: number): void {
+    this.pendingGradientExponent = exponent;
+    this.renderer?.setGradientExponent(exponent);
+  }
+
   /** "Add Particle" tool — `(x, y)`: MpmCore's own [0,1]^2 domain
    * coords, already converted from screen space by the caller (render/
    * GridCanvas.tsx). Also tells Agents about the new, larger activeCount
@@ -484,6 +518,18 @@ export class GpuSimulation {
     this.interact?.endDrag();
   }
 
+  /** "Deform" tool (gpu/deform.ts) — one-shot, called once per click (not
+   * per frame the way dragTo() above is). Injects a radial push/pull
+   * (`direction`, `strength`) at domain position (x,y), affecting every
+   * particle within `radius` — see Deform.inject()'s own docstring for
+   * the exact per-particle radial direction, the velocity-impulse vs
+   * deformation-gradient-edit math, and the falloff. No-ops before the
+   * first rebuild(), same stance every other GpuSimulation method here
+   * already takes. */
+  injectDeform(x: number, y: number, direction: DeformDirection, strength: number, radius: number, mode: DeformMode): void {
+    this.deform?.inject(x, y, direction, strength, radius, mode);
+  }
+
   /** Replaces the live update rule with a fresh random init (see
    * Agents.randomizeWeights()'s own docstring) and restarts the rollout —
    * without the restart, whatever's already grown stays governed by the
@@ -517,12 +563,14 @@ export class GpuSimulation {
     this.agents?.destroy();
     this.renderer?.destroy();
     this.interact?.destroy();
+    this.deform?.destroy();
     this.nnProbe?.destroy();
     this.mpmCore = null;
     this.environment = null;
     this.agents = null;
     this.renderer = null;
     this.interact = null;
+    this.deform = null;
     this.nnProbe = null;
   }
 

@@ -1,5 +1,5 @@
 export interface UpdateRuleWeights {
-  fc1w: number[][]; // (HIDDEN_DIM, 3*channels)
+  fc1w: number[][]; // (HIDDEN_DIM, 3*channels+2) — +2 for the agent's own spawn-center-relative (x,y) position, see agents.wgsl's own IN_DIM
   fc1b: number[]; // (HIDDEN_DIM,)
   fc2w: number[][]; // (channels*4+5, HIDDEN_DIM) — *4 for the 4 deposit spots, see agents.wgsl's own SPOTS
   fc2b: number[]; // (channels*4+5,)

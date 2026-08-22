@@ -6,5 +6,5 @@
   "PARTICLE_MASS": 1.0,
   "VOL": 1.0,
   "MAX_PARTICLES": 200000,
-  "FIELD_N": 256
+  "FIELD_N": 512
 }

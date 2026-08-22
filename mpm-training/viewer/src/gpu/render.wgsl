@@ -84,20 +84,3 @@ fn triangleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_ind
 fn triangleFragment() -> @location(0) vec4<f32> {
   return pointColor;
 }
-
-// --- static [0,1]^2 domain outline, drawn as a line-strip ---
-
-const BOUNDARY_POINTS = array<vec2<f32>, 5>(
-  vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0), vec2<f32>(0.0, 0.0),
-);
-
-@vertex
-fn boundaryVertex(@builtin(vertex_index) vertexIndex: u32) -> @builtin(position) vec4<f32> {
-  let p = BOUNDARY_POINTS[vertexIndex] * 2.0 - vec2<f32>(1.0, 1.0);
-  return vec4<f32>(p, 0.0, 1.0);
-}
-
-@fragment
-fn boundaryFragment() -> @location(0) vec4<f32> {
-  return vec4<f32>(0.3, 0.3, 0.3, 1.0);
-}

@@ -1,9 +1,13 @@
 // The evolved per-particle policy, GPU-resident — WGSL port of
-// trainer/update_rule.py's Dense(128) -> tanh -> Dense(16), following
-// envnca/frontend/src/gpu/agents.wgsl's own NN-forward-pass approach
-// (weights as one flat buffer, plain loops rather than a matrix type,
-// safeTanh to avoid a real confirmed NaN failure mode) with the
-// differences update_rule.py's own Python port already settled:
+// trainer/update_rule.py's Dense(128) -> sin -> Dense(16) (hidden
+// activation swapped from tanh to sin, a periodic activation, per this
+// project's own explicit request — see evalPolicy()'s own comment for
+// why), following envnca/frontend/src/gpu/agents.wgsl's own NN-forward-
+// pass approach (weights as one flat buffer, plain loops rather than a
+// matrix type, safeTanh on the OUTPUT layer's own squashing to avoid a
+// real confirmed NaN failure mode — see that layer's own comment, sin's
+// own hidden-layer use doesn't share this) with the differences
+// update_rule.py's own Python port already settled:
 //
 // Lives in core/, not viewer/src/gpu/, alongside p2g.wgsl/g2p.wgsl/etc
 // — the single source of truth BOTH ../viewer/src/gpu/agents.ts (via
@@ -492,7 +496,7 @@ struct PolicyOutput {
   strafeLocal: vec2<f32>,
 }
 
-// One full Dense(HIDDEN_DIM) -> tanh -> Dense(OUT_DIM) forward pass,
+// One full Dense(HIDDEN_DIM) -> sin -> Dense(OUT_DIM) forward pass,
 // squashed/scaled into PolicyOutput. Pulled out of agentStep() into its
 // own function specifically so CHIRALITY can call it twice, on two
 // different (mirrored) `inputVec`s, without duplicating the actual
@@ -505,7 +509,17 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
     for (var i: u32 = 0u; i < IN_DIM; i = i + 1u) {
       acc = acc + inputVec[i] * weights[FC1W_OFFSET + j * IN_DIM + i];
     }
-    hidden[j] = safeTanh(acc);
+    // sin, not tanh — a periodic hidden activation, swapped in per this
+    // project's own explicit request (a controlled, single-layer trial,
+    // not a full SIREN rewrite — see this project's own design
+    // discussion for why SIREN's actual value proposition, stable deep
+    // gradient-based training of high-frequency signals, doesn't
+    // transfer to a network that's mutated/selected, never backprop-
+    // trained). No safeTanh-style input clamp needed the way the output
+    // layer's own tanh below still has: sin's own native WGSL
+    // implementation doesn't share naive tanh's specific (e^2x-1)/(e^2x+1)
+    // overflow failure mode for large |x| (see safeTanh()'s own comment).
+    hidden[j] = sin(acc);
   }
 
   var outVec: array<f32, OUT_DIM>;

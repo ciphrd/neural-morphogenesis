@@ -24,9 +24,9 @@ import type { MpmCore } from "./mpmCore";
 export interface NetworkProbe {
   channels: number;
   hiddenDim: number;
-  /** IN_DIM = channels*3 — [value×channels, gradForward×channels, gradLateral×channels]. */
+  /** IN_DIM = channels*3+2 — [value×channels, gradForward×channels, gradLateral×channels, (x,y) spawn-center-relative position]. */
   input: Float32Array;
-  /** hiddenDim tanh activations from the PRIMARY (non-chirality-mirrored) pass — see nnProbe.wgsl's own comment. */
+  /** hiddenDim sin activations from the PRIMARY (non-chirality-mirrored) pass — see nnProbe.wgsl's own comment. */
   hidden: Float32Array;
   /** channels*4, spot-major (front,left,back,right), channels within each spot — chirality-averaged, matches what agentStep() actually deposits. */
   envWrite: Float32Array;
@@ -37,7 +37,11 @@ export interface NetworkProbe {
 }
 
 function probeLayout(channels: number, hiddenDim: number) {
-  const inDim = channels * 3;
+  // +2 — must match nnProbe.wgsl's own IN_DIM (and core/agents.wgsl's)
+  // exactly: the agent's own spawn-center-relative (x,y) position,
+  // appended after the per-channel value/grad_forward/grad_lateral
+  // triples.
+  const inDim = channels * 3 + 2;
   const envWriteDim = channels * 4;
   const inputOffset = 0;
   const hiddenOffset = inputOffset + inDim;

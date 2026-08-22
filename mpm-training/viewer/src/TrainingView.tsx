@@ -9,7 +9,7 @@ import { fetchRunState } from "./net/runs"
 import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
 import { pickRecordingFormat } from "./render/canvasRecorder"
-import type { GridCanvasHandle, Tool } from "./render/GridCanvas"
+import type { DeformSettings, GridCanvasHandle, Tool } from "./render/GridCanvas"
 import { GridCanvas } from "./render/GridCanvas"
 import { NetworkPanel } from "./ui/NetworkPanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
@@ -95,13 +95,36 @@ export function TrainingView() {
   // uniform comment for the exact curve). 0 = identity, every mode
   // renders exactly as it did before this knob existed.
   const [accent, setAccent] = useState(0)
+  // [0,2] — Gaussian sigma, in repulsion-field texels, for the "gradient"
+  // mode's own blur pass (see gpu/render.ts's own setBlur()/field.wgsl's
+  // own blurDensity() comment for why: raw per-particle density is too
+  // grainy for a clean shape-boundary gradient). 0 = no blur, unchanged
+  // from before this knob existed; only read by that one background mode.
+  const [blur, setBlur] = useState(0)
+  // [~0.25,4] — power curve on the "gradient" mode's own gradient
+  // MAGNITUDE (direction preserved — see gpu/render.ts's own
+  // setGradientExponent()/field.wgsl's own colorizeGradient() comment).
+  // 1 = identity, unchanged from before this knob existed; only read by
+  // that one background mode.
+  const [gradientExponent, setGradientExponent] = useState(1)
   const [particleShape, setParticleShape] = useState<ParticleShape>("triangle")
   const [particleRadiusPx, setParticleRadiusPx] = useState(4)
-  // "Add"/"Move" interaction tools (render/GridCanvas.tsx's own Tool
-  // type) — toggled on/off by clicking their own icon button again (see
-  // the Tools section below), not reset by a run/generation change
+  // "Add"/"Move"/"Deform" interaction tools (render/GridCanvas.tsx's own
+  // Tool type) — toggled on/off by clicking their own icon button again
+  // (see the Tools section below), not reset by a run/generation change
   // either, same reasoning as the rendering options above.
   const [tool, setTool] = useState<Tool>("none")
+  // "Deform" tool's own live settings (direction/strength/radius/mode) —
+  // owned here (this component's own small panel below), read by
+  // GridCanvas at click/hover time (see that component's own
+  // DeformSettings docstring). direction/strength/radius/mode defaults
+  // mirror gpu/deform.wgsl's own starting-guess scale comments.
+  const [deformSettings, setDeformSettings] = useState<DeformSettings>({
+    direction: "outward",
+    strength: 1,
+    radius: 0.08,
+    mode: "velocity",
+  })
 
   // null selection = follow whatever's newest; otherwise replay whichever
   // past generation was scrubbed to. configByGeneration and history are
@@ -196,54 +219,274 @@ export function TrainingView() {
 
   return (
     <div className="training-layout">
-      <div className="training-main">
-        <div className="controls">
-          <h1>mpm-training viewer</h1>
+      <div className="controls">
+        <h1>mpm-training viewer</h1>
 
-          <section>
-            <RunPicker
-              apiUrl={TRAIN_API_URL}
-              activeRunId={viewingRunId}
-              onSelectRun={setViewingRunId}
+        <section>
+          <RunPicker
+            apiUrl={TRAIN_API_URL}
+            activeRunId={viewingRunId}
+            onSelectRun={setViewingRunId}
+          />
+        </section>
+
+        <section>
+          <h2>Rollout</h2>
+          <div className="stat-row">
+            <span>Step (replay)</span>
+            <span>
+              {activeConfig
+                ? `${replayStep} / ${activeConfig.macroSteps}`
+                : "—"}
+            </span>
+          </div>
+          <div className="stat-row">
+            <span>All-time best</span>
+            <span>
+              {activeStat ? activeStat.allTimeBest.toFixed(3) : "—"}
+            </span>
+          </div>
+          <div className="stat-row">
+            <span>Max particles</span>
+            <span>{activeConfig ? activeConfig.particles : "—"}</span>
+          </div>
+          <div className="stat-row">
+            <span>Chemical field</span>
+            <span>
+              {activeConfig
+                ? `${activeConfig.fieldN}×${activeConfig.fieldN}`
+                : "—"}
+            </span>
+          </div>
+          <div className="stat-row">
+            <span>Channels</span>
+            <span>{activeConfig ? activeConfig.channels : "—"}</span>
+          </div>
+        </section>
+
+        <section>
+          <h2>Rendering</h2>
+          <label className="slider-row">
+            <span>Background</span>
+            <select
+              className="select"
+              value={fieldMode}
+              onChange={(e) => setFieldMode(e.target.value as FieldMode)}
+            >
+              <option value="none">None</option>
+              <option value="density">Density</option>
+              <option value="speed">Speed</option>
+              <option value="deformation">Deformation</option>
+              <option value="pressure">Pressure</option>
+              <option value="shear">Shear</option>
+              <option value="repulsion">Repulsion field</option>
+              <option value="substrate">Substrate</option>
+              <option value="growth">Growth (cividis)</option>
+              <option value="gradient">Boundary gradient</option>
+            </select>
+          </label>
+          <label className="slider-row">
+            <span>Accent</span>
+            <input
+              type="range"
+              min={0}
+              max={2}
+              step={0.01}
+              value={accent}
+              onChange={(e) => setAccent(Number(e.target.value))}
             />
-          </section>
+            <span className="slider-value">{accent.toFixed(2)}</span>
+          </label>
+          {/* Blur/Gradient exponent only drive the "gradient" (Boundary
+              gradient) background mode's own blur+colorize passes — see
+              gpu/render.ts's own setBlur()/setGradientExponent()
+              comments — so they'd do nothing under any other mode;
+              hidden rather than shown-but-inert. */}
+          {fieldMode === "gradient" && (
+            <>
+              <label className="slider-row">
+                <span>Blur</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={0.01}
+                  value={blur}
+                  onChange={(e) => setBlur(Number(e.target.value))}
+                />
+                <span className="slider-value">{blur.toFixed(2)}</span>
+              </label>
+              <label className="slider-row">
+                <span>Gradient exponent</span>
+                <input
+                  type="range"
+                  min={0.25}
+                  max={4}
+                  step={0.05}
+                  value={gradientExponent}
+                  onChange={(e) => setGradientExponent(Number(e.target.value))}
+                />
+                <span className="slider-value">
+                  {gradientExponent.toFixed(2)}
+                </span>
+              </label>
+            </>
+          )}
+          <label className="slider-row">
+            <span>Particle size</span>
+            <input
+              type="range"
+              min={1}
+              max={16}
+              step={1}
+              value={particleRadiusPx}
+              onChange={(e) => setParticleRadiusPx(Number(e.target.value))}
+            />
+            <span className="slider-value">{particleRadiusPx}px</span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={particleShape === "triangle"}
+              onChange={(e) =>
+                setParticleShape(e.target.checked ? "triangle" : "circle")
+              }
+            />
+            Point particles toward heading
+          </label>
+        </section>
 
-          <section>
-            <h2>Rollout</h2>
-            <div className="stat-row">
-              <span>Step (replay)</span>
-              <span>
-                {activeConfig
-                  ? `${replayStep} / ${activeConfig.macroSteps}`
-                  : "—"}
-              </span>
-            </div>
-            <div className="stat-row">
-              <span>All-time best</span>
-              <span>
-                {activeStat ? activeStat.allTimeBest.toFixed(3) : "—"}
-              </span>
-            </div>
-            <div className="stat-row">
-              <span>Max particles</span>
-              <span>{activeConfig ? activeConfig.particles : "—"}</span>
-            </div>
-            <div className="stat-row">
-              <span>Chemical field</span>
-              <span>
-                {activeConfig
-                  ? `${activeConfig.fieldN}×${activeConfig.fieldN}`
-                  : "—"}
-              </span>
-            </div>
-            <div className="stat-row">
-              <span>Channels</span>
-              <span>{activeConfig ? activeConfig.channels : "—"}</span>
-            </div>
-          </section>
-
-          <section>
-            <h2>Tools</h2>
+        {trainedPhysics && physicsValues && (
+          <PhysicsPanel
+            trained={trainedPhysics}
+            value={physicsValues}
+            onChange={setPhysicsOverride}
+            isOverridden={physicsOverride !== null}
+            onReset={() => setPhysicsOverride(null)}
+          />
+        )}
+      </div>
+      <div className="center-column">
+        <div className="viewport">
+          <GridCanvas
+            ref={gridCanvasRef}
+            config={activeConfig}
+            targetPoints={targetPoints}
+            physics={physicsValues}
+            fieldMode={fieldMode}
+            accent={accent}
+            blur={blur}
+            gradientExponent={gradientExponent}
+            particleShape={particleShape}
+            particleRadiusPx={particleRadiusPx}
+            tool={tool}
+            deformSettings={deformSettings}
+            onStep={setReplayStep}
+            onProbe={setProbe}
+            loopAtTrainedSteps={loopAtTrainedSteps}
+            paused={paused}
+          />
+        </div>
+        <div className="toolbar">
+          <div className="tool-buttons-wrap">
+            {/* The active tool's own contextual settings — pops up
+                directly above the tool-selector buttons instead of
+                living in the left sidebar, so it stays visually
+                attached to the tool it belongs to. Renders nothing
+                while no tool is active. */}
+            {tool !== "none" && (
+              <div className="tool-settings-panel">
+                <h3>
+                  {tool === "add"
+                    ? "Add"
+                    : tool === "move"
+                      ? "Move"
+                      : "Deform"}
+                </h3>
+                {tool !== "deform" && (
+                  <p className="hint">
+                    {tool === "add"
+                      ? "Click the sim to add a particle."
+                      : "Drag a particle to move it."}
+                  </p>
+                )}
+                {tool === "deform" && (
+                  <>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={deformSettings.direction === "outward"}
+                        onChange={(e) =>
+                          setDeformSettings((s) => ({
+                            ...s,
+                            direction: e.target.checked ? "outward" : "inward",
+                          }))
+                        }
+                      />
+                      {deformSettings.direction === "outward"
+                        ? "Push outward (explode)"
+                        : "Pull inward (implode)"}
+                    </label>
+                    <label className="slider-row">
+                      <span>Strength</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={2}
+                        step={0.01}
+                        value={deformSettings.strength}
+                        onChange={(e) =>
+                          setDeformSettings((s) => ({
+                            ...s,
+                            strength: Number(e.target.value),
+                          }))
+                        }
+                      />
+                      <span className="slider-value">
+                        {deformSettings.strength.toFixed(2)}
+                      </span>
+                    </label>
+                    <label className="slider-row">
+                      <span>Radius</span>
+                      <input
+                        type="range"
+                        min={0.01}
+                        max={0.5}
+                        step={0.01}
+                        value={deformSettings.radius}
+                        onChange={(e) =>
+                          setDeformSettings((s) => ({
+                            ...s,
+                            radius: Number(e.target.value),
+                          }))
+                        }
+                      />
+                      <span className="slider-value">
+                        {deformSettings.radius.toFixed(2)}
+                      </span>
+                    </label>
+                    <label className="checkbox-row">
+                      <input
+                        type="checkbox"
+                        checked={deformSettings.mode === "deformation"}
+                        onChange={(e) =>
+                          setDeformSettings((s) => ({
+                            ...s,
+                            mode: e.target.checked ? "deformation" : "velocity",
+                          }))
+                        }
+                      />
+                      Direct deformation (F) edit
+                    </label>
+                    <p className="hint">
+                      {deformSettings.mode === "deformation"
+                        ? `Click the sim to instantly stretch material ${deformSettings.direction === "outward" ? "away from" : "toward"} the click point.`
+                        : `Click the sim to push particles ${deformSettings.direction === "outward" ? "away from" : "toward"} the click point (a force, propagated by physics).`}
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
             <div className="tool-buttons">
               <button
                 className={`icon-button${tool === "add" ? " is-active" : ""}`}
@@ -263,257 +506,165 @@ export function TrainingView() {
               >
                 ✥
               </button>
-            </div>
-            {tool !== "none" && (
-              <p className="hint">
-                {tool === "add"
-                  ? "Click the sim to add a particle."
-                  : "Drag a particle to move it."}
-              </p>
-            )}
-          </section>
-
-          {trainedPhysics && physicsValues && (
-            <PhysicsPanel
-              trained={trainedPhysics}
-              value={physicsValues}
-              onChange={setPhysicsOverride}
-              isOverridden={physicsOverride !== null}
-              onReset={() => setPhysicsOverride(null)}
-            />
-          )}
-
-          <section>
-            <h2>Rendering</h2>
-            <label className="slider-row">
-              <span>Background</span>
-              <select
-                className="select"
-                value={fieldMode}
-                onChange={(e) => setFieldMode(e.target.value as FieldMode)}
-              >
-                <option value="none">None</option>
-                <option value="density">Density</option>
-                <option value="speed">Speed</option>
-                <option value="deformation">Deformation</option>
-                <option value="pressure">Pressure</option>
-                <option value="shear">Shear</option>
-                <option value="repulsion">Repulsion field</option>
-                <option value="substrate">Substrate</option>
-                <option value="growth">Growth (cividis)</option>
-              </select>
-            </label>
-            <label className="slider-row">
-              <span>Accent</span>
-              <input
-                type="range"
-                min={0}
-                max={2}
-                step={0.01}
-                value={accent}
-                onChange={(e) => setAccent(Number(e.target.value))}
-              />
-              <span className="slider-value">{accent.toFixed(2)}</span>
-            </label>
-            <label className="slider-row">
-              <span>Particle size</span>
-              <input
-                type="range"
-                min={1}
-                max={16}
-                step={1}
-                value={particleRadiusPx}
-                onChange={(e) => setParticleRadiusPx(Number(e.target.value))}
-              />
-              <span className="slider-value">{particleRadiusPx}px</span>
-            </label>
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={particleShape === "triangle"}
-                onChange={(e) =>
-                  setParticleShape(e.target.checked ? "triangle" : "circle")
-                }
-              />
-              Point particles toward heading
-            </label>
-          </section>
-
-          <section>
-            <h2>Playback</h2>
-            <div className="playback-buttons">
               <button
-                className="playback-button"
-                onClick={() => setPaused((p) => !p)}
+                className={`icon-button${tool === "deform" ? " is-active" : ""}`}
+                onClick={() => setTool((t) => (t === "deform" ? "none" : "deform"))}
+                title="Deform — click the sim to inject a directional deformation"
+                aria-label="Deform"
+                aria-pressed={tool === "deform"}
               >
-                {paused ? "▶ Play" : "⏸ Pause"}
-              </button>
-              <button
-                className="playback-button"
-                onClick={() => gridCanvasRef.current?.restart()}
-              >
-                ↺ Restart
-              </button>
-              <button
-                className={
-                  "playback-button" + (recording ? " is-recording" : "")
-                }
-                onClick={handleRecordClick}
-                disabled={!RECORDING_FORMAT}
-                title={
-                  RECORDING_FORMAT
-                    ? undefined
-                    : "This browser can't record video (MediaRecorder unsupported)"
-                }
-              >
-                {recording ? "● REC" : "⏺ Record"}
+                ⤢
               </button>
             </div>
-            {RECORDING_FORMAT && RECORDING_FORMAT.ext !== "mp4" && (
-              <p className="hint">
-                Recording saves as .{RECORDING_FORMAT.ext} — this browser can't
-                encode MP4 directly.
-              </p>
-            )}
-            <label className="checkbox-row">
+          </div>
+          <div className="toolbar-actions">
+            <label
+              className="toolbar-checkbox"
+              title={
+                loopAtTrainedSteps
+                  ? "Restart with a fresh rollout once it reaches the step count it was trained/scored at"
+                  : `Running past step ${activeConfig?.macroSteps ?? "—"} — the horizon it was scored at`
+              }
+            >
               <input
                 type="checkbox"
                 checked={loopAtTrainedSteps}
                 onChange={(e) => setLoopAtTrainedSteps(e.target.checked)}
               />
-              Loop at trained step count
+              Loop
             </label>
-            {!loopAtTrainedSteps && (
-              <p className="hint">
-                Running past step {activeConfig?.macroSteps ?? "—"} — the
-                horizon it was scored at.
-              </p>
-            )}
-          </section>
-
-          <section>
-            <h2>Update rule</h2>
             <button
-              className="playback-button"
+              className="icon-button"
               onClick={() => gridCanvasRef.current?.randomizeWeights()}
               disabled={!activeConfig}
-              title="Replace the update rule's weights/biases with a fresh random init and restart the rollout under it"
+              title="Randomize weights — replace the update rule's weights/biases with a fresh random init and restart the rollout under it, until a new one loads or you switch generations"
+              aria-label="Randomize weights"
             >
-              🎲 Randomize weights
+              🎲
             </button>
-            <p className="hint">
-              Overrides this generation's trained weights until a new one loads
-              or you switch generations.
-            </p>
-          </section>
+            <button
+              className="icon-button"
+              onClick={() => setPaused((p) => !p)}
+              title={paused ? "Play" : "Pause"}
+              aria-label={paused ? "Play" : "Pause"}
+            >
+              {paused ? "▶" : "⏸"}
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => gridCanvasRef.current?.restart()}
+              title="Restart"
+              aria-label="Restart"
+            >
+              ↺
+            </button>
+            <button
+              className={`icon-button${recording ? " is-recording" : ""}`}
+              onClick={handleRecordClick}
+              disabled={!RECORDING_FORMAT}
+              title={
+                !RECORDING_FORMAT
+                  ? "This browser can't record video (MediaRecorder unsupported)"
+                  : recording
+                    ? "Stop recording"
+                    : `Record — saves as .${RECORDING_FORMAT.ext}`
+              }
+              aria-label={recording ? "Stop recording" : "Record"}
+            >
+              {recording ? "●" : "⏺"}
+            </button>
+          </div>
         </div>
-        <div className="viewport">
-          <GridCanvas
-            ref={gridCanvasRef}
-            config={activeConfig}
-            targetPoints={targetPoints}
-            physics={physicsValues}
-            fieldMode={fieldMode}
-            accent={accent}
-            particleShape={particleShape}
-            particleRadiusPx={particleRadiusPx}
-            tool={tool}
-            onStep={setReplayStep}
-            onProbe={setProbe}
-            loopAtTrainedSteps={loopAtTrainedSteps}
-            paused={paused}
+        <div className="training-timeline">
+          <FitnessChart
+            history={history}
+            selectedGeneration={selectedGeneration}
+            onSelectGeneration={setSelectedGeneration}
+            getPreviewImageUrl={(generation) =>
+              generationImageUrl(TRAIN_API_URL, activeRunId, generation, "agents")
+            }
           />
         </div>
-        <div className="controls-right">
-          <section>
-            <h2>Stats</h2>
-            <div className="stat-row">
-              <span>Generation</span>
-              <span>{activeStat ? activeStat.generation : "—"}</span>
-            </div>
-            <div className="stat-row">
-              <span>Best (this gen)</span>
-              <span>{activeStat ? activeStat.best.toFixed(3) : "—"}</span>
-            </div>
-            <div className="stat-row">
-              <span>Mean (this gen)</span>
-              <span>{activeStat ? activeStat.mean.toFixed(3) : "—"}</span>
-            </div>
-            <div className="stat-row">
-              <span>Worst (this gen)</span>
-              <span>{activeStat ? activeStat.worst.toFixed(3) : "—"}</span>
-            </div>
-          </section>
-
-          <section>
-            <h2>Snapshot</h2>
-            {activeStat ? (
-              <div className="snapshot-grid">
-                {/* Target/agents come first, side by side — the pair
-                    meant to be checked directly against each other (see
-                    debug_images.py's own module docstring: "agents" is
-                    rasterized at literally the same pose
-                    raster.training_raster_distance() scored it under, so
-                    it lines up pixel-for-pixel with "target"). Grown
-                    (raw, un-aligned positions) is context below, spanning
-                    the full row — see .snapshot-item-wide. */}
-                <div className="snapshot-item">
-                  <img
-                    className="snapshot-image"
-                    src={generationImageUrl(
-                      TRAIN_API_URL,
-                      activeRunId,
-                      activeStat.generation,
-                      "target"
-                    )}
-                    alt="Target raster this run is training against"
-                  />
-                  <span className="snapshot-label">Target</span>
-                </div>
-                <div className="snapshot-item">
-                  <img
-                    className="snapshot-image"
-                    src={generationImageUrl(
-                      TRAIN_API_URL,
-                      activeRunId,
-                      activeStat.generation,
-                      "agents"
-                    )}
-                    alt="Winning rollout, rasterized at its best-scoring pose"
-                  />
-                  <span className="snapshot-label">Agents (aligned)</span>
-                </div>
-                <div className="snapshot-item snapshot-item-wide">
-                  <img
-                    className="snapshot-image"
-                    src={generationImageUrl(
-                      TRAIN_API_URL,
-                      activeRunId,
-                      activeStat.generation,
-                      "grown"
-                    )}
-                    alt="Winning rollout, raw final positions"
-                  />
-                  <span className="snapshot-label">Grown (raw)</span>
-                </div>
-              </div>
-            ) : (
-              <p className="hint">No generation selected yet.</p>
-            )}
-          </section>
-
-          <NetworkPanel probe={probe} physics={physicsValues} />
-        </div>
       </div>
-      <div className="training-timeline">
-        <FitnessChart
-          history={history}
-          selectedGeneration={selectedGeneration}
-          onSelectGeneration={setSelectedGeneration}
-          getPreviewImageUrl={(generation) =>
-            generationImageUrl(TRAIN_API_URL, activeRunId, generation, "agents")
-          }
-        />
+      <div className="controls-right">
+        <section>
+          <h2>Stats</h2>
+          <div className="stat-row">
+            <span>Generation</span>
+            <span>{activeStat ? activeStat.generation : "—"}</span>
+          </div>
+          <div className="stat-row">
+            <span>Best (this gen)</span>
+            <span>{activeStat ? activeStat.best.toFixed(3) : "—"}</span>
+          </div>
+          <div className="stat-row">
+            <span>Mean (this gen)</span>
+            <span>{activeStat ? activeStat.mean.toFixed(3) : "—"}</span>
+          </div>
+          <div className="stat-row">
+            <span>Worst (this gen)</span>
+            <span>{activeStat ? activeStat.worst.toFixed(3) : "—"}</span>
+          </div>
+        </section>
+
+        <section>
+          <h2>Snapshot</h2>
+          {activeStat ? (
+            <div className="snapshot-grid">
+              {/* Target/agents come first, side by side — the pair
+                  meant to be checked directly against each other (see
+                  debug_images.py's own module docstring: "agents" is
+                  rasterized at literally the same pose
+                  raster.training_raster_distance() scored it under, so
+                  it lines up pixel-for-pixel with "target"). Grown
+                  (raw, un-aligned positions) is context below, spanning
+                  the full row — see .snapshot-item-wide. */}
+              <div className="snapshot-item">
+                <img
+                  className="snapshot-image"
+                  src={generationImageUrl(
+                    TRAIN_API_URL,
+                    activeRunId,
+                    activeStat.generation,
+                    "target"
+                  )}
+                  alt="Target raster this run is training against"
+                />
+                <span className="snapshot-label">Target</span>
+              </div>
+              <div className="snapshot-item">
+                <img
+                  className="snapshot-image"
+                  src={generationImageUrl(
+                    TRAIN_API_URL,
+                    activeRunId,
+                    activeStat.generation,
+                    "agents"
+                  )}
+                  alt="Winning rollout, rasterized at its best-scoring pose"
+                />
+                <span className="snapshot-label">Agents (aligned)</span>
+              </div>
+              <div className="snapshot-item snapshot-item-wide">
+                <img
+                  className="snapshot-image"
+                  src={generationImageUrl(
+                    TRAIN_API_URL,
+                    activeRunId,
+                    activeStat.generation,
+                    "grown"
+                  )}
+                  alt="Winning rollout, raw final positions"
+                />
+                <span className="snapshot-label">Grown (raw)</span>
+              </div>
+            </div>
+          ) : (
+            <p className="hint">No generation selected yet.</p>
+          )}
+        </section>
+
+        <NetworkPanel probe={probe} physics={physicsValues} />
       </div>
     </div>
   )

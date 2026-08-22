@@ -1,12 +1,26 @@
 // Browser port of trainer/mpm_core.py's own MpmCore — same buffer
-// layout, bind groups, and pass ordering (clearGrid -> p2g -> gridUpdate
-// -> g2p -> clearDensity -> splatDensity -> densityToTexture ->
-// applyRepulsion), scoped to exactly ../core/'s 5 passes, same as the
+// layout, bind groups, and pass ordering (clearDensity -> splatDensity
+// -> densityToTexture -> applyRepulsion -> clearGrid -> p2g ->
+// gridUpdate -> g2p), scoped to exactly ../core/'s passes, same as the
 // Python headless wrapper. The WGSL itself isn't re-typed here at all —
 // it's loaded straight out of ../core/*.wgsl via Vite's `?raw` imports,
 // the same single-source-of-truth convention trainer/shader_template.py's
 // load_core_shader() uses on the Python side (see vite.config.ts's own
 // comment on why that path needs server.fs.allow).
+//
+// Repulsion (clearDensity/splatDensity/densityToTexture/applyRepulsion,
+// all from ../../../core/repulsion.wgsl) runs FIRST each substep —
+// applyRepulsion nudges velocity from THIS substep's own freshly-built
+// density field, at each particle's own exact position, so the push
+// reaches the grid through the very same substep's own P2G->gridUpdate
+// ->G2P transfer immediately. See that file's own module docstring for
+// the full revision history, including why a per-grid-node variant
+// (inside gridUpdate.wgsl) was tried and reverted: it avoided P2G's own
+// momentum-cancellation for overlapping particles, but at the cost of
+// capping the push's spatial resolution at the physics grid's own cell
+// size — confirmed empirically to barely separate particles at the
+// distance core/agents.wgsl's own growth spawns them at, which is
+// exactly the case this mechanism exists for.
 //
 // Unlike the Python wrapper, step() does NOT need to chunk large substep
 // counts across multiple command encoders with an intermediate host sync
@@ -388,30 +402,6 @@ export class MpmCore {
     const particleDispatch = ceilDiv(this._activeCount, WORKGROUP);
     for (let i = 0; i < substeps; i++) {
       let pass = encoder.beginComputePass();
-      pass.setPipeline(this.clearGridPipeline);
-      pass.setBindGroup(0, this.clearGridBindGroup);
-      pass.dispatchWorkgroups(this.gridDispatch);
-      pass.end();
-
-      pass = encoder.beginComputePass();
-      pass.setPipeline(this.p2gPipeline);
-      pass.setBindGroup(0, this.p2gBindGroup);
-      pass.dispatchWorkgroups(particleDispatch);
-      pass.end();
-
-      pass = encoder.beginComputePass();
-      pass.setPipeline(this.gridUpdatePipeline);
-      pass.setBindGroup(0, this.gridUpdateBindGroup);
-      pass.dispatchWorkgroups(this.gridDispatch);
-      pass.end();
-
-      pass = encoder.beginComputePass();
-      pass.setPipeline(this.g2pPipeline);
-      pass.setBindGroup(0, this.g2pBindGroup);
-      pass.dispatchWorkgroups(particleDispatch);
-      pass.end();
-
-      pass = encoder.beginComputePass();
       pass.setPipeline(this.clearDensityPipeline);
       pass.setBindGroup(0, this.clearDensityBindGroup);
       pass.dispatchWorkgroups(this.densityClearDispatch);
@@ -432,6 +422,30 @@ export class MpmCore {
       pass = encoder.beginComputePass();
       pass.setPipeline(this.applyRepulsionPipeline);
       pass.setBindGroup(0, this.applyRepulsionBindGroup);
+      pass.dispatchWorkgroups(particleDispatch);
+      pass.end();
+
+      pass = encoder.beginComputePass();
+      pass.setPipeline(this.clearGridPipeline);
+      pass.setBindGroup(0, this.clearGridBindGroup);
+      pass.dispatchWorkgroups(this.gridDispatch);
+      pass.end();
+
+      pass = encoder.beginComputePass();
+      pass.setPipeline(this.p2gPipeline);
+      pass.setBindGroup(0, this.p2gBindGroup);
+      pass.dispatchWorkgroups(particleDispatch);
+      pass.end();
+
+      pass = encoder.beginComputePass();
+      pass.setPipeline(this.gridUpdatePipeline);
+      pass.setBindGroup(0, this.gridUpdateBindGroup);
+      pass.dispatchWorkgroups(this.gridDispatch);
+      pass.end();
+
+      pass = encoder.beginComputePass();
+      pass.setPipeline(this.g2pPipeline);
+      pass.setBindGroup(0, this.g2pBindGroup);
       pass.dispatchWorkgroups(particleDispatch);
       pass.end();
     }

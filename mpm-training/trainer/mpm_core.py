@@ -1,10 +1,27 @@
 """Headless MLS-MPM simulation — the MpmSimulation-equivalent for this
-project's Python trainer, scoped to exactly core/'s 5 passes (clearGrid,
-p2g, gridUpdate, g2p, repulsion). Mirrors mls-mpm/src/gpu/mpm.ts's own
-MpmSimulation class structure (buffer layout, bind groups, step()
-ordering) as closely as possible so the two stay easy to compare by eye,
-minus everything sandbox-only (Mouse uniform, attract-to-point,
-field-visualize diagnostic channels — see ../core/README.md).
+project's Python trainer, scoped to exactly core/'s passes (clearDensity,
+splatDensity, densityToTexture, applyRepulsion, clearGrid, p2g,
+gridUpdate, g2p). Mirrors mls-mpm/src/gpu/mpm.ts's own MpmSimulation
+class structure (buffer layout, bind groups, step() ordering) as closely
+as possible so the two stay easy to compare by eye, minus everything
+sandbox-only (Mouse uniform, attract-to-point, field-visualize
+diagnostic channels — see ../core/README.md).
+
+Repulsion (clearDensity/splatDensity/densityToTexture/applyRepulsion,
+all from core/repulsion.wgsl) runs FIRST each substep, before
+clearGrid/p2g/gridUpdate/g2p — applyRepulsion nudges particleVel from
+THIS substep's own freshly-built density field, at each particle's own
+exact position, so the push reaches the grid through the very same
+substep's own P2G->gridUpdate->G2P transfer immediately rather than
+sitting stale for one substep. See core/repulsion.wgsl's own module
+docstring for the full 3-revision history of this mechanism, including
+why a 4th revision (moving the push into gridUpdate.wgsl as a per-node
+acceleration, to fully eliminate P2G's own momentum-cancellation for
+overlapping particles) was tried and reverted: it traded that partial
+cancellation for a worse problem, capping the push's effective spatial
+resolution at the physics grid's own cell size — coarser than
+core/agents.wgsl's own growth-spawn displacement — confirmed empirically
+to leave freshly-spawned overlapping particles barely separated at all.
 """
 from __future__ import annotations
 
@@ -84,8 +101,8 @@ def yield_bounds(elasticity: float) -> tuple[float, float]:
 class MpmCore:
     """Owns every GPU resource for the core MLS-MPM simulation and the
     one step(substeps) entry point — runs `substeps` full advance()
-    iterations (clearGrid -> p2g -> gridUpdate -> g2p -> clearDensity ->
-    splatDensity -> densityToTexture -> applyRepulsion) in a single
+    iterations (clearDensity -> splatDensity -> densityToTexture ->
+    applyRepulsion -> clearGrid -> p2g -> gridUpdate -> g2p) in a single
     submitted command buffer, each pass its own begin/end compute pass
     (WebGPU gives no cross-dispatch visibility guarantee *within* one
     pass, only across pass boundaries — same reasoning mpm.ts's own class
@@ -374,9 +391,17 @@ class MpmCore:
 
     def step(self, substeps: int) -> None:
         """Runs `substeps` full advance() iterations — same pass ordering
-        as mpm.ts's own step(): clearGrid -> p2g -> gridUpdate -> g2p ->
-        clearDensity -> splatDensity -> densityToTexture ->
-        applyRepulsion, each its own begin/end compute pass. Internally
+        as mpm.ts's own step(): clearDensity -> splatDensity ->
+        densityToTexture -> applyRepulsion -> clearGrid -> p2g ->
+        gridUpdate -> g2p, each its own begin/end compute pass. Repulsion
+        runs FIRST (not after g2p) so applyRepulsion's own velocity nudge
+        — computed from THIS substep's own freshly-built density field,
+        at each particle's own exact position — reaches the grid through
+        the very same substep's own transfer immediately, rather than
+        sitting stale in particleVel for one substep. See
+        core/repulsion.wgsl's own module docstring for the full
+        revision history of this mechanism and why it stays a
+        per-particle pass rather than a per-grid-node one. Internally
         chunked into multiple command encoders/submits, each followed by
         an explicit GPU sync, when `substeps` exceeds
         _MAX_SUBSTEPS_PER_SUBMIT (see that constant's own docstring) —
@@ -394,30 +419,6 @@ class MpmCore:
             remaining -= chunk
             encoder = self.device.create_command_encoder()
             for _ in range(chunk):
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.clear_grid_pipeline)
-                p.set_bind_group(0, self.clear_grid_bind_group)
-                p.dispatch_workgroups(self.grid_dispatch)
-                p.end()
-
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.p2g_pipeline)
-                p.set_bind_group(0, self.p2g_bind_group)
-                p.dispatch_workgroups(particle_dispatch)
-                p.end()
-
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.grid_update_pipeline)
-                p.set_bind_group(0, self.grid_update_bind_group)
-                p.dispatch_workgroups(self.grid_dispatch)
-                p.end()
-
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.g2p_pipeline)
-                p.set_bind_group(0, self.g2p_bind_group)
-                p.dispatch_workgroups(particle_dispatch)
-                p.end()
-
                 p = encoder.begin_compute_pass()
                 p.set_pipeline(self.clear_density_pipeline)
                 p.set_bind_group(0, self.clear_density_bind_group)
@@ -439,6 +440,30 @@ class MpmCore:
                 p = encoder.begin_compute_pass()
                 p.set_pipeline(self.apply_repulsion_pipeline)
                 p.set_bind_group(0, self.apply_repulsion_bind_group)
+                p.dispatch_workgroups(particle_dispatch)
+                p.end()
+
+                p = encoder.begin_compute_pass()
+                p.set_pipeline(self.clear_grid_pipeline)
+                p.set_bind_group(0, self.clear_grid_bind_group)
+                p.dispatch_workgroups(self.grid_dispatch)
+                p.end()
+
+                p = encoder.begin_compute_pass()
+                p.set_pipeline(self.p2g_pipeline)
+                p.set_bind_group(0, self.p2g_bind_group)
+                p.dispatch_workgroups(particle_dispatch)
+                p.end()
+
+                p = encoder.begin_compute_pass()
+                p.set_pipeline(self.grid_update_pipeline)
+                p.set_bind_group(0, self.grid_update_bind_group)
+                p.dispatch_workgroups(self.grid_dispatch)
+                p.end()
+
+                p = encoder.begin_compute_pass()
+                p.set_pipeline(self.g2p_pipeline)
+                p.set_bind_group(0, self.g2p_bind_group)
                 p.dispatch_workgroups(particle_dispatch)
                 p.end()
 

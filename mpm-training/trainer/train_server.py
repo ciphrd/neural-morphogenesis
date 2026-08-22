@@ -633,25 +633,34 @@ def named_target_points(name: str) -> dict:
     return {"points": loaded.points.tolist()}
 
 
-def _find_latest_preview(images_dir: Path) -> Optional[Path]:
-    """Highest-generation-numbered agents-raster (falling back to grown)
-    image in `images_dir`, found by scanning actual files rather than
-    trusting a run's best_meta.json — _save_generation_images() runs
-    every generation, but best_meta.json only updates at
-    --checkpoint-every boundaries, so a run stopped between checkpoints
-    can have images saved past whatever generation number the metadata
-    last reported. Filenames are zero-padded (gen_00042_....png), so
-    lexicographic sort is numeric sort. "agents" (this winner's own
-    best-rotation raster — see debug_images.py's own module docstring)
-    is the preferred preview, same role "aligned" used to play before it
-    was superseded by this more accurate (literally the pose training
-    scored) raster."""
+def _find_latest_preview_prefix(images_dir: Path) -> Optional[str]:
+    """Zero-padded generation prefix (e.g. "gen_00042") of the highest-
+    generation-numbered debug image SET in `images_dir`, found by
+    scanning actual files rather than trusting a run's best_meta.json —
+    _save_generation_images() runs every generation, but best_meta.json
+    only updates at --checkpoint-every boundaries, so a run stopped
+    between checkpoints can have images saved past whatever generation
+    number the metadata last reported. Filenames are zero-padded, so
+    lexicographic sort is numeric sort.
+
+    Returns the shared PREFIX, not one specific file, because
+    _save_generation_images() always writes its "grown"/"agents"/
+    "target" trio together, every generation (see that function's own
+    docstring) — run_preview() and run_target_preview() below both derive
+    their own filename from this same prefix, so a run's best-result
+    thumbnail and its target thumbnail are always the exact same
+    generation's own pair, not two independently-"latest" images that
+    could theoretically disagree (they can't in practice, since target
+    is fixed for a whole run and every generation resaves the identical
+    raster, but deriving both from one shared prefix is the same
+    single-source-of-truth reasoning regardless)."""
     if not images_dir.is_dir():
         return None
     for pattern in ("gen_*_agents.png", "gen_*_grown.png"):
         candidates = sorted(images_dir.glob(pattern))
         if candidates:
-            return candidates[-1]
+            # "gen_00042_agents.png" -> "gen_00042"
+            return candidates[-1].name.rsplit("_", 1)[0]
     return None
 
 
@@ -696,6 +705,7 @@ def list_runs() -> dict:
                 "generation": latest_generation_message["generation"] if latest_generation_message else None,
                 "bestFitness": latest_generation_message["allTimeBest"] if latest_generation_message else None,
                 "previewUrl": "/runs/current/preview.png",
+                "targetPreviewUrl": "/runs/current/target-preview.png",
             }
         )
 
@@ -719,6 +729,7 @@ def list_runs() -> dict:
                     "generation": meta.get("generation"),
                     "bestFitness": meta.get("fitness"),
                     "previewUrl": f"/runs/{run_dir.name}/preview.png",
+                    "targetPreviewUrl": f"/runs/{run_dir.name}/target-preview.png",
                 }
             )
 
@@ -758,9 +769,34 @@ def _images_dir_for_run(run_id: str) -> Path:
 
 @app.get("/runs/{run_id}/preview.png")
 def run_preview(run_id: str) -> FileResponse:
-    path = _find_latest_preview(_images_dir_for_run(run_id))
-    if path is None:
+    """This run's best-result thumbnail — the winning rollout's own
+    best-rotation raster (falling back to the raw grown positions — see
+    _find_latest_preview_prefix()'s own docstring)."""
+    images_dir = _images_dir_for_run(run_id)
+    prefix = _find_latest_preview_prefix(images_dir)
+    if prefix is None:
         raise HTTPException(404, "no preview image available yet")
+    path = images_dir / f"{prefix}_agents.png"
+    if not path.is_file():
+        path = images_dir / f"{prefix}_grown.png"
+    return FileResponse(path)
+
+
+@app.get("/runs/{run_id}/target-preview.png")
+def run_target_preview(run_id: str) -> FileResponse:
+    """This run's target thumbnail — the same target raster
+    run_preview()'s own best-result thumbnail was actually scored
+    against (same generation prefix — see
+    _find_latest_preview_prefix()'s own docstring), so the two sit
+    side by side as a genuine, literally-comparable pair, not two
+    independently-picked images."""
+    images_dir = _images_dir_for_run(run_id)
+    prefix = _find_latest_preview_prefix(images_dir)
+    if prefix is None:
+        raise HTTPException(404, "no target preview image available yet")
+    path = images_dir / f"{prefix}_target.png"
+    if not path.is_file():
+        raise HTTPException(404, "no target preview image available yet")
     return FileResponse(path)
 
 

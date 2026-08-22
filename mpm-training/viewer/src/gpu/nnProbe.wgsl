@@ -25,7 +25,12 @@
 
 const CHANNELS: u32 = __CHANNELS__u;
 const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
-const IN_DIM: u32 = CHANNELS * 3u; // value + grad_forward + grad_lateral
+// value + grad_forward + grad_lateral, +2 for the agent's own spawn-
+// center-relative (x,y) position — must match core/agents.wgsl's own
+// IN_DIM exactly (this duplicate's own weight-offset math below is
+// wrong otherwise — see this file's own module docstring for why this
+// isn't a shared constant).
+const IN_DIM: u32 = CHANNELS * 3u + 2u;
 const SPOTS: u32 = 4u;
 const ENV_WRITE_DIM: u32 = CHANNELS * SPOTS;
 const OUT_DIM: u32 = ENV_WRITE_DIM + 5u;
@@ -58,7 +63,11 @@ const SPLIT_PROB_OFFSET: u32 = STRAFE_OFFSET + 2u;
 
 // Identical layout to core/agents.wgsl's own AgentPhysics — declared
 // again here (not shared) purely so this uniform's byte offsets line up;
-// only maxEnvWrite/maxAngularAccel/maxStrafe are actually read below.
+// the buffer bound at binding 5 is agents.ts's own real physicsState
+// (see nnProbe.ts's own bind group), always current — this struct just
+// has to declare every field up through whichever ones this file
+// actually reads (maxEnvWrite/maxAngularAccel/maxStrafe/spawnX/spawnY),
+// in the right order, or the trailing ones' own byte offsets miss.
 struct AgentPhysics {
   maxAccel: f32,
   maxStrafe: f32,
@@ -70,6 +79,9 @@ struct AgentPhysics {
   splitDisplacement: f32,
   divisionCooldown: f32,
   friction: f32,
+  depositSigma: f32,
+  spawnX: f32,
+  spawnY: f32,
 }
 @group(0) @binding(5) var<uniform> physics: AgentPhysics;
 
@@ -145,7 +157,10 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
     for (var i: u32 = 0u; i < IN_DIM; i = i + 1u) {
       acc = acc + inputVec[i] * weights[FC1W_OFFSET + j * IN_DIM + i];
     }
-    hidden[j] = safeTanh(acc);
+    // sin, not tanh — must match core/agents.wgsl's own evalPolicy()
+    // exactly (see that file's own comment for why sin replaced tanh
+    // here).
+    hidden[j] = sin(acc);
   }
 
   var outVec: array<f32, OUT_DIM>;
@@ -188,6 +203,16 @@ fn probe() {
     inputVec[CHANNELS + c] = gx * cosH + gy * sinH;
     inputVec[2u * CHANNELS + c] = -gx * sinH + gy * cosH;
   }
+  // Agent's own position, relative to this rollout's own spawn center —
+  // must match core/agents.wgsl's own agentStep() exactly (same
+  // minimum-image wraparound, same index offset). See that file's own
+  // inputVec population comment for the full reasoning.
+  var dx = pos.x - physics.spawnX;
+  dx = dx - round(dx);
+  var dy = pos.y - physics.spawnY;
+  dy = dy - round(dy);
+  inputVec[3u * CHANNELS] = dx;
+  inputVec[3u * CHANNELS + 1u] = dy;
 
   var result = evalPolicy(inputVec);
 

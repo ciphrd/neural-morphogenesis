@@ -18,7 +18,13 @@ export interface RunSummary {
   target: string | null;
   generation: number | null;
   bestFitness: number | null;
+  /** Best-result thumbnail — the winning rollout's own best-rotation raster. */
   previewUrl: string;
+  /** The SAME generation's own target raster (train_server.py's own
+   * run_target_preview() derives both from one shared generation
+   * prefix — see that route's own docstring) — a genuinely comparable
+   * pair, not two independently-"latest" images. */
+  targetPreviewUrl: string;
 }
 
 export async function fetchRuns(apiUrl: string): Promise<RunSummary[]> {

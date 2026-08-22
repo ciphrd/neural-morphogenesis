@@ -5,18 +5,76 @@
 // baked into an r32float texture by densityToTexture); a particle then
 // gets pushed away from wherever that field is locally highest by
 // sampling the texture's own gradient (applyRepulsion) — a central
-// finite difference between the 2 neighboring texels each axis, using
-// ordinary textureLoad rather than manually re-deriving Gaussian weights
-// from the raw accumulator buffer. applyRepulsion writes that gradient
-// directly to particlePos, not just particleVel — see that function's
-// own comment for why a velocity-only nudge doesn't actually separate
-// particles closer together than one MPM grid cell (gridUpdate.wgsl's
-// own mass-weighted average cancels opposing velocities from particles
-// sharing the same P2G stencil). Four passes, each its own compute pass
-// (not chained within one) for the same reason clearGrid/p2g/gridUpdate/
-// g2p are separate passes: WebGPU doesn't guarantee one dispatch's
-// writes are visible to the next dispatch *within* a single compute
-// pass, only across pass boundaries.
+// finite difference of a BILINEARLY-FILTERED read of that field (see
+// sampleDensityBilinear() below), not a raw per-texel one, so the
+// resulting force varies smoothly as a particle moves WITHIN a texel,
+// not just when it crosses one — this is what actually mattered for sim
+// quality: nearest-texel sampling made the gradient (and so the push) a
+// piecewise-constant step function, visible as a subtle per-texel jitter
+// in how particles settle relative to each other. The filtering is
+// manual (4 loadDensity() taps + mix()), not hardware textureSample —
+// see loadDensity()'s own comment for why, and why that's also the
+// right call for memory (no format change, no bigger texture).
+//
+// applyRepulsion writes ONLY to particleVel, not particlePos — this
+// mechanism has gone through 3 real revisions, worth recording since the
+// tradeoffs are genuinely subtle and easy to re-litigate by accident:
+//
+// 1. Direct particlePos write (original, ported from the sandbox).
+//    Kinematic, not physical — bypasses the grid entirely, no momentum
+//    conservation, no decay mechanism (nothing like gridUpdate.wgsl's
+//    own Damping bleeds it off), and splatDensity's Gaussian never
+//    reaches exactly zero, so the push never truly stopped, just got
+//    smaller, compounding every substep.
+// 2. Velocity-only, still a standalone pass running AFTER g2p (i.e.
+//    feeding the NEXT substep's p2g). Routes through the normal
+//    momentum-conserving grid transfer at last — but a per-particle
+//    value that only reaches the grid via P2G's own scatter is subject
+//    to gridUpdate.wgsl's own mass-weighted momentum average, which
+//    CANCELS opposing per-particle contributions from particles sharing
+//    a P2G stencil — exactly the case right after growth spawns a child
+//    beside its own parent (core/agents.wgsl's own SPLIT_DISPLACEMENT).
+// 3. THIS version: still velocity-only, but (a) sampled from THIS
+//    substep's own density field at each particle's own exact position
+//    (unchanged from revision 2 — see loadDensity() below, using
+//    FIELD_N's own fine resolution, independent of the coarser physics
+//    grid), and (b) dispatched BEFORE clearGrid/p2g/gridUpdate/g2p each
+//    substep rather than after, so the push is routed through the SAME
+//    substep's transfer immediately rather than sitting stale in
+//    particleVel for one substep.
+//
+// A 4th revision was tried and reverted: moving the push into
+// gridUpdate.wgsl itself as a per-GRID-NODE acceleration (alongside
+// gravity), specifically to eliminate revision 2's cancellation problem
+// by entering AFTER the mass-weighted average rather than before it.
+// That does eliminate cancellation — but it also caps the push's
+// effective SPATIAL resolution at the physics grid's own cell size
+// (GRID_N=64, DX≈0.0156), coarser than both the density field's own
+// resolution (FIELD_N=256, texel≈0.0039) and, critically, coarser than
+// core/agents.wgsl's own SPLIT_DISPLACEMENT (0.01): two particles that
+// share the same 3x3 B-spline node stencil (any pair less than ~1
+// GRID_N cell apart, which growth-spawned pairs always are) interpolate
+// nearly IDENTICAL repulsion from that stencil and barely separate at
+// all relative to each other, even though both get pushed. Confirmed
+// empirically, not just in theory: two particles seeded 0.01 apart (
+// SPLIT_DISPLACEMENT's own value) and run for 1500 substeps at a
+// repulsion strength strong enough to make revision 3's own effect
+// clearly visible stayed within 3% of their starting separation under
+// the per-node design, while THIS revision (still not eliminating
+// cancellation, only reducing it) reached 15-25% growth at the same
+// strength over the same substep count, purely because it still samples
+// the fine per-particle field rather than the coarse per-node one. In
+// other words: the momentum-cancellation problem the per-node redesign
+// set out to fix turned out to be the SMALLER of the two problems —
+// losing sub-grid-cell spatial resolution entirely was worse in
+// practice for the one thing this mechanism actually needs to do
+// (separate freshly-spawned overlapping particles). Kept here as the
+// record of why gridUpdate.wgsl does NOT carry a densityTex binding.
+//
+// Four passes total, each its own compute pass (not chained within one)
+// for the same reason clearGrid/p2g/gridUpdate/g2p are separate passes:
+// WebGPU doesn't guarantee one dispatch's writes are visible to the next
+// dispatch *within* a single compute pass, only across pass boundaries.
 //
 // Independent copy of mls-mpm/src/gpu/repulsion.wgsl (this project's own
 // sandbox), kept as a real, always-on part of core physics rather than
@@ -42,18 +100,19 @@
 // below is its OWN pipeline with its OWN small bind group, nowhere near
 // that limit.
 //
-// ALWAYS ON, runs every substep. KNOWN LIMITATION, inherited as-is from
-// the sandbox, not fixed by this extraction: applyRepulsion's direct
-// position write has no decay mechanism the way a velocity nudge does
-// (nothing like gridUpdate.wgsl's own Damping slider bleeds it off), and
-// splatDensity's Gaussian never reaches exactly zero — so this push
-// never truly stops, just gets smaller, and compounds every substep.
-// Over enough substeps this can disperse even an already-settled world
-// if pushed too hard — the default strength/splat radius (see
-// constants.json) are tuned to keep that gentle at default settings, not
-// to eliminate it (the actual fix would be a density threshold below
-// which the force is exactly zero, not yet implemented, same as the
-// sandbox).
+// ALWAYS ON, runs every substep. KNOWN LIMITATION: for particles closer
+// together than roughly one grid cell (the growth-spawn case), the push
+// is attenuated (not eliminated — see the revision-2-vs-3 comparison
+// above) by gridUpdate.wgsl's own mass-weighted average; a fully
+// cancellation-free fix would need a genuinely different transfer path
+// for this one force (e.g. its own separate small grid, sized well
+// below GRID_N, with its own P2G-style scatter), not attempted here.
+// The current default strength/splat radius (see simulation_settings.py)
+// are tuned empirically against this attenuated effective magnitude —
+// expect to need noticeably higher REPULSION_STRENGTH values than the
+// old direct-position-write revision ever needed for the same visible
+// effect, since that revision's instantaneous kinematic correction had
+// no grid-transfer attenuation at all.
 
 const FIELD_N: u32 = __FIELD_N__u;
 const TEXELS: u32 = FIELD_N * FIELD_N;
@@ -96,12 +155,7 @@ fn clearDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
 struct SplatParams {
   sigma: f32, // domain-space Gaussian sigma ([0,1] units, "splat radius")
 }
-// read_write, not read — splatDensity itself never writes through this
-// (see below), but applyRepulsion's own bind group (which reuses this
-// same declaration, per-pipeline bind groups being inferred
-// independently regardless of shared WGSL variable names) needs write
-// access, for reasons that function's own comment explains.
-@group(0) @binding(1) var<storage, read_write> particlePos: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read> particlePos: array<vec2<f32>>;
 @group(0) @binding(2) var<uniform> activeCount: u32;
 @group(0) @binding(3) var<uniform> splatParams: SplatParams;
 
@@ -172,7 +226,10 @@ fn densityToTexture(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // --- Gradient-descent repulsion: nudge each particle away from wherever
-// the density field is locally highest ---
+// the density field is locally highest, at that particle's own exact
+// position (fine FIELD_N resolution — see this file's own module
+// docstring for why that matters, and why this stays a per-particle
+// pass rather than moving into gridUpdate.wgsl) ---
 
 struct RepulsionParams {
   strength: f32,
@@ -184,12 +241,48 @@ struct RepulsionParams {
 // r32float textures are "unfilterable-float" by default in core WebGPU
 // (no sampler/textureSample against them without the optional
 // float32-filterable feature) — textureLoad below reads exact texels by
-// integer coordinate instead, no sampler needed at all.
-const FIELD_N_I: i32 = i32(FIELD_N);
-
+// integer coordinate instead, no sampler needed at all. Deliberately not
+// requested even to unlock hardware filtering: this project's own
+// gpu/device.ts requestDevice() call asks for exactly one requiredLimits
+// bump and zero requiredFeatures, on principle (every optional WebGPU
+// feature is a real chance of failing to acquire a device on some
+// backend) — see sampleDensityBilinear() below for how filtering is done
+// without needing this texture to become hardware-filterable at all.
 fn loadDensity(texel: vec2<i32>) -> f32 {
   let wrapped = vec2<i32>(wrapFieldIndex(texel.x), wrapFieldIndex(texel.y));
   return textureLoad(densityTexSampled, wrapped, 0).r;
+}
+
+// Manual bilinear filtering — 4 loadDensity() taps + 2 mix()es — rather
+// than a hardware-filtered textureSample(). Two independent reasons this
+// beats switching densityTexture to a format that DOES filter natively
+// (e.g. rgba16float): (1) no core-WebGPU single-channel format is both
+// storage-texture-WRITABLE (needed by densityToTexture's own
+// textureStore above) and natively filterable without an optional
+// feature — r8unorm/r16float both need the "texture-formats-tier1"
+// feature just to be storage-write targets, same "don't depend on
+// optional features" reasoning as loadDensity()'s own comment; the only
+// core-mandatory storage-writable single-channel format is exactly the
+// r32float already in use. (2) even ignoring (1), the smallest format
+// that WOULD hardware-filter without a feature is 4-channel (rgba16float
+// or similar — no single/dual-channel core format is both storage-
+// writable and filterable) which is strictly MORE memory than staying
+// single-channel r32float and filtering by hand. So this keeps the exact
+// same densityAccum/densityTexture byte footprint this file always had —
+// the quality gain below is pure math, not a bigger buffer.
+//
+// Texel i's own sample point is at continuous coordinate i+0.5, matching
+// splatDensity's own texelCenter convention above — hence the -0.5
+// before flooring to find the 4 surrounding texel corners.
+fn sampleDensityBilinear(domainPos: vec2<f32>) -> f32 {
+  let texPos = domainPos * f32(FIELD_N) - vec2<f32>(0.5, 0.5);
+  let base = vec2<i32>(floor(texPos));
+  let f = texPos - vec2<f32>(base);
+  let d00 = loadDensity(base);
+  let d10 = loadDensity(base + vec2<i32>(1, 0));
+  let d01 = loadDensity(base + vec2<i32>(0, 1));
+  let d11 = loadDensity(base + vec2<i32>(1, 1));
+  return mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
 }
 
 @compute @workgroup_size(64)
@@ -198,42 +291,26 @@ fn applyRepulsion(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (pi >= activeCount) { return; }
 
   let pos = particlePos[pi];
-  let texel = vec2<i32>(pos * f32(FIELD_N));
-  let dx = loadDensity(texel + vec2<i32>(1, 0)) - loadDensity(texel - vec2<i32>(1, 0));
-  let dy = loadDensity(texel + vec2<i32>(0, 1)) - loadDensity(texel - vec2<i32>(0, 1));
-  // 2 texels apart (i32(1)-i32(-1)) in domain units.
-  let grad = vec2<f32>(dx, dy) / (2.0 / f32(FIELD_N));
+  // 1 texel apart each side (2 texels total span, same as the old
+  // texel-indexed version), in domain units — but now a central
+  // difference of sampleDensityBilinear()'s own CONTINUOUS field rather
+  // than loadDensity()'s texel-quantized one, so the gradient (and the
+  // resulting push) varies smoothly as a particle moves within a texel,
+  // not just when it crosses one.
+  let eps = 1.0 / f32(FIELD_N);
+  let dx = sampleDensityBilinear(pos + vec2<f32>(eps, 0.0)) - sampleDensityBilinear(pos - vec2<f32>(eps, 0.0));
+  let dy = sampleDensityBilinear(pos + vec2<f32>(0.0, eps)) - sampleDensityBilinear(pos - vec2<f32>(0.0, eps));
+  let grad = vec2<f32>(dx, dy) / (2.0 * eps);
 
   // Downhill on the density field, i.e. away from wherever local
-  // crowding is highest. Written to BOTH particlePos and particleVel,
-  // not just velocity — a velocity-only nudge here doesn't work: two
-  // particles closer together than one MPM grid cell get nearly
-  // identical P2G interpolation weights, so if repulsion gives them
-  // opposing velocities, their momentum contributions land on the same
-  // grid nodes and largely cancel in gridUpdate.wgsl's mass-weighted
-  // average — g2p.wgsl then hands both particles back the same
-  // (near-zero, averaged-away) velocity, erasing the separation in the
-  // very substep it was computed. Writing directly to particlePos
-  // bypasses the grid round-trip entirely for the positional effect.
-  // This makes repulsion a kinematic position correction layered on top
-  // of MPM, NOT a proper physical force the way gravity is — it doesn't
-  // conserve momentum the way a grid-mediated force does. Acceptable
-  // tradeoff for "don't let particles overlap," not a general substitute
-  // for gravity's own grid-routed approach.
-  //
-  // KNOWN LIMITATION, inherited as-is from the sandbox: a direct
-  // position write has no decay mechanism the way a velocity nudge does,
-  // and splatDensity's Gaussian never reaches exactly zero — so this
-  // push never truly stops either, just gets smaller, and compounds
-  // every substep. Default strength/splat radius are picked to keep
-  // that dispersal slow/gentle at default settings, not to stop it.
-  let delta = grad * (repulsionParams.strength * DT);
-  particleVel[pi] = particleVel[pi] - delta;
-  // Toroidal: wrap into [0,1) rather than clamp against a wall — see
-  // g2p.wgsl's own fract()-based position update for the same reasoning.
-  // No margin needed either (this file's own former POS_MARGIN existed
-  // solely to keep a particle inside P2G's valid stencil range for one
-  // more substep — moot now that stencil indexing wraps unconditionally,
-  // see p2g.wgsl's own wrapIndex()).
-  particlePos[pi] = fract(pos - delta);
+  // crowding is highest — velocity only (see this file's own module
+  // docstring for the 3-revision history of why, and the empirical
+  // comparison against a per-node alternative). Dispatched BEFORE
+  // clearGrid/p2g/gridUpdate/g2p each substep (see mpm_core.py's/
+  // mpmCore.ts's own step()/encodeSteps() for the exact ordering), so
+  // this reaches the grid through the SAME substep's own transfer,
+  // subject to gridUpdate.wgsl's own Damping like any other velocity —
+  // it decays on its own, no unbounded-drift risk the way the old
+  // direct-position-write revision had.
+  particleVel[pi] = particleVel[pi] - grad * (repulsionParams.strength * DT);
 }

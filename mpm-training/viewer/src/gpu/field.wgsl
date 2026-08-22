@@ -452,3 +452,175 @@ fn colorizeGrowth(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn growthFragment(in: QuadOut) -> @location(0) vec4<f32> {
   return textureSample(growthTex, fieldSampler, in.uv);
 }
+
+// --- Gradient background: a first step toward a "shape boundary"
+// visualization — the DIRECTION/magnitude of the REPULSION density
+// field's own spatial gradient (core/repulsion.wgsl's own densityAccum,
+// splatted from every active particle's own position — the SAME field
+// the "repulsion" background mode's own repulsionFragment above already
+// samples via repulsionTex, binding 6), not a chemical channel. Computed
+// via a Sobel finite difference read off the BLURRED density (see
+// blurDensity()/blurredDensityAt() below — raw per-particle density is
+// grainy at the scale of individual particles, which a Sobel kernel
+// picks up as noise everywhere, not just at the shape's own boundary;
+// blurring first is what makes the gradient respond to the shape,
+// not the grain) — unlike the chemical field, repulsion has no
+// precomputed gradient anywhere upstream (environment.wgsl's own
+// computeGradient is chemical-field-only), and computing one here, once
+// per background redraw, is cheap enough not to need one.
+//
+// A flat region (uniformly empty, or uniformly dense) has zero gradient
+// and renders exactly the MID (0.5) gray this file's own graypoint()
+// convention already uses for "measured, genuinely zero" — the boundary
+// of wherever particles actually are is where color moves away from that
+// gray: R for the gradient's own x component, G for y (B held at a fixed
+// 0.5 — there's no third gradient component to show, just the flat
+// backdrop this mode's own name asked for). Direction alone for now, per
+// this feature's own first iteration — no arrow/outline geometry yet.
+//
+// Own output texture, sized to REPULSION_FIELD_N (core/constants.json's
+// own FIELD_N, via mpmCore.ts's own REPULSION_FIELD_N — see that
+// constant's own comment for why this is a DIFFERENT, unrelated
+// resolution from SUBSTRATE_WIDTH/HEIGHT above), not reused from
+// substrate/growth's own gradientOutputTex/dispatch.
+//
+// A first guess, not yet measured against a real repulsion field's own
+// gradient range — environment.wgsl's own sobelX/sobelY taps top out at
+// 0.25 magnitude (same kernel, ported below), so a sharp, fully-dense-
+// to-empty adjacent-cell edge produces a raw gradient around that same
+// scale; retune once this mode's actually been seen live.
+const GRADIENT_MAX: f32 = 0.25;
+
+// Toroidal wrap, matching MpmCore's own domain (gridUpdate.wgsl's own
+// module docstring — no walls) — repulsion density is splatted the same
+// way, so a boundary right at the domain edge should read no differently
+// than one in the middle.
+fn densityAt(x: i32, y: i32) -> f32 {
+  let n = i32(REPULSION_FIELD_N);
+  let wrapped = vec2<i32>((x + n) % n, (y + n) % n);
+  return textureLoad(repulsionTex, wrapped, 0).r;
+}
+
+// --- Blur pass: a cheap, bounded-radius Gaussian blur of the raw
+// density field, run BEFORE colorizeGradient below reads it — this is
+// what "Blur" (the frontend's own slider, gpu/render.ts's own setBlur())
+// actually controls: raw repulsion density is a hard, particle-sized-
+// grain splat (see core/repulsion.wgsl's own densityAccum), so its own
+// Sobel gradient is noisy at the scale of individual particles, not just
+// at the boundary of the shape they form together. Blurring first
+// smooths that grain out, so the gradient below responds to the
+// SHAPE's own boundary rather than every particle's own edge.
+//
+// A single, non-separable 2D pass (not two 1D passes, which would be
+// cheaper for a large radius) — simpler for a bounded, viewer-only
+// diagnostic max radius (BLUR_MAX_RADIUS), not worth a second
+// intermediate texture/dispatch. blurSigma<=1e-4 (the slider's own
+// default/minimum) skips the blur entirely — copies the raw density
+// through unchanged, the exact behavior this feature didn't touch.
+const BLUR_MAX_RADIUS: i32 = 6;
+
+@group(0) @binding(14) var<uniform> blurSigma: f32;
+@group(0) @binding(17) var blurredDensityOutputTex: texture_storage_2d<r32float, write>;
+
+@compute @workgroup_size(16, 16)
+fn blurDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= REPULSION_FIELD_N || gid.y >= REPULSION_FIELD_N) { return; }
+  let x = i32(gid.x);
+  let y = i32(gid.y);
+
+  if (blurSigma <= 1e-4) {
+    textureStore(blurredDensityOutputTex, vec2<i32>(x, y), vec4<f32>(densityAt(x, y), 0.0, 0.0, 0.0));
+    return;
+  }
+
+  // 3-sigma radius, same "enough of the kernel to matter" convention a
+  // truncated Gaussian normally uses, capped at BLUR_MAX_RADIUS so the
+  // slider's own top end can't make this pass unboundedly expensive.
+  let radius = min(BLUR_MAX_RADIUS, i32(ceil(blurSigma * 3.0)));
+  var sum: f32 = 0.0;
+  var weightSum: f32 = 0.0;
+  for (var dy: i32 = -radius; dy <= radius; dy = dy + 1) {
+    for (var dx: i32 = -radius; dx <= radius; dx = dx + 1) {
+      let w = exp(-f32(dx * dx + dy * dy) / (2.0 * blurSigma * blurSigma));
+      sum = sum + densityAt(x + dx, y + dy) * w;
+      weightSum = weightSum + w;
+    }
+  }
+  textureStore(blurredDensityOutputTex, vec2<i32>(x, y), vec4<f32>(sum / weightSum, 0.0, 0.0, 0.0));
+}
+
+@group(0) @binding(18) var blurredDensityTex: texture_2d<f32>;
+
+// Same toroidal-wrap reasoning as densityAt() above, reading the BLURRED
+// texture blurDensity() just wrote instead of raw repulsionTex.
+fn blurredDensityAt(x: i32, y: i32) -> f32 {
+  let n = i32(REPULSION_FIELD_N);
+  let wrapped = vec2<i32>((x + n) % n, (y + n) % n);
+  return textureLoad(blurredDensityTex, wrapped, 0).r;
+}
+
+// Matches environment.wgsl's own sobelX/sobelY exactly — [[-1,0,1],
+// [-2,0,2],[-1,0,1]]/8 (and its transpose for Y) — same kernel, just
+// sampling blurredDensityAt() instead of a chemical channel.
+fn sobelX(dy: i32, dx: i32) -> f32 {
+  if (dx == 0) { return 0.0; }
+  let mag = select(0.125, 0.25, dy == 0);
+  return select(-mag, mag, dx > 0);
+}
+fn sobelY(dy: i32, dx: i32) -> f32 {
+  return sobelX(dx, dy);
+}
+
+@group(0) @binding(15) var gradientOutputTex: texture_storage_2d<rgba8unorm, write>;
+
+// "Gradient exponent" (the frontend's own slider, gpu/render.ts's own
+// setGradientExponent()) — a dedicated power curve for THIS mode
+// specifically, separate from the shared "Accent" slider every other
+// background mode reaches through graypoint()/accentedSigned(). Applied
+// to the gradient vector's own MAGNITUDE, not each of gx/gy
+// independently — reshaping magnitude alone preserves the vector's own
+// true DIRECTION (an independent per-component power curve would distort
+// the angle, which matters here since this mode's whole point is "which
+// way does the boundary face," not just "how strong is it"). >1
+// suppresses weak/noisy gradients and sharpens onto strong, real edges
+// (useful when Blur alone doesn't fully clean up residual per-particle
+// grain); <1 brings out faint boundaries the linear mapping would
+// otherwise show as barely-there. 1 = identity, exactly today's linear-
+// normalized mapping, unchanged from before this knob existed.
+@group(0) @binding(19) var<uniform> gradientExponent: f32;
+
+@compute @workgroup_size(16, 16)
+fn colorizeGradient(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= REPULSION_FIELD_N || gid.y >= REPULSION_FIELD_N) { return; }
+  let x = i32(gid.x);
+  let y = i32(gid.y);
+
+  var gx: f32 = 0.0;
+  var gy: f32 = 0.0;
+  for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
+    for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
+      let v = blurredDensityAt(x + dx, y + dy);
+      gx = gx + v * sobelX(dy, dx);
+      gy = gy + v * sobelY(dy, dx);
+    }
+  }
+
+  let normalized = clamp(vec2<f32>(gx, gy) / GRADIENT_MAX, vec2<f32>(-1.0), vec2<f32>(1.0));
+  let mag = length(normalized);
+  let shapedMag = pow(min(mag, 1.0), gradientExponent);
+  var dir = vec2<f32>(0.0, 0.0);
+  if (mag > 1e-6) {
+    dir = normalized / mag;
+  }
+  let shaped = dir * shapedMag;
+
+  let color = vec3<f32>(shaped.x * 0.5 + 0.5, shaped.y * 0.5 + 0.5, 0.5);
+  textureStore(gradientOutputTex, vec2<i32>(x, y), vec4<f32>(color, 1.0));
+}
+
+@group(0) @binding(16) var gradientTex: texture_2d<f32>;
+
+@fragment
+fn gradientFragment(in: QuadOut) -> @location(0) vec4<f32> {
+  return textureSample(gradientTex, fieldSampler, in.uv);
+}

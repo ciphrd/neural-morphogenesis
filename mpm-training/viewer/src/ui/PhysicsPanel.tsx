@@ -187,7 +187,9 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
     {
       key: "repulsionStrength",
       label: "Repulsion strength",
-      ...scaledRange(trained.repulsionStrength, 3),
+      min: 0,
+      max: 1_000,
+      step: 0.001,
       format: (v) => v.toFixed(3),
     },
   ]
@@ -270,9 +272,13 @@ export function PhysicsPanel({
             <input
               type="checkbox"
               checked={value.mpmEnabled}
-              onChange={(e) => onChange({ ...value, mpmEnabled: e.target.checked })}
+              onChange={(e) =>
+                onChange({ ...value, mpmEnabled: e.target.checked })
+              }
             />
-            <span className="slider-value">{value.mpmEnabled ? "on" : "off"}</span>
+            <span className="slider-value">
+              {value.mpmEnabled ? "on" : "off"}
+            </span>
           </label>
           {specs.map((spec) => (
             <label key={spec.key} className="slider-row">
@@ -292,11 +298,6 @@ export function PhysicsPanel({
               </span>
             </label>
           ))}
-          <p className="hint">
-            {isOverridden
-              ? "Overriding this generation's own trained values — playback only, doesn't affect training."
-              : "Showing this generation's own trained values."}
-          </p>
         </div>
       )}
     </section>

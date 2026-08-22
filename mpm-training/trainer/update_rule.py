@@ -1,4 +1,4 @@
-"""The evolved per-particle policy: Dense(128) -> tanh -> Dense(16) —
+"""The evolved per-particle policy: Dense(128) -> sin -> Dense(16) —
 architecture/shape reference and a CPU-only utility class (random weight
 init via a fresh instance's own initialized parameters, JSON export via
 export_weights()), NOT the live forward pass anymore. That now runs
@@ -9,6 +9,11 @@ every macro step to bridge wgpu-native's own physics device and torch's
 own MPS/CUDA device, which share no buffers). forward() below is kept as
 a readable, executable reference for the exact math core/agents.wgsl's
 own agentStep() implements — evolve.py/train_server.py never call it.
+Hidden activation swapped from tanh to sin (a periodic activation) per
+this project's own explicit request — see self.net's own comment below
+for why, and why this doesn't need SIREN's own specific init/frequency
+scheme to remain sound under this project's own mutation-based (not
+gradient-based) optimizer.
 
 Same architecture, and the same LOCAL (heading-relative) frame
 convention envnca's own agents use: heading is core/agents.wgsl's own
@@ -45,10 +50,10 @@ pipelines now).
   MpmCore's own physics (see core/agents.wgsl's own module docstring for
   the full history: this has flipped between velocity and a direct
   position nudge twice now). accel is a separate output channel, still
-  produced (output width is unchanged) but currently unused. C=4
+  produced (output width is unchanged) but currently unused. C=8
   (simulation_settings.CHEM_CHANNELS) and
   DEPOSIT_SPOTS=4 (simulation_settings.DEPOSIT_SPOTS) are what pin the
-  output width at exactly 21: 4*4 + 1 + 2 + 2.
+  output width at exactly 37: 8*4 + 1 + 2 + 2.
 """
 from __future__ import annotations
 
@@ -66,20 +71,42 @@ from simulation_settings import ACCEL_DIM, ANGULAR_DIM, CHEM_CHANNELS, DEPOSIT_S
 POSITION_DIM = 2
 
 
+class Sin(nn.Module):
+    """torch has no built-in sin activation module (unlike Tanh/ReLU) —
+    this is the whole layer, nothing to configure. See UpdateRule.__init__'s
+    own comment for why this replaced Tanh here specifically."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.sin(x)
+
+
 class UpdateRule(nn.Module):
     def __init__(self, num_channels: int = CHEM_CHANNELS) -> None:
         super().__init__()
         self.num_channels = num_channels
         input_dim = 3 * num_channels + POSITION_DIM
         output_dim = num_channels * DEPOSIT_SPOTS + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM
-        # tanh hidden activation, not ReLU: this net is evolved (mutation
-        # + selection), never backprop-trained, so ReLU's usual vanishing-
-        # gradient advantage doesn't apply — tanh instead bounds a single
-        # dominant unit's contribution to the output layer, same reasoning
-        # trainer/backend's and envnca's own UpdateRule document.
+        # sin hidden activation, not ReLU or tanh: this net is evolved
+        # (mutation + selection), never backprop-trained, so ReLU's usual
+        # vanishing-gradient advantage doesn't apply, and neither does
+        # tanh's own "bounds a single dominant unit's contribution"
+        # rationale specifically — sin was swapped in instead per this
+        # project's own explicit request, on the theory that a PERIODIC
+        # activation is a more natural fit for a domain where heading/
+        # rotation (themselves sin/cos-parameterized throughout
+        # core/agents.wgsl's own sensing rotation, deposit-spot angles,
+        # strafe rotation) are everywhere. Deliberately NOT a full SIREN
+        # architecture (multiple sin-activated layers + SIREN's own
+        # frequency-scaled init, ω₀) — SIREN's actual value proposition is
+        # enabling STABLE, GRADIENT-BASED training of deep sinusoidal
+        # stacks representing high-frequency continuous signals; this
+        # network has neither property (shallow — one hidden layer — and
+        # never gradient-trained at all), so that machinery wouldn't buy
+        # anything here. This is a controlled, single-layer activation
+        # swap only.
         self.net = nn.Sequential(
             nn.Linear(input_dim, HIDDEN_DIM),
-            nn.Tanh(),
+            Sin(),
             nn.Linear(HIDDEN_DIM, output_dim),
         )
 
