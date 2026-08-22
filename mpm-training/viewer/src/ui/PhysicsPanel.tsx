@@ -1,5 +1,6 @@
 import { useState } from "react"
 import type { PhysicsSettings } from "../gpu/types"
+import { Slider } from "./Slider"
 
 interface PhysicsPanelProps {
   /** This generation's own trained values (train_server.py's broadcast
@@ -192,6 +193,20 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
       step: 0.001,
       format: (v) => v.toFixed(3),
     },
+    {
+      key: "repulsionMaxDelta",
+      label: "Repulsion max delta",
+      // Explicit absolute range, not scaledRange() — this bounds a
+      // per-substep VELOCITY delta against MLS-MPM's own stability
+      // limit (core/repulsion.wgsl's own RepulsionParams.maxDelta field
+      // comment: DX/DT = 250 is the theoretical "moves exactly one grid
+      // cell in one substep" bound), a fixed physical ceiling regardless
+      // of the trained repulsionStrength value.
+      min: 1,
+      max: 250,
+      step: 0.5,
+      format: (v) => v.toFixed(1),
+    },
   ]
 }
 
@@ -264,11 +279,12 @@ export function PhysicsPanel({
         <div className="physics-panel-body">
           {/* Boolean, not a slider — kept out of specsFor()'s own
            * SliderSpec list (which assumes a numeric range) and rendered
-           * as its own checkbox row instead. See
-           * gpu/types.ts's own RunSettings.mpmEnabled docstring for
-           * exactly what turning this off does. */}
-          <label className="slider-row">
-            <span>MPM physics</span>
+           * as its own checkbox row instead (same label-left/checkbox-
+           * right layout the "Point particles toward heading" row uses
+           * — see style.css's own .checkbox-row). See gpu/types.ts's own
+           * RunSettings.mpmEnabled docstring for exactly what turning
+           * this off does. */}
+          <label className="checkbox-row">
             <input
               type="checkbox"
               checked={value.mpmEnabled}
@@ -276,22 +292,17 @@ export function PhysicsPanel({
                 onChange({ ...value, mpmEnabled: e.target.checked })
               }
             />
-            <span className="slider-value">
-              {value.mpmEnabled ? "on" : "off"}
-            </span>
+            MPM physics
           </label>
           {specs.map((spec) => (
             <label key={spec.key} className="slider-row">
               <span>{spec.label}</span>
-              <input
-                type="range"
+              <Slider
                 min={spec.min}
                 max={spec.max}
                 step={spec.step}
                 value={value[spec.key]}
-                onChange={(e) =>
-                  onChange({ ...value, [spec.key]: Number(e.target.value) })
-                }
+                onChange={(v) => onChange({ ...value, [spec.key]: v })}
               />
               <span className="slider-value">
                 {spec.format(value[spec.key])}

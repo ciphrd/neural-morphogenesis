@@ -59,16 +59,53 @@ MPM_ENABLED = True
 MATERIAL_E = 1e4
 MATERIAL_NU = 0.2
 MATERIAL_HARDENING = 3.0
-MATERIAL_ELASTICITY = 0.0
+MATERIAL_ELASTICITY = 0.2
 
 # Growth
 SPLIT_DISPLACEMENT = 0.01
-DIVISION_COOLDOWN = 100.0
+DIVISION_COOLDOWN = 1.0
+# Retained in broadcasts for compatibility with older viewers. The
+# conservative grow-then-divide model no longer fades mass in after a
+# split; mass is accumulated before division through g instead.
+MASS_RAMP_MACRO_STEPS = 1.0
 
-# Simuation
+# --- Kinematic growth (multiplicative decomposition F = Fe*Fg) ---
+# The mechanism that lets a shape actually GROW as particles are added,
+# instead of elasticity fighting to restore its original volume: growth
+# accumulates in a per-particle stress-free rest factor g (det(Fg)), and
+# core/p2g.wgsl evaluates the constitutive law on Fe = F/sqrt(g) rather
+# than raw F. See core/g2p.wgsl's own substrate-driven growth block (where g is
+# advanced) and core/agents.wgsl's own ParticleRest.growth field comment.
+#
+# Exponential stress-free area growth rate while a substrate-triggered
+# cell cycle is active. Growth is imposed first; elastic relaxation then
+# expands the compatible body. 0 disables growth.
+GROWTH_RATE = 50.0
+# Division area ratio. 2 makes one g=2 parent exactly equivalent in mass
+# and rest area to two g=1 daughters.
+GROWTH_MAX = 2.0
+# Compression reference for continuous mechanical feedback. Below this
+# elastic volume Je, growth is slowed by Je/reference; it is never
+# switched off at a threshold. 0 disables inhibition.
+GROWTH_THRESHOLD = 0.85
+
+# Simulation. This is stronger than the previous 0.999 per-substep
+# retention so kinetic energy from completed divisions decays instead of
+# surviving for many later fitness snapshots.
 SUBSTEPS_PER_DAMPING_FRAME = round(10 * (_GRID_N / 80))
-DAMPING_LOSS_FRACTION = 1 - 0.999**SUBSTEPS_PER_DAMPING_FRAME
+DAMPING_LOSS_FRACTION = 1 - 0.995**SUBSTEPS_PER_DAMPING_FRAME
 
 # Repulsion
 SPLAT_RADIUS = 0.004
-REPULSION_STRENGTH = 0.05
+REPULSION_STRENGTH = 0.2
+# Hard cap on the MAGNITUDE of one physics substep's own repulsion
+# velocity delta — see core/repulsion.wgsl's own RepulsionParams.maxDelta
+# field comment for the full reasoning (an unclamped delta at the
+# strength needed to beat MATERIAL_E's own continuous elastic resistance
+# is exactly what produces a single-substep MLS-MPM stability violation
+# — confirmed empirically to blow up to NaN with REPULSION_STRENGTH>=100
+# and zero growth/elasticity involved). ~1/3 of DX/DT (core/
+# constants.json's own DX=0.015625, DT=0.0000625 => DX/DT=250, the
+# theoretical "moves exactly one grid cell in one substep" bound for
+# velocity) — comfortable margin below that bound, not tuned to the edge.
+REPULSION_MAX_DELTA = 40.0

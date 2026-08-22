@@ -21,8 +21,8 @@ export interface UpdateRuleWeights {
 // randomWeights() for how that gap gets filled with a placeholder
 // rollout in the meantime).
 export interface RunSettings {
-  // The growth CAP, not a fixed starting count — every rollout always
-  // starts with exactly ONE particle (see gpu/simulation.ts's own
+  // The growth CAP, not a fixed starting count — every rollout currently
+  // starts with two particles (see gpu/simulation.ts's own
   // restartRollout()) and grows via splitting from there, up to this
   // many (core/agents.wgsl's own MAX_ACTIVE_PARTICLES template const —
   // see that file's own module docstring for the full growth design).
@@ -30,6 +30,9 @@ export interface RunSettings {
   // consts — see resetKeyFor()), same as channels/fieldN/hiddenDim below.
   particles: number;
   macroSteps: number;
+  // Optional time cutoff for starting new cycles. null/absent means
+  // growth remains chemically controlled for the whole replay.
+  growthSteps?: number | null;
   substepsPerMacro: number;
   gravity: number;
   spawnX: number;
@@ -63,6 +66,18 @@ export interface RunSettings {
   splitDisplacement: number;
   divisionCooldown: number;
   friction: number;
+  // Macro steps a freshly-split child takes to fade in to full mass —
+  // see core/agents.wgsl's own AgentPhysics.massRampMacroSteps field
+  // comment, and core/p2g.wgsl for the smoothstep shaping. 1 disables
+  // the ramp. Live-tunable via the viewer's own Growth panel.
+  massRampMacroSteps: number;
+  // Kinematic growth (the multiplicative decomposition F = Fe*Fg) — see
+  // core/g2p.wgsl's own Material struct for what each of these does, and
+  // core/agents.wgsl's own ParticleRest.growth for what they accumulate
+  // into. growthRate 0 disables growth entirely.
+  growthRate: number;
+  growthMax: number;
+  growthThreshold: number;
   // Debug/testing toggle — off skips MpmCore's own physics substeps
   // entirely each macro step (gpu/simulation.ts's own step(), see that
   // method's own comment for exactly what stays running regardless:
@@ -98,6 +113,14 @@ export interface RunSettings {
   materialElasticity: number;
   splatRadius: number;
   repulsionStrength: number;
+  // Hard cap on the magnitude of one physics substep's own repulsion
+  // velocity delta — see core/repulsion.wgsl's own
+  // RepulsionParams.maxDelta field comment for the full reasoning
+  // (repulsionStrength alone has to be pushed high enough to beat
+  // materialE's own continuous elastic resistance to have any visible
+  // effect, but unclamped that's exactly what produces a single-substep
+  // MLS-MPM stability violation). Live-tunable via PhysicsPanel.
+  repulsionMaxDelta: number;
   target: string;
   population: number;
   elites: number;
@@ -162,8 +185,13 @@ export interface PhysicsSettings {
   splitDisplacement: number;
   divisionCooldown: number;
   friction: number;
+  massRampMacroSteps: number;
+  growthRate: number;
+  growthMax: number;
+  growthThreshold: number;
   splatRadius: number;
   repulsionStrength: number;
+  repulsionMaxDelta: number;
   mpmEnabled: boolean;
 }
 
@@ -199,8 +227,22 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     splitDisplacement: config.splitDisplacement,
     divisionCooldown: config.divisionCooldown,
     friction: config.friction,
+    // Falls back to 1.0 (= disabled, this project's own behavior before
+    // this knob existed) for a `generation` message from a
+    // train_server.py process still running pre-growth code,
+    // same reasoning depositRate's/depositSigma's own fallbacks above
+    // give.
+    massRampMacroSteps: config.massRampMacroSteps ?? 20.0,
+    growthRate: config.growthRate ?? 0.0,
+    growthMax: config.growthMax ?? 2.0,
+    growthThreshold: config.growthThreshold ?? 0.0,
     splatRadius: config.splatRadius,
     repulsionStrength: config.repulsionStrength,
+    // Falls back to 40.0 (trainer/simulation_settings.py's own
+    // REPULSION_MAX_DELTA default) for a `generation` message from a
+    // train_server.py process still running pre-repulsionMaxDelta code,
+    // same reasoning depositSigma's own fallback above gives.
+    repulsionMaxDelta: config.repulsionMaxDelta ?? 40.0,
     // Falls back to true (= normal physics, this project's own behavior
     // before this knob existed) for a `generation` message from a
     // train_server.py process still running pre-mpmEnabled code, same

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react"
 import { FitnessChart } from "./charts/FitnessChart"
-import type { NetworkProbe } from "./gpu/nnProbe"
 import type { FieldMode, ParticleShape } from "./gpu/render"
 import type { PhysicsSettings } from "./gpu/types"
 import { physicsSettingsFromConfig } from "./gpu/types"
@@ -9,11 +8,17 @@ import { fetchRunState } from "./net/runs"
 import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
 import { pickRecordingFormat } from "./render/canvasRecorder"
-import type { DeformSettings, GridCanvasHandle, Tool } from "./render/GridCanvas"
+import type {
+  DeformSettings,
+  GridCanvasHandle,
+  Tool,
+} from "./render/GridCanvas"
 import { GridCanvas } from "./render/GridCanvas"
+import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { RunPicker } from "./ui/RunPicker"
+import { Slider } from "./ui/Slider"
 
 const TRAIN_API_URL = "http://localhost:8003"
 const TRAIN_WS_URL = "ws://localhost:8003/ws"
@@ -135,8 +140,13 @@ export function TrainingView() {
       ? (configByGeneration.get(selectedGeneration) ?? latest)
       : latest
   const [replayStep, setReplayStep] = useState(0)
+  // Live particle count — grows as growth splits (see GpuSimulation's
+  // own particleCount getter), reported alongside the step by
+  // GridCanvas's own onStep every rendered frame.
+  const [cellCount, setCellCount] = useState(0)
   useEffect(() => {
     setReplayStep(0)
+    setCellCount(0)
   }, [activeConfig?.generation])
   // null = following this generation's own trained gravity/decay/
   // maxAccel/maxStrafe/maxEnvWrite; non-null once the "Physics" panel's
@@ -152,16 +162,6 @@ export function TrainingView() {
     ? physicsSettingsFromConfig(activeConfig)
     : null
   const physicsValues = physicsOverride ?? trainedPhysics
-  // Network panel's own live forward-pass snapshot (gpu/nnProbe.ts,
-  // refreshed on GridCanvas's own timer — see PROBE_INTERVAL_MS there).
-  // Reset alongside physicsOverride/targetPoints whenever the run/
-  // generation being viewed changes — a stale probe from a DIFFERENT
-  // config could carry the wrong channels/hiddenDim shape, and even a
-  // same-shape one is just a snapshot of some other rollout's own state.
-  const [probe, setProbe] = useState<NetworkProbe | null>(null)
-  useEffect(() => {
-    setProbe(null)
-  }, [viewingRunId, activeConfig?.generation])
   const activeStat =
     selectedGeneration !== null
       ? (history.find((h) => h.generation === selectedGeneration) ?? null)
@@ -240,11 +240,18 @@ export function TrainingView() {
                 : "—"}
             </span>
           </div>
+          {/* Live count, not the cap — grows as growth splits. The
+              "Max particles" row further down is config.particles, the
+              ceiling this can climb to. */}
+          <div className="stat-row">
+            <span>Cells</span>
+            <span>
+              {activeConfig ? `${cellCount} / ${activeConfig.particles}` : "—"}
+            </span>
+          </div>
           <div className="stat-row">
             <span>All-time best</span>
-            <span>
-              {activeStat ? activeStat.allTimeBest.toFixed(3) : "—"}
-            </span>
+            <span>{activeStat ? activeStat.allTimeBest.toFixed(3) : "—"}</span>
           </div>
           <div className="stat-row">
             <span>Max particles</span>
@@ -267,6 +274,27 @@ export function TrainingView() {
         <section>
           <h2>Rendering</h2>
           <label className="slider-row">
+            <span>Particle size</span>
+            <Slider
+              min={1}
+              max={16}
+              step={1}
+              value={particleRadiusPx}
+              onChange={setParticleRadiusPx}
+            />
+            <span className="slider-value">{particleRadiusPx}px</span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={particleShape === "triangle"}
+              onChange={(e) =>
+                setParticleShape(e.target.checked ? "triangle" : "circle")
+              }
+            />
+            Point particles toward heading
+          </label>
+          <label className="slider-row">
             <span>Background</span>
             <select
               className="select"
@@ -287,13 +315,12 @@ export function TrainingView() {
           </label>
           <label className="slider-row">
             <span>Accent</span>
-            <input
-              type="range"
+            <Slider
               min={0}
               max={2}
               step={0.01}
               value={accent}
-              onChange={(e) => setAccent(Number(e.target.value))}
+              onChange={setAccent}
             />
             <span className="slider-value">{accent.toFixed(2)}</span>
           </label>
@@ -306,25 +333,23 @@ export function TrainingView() {
             <>
               <label className="slider-row">
                 <span>Blur</span>
-                <input
-                  type="range"
+                <Slider
                   min={0}
                   max={2}
                   step={0.01}
                   value={blur}
-                  onChange={(e) => setBlur(Number(e.target.value))}
+                  onChange={setBlur}
                 />
                 <span className="slider-value">{blur.toFixed(2)}</span>
               </label>
               <label className="slider-row">
                 <span>Gradient exponent</span>
-                <input
-                  type="range"
+                <Slider
                   min={0.25}
                   max={4}
                   step={0.05}
                   value={gradientExponent}
-                  onChange={(e) => setGradientExponent(Number(e.target.value))}
+                  onChange={setGradientExponent}
                 />
                 <span className="slider-value">
                   {gradientExponent.toFixed(2)}
@@ -332,38 +357,25 @@ export function TrainingView() {
               </label>
             </>
           )}
-          <label className="slider-row">
-            <span>Particle size</span>
-            <input
-              type="range"
-              min={1}
-              max={16}
-              step={1}
-              value={particleRadiusPx}
-              onChange={(e) => setParticleRadiusPx(Number(e.target.value))}
-            />
-            <span className="slider-value">{particleRadiusPx}px</span>
-          </label>
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={particleShape === "triangle"}
-              onChange={(e) =>
-                setParticleShape(e.target.checked ? "triangle" : "circle")
-              }
-            />
-            Point particles toward heading
-          </label>
         </section>
 
         {trainedPhysics && physicsValues && (
-          <PhysicsPanel
-            trained={trainedPhysics}
-            value={physicsValues}
-            onChange={setPhysicsOverride}
-            isOverridden={physicsOverride !== null}
-            onReset={() => setPhysicsOverride(null)}
-          />
+          <>
+            <PhysicsPanel
+              trained={trainedPhysics}
+              value={physicsValues}
+              onChange={setPhysicsOverride}
+              isOverridden={physicsOverride !== null}
+              onReset={() => setPhysicsOverride(null)}
+            />
+            <GrowthPanel
+              trained={trainedPhysics}
+              value={physicsValues}
+              onChange={setPhysicsOverride}
+              isOverridden={physicsOverride !== null}
+              onReset={() => setPhysicsOverride(null)}
+            />
+          </>
         )}
       </div>
       <div className="center-column">
@@ -381,8 +393,10 @@ export function TrainingView() {
             particleRadiusPx={particleRadiusPx}
             tool={tool}
             deformSettings={deformSettings}
-            onStep={setReplayStep}
-            onProbe={setProbe}
+            onStep={(step, particles) => {
+              setReplayStep(step)
+              setCellCount(particles)
+            }}
             loopAtTrainedSteps={loopAtTrainedSteps}
             paused={paused}
           />
@@ -397,11 +411,7 @@ export function TrainingView() {
             {tool !== "none" && (
               <div className="tool-settings-panel">
                 <h3>
-                  {tool === "add"
-                    ? "Add"
-                    : tool === "move"
-                      ? "Move"
-                      : "Deform"}
+                  {tool === "add" ? "Add" : tool === "move" ? "Move" : "Deform"}
                 </h3>
                 {tool !== "deform" && (
                   <p className="hint">
@@ -429,17 +439,13 @@ export function TrainingView() {
                     </label>
                     <label className="slider-row">
                       <span>Strength</span>
-                      <input
-                        type="range"
+                      <Slider
                         min={0}
                         max={2}
                         step={0.01}
                         value={deformSettings.strength}
-                        onChange={(e) =>
-                          setDeformSettings((s) => ({
-                            ...s,
-                            strength: Number(e.target.value),
-                          }))
+                        onChange={(v) =>
+                          setDeformSettings((s) => ({ ...s, strength: v }))
                         }
                       />
                       <span className="slider-value">
@@ -448,17 +454,13 @@ export function TrainingView() {
                     </label>
                     <label className="slider-row">
                       <span>Radius</span>
-                      <input
-                        type="range"
+                      <Slider
                         min={0.01}
                         max={0.5}
                         step={0.01}
                         value={deformSettings.radius}
-                        onChange={(e) =>
-                          setDeformSettings((s) => ({
-                            ...s,
-                            radius: Number(e.target.value),
-                          }))
+                        onChange={(v) =>
+                          setDeformSettings((s) => ({ ...s, radius: v }))
                         }
                       />
                       <span className="slider-value">
@@ -478,11 +480,6 @@ export function TrainingView() {
                       />
                       Direct deformation (F) edit
                     </label>
-                    <p className="hint">
-                      {deformSettings.mode === "deformation"
-                        ? `Click the sim to instantly stretch material ${deformSettings.direction === "outward" ? "away from" : "toward"} the click point.`
-                        : `Click the sim to push particles ${deformSettings.direction === "outward" ? "away from" : "toward"} the click point (a force, propagated by physics).`}
-                    </p>
                   </>
                 )}
               </div>
@@ -508,7 +505,9 @@ export function TrainingView() {
               </button>
               <button
                 className={`icon-button${tool === "deform" ? " is-active" : ""}`}
-                onClick={() => setTool((t) => (t === "deform" ? "none" : "deform"))}
+                onClick={() =>
+                  setTool((t) => (t === "deform" ? "none" : "deform"))
+                }
                 title="Deform — click the sim to inject a directional deformation"
                 aria-label="Deform"
                 aria-pressed={tool === "deform"}
@@ -581,7 +580,12 @@ export function TrainingView() {
             selectedGeneration={selectedGeneration}
             onSelectGeneration={setSelectedGeneration}
             getPreviewImageUrl={(generation) =>
-              generationImageUrl(TRAIN_API_URL, activeRunId, generation, "agents")
+              generationImageUrl(
+                TRAIN_API_URL,
+                activeRunId,
+                generation,
+                "agents"
+              )
             }
           />
         </div>
@@ -664,7 +668,7 @@ export function TrainingView() {
           )}
         </section>
 
-        <NetworkPanel probe={probe} physics={physicsValues} />
+        <NetworkPanel config={activeConfig} physics={physicsValues} />
       </div>
     </div>
   )

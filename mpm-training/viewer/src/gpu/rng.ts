@@ -33,7 +33,7 @@ function hashU32(x: number): number {
   return x;
 }
 
-/** growthState.rng's own initial per-particle seed — bit-exact with
+/** particleMeta.rng's own initial per-particle seed — bit-exact with
  * agents_gpu.py's own _growth_seed(seed, count). `seed` is the
  * rollout's own raw seed (config.seed on this side, matching evolve.py's
  * own rollout(seed, ...) argument on the Python side). A DELIBERATELY

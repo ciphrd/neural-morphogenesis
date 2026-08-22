@@ -233,6 +233,29 @@ fn densityToTexture(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 struct RepulsionParams {
   strength: f32,
+  // Hard cap on the MAGNITUDE of one substep's own velocity delta
+  // (`grad * strength * DT` below) — the missing piece that let
+  // `strength` alone decide whether repulsion does anything or breaks
+  // everything, with no usable middle: this project's own material
+  // stiffness (trainer/simulation_settings.py's own MATERIAL_E) resists
+  // repulsion's push continuously, every substep, from the very first
+  // one (NOT something core/agents.wgsl's own growthJpRelief touches at
+  // all — that only nudges Jp at discrete split events) — so `strength`
+  // has to be pushed high enough to genuinely win against that
+  // resistance to have any visible effect. But an UNCLAMPED delta at
+  // that magnitude is exactly what produces a single-substep velocity
+  // kick large enough to violate MLS-MPM's own implicit assumption that
+  // a particle stays within its local 3x3 P2G/G2P stencil for one
+  // substep — confirmed empirically earlier in this project's own
+  // history: two particles seeded SPLIT_DISPLACEMENT apart, repulsion
+  // strength >=100, blow up to NaN in a SINGLE substep, with zero growth
+  // or elasticity involved at all. This clamp lets `strength` be turned
+  // up as far as needed to beat elastic stiffness while keeping the
+  // PER-SUBSTEP delta bounded to something MLS-MPM can actually resolve
+  // — trainer/simulation_settings.py's own REPULSION_MAX_DELTA is the
+  // starting value, live-tunable via PhysicsPanel same as strength
+  // itself.
+  maxDelta: f32,
 }
 @group(0) @binding(4) var<storage, read_write> particleVel: array<vec2<f32>>;
 @group(0) @binding(5) var densityTexSampled: texture_2d<f32>;
@@ -312,5 +335,14 @@ fn applyRepulsion(@builtin(global_invocation_id) gid: vec3<u32>) {
   // subject to gridUpdate.wgsl's own Damping like any other velocity —
   // it decays on its own, no unbounded-drift risk the way the old
   // direct-position-write revision had.
-  particleVel[pi] = particleVel[pi] - grad * (repulsionParams.strength * DT);
+  var delta = grad * (repulsionParams.strength * DT);
+  // Clamp the delta's own MAGNITUDE, not each component independently —
+  // preserves push DIRECTION exactly, only ever shrinks how far it goes
+  // in one substep. See RepulsionParams.maxDelta's own comment for why
+  // this exists at all.
+  let deltaLen = length(delta);
+  if (deltaLen > repulsionParams.maxDelta) {
+    delta = delta * (repulsionParams.maxDelta / deltaLen);
+  }
+  particleVel[pi] = particleVel[pi] - delta;
 }

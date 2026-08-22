@@ -1,19 +1,10 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { DeformDirection, DeformMode } from "../gpu/deform";
 import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu/device";
-import type { NetworkProbe } from "../gpu/nnProbe";
 import type { FieldMode, ParticleShape } from "../gpu/render";
 import { GpuSimulation } from "../gpu/simulation";
 import type { PhysicsSettings, SimulationConfig } from "../gpu/types";
 import { CanvasRecorder } from "./canvasRecorder";
-
-// How often the Network panel's own probe (gpu/nnProbe.ts) re-samples the
-// live forward pass — its own independent cadence, deliberately NOT once
-// per macro step (that's what the RAF loop below runs at): a diagnostic
-// readback has no business adding a second async GPU round-trip to
-// step()'s own already-async path, and 8/sec is plenty for a human eye to
-// read a "brain" visualization by, even at a much higher true step rate.
-const PROBE_INTERVAL_MS = 125;
 
 /** "none": no click/drag interaction (the default, passive-replay mode).
  * "add": click adds one particle at the clicked domain position (see
@@ -81,7 +72,12 @@ interface GridCanvasProps {
    * simpler than threading an extra null-check through every reader
    * below for a case that can't actually arise in practice). */
   deformSettings: DeformSettings;
-  onStep?: (step: number) => void;
+  /** Fired once per rendered frame with the rollout's own current macro
+   * step AND its live particle count (which grows as growth splits —
+   * see GpuSimulation's own particleCount getter). Both ride the same
+   * callback rather than getting their own, since they're read from the
+   * same sim at the same instant and always displayed together. */
+  onStep?: (step: number, particleCount: number) => void;
   // Default (true): restart with a fresh rollout (same seed) once
   // currentStep reaches config.macroSteps — the rollout was only ever
   // *trained* for that many macro steps, so this keeps a long-idle
@@ -94,12 +90,6 @@ interface GridCanvasProps {
   // check) are skipped while true, but rendering keeps running every
   // frame regardless.
   paused?: boolean;
-  /** Fired roughly every PROBE_INTERVAL_MS with a fresh forward-pass
-   * snapshot (see gpu/nnProbe.ts) for the Network panel's own brain
-   * visualization — never fired with null (a probe that returned null
-   * because a previous one was still resolving just skips that tick
-   * rather than overwriting whatever's already displayed). */
-  onProbe?: (probe: NetworkProbe) => void;
 }
 
 export interface GridCanvasHandle {
@@ -207,7 +197,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     onStep,
     loopAtTrainedSteps = true,
     paused = false,
-    onProbe,
   },
   ref
 ) {
@@ -228,7 +217,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const onStepRef = useRef(onStep);
   const loopAtTrainedStepsRef = useRef(loopAtTrainedSteps);
   const pausedRef = useRef(paused);
-  const onProbeRef = useRef(onProbe);
   // "Move" tool's own live drag state — a ref, not React state, since it
   // updates on every pointermove and is read every animation frame (see
   // the RAF loop below); re-rendering the component for either would be
@@ -345,7 +333,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   onStepRef.current = onStep;
   loopAtTrainedStepsRef.current = loopAtTrainedSteps;
   pausedRef.current = paused;
-  onProbeRef.current = onProbe;
 
   useImperativeHandle(ref, () => ({
     restart: () => {
@@ -720,7 +707,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
           sim.injectDeform(deformHoverRef.current.x, deformHoverRef.current.y, direction, strength, radius, mode);
         }
         sim.render(context);
-        onStepRef.current?.(sim.currentStep);
+        onStepRef.current?.(sim.currentStep, sim.particleCount);
       }
       if (!cancelled) raf = requestAnimationFrame(frame);
     };
@@ -729,28 +716,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     return () => {
       cancelled = true;
       cancelAnimationFrame(raf);
-    };
-  }, [status]);
-
-  // Network panel's own probe (gpu/nnProbe.ts) — a separate, slower-
-  // cadence timer, not tied to the RAF loop above, since it's a
-  // diagnostic readback with its own async GPU round-trip (see
-  // PROBE_INTERVAL_MS's own comment). Runs regardless of `paused` — the
-  // sensed input only actually changes once step() runs again, but
-  // re-probing the same, unchanged state while paused is harmless and
-  // keeps the panel from just freezing on stale "still computing" state
-  // the instant Play is toggled off.
-  useEffect(() => {
-    if (status !== "ready" || !onProbeRef.current) return;
-    let cancelled = false;
-    const interval = setInterval(() => {
-      simulationRef.current?.probeNetwork().then((probe) => {
-        if (!cancelled && probe) onProbeRef.current?.(probe);
-      });
-    }, PROBE_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
     };
   }, [status]);
 

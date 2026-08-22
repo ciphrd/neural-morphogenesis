@@ -26,6 +26,7 @@ from mpm_core import MpmCore
 from shader_template import load_core_shader
 
 WORKGROUP = 64
+PARTICLE_META_BUFFER_OFFSET = 256
 
 
 def _hash_u32(x: np.ndarray) -> np.ndarray:
@@ -48,7 +49,7 @@ def _hash_u32(x: np.ndarray) -> np.ndarray:
 
 
 def _growth_seed(seed: int, count: int) -> np.ndarray:
-    """growthState.rng's own initial per-particle seed — bit-exact with
+    """particleMeta.rng's own initial per-particle seed — bit-exact with
     ../viewer/src/gpu/rng.ts's own growthSeed(seed, index), see that
     function's own comment. `seed` is the rollout's own raw seed
     (evolve.py's own rollout(seed, ...) argument / render_rollout.py's
@@ -159,6 +160,7 @@ class AgentsGPU:
         division_cooldown: float,
         friction: float,
         deposit_sigma: float,
+        growth_enabled: float,
         spawn_x: float,
         spawn_y: float,
     ) -> None:
@@ -172,13 +174,13 @@ class AgentsGPU:
         self._weights_buffer = device.create_buffer(
             size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
         )
-        # 52 bytes — core/agents.wgsl's own AgentPhysics struct is 13 f32
+        # 56 bytes — core/agents.wgsl's own AgentPhysics struct is 14 f32
         # fields (see that struct's own definition for the exact order
         # set_physics() below must match) — the last 2 (spawnX/spawnY) are
         # NOT written by set_physics() below; see set_spawn_center()'s own
         # docstring for why those get a separate setter into this same
         # buffer instead.
-        self._physics_uniform = device.create_buffer(size=52, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self._physics_uniform = device.create_buffer(size=56, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_physics(
             max_accel,
             max_strafe,
@@ -191,48 +193,50 @@ class AgentsGPU:
             division_cooldown,
             friction,
             deposit_sigma,
+            growth_enabled,
         )
         self.set_spawn_center(spawn_x, spawn_y)
 
-        # Persistent per-particle heading/angularVelocity/growthState
-        # state — owned here (not MpmCore, not EnvironmentGPU), zeroed at
-        # creation (randomized/reseeded properly once reset_heading() is
-        # called with a real rng — once per rollout, see training_sim.py's
-        # own TrainingRollout.__init__) and whenever reset_heading() is
-        # called again after that. Sized to max_active_particles, NOT the
-        # single particle every rollout actually starts with — growth
-        # (core/agents.wgsl's own agentStep()) can write heading[newIndex]/
-        # angularVelocity[newIndex]/growthState[newIndex] for any newIndex
+        # Persistent per-particle state — owned here (not MpmCore, not
+        # EnvironmentGPU), zeroed at creation (randomized/reseeded
+        # properly once reset_heading() is called with a real rng — once
+        # per rollout, see training_sim.py's own TrainingRollout.__init__)
+        # and whenever reset_heading() is called again after that. Sized
+        # to max_active_particles, NOT the single particle every rollout
+        # actually starts with — growth (core/agents.wgsl's own
+        # agentStep()) can write particleMeta[newIndex] for any newIndex
         # up to max_active_particles, at runtime, with no rebuild (mirrors
         # agents.ts's own reasoning for sizing THOSE buffers to
         # MAX_PARTICLES, for the "Add Particle" tool's own runtime growth
         # — same underlying need, smaller ceiling since this class has no
         # such interactive tool of its own).
-        state_size = max(max_active_particles, 1) * 4
-        self._heading_buffer = device.create_buffer(size=state_size, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
-        self._angular_velocity_buffer = device.create_buffer(size=state_size, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
-        # Growth's own rng (u32) + cooldown (f32) — packed into ONE 8-
-        # bytes-per-particle buffer (core/agents.wgsl's own GrowthState
-        # struct: {rng: u32, cooldown: f32}), not two separate buffers,
-        # purely to stay under this shader's own 10-storage-buffer
-        # ceiling now that `velocities` is bound too — see that file's
-        # own module docstring for why. reset_heading() writes both
-        # fields interleaved via a numpy structured dtype matching this
-        # exact layout.
-        self._growth_state_dtype = np.dtype([("rng", "<u4"), ("cooldown", "<f4")])
-        self._growth_state_buffer = device.create_buffer(
-            size=max(max_active_particles, 1) * self._growth_state_dtype.itemsize,
-            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+        #
+        # rng(u32)+cooldown(f32)+heading(f32)+angularVelocity(f32) — ALL
+        # FOUR packed into ONE 16-bytes-per-particle buffer
+        # (core/agents.wgsl's own ParticleMeta struct), not four separate
+        # buffers: this shader hit a REAL, confirmed CreateComputePipeline
+        # validation error the first time particleF/particleC/particleJp
+        # tried to add 3 more bindings on top of heading/angularVelocity/
+        # growthState each having their own — Chrome's own Dawn backend
+        # reports a hard 10-storage-buffer-per-stage ceiling on real
+        # browser adapters (NOT the much higher number wgpu-native/Metal
+        # reports headlessly on this side, which is why this constructor
+        # never hit the problem itself) — see core/agents.wgsl's own
+        # module docstring for the full account. rng+cooldown were
+        # already packed together once before, for the exact same reason,
+        # when `velocities` was added; heading/angularVelocity joined them
+        # here to free the 2 slots particleF/particleJp needed (particleC
+        # was dropped instead of freeing a 3rd — see core/agents.wgsl's
+        # own comment on why that one's safe to skip).
+        self._particle_meta_dtype = np.dtype([("rng", "<u4"), ("cooldown", "<f4"), ("heading", "<f4"), ("angularVelocity", "<f4")])
+        # AgentState packs the growth counter at byte 0 and ParticleMeta at
+        # byte 256. Besides satisfying storage-offset alignment for the
+        # viewer's render binding, this frees one agent shader binding for C.
+        self._agent_state_buffer = device.create_buffer(
+            size=PARTICLE_META_BUFFER_OFFSET + max(max_active_particles, 1) * self._particle_meta_dtype.itemsize,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
         )
-        # Growth's own atomic "next free slot" counter — a single u32,
-        # kept in sync with the "official" activeCount by set_active_count()
-        # below (not just at construction) — see core/agents.wgsl's own
-        # module docstring for the full design. COPY_SRC so
-        # read_grown_count() can read it back.
-        self._growth_count_buffer = device.create_buffer(
-            size=4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC
-        )
-        # Every rollout always starts with exactly ONE particle and grows
+        # Every rollout currently starts with two particles and grows
         # via splitting from there (training_sim.py's own
         # TrainingRollout.__init__ calls set_active_count(1) again itself,
         # every rollout — this is just a construction-time placeholder so
@@ -271,14 +275,19 @@ class AgentsGPU:
                     {"binding": 4, "resource": {"buffer": environment.gradient, "offset": 0, "size": environment.gradient.size}},
                     {"binding": 5, "resource": {"buffer": environment.deposit_scratch, "offset": 0, "size": environment.deposit_scratch.size}},
                     {"binding": 6, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
-                    {"binding": 7, "resource": {"buffer": self._heading_buffer, "offset": 0, "size": self._heading_buffer.size}},
-                    {
-                        "binding": 8,
-                        "resource": {"buffer": self._angular_velocity_buffer, "offset": 0, "size": self._angular_velocity_buffer.size},
-                    },
-                    {"binding": 9, "resource": {"buffer": self._growth_count_buffer, "offset": 0, "size": self._growth_count_buffer.size}},
-                    {"binding": 10, "resource": {"buffer": self._growth_state_buffer, "offset": 0, "size": self._growth_state_buffer.size}},
-                    {"binding": 11, "resource": {"buffer": core.velocities, "offset": 0, "size": core.velocities.size}},
+                    {"binding": 7, "resource": {"buffer": self._agent_state_buffer, "offset": 0, "size": self._agent_state_buffer.size}},
+                    {"binding": 8, "resource": {"buffer": core.C, "offset": 0, "size": core.C.size}},
+                    {"binding": 9, "resource": {"buffer": core.velocities, "offset": 0, "size": core.velocities.size}},
+                    # core.F/core.rest — same buffers core/p2g.wgsl and
+                    # core/g2p.wgsl already read/write every physics substep
+                    # — see core/agents.wgsl's own module docstring for why
+                    # agentStep() now needs them too (a freshly-claimed
+                    # particle inherits its parent's CURRENT deformation
+                    # state at split time, not a fresh identity/zero rest
+                    # state). core.C is binding 8, completing APIC-state
+                    # inheritance across division.
+                    {"binding": 10, "resource": {"buffer": core.F, "offset": 0, "size": core.F.size}},
+                    {"binding": 11, "resource": {"buffer": core.rest, "offset": 0, "size": core.rest.size}},
                 ],
             )
 
@@ -291,7 +300,7 @@ class AgentsGPU:
         TrainingRollout reads this rather than taking a redundant
         constructor parameter of its own, so there's exactly one source
         of truth for "how many slots does this instance's own
-        heading/angularVelocity/growthState buffers actually have"."""
+        particleMeta buffer actually have"."""
         return self._max_active_particles
 
     def load_weights(self, flat_weights: np.ndarray) -> None:
@@ -327,6 +336,7 @@ class AgentsGPU:
         division_cooldown: float,
         friction: float,
         deposit_sigma: float,
+        growth_enabled: float,
     ) -> None:
         self.device.queue.write_buffer(
             self._physics_uniform,
@@ -344,14 +354,29 @@ class AgentsGPU:
                     division_cooldown,
                     friction,
                     deposit_sigma,
+                    growth_enabled,
                 ],
                 dtype=np.float32,
             ),
         )
 
+    def set_growth_enabled(self, enabled: bool) -> None:
+        """Controls whether agentStep may start new cell cycles.
+
+        Byte offset 44 is AgentPhysics.growthEnabled, the twelfth f32.
+        Existing cycles continue to g=2 and divide after this is false,
+        which makes the rollout tail a settling window rather than an
+        abrupt cancellation of already accumulated growth.
+        """
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            44,
+            np.array([1.0 if enabled else 0.0], dtype=np.float32),
+        )
+
     def set_spawn_center(self, spawn_x: float, spawn_y: float) -> None:
-        """Writes AgentPhysics.spawnX/spawnY — offset 44 (bytes), the last
-        2 of the struct's own 13 f32 fields, past everything set_physics()
+        """Writes AgentPhysics.spawnX/spawnY — offset 48 (bytes), the last
+        2 of the struct's own 14 f32 fields, past everything set_physics()
         above writes. A separate setter (not folded into set_physics())
         since spawn center is fixed for a whole rollout, not something
         PhysicsPanel-style live tuning ever touches — call once per
@@ -361,7 +386,7 @@ class AgentsGPU:
         for what this drives (the NN's own position input, agentStep()'s
         own inputVec population — relative to spawn center, not the
         domain's own fixed (0.5,0.5))."""
-        self.device.queue.write_buffer(self._physics_uniform, 44, np.array([spawn_x, spawn_y], dtype=np.float32))
+        self.device.queue.write_buffer(self._physics_uniform, 48, np.array([spawn_x, spawn_y], dtype=np.float32))
 
     def set_active_count(self, active_count: int) -> None:
         """Updates this class's own agentStep() dispatch size AND
@@ -376,7 +401,7 @@ class AgentsGPU:
         shared with p2g/gridUpdate-adjacent/g2p/repulsion too, not just
         this class's own dispatch."""
         self._dispatch = ceil_div(active_count, WORKGROUP)
-        self.device.queue.write_buffer(self._growth_count_buffer, 0, np.array([active_count], dtype=np.uint32))
+        self.device.queue.write_buffer(self._agent_state_buffer, 0, np.array([active_count], dtype=np.uint32))
 
     def read_grown_count(self) -> int:
         """Reads back growth's own atomic counter (core/agents.wgsl's own
@@ -391,46 +416,46 @@ class AgentsGPU:
         run — same "reading anything back necessarily waits for the
         queue's own timeline to catch up" property mpm_core.py's own
         step() already relies on for its per-chunk sync."""
-        raw = self.device.queue.read_buffer(self._growth_count_buffer, 0, 4)
+        raw = self.device.queue.read_buffer(self._agent_state_buffer, 0, 4)
         return int(np.frombuffer(raw, dtype=np.uint32)[0])
 
     def reset_heading(self, seed: int) -> None:
         """Randomizes persistent heading state (uniform over [-pi, pi],
         one independent draw per particle slot) and zeroes
-        angularVelocity/growthState.cooldown, EVERY slot up to
-        max_active_particles (not just the currently-active ones — growth
-        can claim any of them later in this same rollout, and agentStep()
-        overwrites whatever a claimed slot's own heading/angularVelocity/
-        growthState already held anyway, so pre-resetting the full range
-        costs nothing extra and needs no separate "which slots are real
-        yet" bookkeeping here). Also reseeds growth's own persistent
-        per-particle growthState.rng (nonzero — see core/agents.wgsl's own
-        xorshift32() for why) — bundled into this same method (despite
-        the name) rather than a separate one since every caller already
-        calls this once per rollout, with a real seed, at exactly the
-        right time; matches this method's own existing "resetHeading also
-        resets angularVelocity" precedent for outgrowing its own name
-        slightly. Call at the start of every rollout, same as agents.ts's
-        own resetHeading() (simulation.ts's own restartRollout() calls it
-        every time a rollout restarts, for the same reason: fresh
-        policy-side state, not carried over from whatever the previous
-        rollout left it at). Heading is randomized (not zeroed) so every
-        particle in a rollout doesn't start out facing an identical,
-        seed-independent direction — via _spawn_uniform01_batch(seed,
-        5 + slot_index) (index 5+, not 0 — see training_sim.py's own
-        seed_blob()/theta for what already claims indices 0-4 off this
-        same `seed`; see _spawn_uniform01()'s own comment for why this
-        stays a DIFFERENT hash domain from growthState.rng below despite
-        both iterating the same slot-index range), bit-exact with
-        agents.ts's own resetHeading() — not just a *plausible* replay
-        the way this used to be (numpy Generator vs TS mulberry32, an
-        accepted gap this project carried for a while: for THIS specific
-        field it never actually mattered in practice, since every slot's
-        own pre-filled heading here gets immediately overwritten either
-        by training_sim.py's own set_headings() call right after (slots
-        0/1) or by growth itself copying from its own parent's live
-        heading the moment a slot is actually claimed (core/agents.wgsl's
-        own agentStep()) — but leaving that as a standing "doesn't matter
+        angularVelocity/cooldown, EVERY slot up to max_active_particles
+        (not just the currently-active ones — growth can claim any of
+        them later in this same rollout, and agentStep() overwrites
+        whatever a claimed slot's own particleMeta already held anyway,
+        so pre-resetting the full range costs nothing extra and needs no
+        separate "which slots are real yet" bookkeeping here). Also
+        reseeds growth's own persistent per-particle rng (nonzero — see
+        core/agents.wgsl's own xorshift32() for why) — bundled into this
+        same method (despite the name) rather than a separate one since
+        every caller already calls this once per rollout, with a real
+        seed, at exactly the right time; matches this method's own
+        existing "resetHeading also resets angularVelocity" precedent for
+        outgrowing its own name slightly. Call at the start of every
+        rollout, same as agents.ts's own resetHeading() (simulation.ts's
+        own restartRollout() calls it every time a rollout restarts, for
+        the same reason: fresh policy-side state, not carried over from
+        whatever the previous rollout left it at). Heading is randomized
+        (not zeroed) so every particle in a rollout doesn't start out
+        facing an identical, seed-independent direction — via
+        _spawn_uniform01_batch(seed, 5 + slot_index) (index 5+, not 0 —
+        see training_sim.py's own seed_blob()/theta for what already
+        claims indices 0-4 off this same `seed`; see
+        _spawn_uniform01()'s own comment for why this stays a DIFFERENT
+        hash domain from the growth rng below despite both iterating the
+        same slot-index range), bit-exact with agents.ts's own
+        resetHeading() — not just a *plausible* replay the way this used
+        to be (numpy Generator vs TS mulberry32, an accepted gap this
+        project carried for a while: for THIS specific field it never
+        actually mattered in practice, since every slot's own pre-filled
+        heading here gets immediately overwritten either by
+        training_sim.py's own set_headings() call right after (slots 0/1)
+        or by growth itself copying from its own parent's live heading
+        the moment a slot is actually claimed (core/agents.wgsl's own
+        agentStep()) — but leaving that as a standing "doesn't matter
         today" caveat was fragile, so it's bit-exact now too, same as
         everything else this rollout's starting condition depends on).
         angularVelocity stays zeroed regardless — a random *turn rate*
@@ -440,8 +465,8 @@ class AgentsGPU:
         starting particle can split as soon as its own draw/probability
         allow, same as before cooldown existed.
 
-        growthState.rng is seeded via `seed` through _growth_seed()
-        instead (a deliberately SEPARATE hash domain from heading's own
+        rng is seeded via `seed` through _growth_seed() instead (a
+        deliberately SEPARATE hash domain from heading's own
         _spawn_uniform01_batch() above, despite both being bit-exact now
         — see _growth_seed()'s own comment for why the two are never
         meant to correlate): growth is a near-critical branching process
@@ -449,32 +474,44 @@ class AgentsGPU:
         correlated seed stream (as opposed to a genuinely independent
         one) risks a systematic bias in which particles tend to split
         together."""
-        count = self._heading_buffer.size // 4
-        headings = (
+        count = (self._agent_state_buffer.size - PARTICLE_META_BUFFER_OFFSET) // self._particle_meta_dtype.itemsize
+        # One combined structured array, matching core/agents.wgsl's own
+        # ParticleMeta struct exactly (see this class's own __init__
+        # comment for why all four fields are packed into one buffer).
+        particle_meta = np.zeros(count, dtype=self._particle_meta_dtype)
+        particle_meta["rng"] = _growth_seed(seed, count)
+        particle_meta["heading"] = (
             _spawn_uniform01_batch(seed, np.arange(count, dtype=np.uint32) + np.uint32(5)) * (2.0 * np.pi) - np.pi
         ).astype(np.float32)
-        zeros = np.zeros(count, dtype=np.float32)
-        self.device.queue.write_buffer(self._heading_buffer, 0, headings)
-        self.device.queue.write_buffer(self._angular_velocity_buffer, 0, zeros)
-        # Interleaved rng(u32)/cooldown(f32) pairs, matching
-        # core/agents.wgsl's own GrowthState struct exactly (see this
-        # class's own __init__ comment for why they're packed together).
-        growth_state = np.zeros(count, dtype=self._growth_state_dtype)
-        growth_state["rng"] = _growth_seed(seed, count)
-        # growth_state["cooldown"] is already 0.0 from np.zeros — "not on
-        # cooldown."
-        self.device.queue.write_buffer(self._growth_state_buffer, 0, growth_state.tobytes())
+        # cooldown/angularVelocity are already 0.0 from np.zeros — "not on
+        # cooldown," "no spin."
+        self.device.queue.write_buffer(self._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, particle_meta.tobytes())
 
     def set_headings(self, headings: np.ndarray) -> None:
-        """Overwrites the FIRST len(headings) heading slots directly, a
+        """Overwrites the FIRST len(headings) heading fields directly, a
         small follow-up write on top of whatever reset_heading() above
         just wrote there (every slot, independently randomized) — for
         callers that need a handful of slots' own heading coordinated
         with each other instead of independent (currently: training_sim.py's
         own TrainingRollout, hardcoded 2-particle "back to back" start).
         Not folded into reset_heading() itself, which stays a general,
-        per-slot-independent utility."""
-        self.device.queue.write_buffer(self._heading_buffer, 0, headings.astype(np.float32))
+        per-slot-independent utility. Written as individual per-index
+        strided byte writes (heading is one f32 field inside
+        ParticleMeta's own 16-byte stride, not a standalone tightly-
+        packed array anymore) rather than one bulk write, to touch ONLY
+        the heading field — leaving rng/cooldown/angularVelocity exactly
+        as reset_heading() just set them, not overwritten with zeros.
+        Only ever called with a couple of headings in practice, so the
+        extra per-index write_buffer() calls cost nothing that matters."""
+        heading_offset = self._particle_meta_dtype.fields["heading"][1]
+        stride = self._particle_meta_dtype.itemsize
+        headings32 = headings.astype(np.float32)
+        for i, h in enumerate(headings32):
+            self.device.queue.write_buffer(
+                self._agent_state_buffer,
+                PARTICLE_META_BUFFER_OFFSET + i * stride + heading_offset,
+                np.array([h], dtype=np.float32),
+            )
 
     def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int) -> None:
         """Encodes the NN forward pass — reads environment's current

@@ -9,8 +9,8 @@ autograd) — a plain (mu, lambda) ES, same as this repo's other
 evolve.py's minus envnca's own optional memetic refinement (not ported
 here). population size here means the *evolutionary* population
 (candidate weight-sets), same meaning it has in every other evolve.py in
-this repo — not the particle count: every rollout now always starts
-with exactly ONE particle and grows via splitting (see training_sim.py's
+this repo — not the particle count: every rollout currently starts
+with a coordinated two-particle seed and grows via splitting (see training_sim.py's
 own module docstring and core/agents.wgsl's own growth design);
 --particles is the CAP that growth can reach, not a fixed per-rollout
 count.
@@ -111,6 +111,7 @@ from simulation_settings import (
     MATERIAL_HARDENING,
     MATERIAL_NU,
     MPM_ENABLED,
+    REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
 )
@@ -244,7 +245,7 @@ def rollout(
     core.set_material(MATERIAL_E, MATERIAL_NU, MATERIAL_HARDENING, MATERIAL_ELASTICITY)
     core.set_damping(DAMPING_LOSS_FRACTION, args.substeps_per_macro)
     core.set_splat_radius(SPLAT_RADIUS)
-    core.set_repulsion_strength(REPULSION_STRENGTH)
+    core.set_repulsion_strength(REPULSION_STRENGTH, REPULSION_MAX_DELTA)
 
     sim = TrainingRollout(
         core,
@@ -267,7 +268,10 @@ def rollout(
     snapshots: list[np.ndarray] = []
 
     for step in range(1, args.macro_steps + 1):
-        sim.macro_step(args.substeps_per_macro)
+        sim.macro_step(
+            args.substeps_per_macro,
+            growth_enabled=args.growth_steps is None or step <= args.growth_steps,
+        )
         if step in checkpoint_steps:
             snapshots.append(sim.positions())
 
@@ -334,15 +338,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=400,
         help=(
-            "maximum particle count a rollout can grow to via splitting — every rollout always starts with "
-            "exactly 1 particle (see core/agents.wgsl's own growth design)"
+            "maximum particle count a rollout can grow to via splitting — every rollout currently starts with "
+            "a coordinated two-particle seed (see training_sim.py)"
         ),
     )
-    parser.add_argument("--macro-steps", type=int, default=24, help="number of NN sense/act interventions per rollout")
+    parser.add_argument(
+        "--macro-steps",
+        type=int,
+        default=160,
+        help="total NN sense/act interventions per rollout",
+    )
+    parser.add_argument(
+        "--growth-steps",
+        type=int,
+        default=None,
+        help="optional last macro step in which agents may start new cell cycles; omitted means no time cutoff",
+    )
     parser.add_argument(
         "--substeps-per-macro",
         type=int,
-        default=8,
+        default=16,
         help="MLS-MPM physics substeps run between each NN intervention (mpm_core.MpmCore.step's own substep unit)",
     )
     parser.add_argument("--gravity", type=float, default=200.0)
@@ -393,6 +408,8 @@ def main() -> None:
 
     if not 1 <= args.elites <= args.population:
         raise SystemExit("--elites must be between 1 and --population")
+    if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
+        raise SystemExit("--growth-steps must be between 0 and --macro-steps")
 
     rng = np.random.default_rng(args.seed)
     torch.manual_seed(args.seed)
@@ -453,6 +470,7 @@ def main() -> None:
                         "target": args.target,
                         "particles": args.particles,
                         "macro_steps": args.macro_steps,
+                        "growth_steps": args.growth_steps,
                         "substeps_per_macro": args.substeps_per_macro,
                         "gravity": args.gravity,
                         "spawn_x": args.spawn_x,
@@ -482,6 +500,7 @@ def main() -> None:
                         "material_elasticity": MATERIAL_ELASTICITY,
                         "splat_radius": SPLAT_RADIUS,
                         "repulsion_strength": REPULSION_STRENGTH,
+                        "repulsion_max_delta": REPULSION_MAX_DELTA,
                     },
                     indent=2,
                 )

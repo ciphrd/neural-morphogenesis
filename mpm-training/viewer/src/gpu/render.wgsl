@@ -47,8 +47,8 @@ fn particleFragment(in: VOut) -> @location(0) vec4<f32> {
 }
 
 // --- heading triangles: same positions/radius/color bindings as the
-// circle pipeline above, plus Agents' own persistent heading buffer
-// (binding 3 — additive, not colliding with 0-2). Only ever bound
+// circle pipeline above, plus Agents' own persistent per-particle state
+// buffer (binding 3 — additive, not colliding with 0-2). Only ever bound
 // against MpmCore's/Agents' own live particle buffers, never the static
 // target-point overlay (which has no heading to point toward) — see
 // render.ts's own Renderer for which pipeline draws which.
@@ -57,9 +57,27 @@ fn particleFragment(in: VOut) -> @location(0) vec4<f32> {
 // atan2(vel.y,vel.x) — see agents.wgsl's own module docstring for why
 // that coupling was removed project-wide): it's agents.wgsl's own
 // persistent per-particle state, the same buffer that shader integrates
-// every macro step. ---
+// every macro step.
+//
+// ParticleMeta is a small, deliberate DUPLICATE of core/agents.wgsl's
+// own struct of the same name (WGSL has no cross-module share
+// mechanism) — heading used to be its own tightly-packed array<f32>
+// buffer; it got folded into this 4-field struct alongside rng/cooldown/
+// angularVelocity specifically to free storage-buffer slots
+// core/agents.wgsl needed for growth's parent-state inheritance (see
+// that file's own module docstring) — this pipeline only ever reads the
+// one field it needs (.heading), but the FULL struct layout (all 4
+// fields, in this exact order) has to match agents.wgsl's own for the
+// stride/offsets to line up, since both shaders bind the exact same
+// GPUBuffer. ---
 
-@group(0) @binding(3) var<storage, read> pointHeading: array<f32>;
+struct ParticleMeta {
+  rng: u32,
+  cooldown: f32,
+  heading: f32,
+  angularVelocity: f32,
+}
+@group(0) @binding(3) var<storage, read> particleMeta: array<ParticleMeta>;
 
 // Local-space wedge pointing along +X, rotated by each particle's own
 // heading before translating to its position — an isoceles triangle, not
@@ -72,7 +90,7 @@ const TRI_LOCAL = array<vec2<f32>, 3>(
 @vertex
 fn triangleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> @builtin(position) vec4<f32> {
   let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
-  let heading = pointHeading[instanceIndex];
+  let heading = particleMeta[instanceIndex].heading;
   let c = cos(heading);
   let s = sin(heading);
   let local = TRI_LOCAL[vertexIndex];

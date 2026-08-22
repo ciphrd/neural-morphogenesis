@@ -35,10 +35,14 @@ import wgpu
 from shader_template import load_core_shader
 from simulation_settings import (
     DAMPING_LOSS_FRACTION,
+    GROWTH_MAX,
+    GROWTH_RATE,
+    GROWTH_THRESHOLD,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
+    REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
     SUBSTEPS_PER_DAMPING_FRAME,
@@ -63,6 +67,27 @@ NODE_COUNT = (GRID_N + 1) * (GRID_N + 1)
 WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass — see core/clearGrid.wgsl
+# jp, growth, cycleActive — core/agents.wgsl's own ParticleRest struct (a
+# 3-f32 struct packs to a 12-byte array stride in WGSL, no padding).
+REST_FIELDS = 3
+
+
+def _pack_rest(jp: np.ndarray) -> np.ndarray:
+    """Expands a flat (count,) Jp array into ParticleRest's own
+    (count, 3) (jp, growth, cycleActive) layout, defaulting growth=1.0
+    (baseline cell area) and cycleActive=0.0.
+
+    Exists so load_scene()/reset_growth_buffers() can keep their original
+    scalar-Jp signatures — every scene seeder in this project
+    (training_sim.py's seed_blob(), feasibility_check.py, render_check.py,
+    and the viewer's own rng.ts) still hands over a plain (count,) ones
+    array, unaware that the underlying buffer grew two siblings."""
+    count = jp.shape[0]
+    packed = np.empty((count, REST_FIELDS), dtype=np.float32)
+    packed[:, 0] = jp
+    packed[:, 1] = 1.0
+    packed[:, 2] = 0.0
+    return packed
 
 SNOW_YIELD_LOW = 1.0 - 2.5e-2
 SNOW_YIELD_HIGH = 1.0 + 7.5e-3
@@ -123,11 +148,22 @@ class MpmCore:
         self.velocities = device.create_buffer(
             size=MAX_PARTICLES * 2 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC
         )
-        self.F = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
-        self.C = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
-        self.Jp = device.create_buffer(size=MAX_PARTICLES * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
+        self.F = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC)
+        self.C = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC)
+        # Per-particle rest state — 3 f32 (jp, growth, cycleActive), see
+        # core/agents.wgsl's own ParticleRest struct. Was a bare
+        # array<f32> of Jp alone; widened rather than adding sibling
+        # buffers because core/agents.wgsl is at the hard
+        # 10-storage-buffer Dawn ceiling and needs all three at its
+        # split site (see that file's own binding comments).
+        self.rest = device.create_buffer(size=MAX_PARTICLES * REST_FIELDS * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
 
-        self.grid_accum = device.create_buffer(size=NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage=wgpu.BufferUsage.STORAGE)
+        # COPY_SRC supports the focused stability/headroom regressions; it
+        # does not add a transfer to the hot path unless a check reads it.
+        self.grid_accum = device.create_buffer(
+            size=NODE_COUNT * GRID_ACCUM_CHANNELS * f32,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
+        )
         self.grid_vel = device.create_buffer(size=NODE_COUNT * 2 * f32, usage=wgpu.BufferUsage.STORAGE)
 
         # Purely a GPU-sync barrier for step()'s own chunking — see
@@ -138,11 +174,22 @@ class MpmCore:
         self.gravity_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_gravity(0.0)  # not a "simulation setting" — gravity is CLI-configurable (evolve.py's --gravity)
 
-        # Material: mu0 + lambda0 + hardening + yieldLow + yieldHigh = 5
-        # floats / 20 bytes — must match p2g.wgsl's/g2p.wgsl's identical
-        # Material struct declarations exactly.
-        self.material_uniform = device.create_buffer(size=20, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
-        self.set_material(MATERIAL_E, MATERIAL_NU, MATERIAL_HARDENING, MATERIAL_ELASTICITY)
+        # Material: mu0 + lambda0 + hardening + yieldLow + yieldHigh +
+        # growthRate + growthMax + growthThreshold = 8 floats / 32 bytes —
+        # must match p2g.wgsl's/g2p.wgsl's identical Material struct
+        # declarations exactly. p2g reads the first five, g2p reads
+        # yieldLow/yieldHigh plus the three growth params; one shared
+        # struct regardless, same convention this buffer already followed.
+        self.material_uniform = device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self.set_material(
+            MATERIAL_E,
+            MATERIAL_NU,
+            MATERIAL_HARDENING,
+            MATERIAL_ELASTICITY,
+            GROWTH_RATE,
+            GROWTH_MAX,
+            GROWTH_THRESHOLD,
+        )
 
         self.active_count_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.damping_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
@@ -168,7 +215,7 @@ class MpmCore:
                 {"binding": 1, "resource": {"buffer": self.velocities, "offset": 0, "size": self.velocities.size}},
                 {"binding": 2, "resource": {"buffer": self.F, "offset": 0, "size": self.F.size}},
                 {"binding": 3, "resource": {"buffer": self.C, "offset": 0, "size": self.C.size}},
-                {"binding": 4, "resource": {"buffer": self.Jp, "offset": 0, "size": self.Jp.size}},
+                {"binding": 4, "resource": {"buffer": self.rest, "offset": 0, "size": self.rest.size}},
                 {"binding": 5, "resource": {"buffer": self.grid_accum, "offset": 0, "size": self.grid_accum.size}},
                 {"binding": 6, "resource": {"buffer": self.material_uniform, "offset": 0, "size": self.material_uniform.size}},
                 {"binding": 7, "resource": {"buffer": self.active_count_uniform, "offset": 0, "size": self.active_count_uniform.size}},
@@ -198,7 +245,7 @@ class MpmCore:
                 {"binding": 1, "resource": {"buffer": self.velocities, "offset": 0, "size": self.velocities.size}},
                 {"binding": 2, "resource": {"buffer": self.F, "offset": 0, "size": self.F.size}},
                 {"binding": 3, "resource": {"buffer": self.C, "offset": 0, "size": self.C.size}},
-                {"binding": 4, "resource": {"buffer": self.Jp, "offset": 0, "size": self.Jp.size}},
+                {"binding": 4, "resource": {"buffer": self.rest, "offset": 0, "size": self.rest.size}},
                 {"binding": 5, "resource": {"buffer": self.grid_vel, "offset": 0, "size": self.grid_vel.size}},
                 {"binding": 6, "resource": {"buffer": self.active_count_uniform, "offset": 0, "size": self.active_count_uniform.size}},
                 {"binding": 7, "resource": {"buffer": self.material_uniform, "offset": 0, "size": self.material_uniform.size}},
@@ -219,8 +266,8 @@ class MpmCore:
 
         self.splat_params_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_splat_radius(SPLAT_RADIUS)
-        self.repulsion_params_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
-        self.set_repulsion_strength(REPULSION_STRENGTH)
+        self.repulsion_params_uniform = device.create_buffer(size=8, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self.set_repulsion_strength(REPULSION_STRENGTH, REPULSION_MAX_DELTA)
 
         repulsion_module = device.create_shader_module(
             code=load_core_shader("repulsion.wgsl", {"FIELD_N": REPULSION_FIELD_N, "DT": DT})
@@ -295,7 +342,12 @@ class MpmCore:
         self.device.queue.write_buffer(self.velocities, 0, velocities.astype(np.float32))
         self.device.queue.write_buffer(self.F, 0, F.astype(np.float32))
         self.device.queue.write_buffer(self.C, 0, C.astype(np.float32))
-        self.device.queue.write_buffer(self.Jp, 0, Jp.astype(np.float32))
+        # Scene API deliberately unchanged: callers still hand over a
+        # flat (count,) Jp array. Expanded here into ParticleRest's own
+        # (jp, growth, cycleActive) layout — growth=1 and cycleActive=0
+        # genuinely-seeded particles, which unlike growth-spawned
+        # children have no ramp to serve.
+        self.device.queue.write_buffer(self.rest, 0, _pack_rest(np.asarray(Jp, dtype=np.float32)))
         self.set_active_count(count)
 
     def set_active_count(self, count: int) -> None:
@@ -317,7 +369,7 @@ class MpmCore:
     def reset_growth_buffers(self, max_active: int) -> None:
         """Zero/identity-fills velocities/F/C/Jp for [0, max_active) —
         call once per rollout, after load_scene(). Every rollout now
-        starts with exactly ONE real particle (see evolve.py's own module
+        starts with two real particles (see training_sim.py's own module
         docstring for why --particles is a growth CAP now, not a fixed
         starting count) — every slot beyond that one is destined to
         become a real particle via growth (core/agents.wgsl's own
@@ -343,7 +395,7 @@ class MpmCore:
         self.device.queue.write_buffer(self.velocities, 0, zeros2)
         self.device.queue.write_buffer(self.F, 0, identity_f)
         self.device.queue.write_buffer(self.C, 0, zeros4)
-        self.device.queue.write_buffer(self.Jp, 0, ones1)
+        self.device.queue.write_buffer(self.rest, 0, _pack_rest(ones1))
 
     def set_gravity(self, gravity: float) -> None:
         self.device.queue.write_buffer(self.gravity_uniform, 0, np.array([gravity], dtype=np.float32))
@@ -351,16 +403,39 @@ class MpmCore:
     def set_damping(self, loss_fraction: float, substeps: int) -> None:
         self.device.queue.write_buffer(self.damping_uniform, 0, np.array([per_substep_damping(loss_fraction, substeps)], dtype=np.float32))
 
-    def set_material(self, e: float, nu: float, hardening: float, elasticity: float) -> None:
+    def set_material(
+        self,
+        e: float,
+        nu: float,
+        hardening: float,
+        elasticity: float,
+        growth_rate: float = GROWTH_RATE,
+        growth_max: float = GROWTH_MAX,
+        growth_threshold: float = GROWTH_THRESHOLD,
+    ) -> None:
+        """The three growth params default to simulation_settings.py's own
+        constants so existing callers that only tune the elastic material
+        (evolve.py, feasibility_check.py, render_rollout.py, ...) keep
+        working unchanged — see core/g2p.wgsl's own Material struct for
+        what each one does."""
         mu0, lambda0 = lame_params(e, nu)
         yield_low, yield_high = yield_bounds(elasticity)
-        self.device.queue.write_buffer(self.material_uniform, 0, np.array([mu0, lambda0, hardening, yield_low, yield_high], dtype=np.float32))
+        self.device.queue.write_buffer(
+            self.material_uniform,
+            0,
+            np.array(
+                [mu0, lambda0, hardening, yield_low, yield_high, growth_rate, growth_max, growth_threshold],
+                dtype=np.float32,
+            ),
+        )
 
     def set_splat_radius(self, sigma: float) -> None:
         self.device.queue.write_buffer(self.splat_params_uniform, 0, np.array([sigma], dtype=np.float32))
 
-    def set_repulsion_strength(self, strength: float) -> None:
-        self.device.queue.write_buffer(self.repulsion_params_uniform, 0, np.array([strength], dtype=np.float32))
+    def set_repulsion_strength(self, strength: float, max_delta: float) -> None:
+        """`max_delta` is core/repulsion.wgsl's own RepulsionParams.maxDelta
+        — see that field's own comment for what it bounds and why."""
+        self.device.queue.write_buffer(self.repulsion_params_uniform, 0, np.array([strength, max_delta], dtype=np.float32))
 
     # Max substeps encoded into a single command encoder before an
     # intermediate submit() — a real, load-bearing limit discovered by
@@ -490,3 +565,11 @@ class MpmCore:
     def read_velocities(self) -> np.ndarray:
         raw = self.device.queue.read_buffer(self.velocities, 0, self._active_count * 2 * 4)
         return np.frombuffer(raw, dtype=np.float32).reshape(-1, 2).copy()
+
+    def read_deformation(self) -> np.ndarray:
+        raw = self.device.queue.read_buffer(self.F, 0, self._active_count * 4 * 4)
+        return np.frombuffer(raw, dtype=np.float32).reshape(-1, 4).copy()
+
+    def read_affine(self) -> np.ndarray:
+        raw = self.device.queue.read_buffer(self.C, 0, self._active_count * 4 * 4)
+        return np.frombuffer(raw, dtype=np.float32).reshape(-1, 4).copy()

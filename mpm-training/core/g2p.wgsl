@@ -24,7 +24,19 @@ const DT: f32 = __DT__;
 @group(0) @binding(1) var<storage, read_write> particleVel: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> particleF: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> particleC: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read_write> particleJp: array<f32>;
+// Per-particle rest-state bookkeeping (jp / growth / cycleActive) — see
+// core/agents.wgsl's own ParticleRest struct for the full field-by-field
+// docs. THIS SHADER OWNS two of the three: it advances `jp` (the plastic
+// clamp below) and `growth` (the substrate-driven growth law below).
+// `cycleActive` is owned by core/agents.wgsl and must be PRESERVED on write — the
+// element used to be a bare f32 this shader could overwrite wholesale,
+// and it no longer is.
+struct ParticleRest {
+  jp: f32,
+  growth: f32,
+  cycleActive: f32,
+}
+@group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
 
 // Live particle count — see p2g.wgsl's own comment on why (a fixed-
@@ -32,14 +44,27 @@ const DT: f32 = __DT__;
 @group(0) @binding(6) var<uniform> activeCount: u32;
 
 // Same Material struct/buffer p2g.wgsl binds (see that file's own
-// comment on why one shared struct) — this shader only reads
-// yieldLow/yieldHigh, the plasticity clamp bounds just below.
+// comment on why one shared struct) — this shader reads
+// yieldLow/yieldHigh (the plasticity clamp bounds just below) and the
+// three growth params (the growth relaxation just below that), but never
+// mu0/lambda0/hardening.
 struct Material {
   mu0: f32,
   lambda0: f32,
   hardening: f32,
   yieldLow: f32,
   yieldHigh: f32,
+  // Exponential area-growth rate while the substrate-triggered cell cycle
+  // is active. 0 disables growth.
+  growthRate: f32,
+  // Legacy uniform slot retained for host-layout compatibility. Division
+  // is fixed at area ratio 2 below because any other value would make one
+  // parent -> two baseline daughters non-conservative.
+  growthMax: f32,
+  // Compression reference for continuous mechanical inhibition. Below
+  // this Je, growth is slowed in proportion to Je/reference rather than
+  // stopped. 0 disables mechanical inhibition entirely.
+  growthThreshold: f32,
 }
 @group(0) @binding(7) var<uniform> material: Material;
 
@@ -168,7 +193,9 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let pos = particlePos[pi];
   let F0 = particleF[pi];
-  let Jp0 = particleJp[pi];
+  let rest0 = particleRest[pi];
+  let Jp0 = rest0.jp;
+  let g0 = max(rest0.growth, 1e-6); // guard a degenerate/uninitialized 0
 
   // base = floor(y - 0.5), fx = y - base, landing in [0.5, 1.5) — must
   // match p2g.wgsl's own note on this exactly (G2P has to gather from
@@ -218,7 +245,24 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // a stretch/compression the corotated elastic term is allowed to fully
   // recover from versus how much gets baked in as permanent (plastic)
   // deformation via Jp below.
-  let sigma = clamp(svd.sigma, vec2<f32>(material.yieldLow), vec2<f32>(material.yieldHigh));
+  //
+  // SCALED BY sqrt(g): yield is a property of ELASTIC strain, so the
+  // clamp belongs on Fe's singular values, not raw F's. Because growth
+  // is isotropic (Fg = sqrt(g)*I — see p2g.wgsl's own Fe derivation),
+  // svd(Fe).sigma is exactly svd(F).sigma / sqrt(g), so clamping Fe to
+  // [yieldLow, yieldHigh] is identical to clamping F to those bounds
+  // scaled by sqrt(g) — no second SVD needed. This matters a lot:
+  // WITHOUT the scaling, accumulated growth would eventually push F's
+  // own singular values past the yield bounds all on its own and get
+  // silently converted into plastic deformation, which is precisely the
+  // "elasticity fights growth" failure the whole decomposition exists to
+  // eliminate.
+  let yieldScale = sqrt(g0);
+  let sigma = clamp(
+    svd.sigma,
+    vec2<f32>(material.yieldLow * yieldScale),
+    vec2<f32>(material.yieldHigh * yieldScale)
+  );
 
   let oldJ = matDet(F);
   let sigmaMat = vec4<f32>(sigma.x, 0.0, 0.0, sigma.y);
@@ -227,9 +271,38 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let JpNew = clamp(Jp0 * oldJ / newJ, 0.6, 20.0);
 
+  // SUBSTRATE-DRIVEN GROWTH. agentStep probabilistically starts a cell
+  // cycle from the last substrate channel and latches cycleActive. Once
+  // active, Fg grows independently of pre-existing dilation. Holding F
+  // fixed while g increases makes Fe compressive; the constitutive force
+  // then expands the compatible body. This is growth followed by elastic
+  // relaxation, rather than the old circular repulsion -> dilation ->
+  // growth ratchet.
+  let je = oldJ / g0;
+  var gNew = g0;
+  // Continuous feedback, not a checkpoint. At and above the reference,
+  // growth runs at its full configured rate; compression below it slows
+  // the rate smoothly. Any physically valid Je > 0 retains a positive
+  // growth rate, so a cycle cannot become permanently latched merely by
+  // crossing a threshold. The max(..., 0) guard prevents an inverted F
+  // from turning growth into exponential shrinkage.
+  var compressionScale = 1.0;
+  if (material.growthThreshold > 0.0) {
+    compressionScale = clamp(max(je, 0.0) / material.growthThreshold, 0.0, 1.0);
+  }
+  if (rest0.cycleActive > 0.5 && material.growthRate > 0.0) {
+    gNew = min(
+      g0 * exp(material.growthRate * compressionScale * DT),
+      2.0
+    );
+  }
+
   particlePos[pi] = newPos;
   particleVel[pi] = newVel;
   particleF[pi] = F;
   particleC[pi] = C;
-  particleJp[pi] = JpNew;
+  // cycleActive carried through untouched — owned by core/agents.wgsl (see
+  // this file's own ParticleRest comment); this element is shared now,
+  // not a bare f32 to overwrite wholesale.
+  particleRest[pi] = ParticleRest(JpNew, gNew, rest0.cycleActive);
 }

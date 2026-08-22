@@ -69,6 +69,25 @@ const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
 const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
+// jp, growth, cycleActive — ../../../core/agents.wgsl's own ParticleRest
+// struct (a 3-f32 struct packs to a 12-byte array stride in WGSL).
+const REST_FIELDS = 3;
+
+/** Expands a flat (count,) Jp array into ParticleRest's own
+ * (jp, growth, cycleActive) layout, defaulting growth=1 and cycleActive=0.
+ * Mirrors trainer/mpm_core.py's own
+ * _pack_rest() exactly — exists so loadScene()/resetGrowthBuffers() keep
+ * their original scalar-Jp signatures and rng.ts's own seedBlob() never
+ * has to know the underlying buffer grew two siblings. */
+function packRest(jp: Float32Array): Float32Array {
+  const packed = new Float32Array(jp.length * REST_FIELDS);
+  for (let i = 0; i < jp.length; i++) {
+    packed[i * REST_FIELDS] = jp[i];
+    packed[i * REST_FIELDS + 1] = 1;
+    packed[i * REST_FIELDS + 2] = 0;
+  }
+  return packed;
+}
 
 function perSubstepDamping(lossFraction: number, substeps: number): number {
   const clamped = Math.min(Math.max(lossFraction, 0.0), 0.999);
@@ -102,10 +121,13 @@ export class MpmCore {
   // reads F/Jp directly, the same particle-state buffers ../core/'s own
   // p2g.wgsl already reads each substep — see that file's own module
   // docstring for why this is a separate, viewer-owned pass rather than
-  // an addition to core/p2g.wgsl itself.
+  // an addition to core/p2g.wgsl itself. C was private until
+  // core/agents.wgsl's own growth-inherits-parent-state change needed it
+  // too (gpu/agents.ts's own bind group — see core/agents.wgsl's own
+  // module docstring for why).
   readonly F: GPUBuffer;
-  private readonly C: GPUBuffer;
-  readonly Jp: GPUBuffer;
+  readonly C: GPUBuffer;
+  readonly rest: GPUBuffer;
   // Public — the render layer's own field-visualize pass (gpu/render.ts's
   // "Density"/"Speed" background modes) reads these directly: gridAccum
   // for CH_MASS, gridVel for the already grid-update.wgsl-resolved
@@ -171,13 +193,16 @@ export class MpmCore {
     this.velocities = device.createBuffer({ size: MAX_PARTICLES * 2 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.F = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.C = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.Jp = device.createBuffer({ size: MAX_PARTICLES * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.rest = device.createBuffer({ size: MAX_PARTICLES * REST_FIELDS * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
 
     this.gridAccum = device.createBuffer({ size: NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage: GPUBufferUsage.STORAGE });
     this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
 
     this.gravityUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.materialUniform = device.createBuffer({ size: 20, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // 32 bytes — mu0/lambda0/hardening/yieldLow/yieldHigh + the three
+    // growth params, matching ../../../core/p2g.wgsl's and g2p.wgsl's own
+    // identical Material struct declarations exactly.
+    this.materialUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.activeCountUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.dampingUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -199,7 +224,7 @@ export class MpmCore {
         { binding: 1, resource: { buffer: this.velocities } },
         { binding: 2, resource: { buffer: this.F } },
         { binding: 3, resource: { buffer: this.C } },
-        { binding: 4, resource: { buffer: this.Jp } },
+        { binding: 4, resource: { buffer: this.rest } },
         { binding: 5, resource: { buffer: this.gridAccum } },
         { binding: 6, resource: { buffer: this.materialUniform } },
         { binding: 7, resource: { buffer: this.activeCountUniform } },
@@ -227,7 +252,7 @@ export class MpmCore {
         { binding: 1, resource: { buffer: this.velocities } },
         { binding: 2, resource: { buffer: this.F } },
         { binding: 3, resource: { buffer: this.C } },
-        { binding: 4, resource: { buffer: this.Jp } },
+        { binding: 4, resource: { buffer: this.rest } },
         { binding: 5, resource: { buffer: this.gridVel } },
         { binding: 6, resource: { buffer: this.activeCountUniform } },
         { binding: 7, resource: { buffer: this.materialUniform } },
@@ -247,7 +272,7 @@ export class MpmCore {
     const densityTextureView = this.densityTexture.createView();
 
     this.splatParamsUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.repulsionParamsUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.repulsionParamsUniform = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     const repulsionModule = device.createShaderModule({ code: templateShader(repulsionSrc, { FIELD_N: REPULSION_FIELD_N, DT }) });
 
@@ -299,7 +324,12 @@ export class MpmCore {
     writeFloat32(this.device, this.velocities, 0, scene.velocities);
     writeFloat32(this.device, this.F, 0, scene.F);
     writeFloat32(this.device, this.C, 0, scene.C);
-    writeFloat32(this.device, this.Jp, 0, scene.Jp);
+    // Scene API deliberately unchanged: callers still hand over a flat
+    // (count,) Jp array (rng.ts's own seedBlob()). Expanded here into
+    // ParticleRest's own (jp, growth, cycleActive) layout — growth=1,
+    // cycleActive=0 are exactly right for
+    // genuinely-seeded particles, which have no ramp to serve.
+    writeFloat32(this.device, this.rest, 0, packRest(scene.Jp));
     this.setActiveCount(scene.count);
   }
 
@@ -345,7 +375,7 @@ export class MpmCore {
     }
     writeFloat32(this.device, this.F, 0, identityF);
     writeFloat32(this.device, this.C, 0, new Float32Array(maxActive * 4));
-    writeFloat32(this.device, this.Jp, 0, new Float32Array(maxActive).fill(1));
+    writeFloat32(this.device, this.rest, 0, packRest(new Float32Array(maxActive).fill(1)));
   }
 
   /** "Add Particle" tool (gpu/interact.wgsl's own module docstring — this
@@ -367,7 +397,7 @@ export class MpmCore {
     writeFloat32(this.device, this.velocities, i * 2 * 4, new Float32Array([0, 0]));
     writeFloat32(this.device, this.F, i * 4 * 4, new Float32Array([1, 0, 0, 1]));
     writeFloat32(this.device, this.C, i * 4 * 4, new Float32Array([0, 0, 0, 0]));
-    writeFloat32(this.device, this.Jp, i * 4, new Float32Array([1]));
+    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 1, 0]));
     this.setActiveCount(this._activeCount + 1);
     return true;
   }
@@ -380,18 +410,36 @@ export class MpmCore {
     writeFloat32(this.device, this.dampingUniform, 0, new Float32Array([perSubstepDamping(lossFraction, substeps)]));
   }
 
-  setMaterial(e: number, nu: number, hardening: number, elasticity: number): void {
+  /** The three growth params drive ../../../core/g2p.wgsl's own growth
+   * relaxation (the multiplicative F = Fe*Fg decomposition) — see that
+   * file's own Material struct for what each does. */
+  setMaterial(
+    e: number,
+    nu: number,
+    hardening: number,
+    elasticity: number,
+    growthRate: number,
+    growthMax: number,
+    growthThreshold: number
+  ): void {
     const [mu0, lambda0] = lameParams(e, nu);
     const [yieldLow, yieldHigh] = yieldBounds(elasticity);
-    writeFloat32(this.device, this.materialUniform, 0, new Float32Array([mu0, lambda0, hardening, yieldLow, yieldHigh]));
+    writeFloat32(
+      this.device,
+      this.materialUniform,
+      0,
+      new Float32Array([mu0, lambda0, hardening, yieldLow, yieldHigh, growthRate, growthMax, growthThreshold])
+    );
   }
 
   setSplatRadius(sigma: number): void {
     writeFloat32(this.device, this.splatParamsUniform, 0, new Float32Array([sigma]));
   }
 
-  setRepulsionStrength(strength: number): void {
-    writeFloat32(this.device, this.repulsionParamsUniform, 0, new Float32Array([strength]));
+  /** `maxDelta` is core/repulsion.wgsl's own RepulsionParams.maxDelta —
+   * see that field's own comment for what it bounds and why. */
+  setRepulsionStrength(strength: number, maxDelta: number): void {
+    writeFloat32(this.device, this.repulsionParamsUniform, 0, new Float32Array([strength, maxDelta]));
   }
 
   /** Encodes `substeps` full advance() iterations into `encoder` — does
@@ -456,7 +504,7 @@ export class MpmCore {
     this.velocities.destroy();
     this.F.destroy();
     this.C.destroy();
-    this.Jp.destroy();
+    this.rest.destroy();
     this.gridAccum.destroy();
     this.gridVel.destroy();
     this.gravityUniform.destroy();

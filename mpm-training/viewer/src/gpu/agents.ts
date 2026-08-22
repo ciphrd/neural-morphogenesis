@@ -2,16 +2,16 @@
 // the AgentPhysics uniform (maxAccel/maxStrafe/maxEnvWrite/
 // maxAngularAccel/angularDamping/maxAngularVelocity/depositDistance/
 // splitDisplacement/divisionCooldown/friction), and the persistent
-// per-particle heading/angularVelocity/growthState state buffers (owned
-// here, not MpmCore, not Environment — see agents.wgsl's own module
-// docstring for why). Builds
+// per-particle ParticleMeta state buffer (owned here, not MpmCore, not
+// Environment — see agents.wgsl's own module docstring for why). Builds
 // the two parity-indexed bind group variants agentStep needs
 // (its gridCurrent/gradient bindings must track environment.ts's own
 // ping-pong parity exactly, since both classes read/write the same
 // physical buffers each macro step — see simulation.ts for how the two
 // stay in lockstep).
 //
-// Also owns growth's own atomic "next free slot" counter (growthCountBuffer)
+// Also owns growth's own atomic "next free slot" counter (byte 0 of
+// agentStateBuffer)
 // and the tiny mappable staging buffer readGrownCount() reads it back
 // through — see that method's own docstring, and gpu/simulation.ts's own
 // module docstring, for why WebGPU's own async-only buffer readback
@@ -21,12 +21,15 @@
 // Strafe drives MpmCore's own `velocities` buffer directly again (an
 // acceleration, damped by `friction`) — see agents.wgsl's own module
 // docstring for the full history (this has flipped between velocity and
-// a direct position nudge twice now). growthState packs growth's own
-// per-particle rng+cooldown into ONE buffer (not two), purely to keep
-// this shader's own storage buffer count under the 10-per-stage hardware
-// ceiling this project's own dev adapter reported — see agents.wgsl's
-// own module docstring for the confirmed uncaptured-error history behind
-// that constraint.
+// a direct position nudge twice now). agentStateBuffer packs FOUR
+// per-particle scalars (rng, cooldown, heading, angularVelocity) into
+// ONE buffer, not four, to keep this shader's own storage buffer count
+// AT (not under — there's no headroom left) the 10-per-stage hardware
+// ceiling Chrome's own Dawn backend reports on real browser adapters —
+// see agents.wgsl's own module docstring for the confirmed
+// CreateComputePipeline validation-error history behind that constraint,
+// and for why mpmCore.F/mpmCore.Jp (bound here too, for growth's own
+// parent-state inheritance) needed those 2 slots freed to fit at all.
 
 import agentsSrc from "../../../core/agents.wgsl?raw";
 import { templateShader } from "./shaderTemplate";
@@ -37,6 +40,20 @@ import { growthSeed, spawnUniform01 } from "./rng";
 import type { UpdateRuleWeights } from "./types";
 
 const WORKGROUP = 64;
+
+// core/agents.wgsl's own ParticleMeta struct: {rng: u32, cooldown: f32,
+// heading: f32, angularVelocity: f32} — 4 bytes each, in this exact
+// order, no padding (every field is already 4-byte aligned). Only
+// rng/heading get their own named offset below — cooldown/
+// angularVelocity are only ever left at their zero-initialized default
+// by the TS side (see resetHeading()'s own comment), never written at a
+// specific offset the way rng/heading are.
+const PARTICLE_META_STRIDE = 16;
+const PARTICLE_META_OFFSET_RNG = 0;
+const PARTICLE_META_OFFSET_HEADING = 8;
+// AgentState places its runtime ParticleMeta array after one atomic u32 and
+// 63 padding u32s. 256 is also a legal standalone storage-binding offset.
+export const PARTICLE_META_BUFFER_OFFSET = 256;
 
 export interface AgentsConfig {
   channels: number;
@@ -53,6 +70,7 @@ export interface AgentsConfig {
   splitDisplacement: number;
   divisionCooldown: number;
   friction: number;
+  growthEnabled: number;
   maxActiveParticles: number;
   spawnX: number;
   spawnY: number;
@@ -127,10 +145,7 @@ export class Agents {
 
   private readonly weightsBuffer: GPUBuffer;
   private readonly physicsUniform: GPUBuffer;
-  private readonly headingBuffer: GPUBuffer;
-  private readonly angularVelocityBuffer: GPUBuffer;
-  private readonly growthStateBuffer: GPUBuffer;
-  private readonly growthCountBuffer: GPUBuffer;
+  private readonly agentStateBuffer: GPUBuffer;
   private readonly grownCountStaging: GPUBuffer;
   private readonly pipeline: GPUComputePipeline;
   private readonly bindGroups: [GPUBindGroup, GPUBindGroup];
@@ -146,13 +161,13 @@ export class Agents {
 
     const { totalFloats } = weightLayout(config.channels, config.hiddenDim);
     this.weightsBuffer = device.createBuffer({ size: totalFloats * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // 52 bytes — core/agents.wgsl's own AgentPhysics struct is 13 f32
+    // 56 bytes — core/agents.wgsl's own AgentPhysics struct is 14 f32
     // fields (see that struct's own definition for the exact order
     // setPhysics() below must match) — the last 2 (spawnX/spawnY) are
     // NOT written by setPhysics() below; see setSpawnCenter()'s own
     // docstring for why those get a separate setter into this same
     // buffer instead.
-    this.physicsUniform = device.createBuffer({ size: 52, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.physicsUniform = device.createBuffer({ size: 56, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setPhysics({
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
@@ -165,48 +180,48 @@ export class Agents {
       divisionCooldown: config.divisionCooldown,
       friction: config.friction,
       depositSigma: config.depositSigma,
+      growthEnabled: config.growthEnabled,
     });
     this.setSpawnCenter(config.spawnX, config.spawnY);
 
-    // Persistent per-particle heading/angularVelocity/growthState state —
-    // owned here (not MpmCore, not Environment), zeroed at creation and
-    // whenever resetHeading() is called (simulation.ts's own
-    // restartRollout()). Sized to MAX_PARTICLES up front, like every one
-    // of MpmCore's own per-particle buffers, NOT to config.particles (the
-    // growth cap this run actually uses) — both the "Add Particle" tool
-    // (gpu/interact.wgsl's own module docstring) AND growth (core/agents.wgsl's
-    // own agentStep() — see that file's own module docstring) can grow
+    // Persistent per-particle state — owned here (not MpmCore, not
+    // Environment), zeroed at creation and whenever resetHeading() is
+    // called (simulation.ts's own restartRollout()). Sized to
+    // MAX_PARTICLES up front, like every one of MpmCore's own per-
+    // particle buffers, NOT to config.particles (the growth cap this run
+    // actually uses) — both the "Add Particle" tool (gpu/interact.wgsl's
+    // own module docstring) AND growth (core/agents.wgsl's own
+    // agentStep() — see that file's own module docstring) can grow
     // MpmCore's own activeCount past whatever this class was originally
-    // constructed with, at runtime, with no rebuild; undersizing these
-    // buffers would leave agentStep's own dispatch (sized off the SAME,
+    // constructed with, at runtime, with no rebuild; undersizing this
+    // buffer would leave agentStep's own dispatch (sized off the SAME,
     // now-larger activeCount — see setActiveCount() below) reading/
-    // writing past the end of them for every newly-added particle.
-    const stateSize = MAX_PARTICLES * 4;
-    this.headingBuffer = device.createBuffer({ size: stateSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.angularVelocityBuffer = device.createBuffer({ size: stateSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // Growth's own rng (u32) + cooldown (f32) — packed into ONE 8-bytes-
-    // per-particle buffer (core/agents.wgsl's own GrowthState struct:
-    // {rng: u32, cooldown: f32}), not two separate buffers, purely to
-    // stay under this shader's own 10-storage-buffer ceiling now that
-    // `velocities` is bound too — see that file's own module docstring
-    // for why. resetHeading() writes both fields interleaved via a
-    // DataView matching this exact layout.
-    this.growthStateBuffer = device.createBuffer({ size: MAX_PARTICLES * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // Growth's own atomic "next free slot" counter — a single u32, kept
-    // in sync with the "official" activeCount by setActiveCount() below
-    // (not just at construction) — see core/agents.wgsl's own module
-    // docstring for the full design. COPY_SRC so readGrownCount() can
-    // copy it into grownCountStaging.
-    this.growthCountBuffer = device.createBuffer({
-      size: 4,
+    // writing past the end of it for every newly-added particle.
+    //
+    // rng(u32)+cooldown(f32)+heading(f32)+angularVelocity(f32) — ALL FOUR
+    // packed into ONE 16-bytes-per-particle buffer (core/agents.wgsl's
+    // own ParticleMeta struct), not four separate buffers: this shader
+    // hit a REAL, confirmed CreateComputePipeline validation error the
+    // first time mpmCore.F/C/Jp tried to add 3 more bindings on top of
+    // heading/angularVelocity/growthState each having their own — see
+    // agents.wgsl's own module docstring for the full account. rng+
+    // cooldown were already packed together once before, for the exact
+    // same reason, when `velocities` was added; heading/angularVelocity
+    // joined them here to free the 2 slots mpmCore.F/mpmCore.Jp needed.
+    // resetHeading() writes all four fields via a DataView matching this
+    // exact layout.
+    // One allocation holds the growth counter at byte 0 and ParticleMeta
+    // records from byte 256. Packing them frees a shader binding for C.
+    this.agentStateBuffer = device.createBuffer({
+      size: PARTICLE_META_BUFFER_OFFSET + MAX_PARTICLES * PARTICLE_META_STRIDE,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    // A separate, MAP_READ-capable buffer growthCountBuffer itself can't
+    // A separate, MAP_READ-capable buffer agentStateBuffer itself can't
     // be (STORAGE and MAP_READ are mutually exclusive usages in WebGPU)
     // — encodeReadGrownCount() copies into this every macro step,
     // readGrownCount() maps/reads/unmaps it asynchronously afterward.
     this.grownCountStaging = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    // Every rollout always starts with exactly ONE particle and grows
+    // Every rollout currently starts with two particles and grows
     // via splitting from there (simulation.ts's own restartRollout()
     // calls setActiveCount(1) again itself, every rollout — this is just
     // a construction-time placeholder so there's a sane dispatch size
@@ -244,11 +259,18 @@ export class Agents {
           { binding: 4, resource: { buffer: environment.gradient } },
           { binding: 5, resource: { buffer: environment.depositScratch } },
           { binding: 6, resource: { buffer: this.physicsUniform } },
-          { binding: 7, resource: { buffer: this.headingBuffer } },
-          { binding: 8, resource: { buffer: this.angularVelocityBuffer } },
-          { binding: 9, resource: { buffer: this.growthCountBuffer } },
-          { binding: 10, resource: { buffer: this.growthStateBuffer } },
-          { binding: 11, resource: { buffer: mpmCore.velocities } },
+          { binding: 7, resource: { buffer: this.agentStateBuffer } },
+          { binding: 8, resource: { buffer: mpmCore.C } },
+          { binding: 9, resource: { buffer: mpmCore.velocities } },
+          // mpmCore.F/rest — same buffers ../core/'s own p2g.wgsl/g2p.wgsl
+          // already read/write every physics substep — see
+          // ../../../core/agents.wgsl's own module docstring for why
+          // agentStep() now needs them too (a freshly-claimed particle
+          // inherits its parent's CURRENT deformation state at split
+          // time, not a fresh identity/zero rest state). mpmCore.C is
+          // binding 8 so the split preserves the complete APIC state.
+          { binding: 10, resource: { buffer: mpmCore.F } },
+          { binding: 11, resource: { buffer: mpmCore.rest } },
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];
@@ -256,27 +278,12 @@ export class Agents {
 
   /** Exposed so Renderer's own triangle-shape pipeline can point each
    * particle along its real heading state rather than (mis-)deriving one
-   * from velocity — see render.wgsl's own triangleVertex. */
-  get headingState(): GPUBuffer {
-    return this.headingBuffer;
-  }
-
-  /** Exposed so gpu/nnProbe.ts can bind the exact same live weights
-   * buffer agentStep() itself reads — a probe always reflects whatever's
-   * currently loaded, loadWeights()/randomizeWeights() included, no
-   * extra plumbing needed on either side. */
-  get weightsState(): GPUBuffer {
-    return this.weightsBuffer;
-  }
-
-  /** Same reasoning as weightsState above — gpu/nnProbe.ts needs
-   * maxEnvWrite/maxAngularAccel/maxStrafe to squash/scale its own
-   * forward pass identically to agentStep()'s own evalPolicy(), and this
-   * is the one buffer that already holds them (AgentPhysics's full
-   * struct — nnProbe.wgsl declares the identical struct layout so the
-   * byte offsets line up without needing a second, narrower uniform). */
-  get physicsState(): GPUBuffer {
-    return this.physicsUniform;
+   * from velocity — see render.wgsl's own triangleVertex. Returns the
+   * COMBINED ParticleMeta buffer, not a standalone heading array — that
+   * pipeline's own WGSL declares the same 4-field struct (see
+   * render.wgsl's own module docstring) and reads only `.heading`. */
+  get particleMetaState(): GPUBuffer {
+    return this.agentStateBuffer;
   }
 
   loadWeights(weights: UpdateRuleWeights): void {
@@ -305,6 +312,7 @@ export class Agents {
     divisionCooldown: number;
     friction: number;
     depositSigma: number;
+    growthEnabled: number;
   }): void {
     writeFloat32(
       this.device,
@@ -322,12 +330,24 @@ export class Agents {
         settings.divisionCooldown,
         settings.friction,
         settings.depositSigma,
+        settings.growthEnabled,
       ])
     );
   }
 
-  /** Writes AgentPhysics.spawnX/spawnY — offset 44 (bytes), the last 2 of
-   * the struct's own 13 f32 fields, past everything setPhysics() above
+  /** Gates entry into new cell cycles without cancelling cycles already
+   * underway. AgentPhysics.growthEnabled is the twelfth f32 (byte 44). */
+  setGrowthEnabled(enabled: boolean): void {
+    writeFloat32(
+      this.device,
+      this.physicsUniform,
+      44,
+      new Float32Array([enabled ? 1.0 : 0.0])
+    );
+  }
+
+  /** Writes AgentPhysics.spawnX/spawnY — offset 48 (bytes), the last 2 of
+   * the struct's own 14 f32 fields, past everything setPhysics() above
    * writes. A separate setter (not folded into setPhysics()) since spawn
    * center is fixed for a whole rollout, not something PhysicsPanel-style
    * live tuning ever touches — call once per rollout (simulation.ts's own
@@ -337,7 +357,7 @@ export class Agents {
    * input, agentStep()'s own inputVec population — relative to spawn
    * center, not the domain's own fixed (0.5,0.5)). */
   setSpawnCenter(spawnX: number, spawnY: number): void {
-    writeFloat32(this.device, this.physicsUniform, 44, new Float32Array([spawnX, spawnY]));
+    writeFloat32(this.device, this.physicsUniform, 48, new Float32Array([spawnX, spawnY]));
   }
 
   /** Updates this class's own agentStep() dispatch size AND growth's own
@@ -353,7 +373,7 @@ export class Agents {
    * class's own dispatch. */
   setActiveCount(activeCount: number): void {
     this.dispatch = ceilDiv(activeCount, WORKGROUP);
-    writeFloat32(this.device, this.growthCountBuffer, 0, new Uint32Array([activeCount]));
+    writeFloat32(this.device, this.agentStateBuffer, 0, new Uint32Array([activeCount]));
   }
 
   /** Encodes the copy of growth's own atomic counter into a mappable
@@ -362,7 +382,7 @@ export class Agents {
    * reflects whatever this macro step's own agentStep() pass just
    * claimed. Does not submit. */
   encodeReadGrownCount(encoder: GPUCommandEncoder): void {
-    encoder.copyBufferToBuffer(this.growthCountBuffer, 0, this.grownCountStaging, 0, 4);
+    encoder.copyBufferToBuffer(this.agentStateBuffer, 0, this.grownCountStaging, 0, 4);
   }
 
   /** Reads back growth's own atomic counter, via encodeReadGrownCount()'s
@@ -389,12 +409,12 @@ export class Agents {
    * particles' x/y jitter claims 0-3, simulation.ts's own theta draw
    * claims 4, this is the next range over, bit-exact with
    * agents_gpu.py's own reset_heading()), zeroes angularVelocity, and
-   * reseeds growth's own persistent per-particle growthState.rng
-   * (nonzero — see core/agents.wgsl's own xorshift32() for why, via
-   * rng.ts's own growthSeed() — a DELIBERATELY SEPARATE hash domain from
-   * heading's own spawnUniform01() above despite both being bit-exact
-   * now, see growthSeed()'s own comment for why) while zeroing
-   * growthState.cooldown ("not on cooldown," so a fresh rollout's own
+   * reseeds growth's own persistent per-particle rng (nonzero — see
+   * core/agents.wgsl's own xorshift32() for why, via rng.ts's own
+   * growthSeed() — a DELIBERATELY SEPARATE hash domain from heading's own
+   * spawnUniform01() above despite both being bit-exact now, see
+   * growthSeed()'s own comment for why) while zeroing cooldown ("not on
+   * cooldown," so a fresh rollout's own
    * starting particle can split immediately, same as before cooldown
    * existed) — called whenever a rollout restarts (simulation.ts's own
    * restartRollout()). Bundled into this same method (despite the name)
@@ -422,30 +442,24 @@ export class Agents {
    * mulberry32 stream" trick this used to need (see rng.ts's own
    * spawnUniform01()/growthSeed() comments). */
   resetHeading(seed: number): void {
-    const count = this.headingBuffer.size / 4;
-    const headings = new Float32Array(count);
-    for (let i = 0; i < count; i++) headings[i] = (spawnUniform01(seed, 5 + i) * 2 - 1) * Math.PI;
-    const zeros = new Float32Array(count);
-    this.device.queue.writeBuffer(this.headingBuffer, 0, headings);
-    this.device.queue.writeBuffer(this.angularVelocityBuffer, 0, zeros);
-
-    // Interleaved rng(u32)/cooldown(f32) pairs, matching
-    // core/agents.wgsl's own GrowthState struct exactly (see this
-    // class's own constructor comment for why they're packed together)
-    // — a plain Float32Array/Uint32Array can't represent that mixed
-    // layout, so this writes through a DataView instead, 8 bytes at a
-    // time. cooldown is left at 0 (the buffer's own zero-initialized
-    // default) — "not on cooldown."
-    const growthState = new ArrayBuffer(count * 8);
-    const view = new DataView(growthState);
+    const count = (this.agentStateBuffer.size - PARTICLE_META_BUFFER_OFFSET) / PARTICLE_META_STRIDE;
+    // One combined DataView write, matching core/agents.wgsl's own
+    // ParticleMeta struct exactly (rng u32, cooldown f32, heading f32,
+    // angularVelocity f32 — see this class's own constructor comment for
+    // why all four are packed into one buffer). cooldown/angularVelocity
+    // are left at 0 (ArrayBuffer's own zero-initialized default) — "not
+    // on cooldown," "no spin."
+    const buf = new ArrayBuffer(count * PARTICLE_META_STRIDE);
+    const view = new DataView(buf);
     for (let i = 0; i < count; i++) {
-      view.setUint32(i * 8, growthSeed(seed, i), true);
-      view.setFloat32(i * 8 + 4, 0, true);
+      const base = i * PARTICLE_META_STRIDE;
+      view.setUint32(base + PARTICLE_META_OFFSET_RNG, growthSeed(seed, i), true);
+      view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, (spawnUniform01(seed, 5 + i) * 2 - 1) * Math.PI, true);
     }
-    this.device.queue.writeBuffer(this.growthStateBuffer, 0, growthState);
+    this.device.queue.writeBuffer(this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET, buf);
   }
 
-  /** Overwrites the FIRST headings.length heading slots directly, a
+  /** Overwrites the FIRST headings.length heading fields directly, a
    * small follow-up write on top of whatever resetHeading() above just
    * wrote there (every slot, independently randomized) — for callers
    * that need a handful of slots' own heading coordinated with each
@@ -455,9 +469,15 @@ export class Agents {
    * spirit — resetHeading() above no longer has an accepted
    * reproducibility gap for callers of this to inherit), not folded into
    * resetHeading() itself, which stays a general, per-slot-independent
-   * utility. */
+   * utility. Individual per-index strided writes (heading is one f32
+   * field inside ParticleMeta's own 16-byte stride now, not a
+   * standalone tightly-packed array) so this touches ONLY the heading
+   * field, leaving rng/cooldown/angularVelocity exactly as
+   * resetHeading() just set them. */
   setHeadings(headings: Float32Array): void {
-    writeFloat32(this.device, this.headingBuffer, 0, headings);
+    headings.forEach((h, i) => {
+      writeFloat32(this.device, this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET + i * PARTICLE_META_STRIDE + PARTICLE_META_OFFSET_HEADING, new Float32Array([h]));
+    });
   }
 
   /** Encodes the NN forward pass — reads the environment's current
@@ -477,10 +497,7 @@ export class Agents {
   destroy(): void {
     this.weightsBuffer.destroy();
     this.physicsUniform.destroy();
-    this.headingBuffer.destroy();
-    this.angularVelocityBuffer.destroy();
-    this.growthStateBuffer.destroy();
-    this.growthCountBuffer.destroy();
+    this.agentStateBuffer.destroy();
     this.grownCountStaging.destroy();
   }
 }

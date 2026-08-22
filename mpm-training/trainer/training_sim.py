@@ -67,14 +67,14 @@ history and the measured numbers behind it. The network's own separate
 `accel` output remains a real channel (core/agents.wgsl's own
 evalPolicy() still computes it) but stays intentionally unused.
 
-Growth: every rollout now always starts with exactly ONE particle
-(seed_blob(1, ...) below) — core/agents.wgsl's own agentStep() may spawn
+Growth: every rollout currently starts with a coordinated two-particle
+seed — core/agents.wgsl's own agentStep() may spawn
 new ones from there (splitting, based on the last chemical channel's own
 sensed value — see that file's own module docstring for the full
 design), up to evolve.py's own --particles (now a CAP, not a fixed
 starting count — see that module's own module docstring for why; a
-policy that never learns to use the growth channel just stays at 1
-particle forever, same as this used to be the ONLY option). This is the
+policy that never learns to use the growth channel stays at 2
+particles). This is the
 ONE exception to "zero host round-trips for anything data-related" this
 module's own docstring boasts about above: macro_step() reads back a
 single 4-byte atomic counter every macro step (agents.read_grown_count())
@@ -215,8 +215,13 @@ class TrainingRollout:
         # own set_headings() docstring describes.
         agents.set_headings(np.array([theta, theta + np.pi], dtype=np.float32))
 
-    def macro_step(self, substeps_per_macro: int) -> None:
+    def macro_step(self, substeps_per_macro: int, *, growth_enabled: bool = True) -> None:
         core = self.core
+
+        # Only gates entry into a new cell cycle. Cycles already underway
+        # finish normally, leaving the remaining macro steps for elastic
+        # relaxation with no fresh growth events being initiated.
+        self.agents.set_growth_enabled(growth_enabled)
 
         # Sense -> NN forward pass -> deposit/decay, one encoder/submit —
         # matches simulation.ts's own step() ordering exactly. A SEPARATE

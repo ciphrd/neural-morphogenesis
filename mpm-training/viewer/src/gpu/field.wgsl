@@ -45,7 +45,7 @@ const GRID_N: u32 = __GRID_N__u;
 const NODES: u32 = GRID_N + 1u;
 
 const CH_MASS: u32 = 2u; // must match core/p2g.wgsl's own channel layout
-const SCALE: f32 = 65536.0; // must match core/p2g.wgsl's own fixed-point SCALE
+const SCALE: f32 = 4096.0; // must match core/p2g.wgsl's own fixed-point SCALE
 
 const MODE_NONE: u32 = 0u;
 const MODE_DENSITY: u32 = 1u;

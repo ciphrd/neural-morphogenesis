@@ -35,7 +35,7 @@ import fieldSrc from "./field.wgsl?raw";
 import fieldDiagnosticsSrc from "./fieldDiagnostics.wgsl?raw";
 import renderSrc from "./render.wgsl?raw";
 import { writeFloat32, ceilDiv } from "./gpuUtil";
-import type { Agents } from "./agents";
+import { PARTICLE_META_BUFFER_OFFSET, type Agents } from "./agents";
 import type { Environment } from "./environment";
 import { DX, GRID_N, INV_DX, PARTICLE_MASS, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
@@ -248,7 +248,7 @@ export class Renderer {
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: this.particleRadiusUniform } },
         { binding: 2, resource: { buffer: this.particleColorUniform } },
-        { binding: 3, resource: { buffer: agents.headingState } },
+        { binding: 3, resource: { buffer: agents.particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
       ],
     });
 
@@ -307,7 +307,7 @@ export class Renderer {
       entries: [
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: mpmCore.F } },
-        { binding: 2, resource: { buffer: mpmCore.Jp } },
+        { binding: 2, resource: { buffer: mpmCore.rest } },
         { binding: 3, resource: { buffer: this.diagnosticsBuffer } },
         { binding: 4, resource: { buffer: mpmCore.materialUniform } },
         { binding: 5, resource: { buffer: mpmCore.activeCountUniform } },

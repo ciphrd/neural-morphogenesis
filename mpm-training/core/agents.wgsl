@@ -77,14 +77,14 @@
 // See agentStep()'s own comment for the exact split logic.
 //
 // A new particle claims the next free slot via an atomic counter
-// (`growthCount`, binding 9) — MAX_ACTIVE_PARTICLES (a compile-time
+// (`agentState.growthCount`, binding 7) — MAX_ACTIVE_PARTICLES (a compile-time
 // const, like CHANNELS/HIDDEN_DIM: this shapes buffer-index bounds
 // checking, not something live-tunable mid-rollout makes sense for) caps
 // how many claims actually get written. Unlike CHANNELS/HIDDEN_DIM this
 // isn't a fixed simulation_settings.py constant — it's evolve.py's own
 // --particles (a per-run CLI choice, now the growth CAP, not a fixed
-// starting count — every rollout always starts with exactly ONE
-// particle; see evolve.py's own module docstring) —
+// starting count — every rollout currently starts with two particles;
+// see training_sim.py's own module docstring) —
 // see trainer/training_sim.py's/gpu/simulation.ts's own module
 // docstring for the CPU-side readback that turns this atomic's own
 // value into the "official" activeCount every other pass (P2G/
@@ -103,35 +103,40 @@
 // activation lag is a far cheaper, and imperceptible-at-training-scale,
 // price.
 //
-// A newly claimed particle is a literal position+heading copy of its
-// parent (see agentStep()'s own comment for exactly what's copied vs.
-// reset) — F/C/Jp are NOT bound here at all, and this shader never
-// writes them for a new particle: instead, every slot up to
-// MAX_ACTIVE_PARTICLES is pre-reset to the exact same fresh MPM state
-// (velocity=0, F=identity, C=0, Jp=1) seed_blob() already gives every
-// genuinely-seeded particle, once per rollout (mpm_core.py's own
-// reset_growth_buffers()) — a claimed slot already holds correct fresh
-// F/C/Jp state the moment it's claimed, with zero extra bindings/writes
-// needed here for those three specifically (`velocities` IS bound and
-// written directly, for strafe's own sake — see below).
+// Division is conservative grow-then-split. The substrate probabilistically
+// starts a cell cycle; g2p increases the parent's stress-free area and mass
+// to the division target; agentStep then replaces it with two baseline
+// daughters. Their F is rescaled so Fe, stress and velocity are continuous,
+// and their symmetric placement preserves the center of mass.
 //
-// growthState (binding 10) packs growth's own PER-PARTICLE state that
-// only growth itself ever reads/writes — rng (xorshift32, seeded once
-// per rollout by Agents.resetHeading() alongside heading/angularVelocity
-// — see xorshift32()'s own comment for why growth's random draw needs
-// dedicated state rather than hashing something that already changes
-// each step) and cooldown (macro steps remaining before this slot can
-// split again, counted down every step, reset to physics.divisionCooldown
-// on BOTH the parent and the new child whenever a split succeeds —
-// without this, a particle sitting on a strong, stable deposit could
-// keep splitting every single step it's eligible, producing a burst of
-// children from one spot rather than growth actually spreading out over
-// time/distance). Packed into one struct/buffer, not two, specifically
-// to keep this shader's own storage buffer count under the 10-per-stage
-// hardware ceiling wgpu-native's Metal backend/Chrome's own Dawn backend
-// both reported on this project's own dev hardware (`velocities`, added
-// back below, would otherwise have pushed this shader to 11 — a real,
-// confirmed uncaptured WebGPU validation error, not a hypothetical).
+// agentState.particleMeta (binding 7, byte offset 256) packs FOUR
+// per-particle scalars into one
+// struct/buffer: rng+cooldown (growth's own state, only growth itself
+// ever reads/writes them) and heading+angularVelocity (this shader's
+// facing-direction integrator, see below) — rng is xorshift32 state,
+// seeded once per rollout by Agents.resetHeading() (see xorshift32()'s
+// own comment for why growth's random draw needs dedicated state rather
+// than hashing something that already changes each step); cooldown is
+// macro steps remaining before this slot can split again, counted down
+// every step, reset to physics.divisionCooldown on BOTH the parent and
+// the new child whenever a split succeeds (without this, a particle
+// sitting on a strong, stable deposit could keep splitting every single
+// step it's eligible, producing a burst of children from one spot
+// rather than growth actually spreading out over time/distance).
+// Packed into ONE struct/buffer, not four separate ones, specifically to
+// keep this shader's own storage buffer count under the 10-per-stage
+// hardware ceiling Chrome's own Dawn backend reports on real browser
+// adapters (NOT the much higher number wgpu-native/Metal reports
+// headlessly on the Python side — a real, confirmed
+// CreateComputePipeline validation error the first time this shader
+// tried to bind particleF/particleC/particleJp as 3 SEPARATE new
+// bindings on top of heading/angularVelocity/growthState each having
+// their own, not a hypothetical). rng/cooldown were already packed
+// together for this exact reason once before (when `velocities` was
+// added); heading/angularVelocity joined them for the same reason again
+// when particleF/particleJp needed room (see this file's own module
+// docstring for why those two matter enough to be worth the 2 slots
+// this merge freed).
 //
 // Bound directly to MpmCore's own positions/velocities/activeCount
 // buffers (see simulation.ts/agents_gpu.py).
@@ -266,6 +271,10 @@ struct AgentPhysics {
   // own DEPOSIT_SIGMA is the starting value — live-tunable via
   // PhysicsPanel, for testing this splat's own shape/spread.
   depositSigma: f32,
+  // Host-controlled gate for STARTING new cell cycles. Already-active
+  // cycles are allowed to finish, so switching this off creates a clean
+  // settling phase rather than stranding partly-grown cells.
+  growthEnabled: f32,
   // This rollout's own spawn center (MpmCore's own [0,1]^2 domain units,
   // same as `positions` — trainer/evolve.py's own --spawn-x/--spawn-y /
   // types.ts's own SimulationConfig.spawnX/spawnY) — what the NN's own
@@ -282,34 +291,98 @@ struct AgentPhysics {
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
 // Persistent per-particle state, owned by this shader (not MpmCore, not
-// Environment) — see this file's own module docstring for why heading
-// is no longer derived from velocity. Zeroed by Agents.resetHeading()
-// whenever a rollout restarts (simulation.ts's own restartRollout()).
-@group(0) @binding(7) var<storage, read_write> heading: array<f32>;
-@group(0) @binding(8) var<storage, read_write> angularVelocity: array<f32>;
-// Growth's own atomic "next free slot" counter — see this file's own
-// module docstring for the full design. Kept in sync with the
-// "official" activeCount by the CPU (Agents.setActiveCount() writes
-// both together) every time it changes, not just at rollout start.
-@group(0) @binding(9) var<storage, read_write> growthCount: atomic<u32>;
-
-// rng: growth's own dedicated per-particle PRNG state (see this file's
-// own module docstring and xorshift32()'s own comment for why this can't
-// just be derived from other, already-changing per-particle state).
-// cooldown: growth's own per-particle division cooldown, macro steps
-// remaining before this slot can split again (see this file's own
-// module docstring). Packed together into one struct/buffer purely to
-// stay under this shader's own 10-storage-buffer ceiling — see this
-// file's own module docstring for why; unrelated otherwise, nothing
-// besides growth's own agentStep() logic ever reads either field.
-struct GrowthState {
+// Environment) — heading/angularVelocity used to each have their OWN
+// binding, same as rng/cooldown once did before THEY got packed
+// together; all four are now ONE struct/buffer for the same reason:
+// this shader hit the WebGPU CORE (not just spec-default) hard ceiling
+// of 10 storage buffers per stage on real browser adapters (Dawn/Chrome
+// on this project's own dev machine reports exactly 10, not the much
+// higher number wgpu-native/Metal reports headlessly on the Python
+// side — a real, confirmed CreateComputePipeline validation error the
+// first time this shader tried to go to 13, not a hypothetical
+// portability worry) — see below for what THAT room got spent on.
+// heading is no longer derived from velocity (see this file's own
+// module docstring). Every field zeroed/randomized by
+// Agents.resetHeading() whenever a rollout restarts (simulation.ts's
+// own restartRollout()). rng/cooldown: see xorshift32()'s own comment
+// (rng) and the growth-cooldown logic below (cooldown) — unrelated to
+// heading/angularVelocity otherwise, nothing besides growth's own
+// agentStep() logic ever reads those two fields.
+struct ParticleMeta {
   rng: u32,
   cooldown: f32,
+  heading: f32,
+  angularVelocity: f32,
 }
-@group(0) @binding(10) var<storage, read_write> growthState: array<GrowthState>;
+// Pack growth's counter and particle metadata into one allocation. The
+// explicit 252-byte pad puts particleMeta at byte 256, allowing the render
+// pipeline to bind that tail directly while satisfying WebGPU's storage-
+// buffer offset alignment. This frees one storage binding for particleC.
+struct AgentState {
+  growthCount: atomic<u32>,
+  _padding: array<u32, 63>,
+  particleMeta: array<ParticleMeta>,
+}
+@group(0) @binding(7) var<storage, read_write> agentState: AgentState;
+// MpmCore's APIC affine velocity field. Division copies C and samples its
+// local velocity field at both daughter offsets, preserving linear and
+// affine momentum rather than silently giving the child C=0 for a step.
+@group(0) @binding(8) var<storage, read_write> particleC: array<vec4<f32>>;
 // MpmCore's own velocity buffer — see this file's own module docstring
 // for why strafe drives this directly again.
-@group(0) @binding(11) var<storage, read_write> velocities: array<vec2<f32>>;
+@group(0) @binding(9) var<storage, read_write> velocities: array<vec2<f32>>;
+// MpmCore's own F/rest buffers (self.F/self.rest, same buffers
+// core/p2g.wgsl and core/g2p.wgsl read/write every physics substep) —
+// what the heading/angularVelocity merge above bought room for: a
+// freshly-claimed particle can now inherit its parent's CURRENT
+// deformation state at split time instead of starting from a fresh
+// identity/zero rest state (see this file's own module docstring for why
+// that reversal matters). The counter/metadata packing above also makes
+// room for particleC, so daughters inherit the complete current MPM state
+// rather than losing affine momentum for their first physics substep.
+// Brings this shader's own
+// storage-buffer count to exactly 10 — AT the real browser ceiling, not
+// under it, so any FUTURE addition needs to free a slot first, the same
+// way this one did.
+@group(0) @binding(10) var<storage, read_write> particleF: array<vec4<f32>>;
+
+// Per-particle REST-STATE bookkeeping — every quantity describing how a
+// particle's own stress-free reference configuration differs from the
+// pristine one it was seeded with. Three unrelated scalars deliberately
+// PACKED into one struct/buffer, exactly like ParticleMeta above and for
+// exactly the same reason: this shader is at the hard 10-storage-buffer
+// Dawn ceiling, and growth (`growth`) plus the cell-cycle latch (`cycleActive`)
+// both need to be written HERE, at the split site, for a newly-claimed
+// child. Three separate bindings were never an option; widening the
+// buffer that was already bound (the old `particleJp: array<f32>`) costs
+// zero new bindings in any of the four shaders that touch it
+// (p2g/g2p/this/fieldDiagnostics).
+//
+// IMPORTANT for every writer: g2p.wgsl and this shader both used to
+// overwrite the whole element unconditionally. Now that siblings share
+// it, a partial update must preserve the fields it doesn't own.
+struct ParticleRest {
+  // Plastic Jacobian — g2p.wgsl's own yield clamp accumulates genuine
+  // plastic damage here, and p2g.wgsl's own `e = exp(hardening*(1-jp))`
+  // reads it for hardening. Growth NO LONGER touches this: an earlier
+  // revision (growthJpRelief) piggybacked growth onto Jp precisely
+  // because there was nowhere else to put it, which entangled two
+  // unrelated meanings; `growth` below is now that home.
+  jp: f32,
+  // Isotropic growth factor g = det(Fg), the multiplicative growth
+  // decomposition's own rest-configuration change (F = Fe*Fg, with
+  // Fg = sqrt(g)*I in 2D, so Fe = F/sqrt(g)). 1.0 = ungrown. Grown
+  // volume is STRESS-FREE by construction — p2g.wgsl evaluates the
+  // constitutive law on Fe, never on raw F, so elasticity resists only
+  // deviation from the newly-grown rest state rather than trying to
+  // restore the original one. g2p.wgsl advances it (see that file's own
+  // substrate-driven growth comment).
+  growth: f32,
+  // Cell-cycle latch. The last substrate channel probabilistically sets
+  // this to 1; g2p advances growth until division and both daughters reset it.
+  cycleActive: f32,
+}
+@group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 
 fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
   return c * FIELD_PLANE + y * FIELD_WIDTH + x;
@@ -335,7 +408,7 @@ fn safeTanh(x: f32) -> f32 {
 // this file's own heading state already avoids re: velocity (see this
 // file's own module docstring). Requires a nonzero state (xorshift's
 // own fixed point at 0) — every seed this file ever writes into
-// growthState[].rng is OR'd with 1u to guarantee that.
+// particleMeta[].rng is OR'd with 1u to guarantee that.
 fn xorshift32(stateIn: u32) -> u32 {
   var state = stateIn;
   state = state ^ (state << 13u);
@@ -556,7 +629,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // module docstring for why). No zero-guard needed the way an
   // atan2-of-velocity approach would (cos/sin of an arbitrary real angle
   // is always well-defined).
-  let headingVal = heading[pi];
+  let headingVal = agentState.particleMeta[pi].heading;
   let cosH = cos(headingVal);
   let sinH = sin(headingVal);
 
@@ -694,25 +767,18 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // always runs before those substeps).
   velocities[pi] = (velocities[pi] + strafeWorld) * physics.friction;
 
-  // Growth: this particle may split, spawning a copy of itself a short
-  // `physics.splitDisplacement` away from its own current position, in a
-  // UNIFORMLY RANDOM direction (see the extra xorshift32 draw below) —
-  // was fixed at exactly 180° behind its own heading, changed per this
-  // project's own explicit request: children spawning around a parent,
-  // not only ever trailing it. See this file's own module docstring for
-  // the full design (probability source, deferred-by-one-macro-step
-  // activation). Uses `pos` (this step's own STARTING position, read at
-  // the top of this function) rather than anything strafe-adjusted,
-  // since strafe no longer moves position directly at all.
-  var rngNext = xorshift32(growthState[pi].rng);
-  growthState[pi].rng = rngNext;
+  // Grow-then-divide cell cycle. The last substrate channel remains a
+  // per-macro-step probability, but a successful draw STARTS growth
+  // instead of inserting a full child immediately. g2p grows Fg until
+  // g=2; only then is one grown parent replaced by two
+  // baseline daughters.
+  var rngNext = xorshift32(agentState.particleMeta[pi].rng);
+  agentState.particleMeta[pi].rng = rngNext;
   // Top 24 bits -> a uniform float in [0,1) — an f32 only has 24 bits of
   // mantissa to begin with, so this uses every bit of precision it can.
   let draw = f32(rngNext >> 8u) * (1.0 / 16777216.0);
-  // The LAST channel's own sensed VALUE — already computed above, into
-  // this step's own NN input, NOT a network output (CHIRALITY's own
-  // mirror-averaging never applies here) — doubles as this particle's
-  // own split probability this step, clamped into a valid range (the
+  // The LAST channel's sensed value is the probability of entering a
+  // growth cycle this step, clamped into a valid range (the
   // chemical field itself isn't bounded to [0,1] — see
   // simulation_settings.py's own MAX_ENV_WRITE).
   let splitProb = clamp(inputVec[CHANNELS - 1u], 0.0, 1.0);
@@ -722,9 +788,34 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // clamped at 0 rather than going negative. Gates the split below
   // alongside the probability draw; see AgentPhysics's own
   // divisionCooldown field comment for the full reasoning.
-  let cooldownNow = max(growthState[pi].cooldown - 1.0, 0.0);
-  growthState[pi].cooldown = cooldownNow;
-  if (cooldownNow <= 0.0 && draw < splitProb) {
+  let cooldownNow = max(agentState.particleMeta[pi].cooldown - 1.0, 0.0);
+  agentState.particleMeta[pi].cooldown = cooldownNow;
+  // A cycle admitted while capacity still existed can be overtaken by
+  // other divisions and find the population cap full on a later macro
+  // step. Close that now-unfulfillable cycle before g2p runs. Preserve
+  // its current growth exactly: rolling g back would delete already
+  // accumulated rest area/mass and require a compensating F change,
+  // while letting the latch remain active would keep injecting growth
+  // forever even though this particle can never obtain a daughter slot.
+  if (activeCount >= MAX_ACTIVE_PARTICLES && particleRest[pi].cycleActive > 0.5) {
+    particleRest[pi].cycleActive = 0.0;
+  }
+  // Never start a cycle that cannot produce a daughter. This matters at
+  // the population cap: without it, every terminal particle could grow
+  // to g=2 despite having no free slot, doubling rest mass/area after
+  // the visible particle count had already stopped changing.
+  if (
+    physics.growthEnabled > 0.5 &&
+    activeCount < MAX_ACTIVE_PARTICLES &&
+    particleRest[pi].cycleActive < 0.5 &&
+    cooldownNow <= 0.0 &&
+    draw < splitProb
+  ) {
+    particleRest[pi].cycleActive = 1.0;
+  }
+
+  let divisionTarget = 2.0;
+  if (activeCount < MAX_ACTIVE_PARTICLES && particleRest[pi].cycleActive > 0.5 && particleRest[pi].growth >= divisionTarget * 0.9999) {
     // atomicAdd returns the OLD value — the slot THIS particle just
     // claimed. Never gated before the add (that would need a compare-
     // exchange loop to stay race-free against every OTHER agent that
@@ -737,7 +828,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     // training_sim.py's/gpu/simulation.ts's own readback separately
     // clamps the *reported* activeCount to MAX_ACTIVE_PARTICLES
     // regardless of how high this atomic itself climbs.
-    let newIndex = atomicAdd(&growthCount, 1u);
+    let newIndex = atomicAdd(&agentState.growthCount, 1u);
     if (newIndex < MAX_ACTIVE_PARTICLES) {
       // Uniformly random spawn direction — a second xorshift32 draw off
       // the SAME persistent per-particle stream `rngNext` above already
@@ -748,18 +839,20 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       // -1*(cosH,sinH) (directly behind heading) — now a fresh angle
       // each split instead, per this project's own explicit request.
       let angleState = xorshift32(rngNext);
-      growthState[pi].rng = angleState; // parent's own rng now reflects BOTH draws this step
+      agentState.particleMeta[pi].rng = angleState; // parent's own rng now reflects BOTH draws this step
       let angleDraw = f32(angleState >> 8u) * (1.0 / 16777216.0);
       let spawnAngle = angleDraw * 2.0 * PI;
       let spawnDir = vec2<f32>(cos(spawnAngle), sin(spawnAngle));
-      positions[newIndex] = fract(pos + spawnDir * physics.splitDisplacement);
+      let halfOffset = spawnDir * (0.5 * physics.splitDisplacement);
+      positions[pi] = fract(pos - halfOffset);
+      positions[newIndex] = fract(pos + halfOffset);
       // "A copy of itself": heading/angularVelocity copied from this
       // particle's own CURRENT state (its pre-integration values — the
       // integrator below hasn't run yet at this point in the function).
       // Heading itself stays copied (not randomized) — only the spawn
       // POSITION is random now, not the child's own facing direction.
-      heading[newIndex] = headingVal;
-      angularVelocity[newIndex] = angularVelocity[pi];
+      agentState.particleMeta[newIndex].heading = headingVal;
+      agentState.particleMeta[newIndex].angularVelocity = agentState.particleMeta[pi].angularVelocity;
       // Reseeded from the parent's own latest post-advance state (both
       // draws, `angleState`) mixed with the new slot index, not copied
       // outright — two particles sharing an identical RNG state would
@@ -767,21 +860,38 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       // easy-to-hit correlation since a child starts every subsequent
       // step from close to the same position/heading its parent had at
       // birth too.
-      growthState[newIndex].rng = xorshift32(angleState ^ newIndex) | 1u;
+      agentState.particleMeta[newIndex].rng = xorshift32(angleState ^ newIndex) | 1u;
       // BOTH the parent (this slot, `pi`) and the new child go on
       // cooldown — a freshly split child immediately splitting again
       // would defeat the whole point of throttling growth, same as a
       // parent that just split shouldn't either.
-      growthState[pi].cooldown = physics.divisionCooldown;
-      growthState[newIndex].cooldown = physics.divisionCooldown;
-      // Fresh velocity, not copied from the parent — same "start from
-      // the exact same rest state seed_blob() gives every genuinely-
-      // seeded particle" convention F/C/Jp already follow via
-      // mpm_core.py's own reset_growth_buffers() (see this file's own
-      // module docstring). Explicit here (unlike F/C/Jp) because
-      // `velocities` is bound/written directly in this shader now,
-      // where those three still aren't.
-      velocities[newIndex] = vec2<f32>(0.0, 0.0);
+      agentState.particleMeta[pi].cooldown = physics.divisionCooldown;
+      agentState.particleMeta[newIndex].cooldown = physics.divisionCooldown;
+      // Preserve velocity and elastic/plastic state. Returning each
+      // daughter to g=1 requires Fdaughter=Fparent/sqrt(gparent), which
+      // preserves Fe exactly while one g=2 weight becomes two g=1 weights.
+      let parentVelocity = velocities[pi];
+      let parentC = particleC[pi];
+      let affineOffsetVelocity = vec2<f32>(
+        parentC.x * halfOffset.x + parentC.y * halfOffset.y,
+        parentC.z * halfOffset.x + parentC.w * halfOffset.y,
+      );
+      velocities[pi] = parentVelocity - affineOffsetVelocity;
+      velocities[newIndex] = parentVelocity + affineOffsetVelocity;
+      particleC[newIndex] = parentC;
+      let daughterF = particleF[pi] * (1.0 / sqrt(max(particleRest[pi].growth, 1e-6)));
+      particleF[pi] = daughterF;
+      particleF[newIndex] = daughterF;
+      let parentJp = particleRest[pi].jp;
+      particleRest[pi] = ParticleRest(parentJp, 1.0, 0.0);
+      particleRest[newIndex] = ParticleRest(
+        parentJp,
+        1.0,
+        0.0,
+      );
+    } else {
+      particleRest[pi].cycleActive = 0.0;
+      agentState.particleMeta[pi].cooldown = physics.divisionCooldown;
     }
   }
 
@@ -793,7 +903,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // still visibly too fast a spin (see simulation_settings.py's own
   // comment on the exact bound); this clamp is the real turn-rate
   // ceiling. Matches training_sim.py's own macro_step() exactly.
-  let newAngularVelocity = clamp((angularVelocity[pi] + angularAccel) * physics.angularDamping, -physics.maxAngularVelocity, physics.maxAngularVelocity);
-  angularVelocity[pi] = newAngularVelocity;
-  heading[pi] = headingVal + newAngularVelocity;
+  let newAngularVelocity = clamp((agentState.particleMeta[pi].angularVelocity + angularAccel) * physics.angularDamping, -physics.maxAngularVelocity, physics.maxAngularVelocity);
+  agentState.particleMeta[pi].angularVelocity = newAngularVelocity;
+  agentState.particleMeta[pi].heading = headingVal + newAngularVelocity;
+
 }

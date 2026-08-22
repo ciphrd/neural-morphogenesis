@@ -47,7 +47,7 @@ const PARTICLE_MASS: f32 = __PARTICLE_MASS__;
 // p2g.wgsl's own value: pressure's own magnitude (up to PRESSURE_CLAMP)
 // is orders larger than J/shear's ~0-2 range, so it needs a much smaller
 // fixed-point scale to stay in range.
-const SCALE: f32 = 65536.0;
+const SCALE: f32 = 4096.0;
 const PRESSURE_SCALE: f32 = 2.0;
 const PRESSURE_CLAMP: f32 = 1.0e6;
 
@@ -61,7 +61,16 @@ const CHANNELS: u32 = 4u;
 
 @group(0) @binding(0) var<storage, read> particlePos: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read> particleF: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> particleJp: array<f32>;
+// Per-particle rest-state bookkeeping (jp / growth / cycleActive) — see
+// ../../../core/agents.wgsl's own ParticleRest struct for the full docs.
+// Duplicated here, same convention this file's own Material struct and
+// quadraticWeights()/wrapIndex() already follow (WGSL has no #include).
+struct ParticleRest {
+  jp: f32,
+  growth: f32,
+  cycleActive: f32,
+}
+@group(0) @binding(2) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(3) var<storage, read_write> diagnostics: array<atomic<i32>>;
 
 struct Material {
@@ -149,7 +158,8 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let pos = particlePos[pi];
   let F = particleF[pi];
-  let Jp = particleJp[pi];
+  let rest = particleRest[pi];
+  let Jp = rest.jp;
 
   let y = pos * INV_DX;
   let base = vec2<i32>(floor(y - vec2<f32>(0.5)));
@@ -159,8 +169,13 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
   let e = exp(material.hardening * (1.0 - Jp));
   let lambda = material.lambda0 * e;
 
-  let J = matDet(F);
-  let polar = polarDecompose(F);
+  // Diagnostics must use the same elastic deformation as P2G. Raw F also
+  // contains stress-free growth and would falsely display grown tissue as
+  // strained/pressurized.
+  let g = max(rest.growth, 1e-6);
+  let Fe = F * (1.0 / sqrt(g));
+  let J = matDet(Fe);
+  let polar = polarDecompose(Fe);
   let r = polar.r;
 
   // Same two diagnostics mls-mpm/src/gpu/p2g.wgsl computes — see that
@@ -169,7 +184,7 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
   //    rotation, 0 = undeformed.
   //  - pressure: isotropic part of the elastic stress, sign-flipped so
   //    compression (J<1) reads positive.
-  let FminusR = F - r;
+  let FminusR = Fe - r;
   let shearMag = sqrt(FminusR.x * FminusR.x + FminusR.y * FminusR.y + FminusR.z * FminusR.z + FminusR.w * FminusR.w);
   let pressure = clamp(-lambda * (J - 1.0), -PRESSURE_CLAMP, PRESSURE_CLAMP);
 
@@ -179,7 +194,8 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
       let nj = wrapIndex(base.y + i32(j));
 
       let wgt = w[i].x * w[j].y;
-      let massContribution = wgt * PARTICLE_MASS;
+      // Same grown mass weighting as core/p2g.wgsl.
+      let massContribution = wgt * PARTICLE_MASS * g;
 
       let nodeIndex = (ni * (GRID_N + 1u) + nj) * CHANNELS;
       atomicAdd(&diagnostics[nodeIndex + CH_J], i32(round(massContribution * J * SCALE)));

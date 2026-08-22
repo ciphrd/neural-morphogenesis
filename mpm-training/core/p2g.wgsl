@@ -47,11 +47,11 @@ const PARTICLE_MASS: f32 = __PARTICLE_MASS__;
 const VOL: f32 = __VOL__;
 
 // Matches g2p's shared SCALE — headroom: total mass/momentum landing on
-// one node is bounded by however many of the (few thousand) particles
-// are within a 2-cell radius of it, each contributing at most
-// PARTICLE_MASS — nowhere near the ~32768 this scale allows before i32
-// overflow for any configuration this project's UI can reach.
-const SCALE: f32 = 65536.0;
+// 4096 retains sub-per-mille transfer precision while providing 16x the
+// momentum headroom of the old 65536 scale. The old value was measured
+// reaching 2.13e9 raw units during an ordinary growing rollout, close
+// enough to i32 overflow that atomic ordering made collapse intermittent.
+const SCALE: f32 = 4096.0;
 
 // gridAccum's per-node channel layout — must match clearGrid.wgsl/
 // gridUpdate.wgsl's own copies of these exact same constants (WGSL has
@@ -65,7 +65,17 @@ const CHANNELS: u32 = 3u;
 @group(0) @binding(1) var<storage, read> particleVel: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> particleF: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> particleC: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read> particleJp: array<f32>;
+// Per-particle rest-state bookkeeping (jp / growth / cycleActive) — see
+// core/agents.wgsl's own ParticleRest struct for the full field-by-field
+// docs and for why three scalars share one buffer. Declared identically
+// here (WGSL has no #include, same duplication tradeoff as the Material
+// struct above).
+struct ParticleRest {
+  jp: f32,
+  growth: f32,
+  cycleActive: f32,
+}
+@group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read_write> gridAccum: array<atomic<i32>>;
 
 // Live-adjustable, unlike GRID_N/DX/... above (those are compile-time
@@ -88,6 +98,15 @@ struct Material {
   hardening: f32,
   yieldLow: f32,
   yieldHigh: f32,
+  // Growth params — read by core/g2p.wgsl only (that's where growth is
+  // actually advanced); declared here purely so both shaders agree on
+  // this uniform's byte layout, the same "one Material concept, one
+  // buffer; each shader reads the subset it needs" convention
+  // yieldLow/yieldHigh above already follow in the other direction (this
+  // shader reads THOSE, g2p reads these).
+  growthRate: f32,
+  growthMax: f32,
+  growthThreshold: f32,
 }
 @group(0) @binding(6) var<uniform> material: Material;
 
@@ -175,7 +194,8 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   let vel = particleVel[pi];
   let F = particleF[pi];
   let C = particleC[pi];
-  let Jp = particleJp[pi];
+  let rest = particleRest[pi];
+  let Jp = rest.jp;
 
   // base = floor(y - 0.5), fx = y - base — fx therefore lands in
   // [0.5, 1.5), NOT [0,1). quadraticWeights() below is only a valid
@@ -192,18 +212,42 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   let mu = material.mu0 * e;
   let lambda = material.lambda0 * e;
 
-  let J = matDet(F);
-  let polar = polarDecompose(F);
+  // MULTIPLICATIVE GROWTH DECOMPOSITION: F = Fe*Fg, where Fg is a
+  // stress-free change of this particle's own REST configuration and Fe
+  // is the only part elasticity is allowed to see. Growth here is
+  // isotropic, so Fg = sqrt(g)*I in 2D (det(Fg) = g exactly) and
+  // Fe = F*Fg^-1 collapses to a plain scalar divide — no matrix inverse
+  // needed. THIS SUBSTITUTION IS THE WHOLE POINT: evaluating the
+  // constitutive law below on Fe rather than raw F means grown volume
+  // costs zero stress by construction, so elasticity resists only
+  // deviation from the newly-grown rest state instead of forever trying
+  // to restore the original one. See core/g2p.wgsl for where g is
+  // advanced, and core/agents.wgsl's own ParticleRest.growth field
+  // comment for the full rationale.
+  let g = max(rest.growth, 1e-6); // guard a degenerate/uninitialized 0
+  let Fe = F * (1.0 / sqrt(g));
+  let Je = matDet(Fe);
+  let polar = polarDecompose(Fe);
   let r = polar.r;
 
   // http://mpm.graphics Paragraph after Eqn. 176 / Eqn. 52.
   let Dinv = 4.0 * INV_DX * INV_DX;
 
-  let PF = matAddScaledIdentity(2.0 * mu * matMul(F - r, matTranspose(F)), lambda * (J - 1.0) * J);
-  let stress = -(DT * VOL * Dinv) * PF;
+  // A growing cell owns proportionally more rest area and mass.  This is
+  // what makes grow-then-divide conservative: immediately before mitosis
+  // one parent has g=2, and immediately after it is replaced by two
+  // daughters with g=1, so total mass, rest area, stress weight and
+  // momentum are continuous across the split.  Growth itself makes Fe
+  // compressive and therefore supplies the mechanical expansion; no
+  // post-division mass fade or repulsion-driven volume creation is needed.
+  let volEff = VOL * g;
+  let massEff = PARTICLE_MASS * g;
+
+  let PF = matAddScaledIdentity(2.0 * mu * matMul(Fe - r, matTranspose(Fe)), lambda * (Je - 1.0) * Je);
+  let stress = -(DT * volEff * Dinv) * PF;
   // Fused APIC momentum + MLS-MPM stress contribution (taichi MLS-MPM/CPIC
   // notes, Eqn. 29).
-  let affine = stress + PARTICLE_MASS * C;
+  let affine = stress + massEff * C;
 
   for (var i: u32 = 0u; i < 3u; i = i + 1u) {
     for (var j: u32 = 0u; j < 3u; j = j + 1u) {
@@ -213,8 +257,8 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
       let dpos = (vec2<f32>(f32(i), f32(j)) - fx) * DX;
       let wgt = w[i].x * w[j].y;
       let affineDpos = vec2<f32>(affine.x * dpos.x + affine.y * dpos.y, affine.z * dpos.x + affine.w * dpos.y);
-      let momentum = wgt * (vel * PARTICLE_MASS + affineDpos);
-      let massContribution = wgt * PARTICLE_MASS;
+      let momentum = wgt * (vel * massEff + affineDpos);
+      let massContribution = wgt * massEff;
 
       let nodeIndex = (ni * (GRID_N + 1u) + nj) * CHANNELS;
       atomicAdd(&gridAccum[nodeIndex + CH_MOM_X], i32(round(momentum.x * SCALE)));

@@ -45,7 +45,11 @@ from simulation_settings import (
     FIELD_N,
     FRICTION,
     HIDDEN_DIM,
+    GROWTH_MAX,
+    GROWTH_RATE,
+    GROWTH_THRESHOLD,
     MATERIAL_E,
+    MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
     MAX_ACCEL,
@@ -69,7 +73,15 @@ def main() -> int:
     wgpu_device = pick_device()
 
     core = MpmCore(wgpu_device)
-    core.set_material(MATERIAL_E, MATERIAL_NU, MATERIAL_HARDENING, elasticity=0.0)
+    core.set_material(
+        MATERIAL_E,
+        MATERIAL_NU,
+        MATERIAL_HARDENING,
+        elasticity=meta.get("material_elasticity", MATERIAL_ELASTICITY),
+        growth_rate=meta.get("growth_rate", GROWTH_RATE),
+        growth_max=meta.get("growth_max", GROWTH_MAX),
+        growth_threshold=meta.get("growth_threshold", GROWTH_THRESHOLD),
+    )
     core.set_damping(DAMPING_LOSS_FRACTION, meta["substeps_per_macro"])
 
     environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, meta.get("deposit_rate", DEPOSIT_RATE))
@@ -87,7 +99,8 @@ def main() -> int:
         MAX_ANGULAR_VELOCITY,
         # Falls back to the current constant/value for older checkpoints
         # saved before "chirality"/"deposit_distance"/"split_displacement"/
-        # "division_cooldown"/"friction" rode along in best_meta.json —
+        # "division_cooldown"/"friction"/"mass_ramp_macro_steps" rode along in
+        # best_meta.json —
         # "particles" itself has ALWAYS been recorded, but meant "starting
         # count" on any checkpoint trained before growth existed; using it
         # as the growth cap here regardless is still correct (evolve.py's
@@ -102,6 +115,7 @@ def main() -> int:
         meta.get("division_cooldown", DIVISION_COOLDOWN),
         meta.get("friction", FRICTION),
         meta.get("deposit_sigma", DEPOSIT_SIGMA),
+        1.0,
         meta["spawn_x"],
         meta["spawn_y"],
     )
@@ -119,8 +133,12 @@ def main() -> int:
         seed=meta["seed"],
     )
 
+    growth_steps = meta.get("growth_steps")
     for i in range(meta["macro_steps"]):
-        sim.macro_step(meta["substeps_per_macro"])
+        sim.macro_step(
+            meta["substeps_per_macro"],
+            growth_enabled=growth_steps is None or i < growth_steps,
+        )
         if i % 4 == 0 or i == meta["macro_steps"] - 1:
             pos = sim.positions()
             _, aligned = best_alignment(pos, target.points)

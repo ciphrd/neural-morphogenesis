@@ -48,7 +48,6 @@ import { Deform, type DeformDirection, type DeformMode } from "./deform";
 import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MpmCore } from "./mpmCore";
-import { NnProbe, type NetworkProbe } from "./nnProbe";
 import { Renderer, type FieldMode, type ParticleShape } from "./render";
 import { seedBlob, spawnUniform01 } from "./rng";
 import type { PhysicsSettings, SimulationConfig } from "./types";
@@ -68,9 +67,6 @@ export class GpuSimulation {
   // "Deform" tool's own one-shot direction-injection (gpu/deform.ts) —
   // same "fresh instance per rebuild()" reasoning as interact above.
   private deform: Deform | null = null;
-  // Network visualization's own live forward-pass readback (gpu/nnProbe.ts)
-  // — same "fresh instance per rebuild()" reasoning as interact above.
-  private nnProbe: NnProbe | null = null;
 
   private config: SimulationConfig | null = null;
   private resetKey: string | null = null;
@@ -95,6 +91,23 @@ export class GpuSimulation {
   // field.wgsl's own colorizeGradient() comment. Same "view-only,
   // survives rebuild()" reasoning pendingAccent above already has.
   private pendingGradientExponent = 1;
+  // The canvas's own backing-store size in DEVICE pixels, as last
+  // reported by GridCanvas's own applySquareSize()/ResizeObserver.
+  // Same "view-only, survives rebuild()" reasoning as the pending
+  // fields above — and it genuinely needs it: with no config loaded
+  // yet (a fresh page load before the first `generation` message
+  // arrives), rebuild() has never run, so there IS no Renderer for
+  // setCanvasSizePx() to forward to, and both GridCanvas's own
+  // device-acquisition call AND its rAF re-validation call land on
+  // `this.renderer?` === null and are silently dropped. The Renderer
+  // built later, when that first generation finally arrives, then
+  // starts from its own constructor default (512x512 — see
+  // render.ts's own canvasMinDimPx) instead of the canvas's real size,
+  // making every device-pixel-sized draw (particle radius, the
+  // target-point overlay dots) render oversized by exactly
+  // realSize/512 — the "everything is drawn twice as big until
+  // something jogs a resize" bug. null until the first report.
+  private pendingCanvasSizePx: [number, number] | null = null;
 
   // Bumped by anything that invalidates in-flight GPU state (rebuild(),
   // restartRollout(), destroy()) — step() captures this at its own start
@@ -132,6 +145,21 @@ export class GpuSimulation {
   }
   get steps(): number {
     return this.config?.macroSteps ?? 0;
+  }
+  /** How many particles are live RIGHT NOW — grows as growth splits
+   * (core/agents.wgsl's own agentStep()), so this changes every macro
+   * step, unlike config.particles which is only the CAP. 0 before the
+   * first rebuild(). */
+  get particleCount(): number {
+    return this.mpmCore?.activeCount ?? 0;
+  }
+  private growthIsEnabled(): boolean {
+    if (!this.config) return false;
+    // No implicit horizon-based gate: null/absent means the chemical
+    // field and population cap are the only controls. A finite cutoff is
+    // an explicit per-run choice supplied by --growth-steps.
+    const cutoff = this.config.growthSteps;
+    return cutoff == null || this._currentStep < cutoff;
   }
   get ready(): boolean {
     return this.mpmCore !== null;
@@ -198,6 +226,7 @@ export class GpuSimulation {
       splitDisplacement: config.splitDisplacement,
       divisionCooldown: config.divisionCooldown,
       friction: config.friction,
+      growthEnabled: 1.0,
       // config.particles is the growth CAP, not a starting count — see
       // types.ts's own SimulationConfig.particles docstring.
       maxActiveParticles: config.particles,
@@ -207,6 +236,7 @@ export class GpuSimulation {
     agents.loadWeights(config.weights);
 
     const renderer = new Renderer(this.device, this.format, mpmCore, environment, agents);
+    if (this.pendingCanvasSizePx) renderer.setCanvasSizePx(...this.pendingCanvasSizePx);
     if (this.pendingTargetPoints) renderer.setTargetPoints(this.pendingTargetPoints);
     renderer.setFieldMode(this.pendingFieldMode);
     renderer.setParticleShape(this.pendingParticleShape);
@@ -218,19 +248,12 @@ export class GpuSimulation {
     const interact = new Interact(this.device, mpmCore);
     const deform = new Deform(this.device, mpmCore);
 
-    const nnProbe = new NnProbe(this.device, mpmCore, environment, agents, {
-      channels: config.channels,
-      hiddenDim: config.hiddenDim,
-      chirality: config.chirality,
-    });
-
     this.mpmCore = mpmCore;
     this.environment = environment;
     this.agents = agents;
     this.renderer = renderer;
     this.interact = interact;
     this.deform = deform;
-    this.nnProbe = nnProbe;
     this.config = config;
     this.applyPhysics(config);
   }
@@ -314,10 +337,25 @@ export class GpuSimulation {
   private applyPhysics(physics: PhysicsSettings): void {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     this.mpmCore.setGravity(physics.gravity);
-    this.mpmCore.setMaterial(physics.materialE, physics.materialNu, physics.materialHardening, physics.materialElasticity);
+    this.mpmCore.setMaterial(
+      physics.materialE,
+      physics.materialNu,
+      physics.materialHardening,
+      physics.materialElasticity,
+      // ?? guards a raw SimulationConfig from a train_server.py still
+      // running pre-growth code, same convention every other knob here
+      // already follows. 0 rate = growth disabled.
+      physics.growthRate ?? 0.0,
+      physics.growthMax ?? 2.0,
+      physics.growthThreshold ?? 0.0
+    );
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
     this.mpmCore.setSplatRadius(physics.splatRadius);
-    this.mpmCore.setRepulsionStrength(physics.repulsionStrength);
+    // ?? 40.0 (trainer/simulation_settings.py's own REPULSION_MAX_DELTA
+    // default) guards a call to this with a raw SimulationConfig from a
+    // train_server.py process still running pre-repulsionMaxDelta code,
+    // same reasoning depositRate's own guard below gives.
+    this.mpmCore.setRepulsionStrength(physics.repulsionStrength, physics.repulsionMaxDelta ?? 40.0);
     // ?? 1.0 (= unchanged) guards a call to this with a raw SimulationConfig
     // from a train_server.py process still running pre-depositRate code
     // (loadGeneration()/rebuild() both pass `config` straight through here,
@@ -337,6 +375,7 @@ export class GpuSimulation {
       splitDisplacement: physics.splitDisplacement,
       divisionCooldown: physics.divisionCooldown,
       friction: physics.friction,
+      growthEnabled: this.growthIsEnabled() ? 1.0 : 0.0,
     });
     // ?? true — same pre-broadcast guard reasoning depositRate's own
     // ?? 1.0 guard above gives, for a train_server.py process still
@@ -379,6 +418,7 @@ export class GpuSimulation {
   async step(): Promise<void> {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     const stepEpoch = this.epoch;
+    this.agents.setGrowthEnabled(this.growthIsEnabled());
     const encoder = this.device.createCommandEncoder();
     this.environment.encodeSense(encoder);
     this.agents.encodeStep(encoder, this.environment.parity);
@@ -431,6 +471,7 @@ export class GpuSimulation {
   }
 
   setCanvasSizePx(widthPx: number, heightPx: number): void {
+    this.pendingCanvasSizePx = [widthPx, heightPx];
     this.renderer?.setCanvasSizePx(widthPx, heightPx);
   }
 
@@ -545,18 +586,6 @@ export class GpuSimulation {
     this.restartRollout();
   }
 
-  /** One forward-pass snapshot for the Network panel's own brain
-   * visualization — see gpu/nnProbe.ts's own module docstring. Callers
-   * drive their own cadence (this is NOT called from step() — a once-in-
-   * a-while diagnostic readback has no business adding a second async
-   * GPU round-trip to the already-async main step() path); null before
-   * the first rebuild(), or if a previous probe() call on this same
-   * instance hasn't resolved yet (see NnProbe.probe()'s own docstring). */
-  probeNetwork(): Promise<NetworkProbe | null> {
-    if (!this.nnProbe || !this.environment) return Promise.resolve(null);
-    return this.nnProbe.probe(this.environment.parity);
-  }
-
   private destroySimObjects(): void {
     this.mpmCore?.destroy();
     this.environment?.destroy();
@@ -564,14 +593,12 @@ export class GpuSimulation {
     this.renderer?.destroy();
     this.interact?.destroy();
     this.deform?.destroy();
-    this.nnProbe?.destroy();
     this.mpmCore = null;
     this.environment = null;
     this.agents = null;
     this.renderer = null;
     this.interact = null;
     this.deform = null;
-    this.nnProbe = null;
   }
 
   destroy(): void {

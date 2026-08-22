@@ -66,7 +66,11 @@ from simulation_settings import (
     DIVISION_COOLDOWN,
     FIELD_N,
     FRICTION,
+    GROWTH_MAX,
+    GROWTH_RATE,
+    GROWTH_THRESHOLD,
     HIDDEN_DIM,
+    MASS_RAMP_MACRO_STEPS,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
@@ -77,6 +81,7 @@ from simulation_settings import (
     MAX_ENV_WRITE,
     MAX_STRAFE,
     MPM_ENABLED,
+    REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
     SPLIT_DISPLACEMENT,
@@ -124,6 +129,8 @@ def _setup() -> None:
 
     if not 1 <= args.elites <= args.population:
         raise SystemExit("--elites must be between 1 and --population")
+    if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
+        raise SystemExit("--growth-steps must be between 0 and --macro-steps")
 
     wgpu_device = pick_device()
 
@@ -355,6 +362,7 @@ async def _training_loop_body() -> None:
         DIVISION_COOLDOWN,
         FRICTION,
         DEPOSIT_SIGMA,
+        1.0,
         args.spawn_x,
         args.spawn_y,
     )
@@ -385,6 +393,7 @@ async def _training_loop_body() -> None:
         "target": args.target,
         "particles": args.particles,
         "macroSteps": args.macro_steps,
+        "growthSteps": args.growth_steps,
         "substepsPerMacro": args.substeps_per_macro,
         "gravity": args.gravity,
         "spawnX": args.spawn_x,
@@ -406,6 +415,10 @@ async def _training_loop_body() -> None:
         "splitDisplacement": SPLIT_DISPLACEMENT,
         "divisionCooldown": DIVISION_COOLDOWN,
         "friction": FRICTION,
+        "massRampMacroSteps": MASS_RAMP_MACRO_STEPS,
+        "growthRate": GROWTH_RATE,
+        "growthMax": GROWTH_MAX,
+        "growthThreshold": GROWTH_THRESHOLD,
         # simulation_settings.py's own MPM_ENABLED (that constant's own
         # comment has the full "why" — a real testing/debug mode that
         # also skips MPM physics in the actual worker-pool population
@@ -422,6 +435,7 @@ async def _training_loop_body() -> None:
         "materialElasticity": MATERIAL_ELASTICITY,
         "splatRadius": SPLAT_RADIUS,
         "repulsionStrength": REPULSION_STRENGTH,
+        "repulsionMaxDelta": REPULSION_MAX_DELTA,
         "population": args.population,
         "elites": args.elites,
         "mutationSigma": args.mutation_sigma,
@@ -519,6 +533,7 @@ async def _training_loop_body() -> None:
                         "target": args.target,
                         "particles": args.particles,
                         "macro_steps": args.macro_steps,
+                        "growth_steps": args.growth_steps,
                         "substeps_per_macro": args.substeps_per_macro,
                         "gravity": args.gravity,
                         "spawn_x": args.spawn_x,
@@ -548,6 +563,10 @@ async def _training_loop_body() -> None:
                         "split_displacement": SPLIT_DISPLACEMENT,
                         "division_cooldown": DIVISION_COOLDOWN,
                         "friction": FRICTION,
+                        "mass_ramp_macro_steps": MASS_RAMP_MACRO_STEPS,
+                        "growth_rate": GROWTH_RATE,
+                        "growth_max": GROWTH_MAX,
+                        "growth_threshold": GROWTH_THRESHOLD,
                         "chirality": CHIRALITY,
                         "damping": DAMPING_LOSS_FRACTION,
                         "material_e": MATERIAL_E,
@@ -556,6 +575,7 @@ async def _training_loop_body() -> None:
                         "material_elasticity": MATERIAL_ELASTICITY,
                         "splat_radius": SPLAT_RADIUS,
                         "repulsion_strength": REPULSION_STRENGTH,
+                        "repulsion_max_delta": REPULSION_MAX_DELTA,
                     },
                     indent=2,
                 )

@@ -115,6 +115,7 @@ def _worker_init(
         DIVISION_COOLDOWN,
         FRICTION,
         DEPOSIT_SIGMA,
+        1.0,
         args.spawn_x,
         args.spawn_y,
     )
