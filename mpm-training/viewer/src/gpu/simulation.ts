@@ -20,7 +20,7 @@
 //      over whichever grid buffer is currently "current" (last step's
 //      diffuse+decay output).
 //   2. agents.encodeStep()            — NN forward pass: reads that same
-//      grid + gradient, writes independent front/left/back/right
+//      grid + gradient, writes one centered deposit per channel
 //      env_write values per channel into the deposit scratch and the
 //      normalized former-strafe pair into ParticleRest.growthDirection and
 //      sigmoid anisotropy/division-bias controls into growthControls
@@ -50,8 +50,9 @@ import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
 import { Renderer, type FieldMode, type ParticleRenderMode } from "./render";
-import { seedBlob, spawnUniform01 } from "./rng";
-import { physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig } from "./types";
+import { seedBlob } from "./rng";
+import { physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig, type UpdateRuleWeights } from "./types";
+import coreConstants from "../../../core/constants.json";
 
 export class GpuSimulation {
   private readonly device: GPUDevice;
@@ -99,6 +100,7 @@ export class GpuSimulation {
   // survives rebuild()" reasoning pendingAccent above already has.
   private pendingGradientExponent = 1;
   private pendingParticleCap: number | null = null;
+  private pendingInitialParticleCount: number | null = null;
   private particleCap = 2;
   private pendingTargetVisible = true;
   private neuralUpdatesPerMacro = 1;
@@ -292,34 +294,23 @@ export class GpuSimulation {
   restartRollout(): void {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     this.epoch++;
-    // HARDCODED experiment: start with 2 particles, back to back,
-    // instead of the usual single starting particle (config.particles is
-    // still the growth CAP, not a starting count — see types.ts's own
-    // SimulationConfig.particles docstring) — particle 1 is placed
-    // config.splitDisplacement behind particle 0 along a shared random
-    // axis (same displacement/direction convention growth's own split
-    // uses, agents.wgsl's own agentStep() `behindDir`), but with its
-    // heading FLIPPED (theta + PI) rather than copied, so the two face
-    // away from each other. Mirrors trainer/training_sim.py's own
-    // TrainingRollout.__init__ — see that constructor's own comment.
-    // Not a general N-agent or CLI-configurable start yet.
+    const initialCount = Math.min(
+      this.particleCap,
+      Math.max(1, Math.floor(
+        this.pendingInitialParticleCount
+        ?? this.config.initialParticleCount
+        ?? coreConstants.INITIAL_PARTICLE_COUNT
+      ))
+    );
     const scene = seedBlob({
-      count: 2,
+      count: initialCount,
       centerX: this.config.spawnX,
       centerY: this.config.spawnY,
-      halfWidth: this.config.spawnHalfWidth,
+      spacing: this.config.splitDisplacement,
       seed: this.config.seed,
     });
-    // Index 4 — seedBlob({count:2,...}) above claims indices 0-3 for its
-    // own 2 particles' x/y jitter (see that function's own docstring),
-    // this is the next one over. Bit-exact with
-    // trainer/training_sim.py's own theta draw.
-    const theta = (spawnUniform01(this.config.seed, 4) * 2 - 1) * Math.PI;
-    const behindDir = [-Math.cos(theta), -Math.sin(theta)];
-    scene.positions[2] = ((scene.positions[0] + behindDir[0] * this.config.splitDisplacement) % 1 + 1) % 1;
-    scene.positions[3] = ((scene.positions[1] + behindDir[1] * this.config.splitDisplacement) % 1 + 1) % 1;
     this.mpmCore.loadScene(scene);
-    // Every slot beyond these 2 starting particles is destined to become
+    // Every slot beyond the genuinely seeded particles is destined to become
     // a real particle via growth, at some unknown point in this rollout
     // — see MpmCore.resetGrowthBuffers()'s own docstring for why this
     // has to run every rollout (not just once, ever) despite seedBlob()
@@ -334,18 +325,13 @@ export class GpuSimulation {
     // although position is no longer a policy input.
     this.agents.setSpawnCenter(this.config.spawnX, this.config.spawnY);
     this.agents.setMaxActiveParticles(this.particleCap);
-    this.agents.setActiveCount(2);
+    this.agents.setActiveCount(initialCount);
     // Heading's own per-slot fill and growth's own seed are both bit-
     // exact via rng.ts's own spawnUniform01()/growthSeed() respectively
     // (two DIFFERENT hash domains, see spawnUniform01()'s own comment
     // for why they're safe to derive from the identical raw seed
     // without correlating) — see Agents.resetHeading()'s own docstring.
     this.agents.resetHeading(this.config.seed);
-    // resetHeading() above already randomized every slot's own heading
-    // independently (including these 2) — overwrite just slots 0/1 with
-    // the coordinated back-to-back pair computed above (theta/theta+PI),
-    // mirroring trainer/agents_gpu.py's own set_headings() call site.
-    this.agents.setHeadings(new Float32Array([theta, theta + Math.PI]));
     this._currentStep = 0;
   }
 
@@ -388,7 +374,10 @@ export class GpuSimulation {
     // default) guards a call to this with a raw SimulationConfig from a
     // train_server.py process still running pre-repulsionMaxDelta code,
     // same reasoning depositRate's own guard below gives.
-    this.mpmCore.setRepulsionStrength(physics.repulsionStrength, physics.repulsionMaxDelta ?? 40.0);
+    this.mpmCore.setRepulsionStrength(
+      physics.repulsionStrength,
+      physics.repulsionMaxDelta ?? 40.0,
+    );
     this.mpmCore.setMorphology(
       this.config.morphologyBlurSigma ?? 0.01,
       this.config.morphologyDensityReference ?? 1.0
@@ -439,10 +428,22 @@ export class GpuSimulation {
     const cap = Math.min(MAX_PARTICLES, Math.max(2, Math.floor(maxParticles)));
     this.pendingParticleCap = cap;
     this.particleCap = cap;
+    if (this.pendingInitialParticleCount !== null) {
+      this.pendingInitialParticleCount = Math.min(this.pendingInitialParticleCount, cap);
+    }
     this.agents?.setMaxActiveParticles(cap);
     if (this.mpmCore && this.mpmCore.activeCount > cap) {
       this.restartRollout();
     }
+  }
+
+  /** Playback-only seeded agent count. Applying it restarts the current
+   * generation so the new initial condition takes effect immediately. */
+  setInitialParticleCount(initialParticles: number): void {
+    const count = Math.min(this.particleCap, Math.max(1, Math.floor(initialParticles)));
+    if (this.pendingInitialParticleCount === count) return;
+    this.pendingInitialParticleCount = count;
+    if (this.mpmCore) this.restartRollout();
   }
 
   /** `points`: flat [x0,y0,x1,y1,...] in MpmCore's own [0,1]^2 domain.
@@ -670,10 +671,11 @@ export class GpuSimulation {
    * reads as broken rather than "randomized." Silently does nothing
    * before the first rebuild(), same stance every other tool method here
    * takes. */
-  randomizeWeights(): void {
-    if (!this.agents) return;
-    this.agents.randomizeWeights();
+  randomizeWeights(): UpdateRuleWeights | null {
+    if (!this.agents) return null;
+    const weights = this.agents.randomizeWeights();
     this.restartRollout();
+    return weights;
   }
 
   private destroySimObjects(): void {

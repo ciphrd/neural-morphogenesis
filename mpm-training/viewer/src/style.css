@@ -315,7 +315,7 @@ body {
   overflow: hidden;
 }
 
-/* NetworkPanel.tsx's own coolwarm background sweep (VectorPad's own
+/* NetworkPanel.tsx's own Viridis background sweep (VectorPad's own
    `heatmap` prop) — sits UNDER the axes/dot below purely via DOM order
    (first child), no z-index needed. */
 .vector-pad-heatmap {
@@ -327,7 +327,7 @@ body {
 .vector-pad-axis {
   position: absolute;
   /* Translucent, not the track's own flat #2a2a2a — needs to stay
-     legible over whatever coolwarm color happens to be underneath at
+     legible over whatever Viridis color happens to be underneath at
      that exact pixel, not just the pad's own plain dark background. */
   background: rgba(0, 0, 0, 0.35);
 }

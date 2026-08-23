@@ -21,7 +21,13 @@ from __future__ import annotations
 import numpy as np
 import wgpu
 
-from simulation_settings import ELASTIC_STRAIN_INPUTS_ENABLED, ELASTIC_STRAIN_SCALE
+from simulation_settings import (
+    CHEMICAL_GRADIENT_INPUT_SCALE,
+    CHEMICAL_VALUE_INPUT_SCALE,
+    ELASTIC_STRAIN_INPUTS_ENABLED,
+    ELASTIC_STRAIN_SCALE,
+    MORPHOLOGY_GRADIENT_INPUT_SCALE,
+)
 
 from environment_gpu import EnvironmentGPU, ceil_div
 from mpm_core import MpmCore, REPULSION_FIELD_N
@@ -116,9 +122,9 @@ def weight_layout(channels: int, hidden_dim: int) -> dict[str, int]:
     # core/agents.wgsl's own IN_DIM: value + heading-forward gradient +
     # lateral gradient per channel, with no positional inputs.
     in_dim = channels * 3 + 6
-    # Four heading-relative env_write values per channel + ANGULAR_DIM(1)
-    # + ACCEL_DIM(2) + STRAFE_DIM(2) + RGB_DIM(3).
-    out_dim = channels * 4 + 8
+    # One centered env_write per channel + ANGULAR_DIM(1) + ACCEL_DIM(2)
+    # + STRAFE_DIM(2) + RGB_DIM(3).
+    out_dim = channels + 8
     fc1w_offset = 0
     fc1b_offset = fc1w_offset + hidden_dim * in_dim
     fc2w_offset = fc1b_offset + hidden_dim
@@ -215,7 +221,7 @@ class AgentsGPU:
         # such interactive tool of its own).
         #
         # rng/cooldown/heading/angularVelocity plus aligned neural RGBA —
-        # packed into ONE 32-bytes-per-particle buffer
+        # packed into ONE 48-bytes-per-particle buffer
         # (core/agents.wgsl's own ParticleMeta struct), not four separate
         # buffers: this shader hit a REAL, confirmed CreateComputePipeline
         # validation error the first time particleF/particleC/particleJp
@@ -237,6 +243,9 @@ class AgentsGPU:
             ("heading", "<f4"),
             ("angularVelocity", "<f4"),
             ("color", "<f4", (4,)),
+            ("divisionHazard", "<f4"),
+            ("divisionThreshold", "<f4"),
+            ("_padding", "<f4", (2,)),
         ])
         # AgentState packs the growth counter at byte 0 and ParticleMeta at
         # byte 256. Besides satisfying storage-offset alignment for the
@@ -245,10 +254,10 @@ class AgentsGPU:
             size=PARTICLE_META_BUFFER_OFFSET + max(max_active_particles, 1) * self._particle_meta_dtype.itemsize,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
         )
-        # Every rollout currently starts with two particles and grows
+        # Rollouts start with their configured initial particle count and grow
         # via splitting from there (training_sim.py's own
-        # TrainingRollout.__init__ calls set_active_count(1) again itself,
-        # every rollout — this is just a construction-time placeholder so
+        # TrainingRollout.__init__ sets that count every rollout — this is
+        # just a construction-time placeholder so
         # there's a sane dispatch size before the first rollout ever
         # starts) — see evolve.py's own module docstring for why
         # --particles is now a CAP, not a fixed starting count.
@@ -261,8 +270,11 @@ class AgentsGPU:
                     "CHANNELS": channels,
                     "HIDDEN_DIM": hidden_dim,
                     "FIELD_WIDTH": environment.width,
-                "FIELD_HEIGHT": environment.height,
-                "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
+                    "FIELD_HEIGHT": environment.height,
+                    "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
+                    "CHEMICAL_VALUE_INPUT_SCALE": repr(CHEMICAL_VALUE_INPUT_SCALE),
+                    "CHEMICAL_GRADIENT_INPUT_SCALE": repr(CHEMICAL_GRADIENT_INPUT_SCALE),
+                    "MORPHOLOGY_GRADIENT_INPUT_SCALE": repr(MORPHOLOGY_GRADIENT_INPUT_SCALE),
                     # WGSL wants lowercase `true`/`false` — Python's own
                     # str(bool) gives "True"/"False", invalid WGSL syntax,
                     # so this can't just be passed through as-is.
@@ -500,7 +512,7 @@ class AgentsGPU:
         would just be an initial spin, not a meaningfully different
         starting condition the way a random facing direction is. cooldown
         is zeroed too — "not on cooldown," so a fresh rollout's own
-        starting particle can split as soon as its own draw/probability
+        starting particle can split as soon as its own hazard threshold
         allow, same as before cooldown existed.
 
         rng is seeded via `seed` through _growth_seed() instead (a
@@ -535,7 +547,7 @@ class AgentsGPU:
         Not folded into reset_heading() itself, which stays a general,
         per-slot-independent utility. Written as individual per-index
         strided byte writes (heading is one f32 field inside
-        ParticleMeta's own 32-byte stride, not a standalone tightly-
+        ParticleMeta's own 48-byte stride, not a standalone tightly-
         packed array anymore) rather than one bulk write, to touch ONLY
         the heading field — leaving rng/cooldown/angularVelocity exactly
         as reset_heading() just set them, not overwritten with zeros.

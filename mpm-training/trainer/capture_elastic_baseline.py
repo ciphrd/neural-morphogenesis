@@ -137,7 +137,7 @@ def main() -> None:
     if args.directional:
         layout = weight_layout(CHEM_CHANNELS, HIDDEN_DIM)
         # Saturated anisotropy/polarity plus a constant local-forward axis.
-        env_write_dim = CHEM_CHANNELS * 4
+        env_write_dim = CHEM_CHANNELS
         weights[layout["fc2b_offset"] + env_write_dim + 1] = 20.0
         weights[layout["fc2b_offset"] + env_write_dim + 2] = 20.0
         weights[layout["fc2b_offset"] + env_write_dim + 3] = 1.0
@@ -162,6 +162,7 @@ def main() -> None:
         gravity=0.0,
         seed=SEED,
         neural_updates_per_macro=1,
+        initial_particle_count=2,
     )
 
     growth_plane = np.ones(FIELD_N * FIELD_N, dtype=np.float32)

@@ -71,7 +71,7 @@ const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
 // growthF(4), jp, cycleActive, growthDirection(2), growthControls(2),
-// then two alignment-padding floats — shared 48-byte ParticleRest layout.
+// followed by two implicit alignment floats — shared 48-byte layout.
 const REST_FIELDS = 12;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own
@@ -290,15 +290,17 @@ export class MpmCore {
     });
     this.morphologyParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    this.splatParamsUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.repulsionParamsUniform = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.splatParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.repulsionParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     const repulsionModule = device.createShaderModule({ code: templateShader(repulsionSrc, { FIELD_N: REPULSION_FIELD_N, DT }) });
 
     this.clearDensityPipeline = device.createComputePipeline({ layout: "auto", compute: { module: repulsionModule, entryPoint: "clearDensity" } });
     this.clearDensityBindGroup = device.createBindGroup({
       layout: this.clearDensityPipeline.getBindGroupLayout(0),
-      entries: [{ binding: 0, resource: { buffer: this.densityAccum } }],
+      entries: [
+        { binding: 0, resource: { buffer: this.densityAccum } },
+      ],
     });
 
     this.splatDensityPipeline = device.createComputePipeline({ layout: "auto", compute: { module: repulsionModule, entryPoint: "splatDensity" } });
@@ -484,13 +486,15 @@ export class MpmCore {
   }
 
   setSplatRadius(sigma: number): void {
-    writeFloat32(this.device, this.splatParamsUniform, 0, new Float32Array([sigma]));
+    writeFloat32(this.device, this.splatParamsUniform, 0, new Float32Array([sigma, 0, 0, 0]));
   }
 
   /** `maxDelta` is core/repulsion.wgsl's own RepulsionParams.maxDelta —
    * see that field's own comment for what it bounds and why. */
   setRepulsionStrength(strength: number, maxDelta: number): void {
-    writeFloat32(this.device, this.repulsionParamsUniform, 0, new Float32Array([strength, maxDelta]));
+    writeFloat32(this.device, this.repulsionParamsUniform, 0, new Float32Array([
+      strength, maxDelta, 0, 0,
+    ]));
   }
 
   setMorphology(sigmaDomain: number, densityReference: number): void {

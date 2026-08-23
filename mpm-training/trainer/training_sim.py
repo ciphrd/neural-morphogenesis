@@ -60,14 +60,14 @@ isotropic growth and symmetric random-axis division regardless of those
 controls. MAX_STRAFE independently controls whether the same direction also
 acts as physical acceleration and is zero by default.
 
-Growth: every rollout currently starts with a coordinated two-particle
-seed — core/agents.wgsl's own agentStep() may spawn
+Growth: every rollout starts with the configured initial particle count;
+core/agents.wgsl's own agentStep() may spawn
 new ones from there (splitting, based on the last chemical channel's own
 sensed value — see that file's own module docstring for the full
 design), up to evolve.py's own --particles (now a CAP, not a fixed
 starting count — see that module's own module docstring for why; a
-policy that never learns to use the growth channel stays at 2
-particles). This is the
+policy that never learns to use the growth channel stays at that initial
+count). This is the
 ONE exception to "zero host round-trips for anything data-related" this
 module's own docstring boasts about above: macro_step() reads back a
 single 4-byte atomic counter every macro step (agents.read_grown_count())
@@ -91,32 +91,48 @@ from __future__ import annotations
 
 import numpy as np
 
-from simulation_settings import COMMUNICATION_SPEED, NEURAL_UPDATES_PER_MACRO
+from simulation_settings import COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, NEURAL_UPDATES_PER_MACRO
 
 from agents_gpu import AgentsGPU, _spawn_uniform01
 from environment_gpu import EnvironmentGPU
 from mpm_core import MpmCore
 
 
-def seed_blob(count: int, center: tuple[float, float], half_width: float, seed: int) -> tuple[np.ndarray, ...]:
-    """Same scene-seeding shape as feasibility_check.py's own seed_blob —
-    duplicated rather than imported (that module is a standalone spike
-    script, not a library this one should depend on). Jittered via
-    agents_gpu._spawn_uniform01(seed, 2*i)/2*i+1 for particle i's own
-    x/y — bit-exact with ../viewer/src/gpu/rng.ts's own seedBlob(), not
-    just a plausible replay (that used to be a numpy Generator/PCG64 vs
-    TS mulberry32 gap, same as reset_heading()'s own history — see that
-    method's own docstring for the fuller "why bit-exact now" reasoning).
-    Indices 0..2*count-1 are reserved for this function's own draws —
-    TrainingRollout.__init__'s own theta draw (this file's own back-to-
-    back placement) starts at index 2*count to never collide, regardless
-    of `count`."""
+def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int) -> tuple[np.ndarray, ...]:
+    """Seed a compact, approximately circular hexagonal packing.
+
+    Complete lattice shells fill from the center outward. Sites on a partial
+    final shell are selected evenly around its circumference, avoiding a
+    one-sided arc. The complete packing receives one deterministic rotation.
+    Nearest lattice neighbors are exactly ``spacing`` apart before wrapping.
+    viewer/src/gpu/rng.ts mirrors this construction.
+    """
+    offsets: list[tuple[float, float]] = [(0.0, 0.0)]
+    ring = 1
+    while len(offsets) < count:
+        shell: list[tuple[float, float]] = []
+        for q in range(-ring, ring + 1):
+            for r in range(-ring, ring + 1):
+                if max(abs(q), abs(r), abs(q + r)) == ring:
+                    shell.append((spacing * (q + 0.5 * r), spacing * (np.sqrt(3.0) * 0.5 * r)))
+        shell.sort(key=lambda p: np.arctan2(p[1], p[0]))
+        take = min(count - len(offsets), len(shell))
+        if take == len(shell):
+            offsets.extend(shell)
+        else:
+            indices = [int(np.floor((j + 0.5) * len(shell) / take)) for j in range(take)]
+            offsets.extend(shell[i] for i in indices)
+        ring += 1
+
+    mean_x = sum(p[0] for p in offsets) / count
+    mean_y = sum(p[1] for p in offsets) / count
+    offsets = [(x - mean_x, y - mean_y) for x, y in offsets]
+    theta = (_spawn_uniform01(seed, 2 * count) * 2.0 - 1.0) * np.pi
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
     positions = np.empty((count, 2), dtype=np.float32)
-    for i in range(count):
-        jx = _spawn_uniform01(seed, 2 * i) * 2.0 - 1.0
-        jy = _spawn_uniform01(seed, 2 * i + 1) * 2.0 - 1.0
-        positions[i, 0] = center[0] + jx * half_width
-        positions[i, 1] = center[1] + jy * half_width
+    for i, (x, y) in enumerate(offsets):
+        positions[i, 0] = (center[0] + x * cos_t - y * sin_t) % 1.0
+        positions[i, 1] = (center[1] + x * sin_t + y * cos_t) % 1.0
     velocities = np.zeros((count, 2), dtype=np.float32)
     F = np.tile(np.array([1, 0, 0, 1], dtype=np.float32), (count, 1))
     C = np.zeros((count, 4), dtype=np.float32)
@@ -129,14 +145,12 @@ class TrainingRollout:
     their GPU buffers/pipelines) are owned and reused by the caller
     across many rollouts — see evolve.py's own module docstring — since
     rebuilding wgpu pipelines per candidate would be real, avoidable
-    overhead; this constructor only seeds `core`'s particle buffers (2
-    particles, back to back — see __init__'s own comment; a HARDCODED
-    experiment, not yet CLI-configurable — --particles remains a growth
-    CAP, not a starting count, see evolve.py's own module docstring) and
+    overhead; this constructor only seeds `core`'s particle buffers (one
+    the configured initial particle count; --particles remains a growth cap) and
     resets `agents`/`environment`'s own persistent state back to a fresh
     (empty field, randomized heading — see AgentsGPU.reset_heading()'s
     own docstring) starting point for this rollout — every bit of that
-    starting condition (spawn jitter, back-to-back theta, heading,
+    starting condition (packed-disk rotation, heading,
     growth's own seed) is now a pure, bit-exact function of `seed` alone
     (see seed_blob()'s/agents_gpu._spawn_uniform01()'s own docstrings),
     no numpy Generator needed anywhere in this constructor anymore.
@@ -156,6 +170,7 @@ class TrainingRollout:
         mpm_enabled: bool = True,
         neural_updates_per_macro: int = NEURAL_UPDATES_PER_MACRO,
         communication_speed: float = COMMUNICATION_SPEED,
+        initial_particle_count: int = INITIAL_PARTICLE_COUNT,
     ) -> None:
         self.core = core
         self.agents = agents
@@ -179,25 +194,15 @@ class TrainingRollout:
         # already follows. The Agents uniform retains legacy spawn slots for
         # wire compatibility, although position is no longer a policy input.
         agents.set_spawn_center(*spawn_center)
-        # HARDCODED experiment: start with 2 particles, back to back,
-        # instead of the usual single starting particle — particle 1 is
-        # placed agents.split_displacement behind particle 0 along a shared
-        # random axis (same displacement/direction convention growth's
-        # own split uses, agents.wgsl's own agentStep() `behindDir`), but
-        # with its heading FLIPPED (theta + pi) rather than copied, so
-        # the two face away from each other. Not a general N-agent or
-        # CLI-configurable start yet — see this class's own docstring for
-        # why a single particle was the rule until now.
-        positions, velocities, F, C, Jp = seed_blob(2, spawn_center, spawn_half_width, seed)
-        # Index 4 — seed_blob(2, ...) above claims indices 0-3 for its own
-        # 2 particles' x/y jitter (see that function's own docstring),
-        # this is the next one over. Bit-exact with
-        # ../viewer/src/gpu/simulation.ts's own theta draw.
-        theta = _spawn_uniform01(seed, 4) * (2.0 * np.pi) - np.pi
-        behind_dir = np.array([-np.cos(theta), -np.sin(theta)], dtype=np.float32)
-        positions[1] = (positions[0] + behind_dir * agents.split_displacement) % 1.0
+        # Retained in the constructor/checkpoint schema for compatibility;
+        # compact multi-cell seeding is now governed by split_displacement.
+        _ = spawn_half_width
+        initial_count = min(agents.max_active_particles, max(1, int(initial_particle_count)))
+        positions, velocities, F, C, Jp = seed_blob(
+            initial_count, spawn_center, agents.split_displacement, seed
+        )
         core.load_scene(positions, velocities, F, C, Jp)
-        # Every slot beyond these 2 starting particles is destined to
+        # Every slot beyond the genuinely seeded particles is destined to
         # become a real particle via growth, at some unknown point in
         # this rollout — see reset_growth_buffers()'s own docstring for
         # why this has to run every rollout (not just once, ever) despite
@@ -208,14 +213,8 @@ class TrainingRollout:
         core.reset_growth_buffers(agents.max_active_particles)
 
         environment.reset()
-        agents.set_active_count(2)
+        agents.set_active_count(initial_count)
         agents.reset_heading(seed)
-        # reset_heading() above already randomized every slot's own
-        # heading independently (including these 2) — overwrite just
-        # slots 0/1 with the coordinated back-to-back pair computed
-        # above (theta / theta+pi), same "follow-up small write" agents_gpu.py's
-        # own set_headings() docstring describes.
-        agents.set_headings(np.array([theta, theta + np.pi], dtype=np.float32))
 
     def macro_step(self, substeps_per_macro: int, *, growth_enabled: bool = True) -> None:
         core = self.core

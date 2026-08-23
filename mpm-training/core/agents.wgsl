@@ -1,12 +1,9 @@
 // The evolved per-particle policy, GPU-resident — WGSL port of
-// trainer/update_rule.py's Dense(128) -> sin -> Dense(4*CHANNELS+8) (hidden
-// activation swapped from tanh to sin, a periodic activation, per this
-// project's own explicit request — see evalPolicy()'s own comment for
-// why), following envnca/frontend/src/gpu/agents.wgsl's own NN-forward-
+// trainer/update_rule.py's Dense(128) -> tanh -> Dense(CHANNELS+8),
+// following envnca/frontend/src/gpu/agents.wgsl's own NN-forward-
 // pass approach (weights as one flat buffer, plain loops rather than a
 // matrix type, safeTanh on the OUTPUT layer's own squashing to avoid a
-// real confirmed NaN failure mode — see that layer's own comment, sin's
-// own hidden-layer use doesn't share this) with the differences
+// real confirmed NaN failure mode — see safeTanh()) with the differences
 // update_rule.py's own Python port already settled:
 //
 // Lives in core/, not viewer/src/gpu/, alongside p2g.wgsl/g2p.wgsl/etc
@@ -47,10 +44,9 @@
 //   work) in exchange for ruling out an arbitrary, physically
 //   unmotivated left/right turning bias by construction.
 //
-// Deposit — four independently-controlled writes per channel at
-// heading-relative front/left/back/right spots. Their distance from the
-// particle and Gaussian radius are live-tunable. See depositGaussian()
-// and agentStep() for the bounded scatter and spot geometry.
+// Deposit — one independently-controlled write per channel at the
+// particle position. The Gaussian radius is live-tunable. See
+// depositGaussian() and agentStep() for the bounded scatter geometry.
 // sensing (value/grad_forward/grad_lateral) is unchanged, still sampled
 // once, at the agent's own position, still via the old bilinear
 // corners()/sampleValue()/sampleGrad() (only the deposit SIDE changed).
@@ -59,8 +55,8 @@
 // tensor-growth cycle. The signed network growth vector polarizes division:
 // the child is placed along +n and the pair's center shifts toward +n in
 // proportion to signal magnitude. A zero signal retains the old symmetric,
-// uniformly-random split exactly. Growth admission has a per-step probability read straight off
-// the LAST channel's own sensed VALUE (inputVec[CHANNELS-1u] — the same
+// uniformly-random split exactly. Growth admission integrates persistent
+// hazard from the LAST channel's sensed VALUE (inputVec[CHANNELS-1u] — the same
 // value already fed into this step's own NN input, clamped to [0,1];
 // NOT a network output, so CHIRALITY's mirror-averaging never touches
 // it) — an evolved policy can shape this "growth substrate" the exact
@@ -158,15 +154,16 @@ const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
 // heading-relative elastic Hencky-strain components.
 const IN_DIM: u32 = CHANNELS * 3u + 6u;
 const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
+const CHEMICAL_VALUE_INPUT_SCALE: f32 = __CHEMICAL_VALUE_INPUT_SCALE__;
+const CHEMICAL_GRADIENT_INPUT_SCALE: f32 = __CHEMICAL_GRADIENT_INPUT_SCALE__;
+const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__;
 
-// Four heading-relative deposit spots in spot-major order:
-// front, left, back, right. Each spot has an independent write per channel.
-const SPOTS: u32 = 4u;
-const ENV_WRITE_DIM: u32 = CHANNELS * SPOTS;
-const OUT_DIM: u32 = ENV_WRITE_DIM + 8u; // env_write(SPOTS*CHANNELS) + turn(1) + growth controls(2) + direction(2) + RGB(3)
+// One independent chemical write per channel, deposited directly beneath
+// the particle rather than at heading-relative cardinal offsets.
+const ENV_WRITE_DIM: u32 = CHANNELS;
+const OUT_DIM: u32 = ENV_WRITE_DIM + 8u; // env_write + turn + growth controls + direction + RGB
 
 const PI: f32 = 3.14159265358979323846;
-const HALF_PI: f32 = PI * 0.5;
 
 const FC1W_OFFSET: u32 = 0u;
 const FC1B_OFFSET: u32 = FC1W_OFFSET + HIDDEN_DIM * IN_DIM;
@@ -197,8 +194,7 @@ struct AgentPhysics {
   maxAngularAccel: f32,
   angularDamping: f32,
   maxAngularVelocity: f32,
-  // Field-pixel distance from the particle to each heading-relative
-  // deposit spot. Zero collapses all four writes onto the particle.
+  // Legacy ABI slot. Centered deposits no longer use a directional offset.
   depositDistance: f32,
   // World-domain (same [0,1]^2 units as `positions`, NOT field-pixels
   // like depositDistance) distance a newly split particle spawns behind
@@ -278,6 +274,12 @@ struct ParticleMeta {
   // Current neural cell color. vec4 keeps the packed record naturally
   // aligned while the unused alpha lane remains fixed at 1.
   color: vec4<f32>,
+  // Integrated division clock. Positive growth signal adds hazard; the
+  // particle starts a cycle when it crosses an exponentially-distributed
+  // threshold. Unlike a fresh Bernoulli draw, sub-threshold drive is not
+  // discarded when the signal later changes or temporarily vanishes.
+  divisionHazard: f32,
+  divisionThreshold: f32,
 }
 // Pack growth's counter and particle metadata into one allocation. The
 // explicit 252-byte pad puts particleMeta at byte 256, allowing the render
@@ -385,6 +387,23 @@ fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
 // this file's other differences from that one.
 fn safeTanh(x: f32) -> f32 {
   return tanh(clamp(x, -20.0, 20.0));
+}
+
+// Robust scales measured from a 2,000-step live rollout (5,005 tracked
+// particle samples). These mappings keep zero exactly zero and bound rare
+// outliers instead of subtracting rollout-specific means. Every chemical
+// channel and both gradient directions share their respective scale,
+// preserving channel-permutation and rotational symmetry.
+fn normalizeChemicalValue(raw: f32) -> f32 {
+  return safeTanh(raw / max(CHEMICAL_VALUE_INPUT_SCALE, 1e-6));
+}
+
+fn normalizeChemicalGradient(raw: f32) -> f32 {
+  return safeTanh(raw / max(CHEMICAL_GRADIENT_INPUT_SCALE, 1e-6));
+}
+
+fn normalizeMorphologyGradient(raw: f32) -> f32 {
+  return safeTanh(raw / max(MORPHOLOGY_GRADIENT_INPUT_SCALE, 1e-6));
 }
 
 fn matMul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
@@ -568,7 +587,7 @@ fn wrapDepositIndex(i: i32, size: u32) -> i32 {
 // stacking up), not just its spread — a real, visible behavior change
 // worth knowing while testing this slider, not merely a smoother-
 // looking version of the old, mass-conserving 4-corner deposit.
-fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, spot: u32, centerFieldPos: vec2<f32>) {
+fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32>) {
   let baseI = i32(floor(centerFieldPos.x));
   let baseJ = i32(floor(centerFieldPos.y));
 
@@ -592,7 +611,7 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, spot: u32, centerFieldPo
       let wx = u32(wrapDepositIndex(ti, FIELD_WIDTH));
       let wy = u32(wrapDepositIndex(tj, FIELD_HEIGHT));
       for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-        let scaled = envWrite[spot * CHANNELS + c] * weight * DEPOSIT_SCALE;
+        let scaled = envWrite[c] * weight * DEPOSIT_SCALE;
         atomicAdd(&depositScratch[fieldIndex(c, wy, wx)], i32(round(scaled)));
       }
     }
@@ -600,7 +619,7 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, spot: u32, centerFieldPo
 }
 
 // The bounded subset of the network's own raw output
-// this shader actually consumes — one env_write per spot per channel +
+// this shader actually consumes — one centered env_write per channel +
 // angularAccel, independent anisotropy/division-bias controls, and the
 // growth-direction signal (optionally also physical acceleration), all
 // still in LOCAL frame.
@@ -617,7 +636,7 @@ fn safeSigmoid(x: f32) -> f32 {
   return 1.0 / (1.0 + exp(-clamp(x, -20.0, 20.0)));
 }
 
-// One full Dense(HIDDEN_DIM) -> sin -> Dense(OUT_DIM) forward pass,
+// One full Dense(HIDDEN_DIM) -> tanh -> Dense(OUT_DIM) forward pass,
 // squashed/scaled into PolicyOutput. Pulled out of agentStep() into its
 // own function specifically so CHIRALITY can call it twice, on two
 // different (mirrored) `inputVec`s, without duplicating the actual
@@ -630,17 +649,9 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
     for (var i: u32 = 0u; i < IN_DIM; i = i + 1u) {
       acc = acc + inputVec[i] * weights[FC1W_OFFSET + j * IN_DIM + i];
     }
-    // sin, not tanh — a periodic hidden activation, swapped in per this
-    // project's own explicit request (a controlled, single-layer trial,
-    // not a full SIREN rewrite — see this project's own design
-    // discussion for why SIREN's actual value proposition, stable deep
-    // gradient-based training of high-frequency signals, doesn't
-    // transfer to a network that's mutated/selected, never backprop-
-    // trained). No safeTanh-style input clamp needed the way the output
-    // layer's own tanh below still has: sin's own native WGSL
-    // implementation doesn't share naive tanh's specific (e^2x-1)/(e^2x+1)
-    // overflow failure mode for large |x| (see safeTanh()'s own comment).
-    hidden[j] = sin(acc);
+    // Bounded, monotonic, zero-centered response. The shared overflow-safe
+    // implementation protects mutated policies with extreme preactivations.
+    hidden[j] = safeTanh(acc);
   }
 
   var outVec: array<f32, OUT_DIM>;
@@ -653,11 +664,8 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
   }
 
   var out: PolicyOutput;
-  for (var spot: u32 = 0u; spot < SPOTS; spot = spot + 1u) {
-    for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-      let writeIndex = spot * CHANNELS + c;
-      out.envWrite[writeIndex] = safeTanh(outVec[writeIndex]) * physics.maxEnvWrite;
-    }
+  for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+    out.envWrite[c] = safeTanh(outVec[c]) * physics.maxEnvWrite;
   }
   // No rotation for angularAccel — it nudges angularVelocity directly,
   // there's no "world frame" for a scalar turn rate to be rotated into.
@@ -712,19 +720,22 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // macro_step() exactly, same rotation envnca/simulation.py's own
   // step() applies.
   var inputVec: array<f32, IN_DIM>;
+  var rawGrowthSignal = 0.0;
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-    inputVec[c] = sampleValue(c, k);
+    let rawValue = sampleValue(c, k);
+    if (c == CHANNELS - 1u) { rawGrowthSignal = rawValue; }
+    inputVec[c] = normalizeChemicalValue(rawValue);
     let gx = sampleGrad(0u, c, k);
     let gy = sampleGrad(FIELD_TOTAL, c, k);
-    inputVec[CHANNELS + c] = gx * cosH + gy * sinH;
-    inputVec[2u * CHANNELS + c] = -gx * sinH + gy * cosH;
+    inputVec[CHANNELS + c] = normalizeChemicalGradient(gx * cosH + gy * sinH);
+    inputVec[2u * CHANNELS + c] = normalizeChemicalGradient(-gx * sinH + gy * cosH);
   }
   let morphologyPos = fract(pos) * f32(MORPHOLOGY_FIELD_N);
   let morphologyGx = 0.5 * (sampleMorphology(morphologyPos + vec2<f32>(1.0, 0.0)) - sampleMorphology(morphologyPos - vec2<f32>(1.0, 0.0)));
   let morphologyGy = 0.5 * (sampleMorphology(morphologyPos + vec2<f32>(0.0, 1.0)) - sampleMorphology(morphologyPos - vec2<f32>(0.0, 1.0)));
-  inputVec[3u * CHANNELS] = sampleMorphology(morphologyPos);
-  inputVec[3u * CHANNELS + 1u] = morphologyGx * cosH + morphologyGy * sinH;
-  inputVec[3u * CHANNELS + 2u] = -morphologyGx * sinH + morphologyGy * cosH;
+  inputVec[3u * CHANNELS] = clamp(2.0 * sampleMorphology(morphologyPos) - 1.0, -1.0, 1.0);
+  inputVec[3u * CHANNELS + 1u] = normalizeMorphologyGradient(morphologyGx * cosH + morphologyGy * sinH);
+  inputVec[3u * CHANNELS + 2u] = normalizeMorphologyGradient(-morphologyGx * sinH + morphologyGy * cosH);
   let forward = vec2<f32>(cosH, sinH);
   let lateral = vec2<f32>(-sinH, cosH);
   var elasticInput = vec3<f32>(0.0);
@@ -747,9 +758,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the genuinely symmetric part of its response survives — see
   // simulation_settings.py's own CHIRALITY for the full reasoning.
   // angularAccel/strafeLocal's own lateral component flip sign right
-  // back (a mirrored "turn right" is a "turn left"). Front/back lie on
-  // the mirror axis; left/right swap when the mirrored result is mapped
-  // back into the particle's real local frame.
+  // back (a mirrored "turn right" is a "turn left"). A centered chemical
+  // write has no handedness, so it is averaged channel-for-channel.
   if (CHIRALITY) {
     var mirroredInput = inputVec;
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
@@ -762,14 +772,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mirrored = evalPolicy(mirroredInput);
 
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-      let front = result.envWrite[0u * CHANNELS + c];
-      let left = result.envWrite[1u * CHANNELS + c];
-      let back = result.envWrite[2u * CHANNELS + c];
-      let right = result.envWrite[3u * CHANNELS + c];
-      result.envWrite[0u * CHANNELS + c] = (front + mirrored.envWrite[0u * CHANNELS + c]) * 0.5;
-      result.envWrite[2u * CHANNELS + c] = (back + mirrored.envWrite[2u * CHANNELS + c]) * 0.5;
-      result.envWrite[1u * CHANNELS + c] = (left + mirrored.envWrite[3u * CHANNELS + c]) * 0.5;
-      result.envWrite[3u * CHANNELS + c] = (right + mirrored.envWrite[1u * CHANNELS + c]) * 0.5;
+      result.envWrite[c] = (result.envWrite[c] + mirrored.envWrite[c]) * 0.5;
     }
     result.angularAccel = (result.angularAccel - mirrored.angularAccel) * 0.5;
     result.anisotropy = (result.anisotropy + mirrored.anisotropy) * 0.5;
@@ -781,15 +784,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     result.color = (result.color + mirrored.color) * 0.5;
   }
 
-  // Four independent bounded Gaussian writes at the heading-relative
-  // front/left/back/right spots. Positions stay unwrapped here so only
-  // the destination indices wrap inside depositGaussian.
-  for (var spot: u32 = 0u; spot < SPOTS; spot = spot + 1u) {
-    let angle = headingVal + f32(spot) * HALF_PI;
-    let spotDirection = vec2<f32>(cos(angle), sin(angle));
-    let spotPos = fieldPos + physics.depositDistance * spotDirection;
-    depositGaussian(result.envWrite, spot, spotPos);
-  }
+  // One bounded Gaussian write per channel, centered underneath the particle.
+  depositGaussian(result.envWrite, fieldPos);
 
   let angularAccel = result.angularAccel;
   var directionLocal = vec2<f32>(0.0);
@@ -820,26 +816,20 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // always runs before those substeps).
   velocities[pi] = (velocities[pi] + strafeWorld * physics.maxStrafe) * physics.friction;
 
-  // Grow-then-divide cell cycle. The last substrate channel remains a
-  // per-macro-step probability, but a successful draw STARTS growth
-  // instead of inserting a full child immediately. g2p grows Fg until
-  // g=2; only then is one grown parent replaced by two
-  // baseline daughters.
-  var rngNext = xorshift32(agentState.particleMeta[pi].rng);
-  agentState.particleMeta[pi].rng = rngNext;
-  // Top 24 bits -> a uniform float in [0,1) — an f32 only has 24 bits of
-  // mantissa to begin with, so this uses every bit of precision it can.
-  let draw = f32(rngNext >> 8u) * (1.0 / 16777216.0);
-  // The LAST channel's sensed value is the probability of entering a
-  // growth cycle this step, clamped into a valid range (the
-  // chemical field itself isn't bounded to [0,1] — see
-  // simulation_settings.py's own MAX_ENV_WRITE).
-  let splitProb = clamp(inputVec[CHANNELS - 1u], 0.0, 1.0);
+  // Grow-then-divide cell cycle. The last substrate channel supplies a
+  // bounded per-macro-step growth probability. Convert it to cumulative
+  // hazard, h=-log(1-p), so a constant signal retains the former event
+  // probability while partial drive persists instead of being discarded.
+  // g2p grows Fg until g=2 after admission; only then is one grown parent
+  // replaced by two baseline daughters.
+  // Lifecycle semantics remain in raw substrate units. Input normalization is
+  // exclusively a neural-sensing transform and must not accelerate division.
+  let splitProb = clamp(rawGrowthSignal, 0.0, 1.0);
   // Division cooldown — counted down every step regardless of whether
-  // this step's own draw would otherwise succeed (so it's a clean
-  // macro-step countdown, not paused by bad luck on the random draw),
-  // clamped at 0 rather than going negative. Gates the split below
-  // alongside the probability draw; see AgentPhysics's own
+  // the division clock would otherwise cross (so it's a clean
+  // macro-step countdown, independent of the stochastic threshold),
+  // clamped at 0 rather than going negative. Gates admission below;
+  // see AgentPhysics's own
   // divisionCooldown field comment for the full reasoning.
   let cooldownNow = max(agentState.particleMeta[pi].cooldown - 1.0, 0.0);
   agentState.particleMeta[pi].cooldown = cooldownNow;
@@ -857,14 +847,34 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the population cap: without it, every terminal particle could grow
   // to g=2 despite having no free slot, doubling rest mass/area after
   // the visible particle count had already stopped changing.
-  if (
+  let lifecycleEligible =
     physics.growthEnabled > 0.5 &&
     activeCount < physics.maxActiveParticles &&
     particleRest[pi].cycleActive < 0.5 &&
-    cooldownNow <= 0.0 &&
-    draw < splitProb
-  ) {
-    particleRest[pi].cycleActive = 1.0;
+    cooldownNow <= 0.0;
+  if (lifecycleEligible) {
+    // A zero threshold is the reset sentinel. Draw once per prospective
+    // cycle, not once per tick. -log(1-u) is Exp(1); top 24 RNG bits match
+    // the precision convention used for the division-angle draw below.
+    if (agentState.particleMeta[pi].divisionThreshold <= 0.0) {
+      let thresholdState = xorshift32(agentState.particleMeta[pi].rng);
+      agentState.particleMeta[pi].rng = thresholdState;
+      let u = f32(thresholdState >> 8u) * (1.0 / 16777216.0);
+      agentState.particleMeta[pi].divisionThreshold = max(-log(max(1.0 - u, 1e-7)), 1e-7);
+    }
+    var hazardIncrement = -log(max(1.0 - splitProb, 1e-7));
+    // Preserve the old exact p=1 behavior: a saturated growth field admits
+    // immediately even for the vanishingly rare Exp(1) threshold >16.1.
+    if (splitProb >= 1.0) {
+      hazardIncrement = agentState.particleMeta[pi].divisionThreshold + 1.0;
+    }
+    agentState.particleMeta[pi].divisionHazard =
+      agentState.particleMeta[pi].divisionHazard + hazardIncrement;
+    if (agentState.particleMeta[pi].divisionHazard >= agentState.particleMeta[pi].divisionThreshold) {
+      particleRest[pi].cycleActive = 1.0;
+      agentState.particleMeta[pi].divisionHazard = 0.0;
+      agentState.particleMeta[pi].divisionThreshold = 0.0;
+    }
   }
 
   let divisionTarget = 2.0;
@@ -890,7 +900,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       // Always consume the historical random-angle draw so zero-direction
       // policies remain bit-for-bit deterministic. A nonzero signed growth
       // vector replaces that random axis: +n is the NEW daughter's side.
-      let angleState = xorshift32(rngNext);
+      let angleState = xorshift32(agentState.particleMeta[pi].rng);
       agentState.particleMeta[pi].rng = angleState; // parent's own rng now reflects BOTH draws this step
       let angleDraw = f32(angleState >> 8u) * (1.0 / 16777216.0);
       let spawnAngle = angleDraw * 2.0 * PI;
@@ -918,6 +928,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       agentState.particleMeta[newIndex].heading = headingVal;
       agentState.particleMeta[newIndex].angularVelocity = agentState.particleMeta[pi].angularVelocity;
       agentState.particleMeta[newIndex].color = agentState.particleMeta[pi].color;
+      agentState.particleMeta[newIndex].divisionHazard = 0.0;
+      agentState.particleMeta[newIndex].divisionThreshold = 0.0;
       // Reseeded from the parent's own latest post-advance state (both
       // draws, `angleState`) mixed with the new slot index, not copied
       // outright — two particles sharing an identical RNG state would

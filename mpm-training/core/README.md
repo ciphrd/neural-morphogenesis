@@ -22,10 +22,9 @@ own module docstring.
   (`clearDensity`/`splatDensity`/`densityToTexture`/`applyRepulsion`),
   **always on, every substep** — a real, standard part of the simulation
   here, not an optional extra. It's what keeps particles from overlapping
-  when new ones get placed right next to existing ones, which chemical-
-  driven spawning will do constantly.
+  when new ones get placed right next to existing ones.
 - `agents.wgsl` — the evolved policy's forward pass
-  (`Dense(128) -> tanh -> Dense(16)`), local/heading-frame sensing +
+  (`Dense(128) -> tanh -> Dense(C+8)`), local/heading-frame sensing +
   action, the persistent per-particle heading/angularVelocity integrator.
   Not part of the "5 physics passes" above — a training-loop concern, not
   MLS-MPM itself — but shares this directory so both consumers load the

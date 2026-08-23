@@ -23,7 +23,6 @@ interface NetworkPanelProps {
 // a value slider); the remaining channels' values/gradients stay pinned
 // at zero in the input vector this panel builds.
 const MANUAL_CHANNELS = 3
-const DEPOSIT_SPOT_NAMES = ["Front", "Left", "Back", "Right"] as const
 
 // Sweep/pad range for both the vector pads' own dx/dy axes and each
 // channel's own raw-value slider — a representative window over the
@@ -57,26 +56,23 @@ function activationColor(t: number): string {
   return `rgb(${r},${g},${b})`
 }
 
-// Matplotlib/ParaView's "coolwarm" (Moreland's diverging blue-white-red)
-// — a handful of its own well-known anchor colors, piecewise-linearly
-// interpolated, rather than the full 33-entry LUT: close enough by eye
-// at the small pad sizes this actually renders at, and this is
-// explicitly a rough, illustrative view ("doesn't give all insights"),
-// not a publication-grade colorbar.
-const COOLWARM_STOPS: Array<[number, number, number, number]> = [
-  [0, 59, 76, 192],
-  [0.25, 138, 176, 244],
-  [0.5, 221, 221, 221],
-  [0.75, 245, 156, 125],
-  [1, 180, 4, 38],
+// Viridis anchors, piecewise-linearly interpolated. The signed neural
+// response range [-1,1] maps across the sequential palette from purple to
+// yellow; unlike coolwarm, zero is green/teal rather than nearly white.
+const VIRIDIS_STOPS: Array<[number, number, number, number]> = [
+  [0, 68, 1, 84],
+  [0.25, 59, 82, 139],
+  [0.5, 33, 145, 140],
+  [0.75, 94, 201, 98],
+  [1, 253, 231, 37],
 ]
 
-function coolwarm(t: number): string {
+function viridis(t: number): string {
   const u = clamp(t, -1, 1) * 0.5 + 0.5 // [-1,1] -> [0,1]
   let i = 0
-  while (i < COOLWARM_STOPS.length - 2 && u > COOLWARM_STOPS[i + 1][0]) i++
-  const [t0, r0, g0, b0] = COOLWARM_STOPS[i]
-  const [t1, r1, g1, b1] = COOLWARM_STOPS[i + 1]
+  while (i < VIRIDIS_STOPS.length - 2 && u > VIRIDIS_STOPS[i + 1][0]) i++
+  const [t0, r0, g0, b0] = VIRIDIS_STOPS[i]
+  const [t1, r1, g1, b1] = VIRIDIS_STOPS[i + 1]
   const f = t1 > t0 ? (u - t0) / (t1 - t0) : 0
   const r = Math.round(r0 + (r1 - r0) * f)
   const g = Math.round(g0 + (g1 - g0) * f)
@@ -138,7 +134,7 @@ const VECTOR_PAD_SIZE_PX = 56
  * mid-gesture still tracks correctly rather than stopping dead at the
  * edge.
  *
- * `heatmap`, when given, paints a coolwarm background UNDER the axes/
+ * `heatmap`, when given, paints a Viridis background UNDER the axes/
  * dot — see buildChannelHeatmaps()'s own comment for exactly what
  * it's a sweep of. Deliberately optional (rather than always required)
  * so this component stays reusable as a plain vector picker with no
@@ -148,14 +144,12 @@ function VectorPad({
   y,
   domain,
   heatmap,
-  heatmapDomain,
   onChange,
 }: {
   x: number
   y: number
   domain: number
   heatmap?: Float32Array
-  heatmapDomain?: number
   onChange: (x: number, y: number) => void
 }) {
   const padRef = useRef<HTMLDivElement>(null)
@@ -170,18 +164,31 @@ function VectorPad({
     const ctx = canvas.getContext("2d")
     if (!ctx) return
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-    const dom = heatmapDomain && heatmapDomain > 0 ? heatmapDomain : 1
+    // Per-preview contrast normalization: the old absolute
+    // output/maxEnvWrite mapping compressed freshly initialized policies
+    // into a nearly constant middle color. Center the observed range and
+    // stretch its extrema across Viridis so the spatial response pattern is
+    // visible. A truly constant map remains at the neutral midpoint.
+    let minValue = Infinity
+    let maxValue = -Infinity
+    for (const value of heatmap) {
+      minValue = Math.min(minValue, value)
+      maxValue = Math.max(maxValue, value)
+    }
+    const midpoint = (minValue + maxValue) * 0.5
+    const halfRange = (maxValue - minValue) * 0.5
     const cell = VECTOR_PAD_SIZE_PX / VECTOR_PAD_HEATMAP_RESOLUTION
     for (let gy = 0; gy < VECTOR_PAD_HEATMAP_RESOLUTION; gy++) {
       for (let gx = 0; gx < VECTOR_PAD_HEATMAP_RESOLUTION; gx++) {
-        const t = clamp(heatmap[gy * VECTOR_PAD_HEATMAP_RESOLUTION + gx] / dom, -1, 1)
-        ctx.fillStyle = coolwarm(t)
+        const value = heatmap[gy * VECTOR_PAD_HEATMAP_RESOLUTION + gx]
+        const t = halfRange > 1e-7 ? clamp((value - midpoint) / halfRange, -1, 1) : 0
+        ctx.fillStyle = viridis(t)
         // +0.5 past each cell's own footprint — same hairline-seam fix
         // this file's own earlier heatmap rendering used.
         ctx.fillRect(gx * cell, gy * cell, cell + 0.5, cell + 0.5)
       }
     }
-  }, [heatmap, heatmapDomain])
+  }, [heatmap])
 
   const setFromPointer = (e: ReactPointerEvent) => {
     const pad = padRef.current
@@ -309,10 +316,10 @@ function buildChannelHeatmaps(
 }
 
 /** "Brain" view of the CURRENT generation's own policy — NOT a live
- * particle probe: the first MANUAL_CHANNELS sensed channels are each
- * dialed in by hand here (a square pad for that channel's own local-
- * frame gradient, plus a slider for its own raw sensed value), every
- * other input stays at zero, and the whole output (four directional
+ * particle probe: the first MANUAL_CHANNELS policy-normalized channels are
+ * each dialed in by hand here (a square pad for that channel's normalized
+ * local-frame gradient, plus a slider for its normalized sensed value), every
+ * other input stays at zero, and the whole output (centered chemical
  * env-writes per channel + turn/growth controls + RGB) is evalPolicy()'s (gpu/policyEval.ts,
  * mirroring core/agents.wgsl) own response to THAT exact vector,
  * recomputed live on every pad drag/slider tick — cheap enough (one
@@ -424,8 +431,10 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       <div className="nn-block">
         <h3>Input</h3>
         <p className="hint">
-          Background: this channel's own front deposit output, swept across the pad (its own value + every other
-          channel held as set). One slice, not the full picture.
+          Background: this channel's own centered deposit output, swept across the pad (its own value + every other
+          channel held as set). Contrast is exaggerated independently per pad
+          by stretching its observed min/max across Viridis. This shows
+          response shape, not absolute output strength.
         </p>
         {Array.from({ length: manualChannelCount }, (_, c) => (
           <div key={c} className="nn-vector-channel">
@@ -436,7 +445,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
                 y={manual[c].dy}
                 domain={DOMAIN}
                 heatmap={channelHeatmaps?.[c]}
-                heatmapDomain={maxEnvWrite}
                 onChange={(dx, dy) => updateChannel(c, { dx, dy })}
               />
               <div className="nn-vector-readout">
@@ -482,8 +490,8 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
               <div className="nn-vector-readout-row"><span>forward</span><span className="nn-vector-readout-value">{morphology.dx.toFixed(2)}</span></div>
               <div className="nn-vector-readout-row"><span>lateral</span><span className="nn-vector-readout-value">{morphology.dy.toFixed(2)}</span></div>
               <label className="slider-row">
-                <span>occupancy</span>
-                <Slider min={0} max={1} step={0.01} value={morphology.value} onChange={(value) => setMorphology((prev) => ({ ...prev, value }))} />
+                <span>normalized occupancy</span>
+                <Slider min={-1} max={1} step={0.01} value={morphology.value} onChange={(value) => setMorphology((prev) => ({ ...prev, value }))} />
                 <span className="slider-value">{morphology.value.toFixed(2)}</span>
               </label>
             </div>
@@ -520,19 +528,17 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
         <>
           <div className="nn-block">
             <h3>Output — env write</h3>
-            {DEPOSIT_SPOT_NAMES.map((spotName, spot) => (
-              <div className="nn-group" key={spotName}>
-                <span className="nn-group-label">{spotName}</span>
-                {Array.from({ length: channels }, (_, c) => (
-                  <ActivationBar
-                    key={c}
-                    label={`ch${c}`}
-                    value={output.envWrite[spot * channels + c]}
-                    domain={maxEnvWrite}
-                  />
-                ))}
-              </div>
-            ))}
+            <div className="nn-group">
+              <span className="nn-group-label">Under particle</span>
+              {Array.from({ length: channels }, (_, c) => (
+                <ActivationBar
+                  key={c}
+                  label={`ch${c}`}
+                  value={output.envWrite[c]}
+                  domain={maxEnvWrite}
+                />
+              ))}
+            </div>
           </div>
 
           <div className="nn-block">

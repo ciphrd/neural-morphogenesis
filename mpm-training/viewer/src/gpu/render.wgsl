@@ -136,6 +136,8 @@ struct ParticleMeta {
   heading: f32,
   angularVelocity: f32,
   color: vec4<f32>,
+  divisionHazard: f32,
+  divisionThreshold: f32,
 }
 @group(0) @binding(3) var<storage, read> particleMeta: array<ParticleMeta>;
 // x: alpha, y: saturation amplification, z: contrast around sigmoid neutral.

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react"
 import { FitnessChart } from "./charts/FitnessChart"
 import { MAX_PARTICLES } from "./gpu/mpmCore"
 import type { FieldMode, ParticleRenderMode } from "./gpu/render"
-import type { PhysicsSettings } from "./gpu/types"
+import type { PhysicsSettings, UpdateRuleWeights } from "./gpu/types"
 import { physicsSettingsFromConfig } from "./gpu/types"
 import { generationImageUrl } from "./net/images"
 import { fetchRunState } from "./net/runs"
@@ -20,6 +20,7 @@ import { NetworkPanel } from "./ui/NetworkPanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { RunPicker } from "./ui/RunPicker"
 import { Slider } from "./ui/Slider"
+import coreConstants from "../../core/constants.json"
 
 const TRAIN_API_URL = "http://localhost:8003"
 const TRAIN_WS_URL = "ws://localhost:8003/ws"
@@ -31,10 +32,9 @@ const RECORDING_FORMAT = pickRecordingFormat()
 
 /** Passive training viewer — a live WebGPU replay of whichever
  * generation's weights are selected, plus a fitness-history timeline.
- * Same overall role as envnca/frontend/src/TrainingView.tsx. No spawn-
- * distribution toggle (particles always seed as a single jittered blob,
- * matching training_sim.py's own seed_blob() exactly — there's nothing
- * else to toggle between); the "Rendering" section below otherwise
+ * Same overall role as envnca/frontend/src/TrainingView.tsx. Initial particles
+ * use the same compact hexagonal disk as training_sim.py's seed_blob(); the
+ * "Rendering" section below otherwise
  * mirrors mls-mpm's own Field-mode/particle-size controls — see
  * gpu/render.ts's own module docstring for exactly which of mls-mpm's
  * field modes are portable without extending core/'s shared physics. */
@@ -118,6 +118,8 @@ export function TrainingView() {
   const [particleRadiusPx, setParticleRadiusPx] = useState(4)
   const [frontendParticleCap, setFrontendParticleCap] = useState(2)
   const [frontendParticleCapInput, setFrontendParticleCapInput] = useState("2")
+  const [frontendInitialParticleCount, setFrontendInitialParticleCount] = useState(1)
+  const [frontendInitialParticleCountInput, setFrontendInitialParticleCountInput] = useState("1")
   const particleCapRunRef = useRef<string | null>(null)
   const [targetVisible, setTargetVisible] = useState(true)
   const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(1)
@@ -149,6 +151,17 @@ export function TrainingView() {
     selectedGeneration !== null
       ? (configByGeneration.get(selectedGeneration) ?? latest)
       : latest
+  // Playback-only randomized policy. The selected generation remains intact;
+  // this mirrors the exact weights currently loaded into the GPU and feeds
+  // the right-hand inspector until another generation/run is selected.
+  const [randomizedWeights, setRandomizedWeights] =
+    useState<UpdateRuleWeights | null>(null)
+  useEffect(() => {
+    setRandomizedWeights(null)
+  }, [viewingRunId, activeConfig?.generation])
+  const previewConfig = activeConfig && randomizedWeights
+    ? { ...activeConfig, weights: randomizedWeights }
+    : activeConfig
   const [replayStep, setReplayStep] = useState(0)
   // Live particle count — grows as growth splits (see GpuSimulation's
   // own particleCount getter), reported alongside the step by
@@ -165,6 +178,12 @@ export function TrainingView() {
     particleCapRunRef.current = runKey
     setFrontendParticleCap(activeConfig.particles)
     setFrontendParticleCapInput(String(activeConfig.particles))
+    const initialCount = Math.min(
+      activeConfig.particles,
+      Math.max(1, Math.floor(activeConfig.initialParticleCount ?? coreConstants.INITIAL_PARTICLE_COUNT))
+    )
+    setFrontendInitialParticleCount(initialCount)
+    setFrontendInitialParticleCountInput(String(initialCount))
   }, [viewingRunId, activeConfig?.particles])
   // null = following this generation's own trained physics/growth values;
   // non-null once either live-control panel's sliders have been touched.
@@ -313,7 +332,12 @@ export function TrainingView() {
                 setFrontendParticleCapInput(e.currentTarget.value)
                 const value = e.currentTarget.valueAsNumber
                 if (Number.isFinite(value) && value >= 2 && value <= MAX_PARTICLES) {
-                  setFrontendParticleCap(Math.floor(value))
+                  const cap = Math.floor(value)
+                  setFrontendParticleCap(cap)
+                  if (frontendInitialParticleCount > cap) {
+                    setFrontendInitialParticleCount(cap)
+                    setFrontendInitialParticleCountInput(String(cap))
+                  }
                 }
               }}
               onBlur={(e) => {
@@ -324,6 +348,40 @@ export function TrainingView() {
                 )
                 setFrontendParticleCapInput(String(cap))
                 setFrontendParticleCap(cap)
+                if (frontendInitialParticleCount > cap) {
+                  setFrontendInitialParticleCount(cap)
+                  setFrontendInitialParticleCountInput(String(cap))
+                }
+              }}
+            />
+          </label>
+          <label className="slider-row">
+            <span>Initial agents</span>
+            <input
+              className="number-input"
+              type="number"
+              min={1}
+              max={frontendParticleCap}
+              step={1}
+              value={frontendInitialParticleCountInput}
+              onChange={(e) => {
+                setFrontendInitialParticleCountInput(e.currentTarget.value)
+                const value = e.currentTarget.valueAsNumber
+                if (Number.isFinite(value) && value >= 1 && value <= frontendParticleCap) {
+                  setFrontendInitialParticleCount(Math.floor(value))
+                }
+              }}
+              onBlur={(e) => {
+                const value = e.currentTarget.valueAsNumber
+                const count = Math.min(
+                  frontendParticleCap,
+                  Math.max(
+                    1,
+                    Number.isFinite(value) ? Math.floor(value) : frontendInitialParticleCount
+                  )
+                )
+                setFrontendInitialParticleCountInput(String(count))
+                setFrontendInitialParticleCount(count)
               }}
             />
           </label>
@@ -530,6 +588,7 @@ export function TrainingView() {
             targetVisible={targetVisible}
             physics={physicsValues}
             particleCap={frontendParticleCap}
+            initialParticleCount={frontendInitialParticleCount}
             fieldMode={fieldMode}
             accent={accent}
             morphologyGradientVisible={morphologyGradientVisible}
@@ -685,7 +744,10 @@ export function TrainingView() {
             </label>
             <button
               className="icon-button"
-              onClick={() => gridCanvasRef.current?.randomizeWeights()}
+              onClick={() => {
+                const weights = gridCanvasRef.current?.randomizeWeights()
+                if (weights) setRandomizedWeights(weights)
+              }}
               disabled={!activeConfig}
               title="Randomize weights — replace the update rule's weights/biases with a fresh random init and restart the rollout under it, until a new one loads or you switch generations"
               aria-label="Randomize weights"
@@ -819,7 +881,7 @@ export function TrainingView() {
           )}
         </section>
 
-        <NetworkPanel config={activeConfig} physics={physicsValues} />
+        <NetworkPanel config={previewConfig} physics={physicsValues} />
       </div>
     </div>
   )

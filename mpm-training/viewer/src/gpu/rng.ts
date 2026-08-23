@@ -79,27 +79,47 @@ export interface SeedBlobConfig {
   count: number;
   centerX: number;
   centerY: number;
-  halfWidth: number;
+  spacing: number;
   seed: number;
 }
 
-/** Mirrors trainer/training_sim.py's own seed_blob(): `count` particles
- * jittered uniformly within `halfWidth` of (centerX,centerY), zero
- * velocity, identity F, zero C, Jp=1 — the standard MpmCore.loadScene()
- * scene shape every rollout (training or replay) starts from. Jittered
- * via spawnUniform01(seed, 2*i)/2*i+1 for particle i's own x/y — bit-
- * exact with the Python trainer's own seed_blob(), see that function's
- * own docstring. Indices 0..2*count-1 are reserved for this function's
- * own draws — gpu/simulation.ts's own theta draw (the back-to-back
- * placement) starts at index 2*count to never collide, regardless of
- * `count`. */
+/** Compact hexagonal disk mirrored by trainer/training_sim.py's seed_blob().
+ * Complete lattice shells fill outward from the center; a partial final shell
+ * samples sites evenly around its circumference. The whole disk receives one
+ * deterministic seed-derived rotation. Nearest neighbors are `spacing` apart. */
 export function seedBlob(config: SeedBlobConfig) {
-  const { count, centerX, centerY, halfWidth, seed } = config;
+  const { count, centerX, centerY, spacing, seed } = config;
 
+  const offsets: Array<[number, number]> = [[0, 0]];
+  for (let ring = 1; offsets.length < count; ring++) {
+    const shell: Array<[number, number]> = [];
+    for (let q = -ring; q <= ring; q++) {
+      for (let r = -ring; r <= ring; r++) {
+        if (Math.max(Math.abs(q), Math.abs(r), Math.abs(q + r)) === ring) {
+          shell.push([spacing * (q + 0.5 * r), spacing * (Math.sqrt(3) * 0.5 * r)]);
+        }
+      }
+    }
+    shell.sort((a, b) => Math.atan2(a[1], a[0]) - Math.atan2(b[1], b[0]));
+    const take = Math.min(count - offsets.length, shell.length);
+    if (take === shell.length) offsets.push(...shell);
+    else {
+      for (let j = 0; j < take; j++) {
+        offsets.push(shell[Math.floor((j + 0.5) * shell.length / take)]);
+      }
+    }
+  }
+  const meanX = offsets.reduce((sum, p) => sum + p[0], 0) / count;
+  const meanY = offsets.reduce((sum, p) => sum + p[1], 0) / count;
+  const theta = (spawnUniform01(seed, 2 * count) * 2 - 1) * Math.PI;
+  const cosTheta = Math.cos(theta);
+  const sinTheta = Math.sin(theta);
   const positions = new Float32Array(count * 2);
   for (let i = 0; i < count; i++) {
-    positions[i * 2] = centerX + (spawnUniform01(seed, 2 * i) * 2 - 1) * halfWidth;
-    positions[i * 2 + 1] = centerY + (spawnUniform01(seed, 2 * i + 1) * 2 - 1) * halfWidth;
+    const x = offsets[i][0] - meanX;
+    const y = offsets[i][1] - meanY;
+    positions[i * 2] = ((centerX + x * cosTheta - y * sinTheta) % 1 + 1) % 1;
+    positions[i * 2 + 1] = ((centerY + x * sinTheta + y * cosTheta) % 1 + 1) % 1;
   }
   const velocities = new Float32Array(count * 2); // zero
   const F = new Float32Array(count * 4);

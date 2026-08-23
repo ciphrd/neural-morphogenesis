@@ -2,6 +2,7 @@
 // envnca/frontend/src/net/runs.ts.
 
 import type { GenerationRecord, RunSettings } from "../gpu/types";
+import { storeRunSettings } from "./settingsStorage";
 import {
   applyGeneration,
   applySettings,
@@ -45,6 +46,9 @@ export async function fetchRunState(apiUrl: string, runId: string): Promise<Trai
   // same as deriveState()'s own "no settings yet" case), not a crash.
   const settings: RunSettings | null = settingsRes.ok ? await settingsRes.json() : null;
   const data: { generations: GenerationRecord[] } = await historyRes.json();
+  // A loaded session is authoritative for both this view and the defaults on
+  // the next startup, replacing whichever live/fallback settings were cached.
+  if (settings) storeRunSettings(settings);
 
   let acc: Accumulator = settings ? applySettings(EMPTY_ACCUMULATOR, settings) : EMPTY_ACCUMULATOR;
   acc = data.generations.reduce((a, message) => applyGeneration(a, message), acc);

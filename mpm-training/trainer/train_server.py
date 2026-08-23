@@ -135,6 +135,8 @@ def _setup() -> None:
 
     if not 1 <= args.elites <= args.population:
         raise SystemExit("--elites must be between 1 and --population")
+    if not 1 <= args.initial_particles <= args.particles:
+        raise SystemExit("--initial-particles must be between 1 and --particles")
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
         raise SystemExit("--growth-steps must be between 0 and --macro-steps")
 
@@ -398,6 +400,7 @@ async def _training_loop_body() -> None:
     settings = {
         "target": args.target,
         "particles": args.particles,
+        "initialParticleCount": args.initial_particles,
         "macroSteps": args.macro_steps,
         "growthSteps": args.growth_steps,
         "substepsPerMacro": args.substeps_per_macro,
@@ -544,6 +547,7 @@ async def _training_loop_body() -> None:
                         "fitness": best_fitness,
                         "target": args.target,
                         "particles": args.particles,
+                        "initial_particle_count": args.initial_particles,
                         "macro_steps": args.macro_steps,
                         "growth_steps": args.growth_steps,
                         "substeps_per_macro": args.substeps_per_macro,

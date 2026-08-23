@@ -156,14 +156,8 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
       format: (v) => v.toFixed(3),
     },
     {
-      key: "depositDistance",
-      label: "Deposit distance",
-      ...scaledRange(trained.depositDistance, 3),
-      format: (v) => v.toFixed(2),
-    },
-    {
       key: "depositSigma",
-      label: "Deposit splat sigma",
+      label: "Deposit splat radius",
       ...scaledRange(trained.depositSigma, 3),
       format: (v) => v.toFixed(3),
     },
@@ -221,8 +215,7 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
  * drives MpmCore's own velocity directly — an acceleration, damped by
  * friction — see agents.wgsl's own module docstring for the full
  * history), the heading integrator's maxAngularAccel/angularDamping/
- * maxAngularVelocity, depositDistance (the front/left/back/right offset),
- * and depositSigma (each directional write's Gaussian splat radius — see
+ * maxAngularVelocity, and depositSigma (the centered write's Gaussian splat radius — see
  * agents.wgsl's own depositGaussian() for the exact kernel this drives,
  * replacing that shader's old flat 4-corner bilinear deposit scatter),
  * growth's own splitDisplacement (daughter separation; the signed growth

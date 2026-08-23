@@ -61,7 +61,7 @@ fn beginGrab(@builtin(global_invocation_id) gid: vec3<u32>) {
 // grabbed particles via VELOCITY instead of a direct position pin, to
 // see whether routing the drag back through the normal P2G -> gridUpdate
 // -> G2P momentum transfer produces any of mls-mpm's own "drag pulls
-// neighbors along" cohesion — see gridUpdate.wgsl's own mass-weighted
+// neighbors along" coupling — see gridUpdate.wgsl's own mass-weighted
 // average for why that's expected to be weak-to-nonexistent (the
 // grabbed particles' momentum gets diluted by however much stationary
 // mass shares their grid nodes), NOT a kinematic override the way

@@ -48,6 +48,7 @@ from simulation_settings import (
     GROWTH_MAX,
     GROWTH_DURATION_MACRO_STEPS,
     GROWTH_THRESHOLD,
+    INITIAL_PARTICLE_COUNT,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
@@ -154,6 +155,7 @@ def main() -> int:
         # exactly one neural/environment round per mechanical macro step.
         neural_updates_per_macro=meta.get("neural_updates_per_macro", 1),
         communication_speed=meta.get("communication_speed", 1.0),
+        initial_particle_count=meta.get("initial_particle_count", INITIAL_PARTICLE_COUNT),
     )
 
     growth_steps = meta.get("growth_steps")

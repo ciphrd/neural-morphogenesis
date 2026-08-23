@@ -12,10 +12,9 @@ training_constants.py — nothing forced any of them to agree with
 whatever the viewer's own gpu/mpmCore.ts independently hardcoded, and
 they didn't ride along in the broadcast message at all until now.
 
-Deliberately NOT here: anything CLI-configurable per training run
-(--particles, --macro-steps, --gravity, --population, --elites,
---mutation-sigma, ... — see evolve.py's own argparse) — those are
-already overridable without editing code, and already forwarded to the
+Run-selected values are not fixed here: --particles, --initial-particles,
+--macro-steps, --gravity, --population, --elites, --mutation-sigma, ...
+(see evolve.py's own argparse) are overridable without editing code and forwarded to the
 frontend the same way (train_server.py's own broadcast message pulls
 both this file's constants and evolve.py's own args into one payload).
 """
@@ -30,7 +29,17 @@ _GRID_N: int = _CORE_CONSTANTS["GRID_N"]
 # --- Policy architecture (UpdateRule) ---
 HIDDEN_DIM = 128
 CHEM_CHANNELS = 8  # last channel is always growth's own split-probability field
-DEPOSIT_SPOTS = 4
+# Default number of genuinely seeded cells before any policy-driven division.
+# Shared with the browser through core/constants.json; individual runs and
+# historical checkpoint metadata can still override it.
+INITIAL_PARTICLE_COUNT: int = _CORE_CONSTANTS["INITIAL_PARTICLE_COUNT"]
+# Robust zero-centered scales from the absolute pooled distribution across all
+# chemical channels (and both gradient directions) in the 5,005-sample live
+# report. One shared scale preserves channel-permutation symmetry: no channel
+# gets a privileged gain based on the accidental behavior of one random brain.
+CHEMICAL_VALUE_INPUT_SCALE: float = _CORE_CONSTANTS["CHEMICAL_VALUE_INPUT_SCALE"]
+CHEMICAL_GRADIENT_INPUT_SCALE: float = _CORE_CONSTANTS["CHEMICAL_GRADIENT_INPUT_SCALE"]
+MORPHOLOGY_GRADIENT_INPUT_SCALE: float = _CORE_CONSTANTS["MORPHOLOGY_GRADIENT_INPUT_SCALE"]
 # Neural evaluations performed before each mechanical macro step. These are
 # numerical communication substeps; increasing this improves temporal
 # resolution without multiplying chemical/turning speed.
@@ -43,7 +52,7 @@ ACCEL_DIM = 2
 STRAFE_DIM = 2
 
 # --- Chemical field (environment_gpu.py / core/environment.wgsl) ---
-FIELD_N = 512
+FIELD_N = 256
 DECAY = 0.0
 
 # Motion
@@ -60,21 +69,20 @@ MAX_ANGULAR_VELOCITY = 0.1
 # policy. Approximately 15% logarithmic strain therefore produces a strong,
 # still-unsaturated mechanosensory signal.
 ELASTIC_STRAIN_SCALE = 0.15
-# Temporary ablation: retain the 30-input checkpoint architecture but force
-# volume/axial/shear mechanosensory lanes to zero. Flip to True to restore the
-# implementation without another weight-shape migration.
-ELASTIC_STRAIN_INPUTS_ENABLED = False
+# Retain this explicit switch so the three volume/axial/shear mechanosensory
+# lanes can be ablated without another weight-shape migration.
+ELASTIC_STRAIN_INPUTS_ENABLED = True
 
 # Deposit
 DEPOSIT_RATE = 1.0
-# Field-pixel distance to the heading-relative front/left/back/right writes.
-# Set to 0 to collapse all four writes back onto the particle position.
-DEPOSIT_DISTANCE = 3.0
+# Retained in the AgentPhysics/settings ABI for checkpoint compatibility.
+# Single deposits are always centered underneath the particle.
+DEPOSIT_DISTANCE = 0.0
 DEPOSIT_SIGMA = 0.4
 MAX_ENV_WRITE = 1.0
 
 # Behavior
-CHIRALITY = False
+CHIRALITY = True
 MPM_ENABLED = True
 MATERIAL_E = 1e4
 MATERIAL_NU = 0.2

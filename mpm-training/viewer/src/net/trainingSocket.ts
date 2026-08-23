@@ -3,7 +3,8 @@
 // (same reducer-over-both-REST-and-WS design, same MAX_HISTORY eviction),
 // PLUS a settings/generation split train_server.py's own SETTINGS_PATH
 // global explains the "why" of: a run's SETTINGS (target/particles/
-// channels/decay/population/...) are fetched ONCE via GET /settings,
+// channels/decay/population/...) are fetched ONCE via GET /settings
+// (and cached locally as the next offline-start default),
 // separately from each generation's own record (best/mean/worst/
 // allTimeBest/seed/weights) — so applySettings()/applyGeneration() below
 // are two independent, mechanical reducers over a raw Accumulator, and
@@ -16,6 +17,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { randomWeights } from "../gpu/agents";
 import type { GenerationRecord, RunSettings, SimulationConfig } from "../gpu/types";
+import { loadDefaultRunSettings, storeRunSettings } from "./settingsStorage";
 
 export interface GenerationStat {
   generation: number;
@@ -115,7 +117,13 @@ export function deriveState(acc: Accumulator): TrainingSocketState {
 }
 
 export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocketState {
-  const [acc, setAcc] = useState<Accumulator>(EMPTY_ACCUMULATOR);
+  // Seed a randomized placeholder rollout immediately. Browser storage holds
+  // the last settings received from a backend; the bundled fallback covers a
+  // first-ever visit made while the backend is down.
+  const [acc, setAcc] = useState<Accumulator>(() => ({
+    settings: loadDefaultRunSettings(),
+    records: new Map(),
+  }));
 
   useEffect(() => {
     let cancelled = false;
@@ -125,16 +133,20 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocket
       fetch(`${apiUrl}/settings`)
         .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`GET /settings -> ${res.status}`))))
         .then((data: RunSettings) => {
-          if (!cancelled) setAcc((prev) => applySettings(prev, data));
+          if (!cancelled) {
+            storeRunSettings(data);
+            setAcc((prev) => applySettings(prev, data));
+          }
         })
         .catch(() => {
           // 503 while _training_loop_body() hasn't reached its own
           // settings assignment yet (see train_server.py's own /settings
           // docstring) — retry rather than give up; this is the ONLY
-          // source of `settings`, and deriveState() can't build anything
-          // without it. In practice this resolves within one or two
-          // attempts (settings are written near the very top of the
-          // training loop, well before generation 0 finishes).
+          // authoritative source of live-run settings. The cached/fallback
+          // settings keep the viewer usable while this retries; in practice
+          // a running backend resolves within one or two attempts (settings
+          // are written near the top of the training loop, well before
+          // generation 0 finishes).
           if (!cancelled) timer = setTimeout(attempt, 500);
         });
     };

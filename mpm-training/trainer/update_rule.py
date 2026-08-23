@@ -1,4 +1,4 @@
-"""The evolved per-particle policy: Dense(128) -> sin -> Dense(4*C+8) —
+"""The evolved per-particle policy: Dense(128) -> tanh -> Dense(C+8) —
 architecture/shape reference and a CPU-only utility class (random weight
 init via a fresh instance's own initialized parameters, JSON export via
 export_weights()), NOT the live forward pass anymore. That now runs
@@ -9,11 +9,9 @@ every macro step to bridge wgpu-native's own physics device and torch's
 own MPS/CUDA device, which share no buffers). forward() below is kept as
 a readable, executable reference for the exact math core/agents.wgsl's
 own agentStep() implements — evolve.py/train_server.py never call it.
-Hidden activation swapped from tanh to sin (a periodic activation) per
-this project's own explicit request — see self.net's own comment below
-for why, and why this doesn't need SIREN's own specific init/frequency
-scheme to remain sound under this project's own mutation-based (not
-gradient-based) optimizer.
+The hidden activation is bounded, monotonic tanh. This replaces the earlier
+experimental sine activation to make evolved responses smoother under input
+changes and mutation.
 
 Same architecture, and the same LOCAL (heading-relative) frame
 convention envnca's own agents use: heading is core/agents.wgsl's own
@@ -31,9 +29,10 @@ pipelines now).
   *rotated*, local-frame gradient the caller (core/agents.wgsl, or this
   method's own torch equivalent if called directly) computes, for 3*C+3 total.
   There is no absolute or spawn-relative position input. This module itself
-  is frame-agnostic; the gradient rotation is entirely the caller's job.
-- Output: env_write (4*C) — one independent deposit value per channel at
-  each heading-relative cardinal spot (front/left/back/right) — plus angular_accel (1),
+  is frame-agnostic; the gradient rotation and robust input normalization are
+  entirely the caller's job.
+- Output: env_write (C) — one deposit value per channel underneath the
+  particle — plus angular_accel (1),
   anisotropy/polarity logits (2), direction (2), and RGB color logits (3),
   all raw/local-frame. angular_accel
   nudges the particle's own persistent angular velocity (which in turn
@@ -43,51 +42,27 @@ pipelines now).
   The two former acceleration channels independently control tensor
   anisotropy and signed division bias through sigmoid. C=8
   (simulation_settings.CHEM_CHANNELS) and
-  the output width is exactly 40: 4*8 + 1 + 2 + 2 + 3.
+  the output width is exactly 16: 8 + 1 + 2 + 2 + 3.
 """
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-from simulation_settings import ACCEL_DIM, ANGULAR_DIM, CHEM_CHANNELS, DEPOSIT_SPOTS, HIDDEN_DIM, STRAFE_DIM
-
-class Sin(nn.Module):
-    """torch has no built-in sin activation module (unlike Tanh/ReLU) —
-    this is the whole layer, nothing to configure. See UpdateRule.__init__'s
-    own comment for why this replaced Tanh here specifically."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.sin(x)
-
+from simulation_settings import ACCEL_DIM, ANGULAR_DIM, CHEM_CHANNELS, HIDDEN_DIM, STRAFE_DIM
 
 class UpdateRule(nn.Module):
     def __init__(self, num_channels: int = CHEM_CHANNELS) -> None:
         super().__init__()
         self.num_channels = num_channels
         input_dim = 3 * num_channels + 6
-        output_dim = num_channels * DEPOSIT_SPOTS + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM + 3
-        # sin hidden activation, not ReLU or tanh: this net is evolved
-        # (mutation + selection), never backprop-trained, so ReLU's usual
-        # vanishing-gradient advantage doesn't apply, and neither does
-        # tanh's own "bounds a single dominant unit's contribution"
-        # rationale specifically — sin was swapped in instead per this
-        # project's own explicit request, on the theory that a PERIODIC
-        # activation is a more natural fit for a domain where heading/
-        # rotation (themselves sin/cos-parameterized throughout
-        # core/agents.wgsl's own sensing and strafe rotations) are
-        # everywhere. Deliberately NOT a full SIREN
-        # architecture (multiple sin-activated layers + SIREN's own
-        # frequency-scaled init, ω₀) — SIREN's actual value proposition is
-        # enabling STABLE, GRADIENT-BASED training of deep sinusoidal
-        # stacks representing high-frequency continuous signals; this
-        # network has neither property (shallow — one hidden layer — and
-        # never gradient-trained at all), so that machinery wouldn't buy
-        # anything here. This is a controlled, single-layer activation
-        # swap only.
+        output_dim = num_channels + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM + 3
+        # Bounded, monotonic, zero-centered hidden response. This controller
+        # is evolved, so smooth local behavior under mutation is preferable
+        # to the periodic phase wrapping of the earlier sine experiment.
         self.net = nn.Sequential(
             nn.Linear(input_dim, HIDDEN_DIM),
-            Sin(),
+            nn.Tanh(),
             nn.Linear(HIDDEN_DIM, output_dim),
         )
 
@@ -118,8 +93,8 @@ class UpdateRule(nn.Module):
         x = torch.cat([value, grad_forward, grad_lateral, morphology, elastic_strain], dim=-1)
         out = self.net(x)
         c = self.num_channels
-        d = c * DEPOSIT_SPOTS
-        # (N, DEPOSIT_SPOTS*C), spot-major: front, left, back, right.
+        d = c
+        # (N, C), one centered write per chemical channel.
         env_write = out[:, :d]
         angular_accel = out[:, d : d + ANGULAR_DIM]
         growth_controls = out[:, d + ANGULAR_DIM : d + ANGULAR_DIM + ACCEL_DIM]
@@ -140,6 +115,6 @@ class UpdateRule(nn.Module):
         return {
             "fc1w": fc1.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels+6)
             "fc1b": fc1.bias.detach().cpu().tolist(),  # (HIDDEN_DIM,)
-            "fc2w": fc2.weight.detach().cpu().tolist(),  # (num_channels*DEPOSIT_SPOTS+8, HIDDEN_DIM)
-            "fc2b": fc2.bias.detach().cpu().tolist(),  # (num_channels*DEPOSIT_SPOTS+8,)
+            "fc2w": fc2.weight.detach().cpu().tolist(),  # (num_channels+8, HIDDEN_DIM)
+            "fc2b": fc2.bias.detach().cpu().tolist(),  # (num_channels+8,)
         }

@@ -154,6 +154,9 @@ fn clearDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
 // texture SIZE) — a queue.writeBuffer, no pipeline recreation.
 struct SplatParams {
   sigma: f32, // domain-space Gaussian sigma ([0,1] units, "splat radius")
+  _padding0: f32,
+  _padding1: f32,
+  _padding2: f32,
 }
 @group(0) @binding(1) var<storage, read> particlePos: array<vec2<f32>>;
 @group(0) @binding(2) var<uniform> activeCount: u32;
@@ -199,9 +202,8 @@ fn splatDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
       let texelCenter = vec2<f32>(f32(ti) + 0.5, f32(tj) + 0.5);
       let delta = texPos - texelCenter;
       let d2 = dot(delta, delta);
-      let weight = exp(-d2 / (2.0 * sigma2));
-
       let idx = u32(wrapFieldIndex(ti)) * FIELD_N + u32(wrapFieldIndex(tj));
+      let weight = exp(-d2 / (2.0 * sigma2));
       atomicAdd(&densityAccum[idx], i32(round(weight * SCALE)));
     }
   }
@@ -256,6 +258,7 @@ struct RepulsionParams {
   // starting value, live-tunable via PhysicsPanel same as strength
   // itself.
   maxDelta: f32,
+  _padding: vec2<f32>,
 }
 @group(0) @binding(4) var<storage, read_write> particleVel: array<vec2<f32>>;
 @group(0) @binding(5) var densityTexSampled: texture_2d<f32>;

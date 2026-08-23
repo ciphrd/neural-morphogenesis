@@ -9,8 +9,8 @@ autograd) — a plain (mu, lambda) ES, same as this repo's other
 evolve.py's minus envnca's own optional memetic refinement (not ported
 here). population size here means the *evolutionary* population
 (candidate weight-sets), same meaning it has in every other evolve.py in
-this repo — not the particle count: every rollout currently starts
-with a coordinated two-particle seed and grows via splitting (see training_sim.py's
+this repo — not the particle count: every rollout starts with
+--initial-particles agents and grows via splitting (see training_sim.py's
 own module docstring and core/agents.wgsl's own growth design);
 --particles is the CAP that growth can reach, not a fixed per-rollout
 count.
@@ -111,6 +111,7 @@ from simulation_settings import (
     ELASTIC_STRAIN_INPUTS_ENABLED,
     FIELD_N,
     GROWTH_DURATION_MACRO_STEPS,
+    INITIAL_PARTICLE_COUNT,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
@@ -271,6 +272,7 @@ def rollout(
         gravity=args.gravity,
         seed=seed,
         mpm_enabled=MPM_ENABLED,
+        initial_particle_count=args.initial_particles,
     )
 
     # Deduplicated and sorted ascending — offsets can collide onto the
@@ -352,10 +354,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--particles",
         type=int,
         default=400,
-        help=(
-            "maximum particle count a rollout can grow to via splitting — every rollout currently starts with "
-            "a coordinated two-particle seed (see training_sim.py)"
-        ),
+        help="maximum particle count a rollout can grow to via splitting",
+    )
+    parser.add_argument(
+        "--initial-particles",
+        type=int,
+        default=INITIAL_PARTICLE_COUNT,
+        help="number of agents seeded at the beginning of each rollout (must not exceed --particles)",
     )
     parser.add_argument(
         "--macro-steps",
@@ -423,6 +428,8 @@ def main() -> None:
 
     if not 1 <= args.elites <= args.population:
         raise SystemExit("--elites must be between 1 and --population")
+    if not 1 <= args.initial_particles <= args.particles:
+        raise SystemExit("--initial-particles must be between 1 and --particles")
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
         raise SystemExit("--growth-steps must be between 0 and --macro-steps")
 
@@ -484,6 +491,7 @@ def main() -> None:
                         "fitness": best_fitness,
                         "target": args.target,
                         "particles": args.particles,
+                        "initial_particle_count": args.initial_particles,
                         "macro_steps": args.macro_steps,
                         "growth_steps": args.growth_steps,
                         "substeps_per_macro": args.substeps_per_macro,

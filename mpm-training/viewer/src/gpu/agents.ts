@@ -32,6 +32,7 @@
 // parent-state inheritance) needed those 2 slots freed to fit at all.
 
 import agentsSrc from "../../../core/agents.wgsl?raw";
+import coreConstants from "../../../core/constants.json";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
 import type { Environment } from "./environment";
@@ -48,7 +49,7 @@ const WORKGROUP = 64;
 // angularVelocity are only ever left at their zero-initialized default
 // by the TS side (see resetHeading()'s own comment), never written at a
 // specific offset the way rng/heading are.
-const PARTICLE_META_STRIDE = 32;
+const PARTICLE_META_STRIDE = 48;
 const PARTICLE_META_OFFSET_RNG = 0;
 const PARTICLE_META_OFFSET_HEADING = 8;
 // AgentState places its runtime ParticleMeta array after one atomic u32 and
@@ -82,9 +83,9 @@ function weightLayout(channels: number, hiddenDim: number) {
   // core/agents.wgsl's IN_DIM: value + heading-forward gradient + lateral
   // gradient per channel, with no positional inputs.
   const inDim = channels * 3 + 6;
-  // Four heading-relative env_write values per channel + ANGULAR_DIM(1)
-  // + ACCEL_DIM(2) + STRAFE_DIM(2) + RGB_DIM(3).
-  const outDim = channels * 4 + 8;
+  // One centered env_write per channel + ANGULAR_DIM(1) + ACCEL_DIM(2)
+  // + STRAFE_DIM(2) + RGB_DIM(3).
+  const outDim = channels + 8;
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -200,7 +201,7 @@ export class Agents {
     // writing past the end of it for every newly-added particle.
     //
     // rng(u32)+cooldown(f32)+heading(f32)+angularVelocity(f32) — ALL FOUR
-    // packed into ONE 32-bytes-per-particle buffer (core/agents.wgsl's
+    // packed into ONE 48-bytes-per-particle buffer (core/agents.wgsl's
     // own ParticleMeta struct), not four separate buffers: this shader
     // hit a REAL, confirmed CreateComputePipeline validation error the
     // first time mpmCore.F/C/Jp tried to add 3 more bindings on top of
@@ -222,9 +223,9 @@ export class Agents {
     // — encodeReadGrownCount() copies into this every macro step,
     // readGrownCount() maps/reads/unmaps it asynchronously afterward.
     this.grownCountStaging = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
-    // Every rollout currently starts with two particles and grows
+    // Rollouts start with their configured initial particle count and grow
     // via splitting from there (simulation.ts's own restartRollout()
-    // calls setActiveCount(1) again itself, every rollout — this is just
+    // sets that count every rollout — this is just
     // a construction-time placeholder so there's a sane dispatch size
     // before the first rollout ever starts) — see types.ts's own
     // SimulationConfig.particles docstring for why that's now a CAP, not
@@ -238,6 +239,9 @@ export class Agents {
         FIELD_WIDTH: environment.width,
         FIELD_HEIGHT: environment.height,
         MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
+        CHEMICAL_VALUE_INPUT_SCALE: coreConstants.CHEMICAL_VALUE_INPUT_SCALE,
+        CHEMICAL_GRADIENT_INPUT_SCALE: coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
+        MORPHOLOGY_GRADIENT_INPUT_SCALE: coreConstants.MORPHOLOGY_GRADIENT_INPUT_SCALE,
         // WGSL wants lowercase `true`/`false` — a raw JS boolean would
         // template-substitute as "true"/"false" too via String(), so
         // this one actually works either way, but spelled out for
@@ -309,8 +313,10 @@ export class Agents {
    * with restartRollout() too (see GpuSimulation.randomizeWeights()) —
    * particles already grown under the old weights don't retroactively
    * un-grow just because the policy driving them changed. */
-  randomizeWeights(): void {
-    this.loadWeights(randomWeights(this.channels, this.hiddenDim));
+  randomizeWeights(): UpdateRuleWeights {
+    const weights = randomWeights(this.channels, this.hiddenDim);
+    this.loadWeights(weights);
+    return weights;
   }
 
   setPhysics(settings: {
@@ -470,7 +476,8 @@ export class Agents {
   resetHeading(seed: number): void {
     const count = (this.agentStateBuffer.size - PARTICLE_META_BUFFER_OFFSET) / PARTICLE_META_STRIDE;
     // One combined DataView write, matching core/agents.wgsl's own
-    // ParticleMeta struct exactly (four scalar fields followed by vec4 color
+    // ParticleMeta struct exactly (four scalar fields, vec4 color, then the
+    // division hazard/threshold pair
     // — see this class's own constructor comment for
     // why the state is packed into one buffer). cooldown/angularVelocity/color
     // are left at 0 (ArrayBuffer's own zero-initialized default) — "not
@@ -496,7 +503,7 @@ export class Agents {
    * reproducibility gap for callers of this to inherit), not folded into
    * resetHeading() itself, which stays a general, per-slot-independent
    * utility. Individual per-index strided writes (heading is one f32
-   * field inside ParticleMeta's own 32-byte stride now, not a
+   * field inside ParticleMeta's own 48-byte stride now, not a
    * standalone tightly-packed array) so this touches ONLY the heading
    * field, leaving rng/cooldown/angularVelocity exactly as
    * resetHeading() just set them. */

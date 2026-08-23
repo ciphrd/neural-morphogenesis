@@ -11,6 +11,7 @@ from agents_gpu import PARTICLE_META_BUFFER_OFFSET, AgentsGPU, weight_layout
 from device import pick_device
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, MpmCore
+from training_sim import TrainingRollout
 
 
 def _rest_state(
@@ -125,6 +126,24 @@ def check_morphology_occupancy(device: wgpu.GPUDevice) -> None:
     print(f"[PASS] morphology_occupancy bounded=yes blurred=yes reference_response=yes peak={occupancy.max():.6f}")
 
 
+def check_single_cell_rollout_seed(device: wgpu.GPUDevice) -> None:
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0)
+    agents = AgentsGPU(
+        device, core, environment, 1, 128,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
+        4, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
+    )
+    TrainingRollout(
+        core, agents, environment,
+        spawn_center=(0.5, 0.5), spawn_half_width=0.0,
+        gravity=0.0, seed=17, initial_particle_count=1,
+    )
+    assert core.read_positions().shape == (1, 2)
+    assert agents.read_grown_count() == 1
+    print("[PASS] rollout starts with exactly one seeded particle")
+
+
 def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 1, 64, 64, 0.5, 1.0)
@@ -144,8 +163,7 @@ def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
     agents.set_growth_enabled(False)
     layout = weight_layout(1, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    for spot in range(4):
-        weights[layout["fc2b_offset"] + spot] = 1.0
+    weights[layout["fc2b_offset"]] = 1.0
     agents.load_weights(weights)
     readback = device.create_buffer(
         size=environment.buffers[0].size,
@@ -243,8 +261,8 @@ def check_compression_slows_without_stalling(device: wgpu.GPUDevice) -> None:
     print(f"[PASS] compressed_growth_continues g={growth:.6f}")
 
 
-def check_cardinal_direction_deposits(device: wgpu.GPUDevice) -> None:
-    """Each spot-major output writes to its heading-relative target."""
+def check_centered_deposits(device: wgpu.GPUDevice) -> None:
+    """Every chemical output is deposited underneath the particle."""
     channels = 8
     width = height = 32
     core = MpmCore(device)
@@ -252,7 +270,7 @@ def check_cardinal_direction_deposits(device: wgpu.GPUDevice) -> None:
     agents = AgentsGPU(
         device, core, environment, channels, 128,
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False,
-        3.0,  # field-pixel offset for each cardinal write
+        0.0,  # legacy deposit-distance ABI slot; centered writes ignore it
         2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
     )
     # Exactly the center of texel (x=8,y=24), avoiding an argmax tie.
@@ -269,11 +287,11 @@ def check_cardinal_direction_deposits(device: wgpu.GPUDevice) -> None:
     agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(channels, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Give spot s a saturated write only in channel s. With heading=0 the
-    # expected targets are front(+x), left(+y), back(-x), right(-y).
-    for spot in range(4):
-        weights[layout["fc2b_offset"] + spot * channels + spot] = 20.0
-    env_write_dim = channels * 4
+    # Give the first four channels saturated writes. All must peak at the
+    # particle texel, independent of heading.
+    for channel in range(4):
+        weights[layout["fc2b_offset"] + channel] = 20.0
+    env_write_dim = channels
     weights[layout["fc2b_offset"] + env_write_dim + 5] = 20.0
     weights[layout["fc2b_offset"] + env_write_dim + 6] = -20.0
     # Blue stays at logit 0 -> sigmoid 0.5.
@@ -317,13 +335,13 @@ def check_cardinal_direction_deposits(device: wgpu.GPUDevice) -> None:
     device.queue.submit([encoder.finish()])
 
     scratch = np.frombuffer(device.queue.read_buffer(readback), np.int32).reshape(channels, height, width)
-    expected = [(11, 24), (8, 27), (5, 24), (8, 21)]
-    for channel, target in enumerate(expected):
+    target = (8, 24)
+    for channel in range(4):
         max_y, max_x = np.unravel_index(np.argmax(scratch[channel]), scratch[channel].shape)
         assert (max_x, max_y) == target, (channel, (max_x, max_y), target)
         assert scratch[channel, max_y, max_x] > 0
     assert not np.any(scratch[4:]), "one output channel leaked into another"
-    print("[PASS] four independent writes land at front/left/back/right targets")
+    print("[PASS] independent channel writes land underneath the particle")
 
     meta_raw = device.queue.read_buffer(
         agents._agent_state_buffer,
@@ -333,7 +351,7 @@ def check_cardinal_direction_deposits(device: wgpu.GPUDevice) -> None:
     meta = np.frombuffer(meta_raw, dtype=agents._particle_meta_dtype, count=1)
     assert np.allclose(meta["color"][0, :3], [1.0, 0.0, 0.5], atol=1e-6), meta["color"][0]
     assert np.isclose(meta["color"][0, 3], 1.0), meta["color"][0]
-    print("[PASS] sigmoid RGB outputs are stored as the particle's current color")
+    print("[PASS] sigmoid RGB outputs are stored in particle state")
 
 
 def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
@@ -354,7 +372,7 @@ def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
     layout = weight_layout(channels, hidden)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     elastic_offset = channels * 3 + 3
-    color_start = channels * 4 + 5
+    color_start = channels + 5
     for component in range(3):
         weights[layout["fc1w_offset"] + component * layout["in_dim"] + elastic_offset + component] = 1.0
         weights[layout["fc2w_offset"] + (color_start + component) * hidden + component] = 1.0
@@ -396,7 +414,7 @@ def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
     normalized = policy_elastic_strain_input(
         (fe @ fg)[None], fg[None], np.array([heading]), scale=scale
     )[0]
-    expected_color = 1.0 / (1.0 + np.exp(-np.sin(normalized)))
+    expected_color = 1.0 / (1.0 + np.exp(-np.tanh(normalized)))
     actual_color = gpu_color(agents, fe @ fg, fg, heading)
     assert np.allclose(actual_color, expected_color, atol=2e-5), (actual_color, expected_color, normalized)
 
@@ -500,8 +518,8 @@ def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float, polarity_b
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     # Former local-forward strafe output. +/-20 saturates tanh at +/-1,
     # making the expected fully-polarized geometry exact enough to test.
-    weights[layout["fc2b_offset"] + 8 * 4 + 2] = polarity_bias
-    weights[layout["fc2b_offset"] + 8 * 4 + 3] = signed_bias
+    weights[layout["fc2b_offset"] + 8 + 2] = polarity_bias
+    weights[layout["fc2b_offset"] + 8 + 3] = signed_bias
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
@@ -706,9 +724,9 @@ def check_strafe_signal_drives_growth_not_motion(device: wgpu.GPUDevice) -> None
     agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    weights[layout["fc2b_offset"] + 8 * 4 + 1] = 2.0
-    weights[layout["fc2b_offset"] + 8 * 4 + 2] = -2.0
-    weights[layout["fc2b_offset"] + 8 * 4 + 3] = 1.0
+    weights[layout["fc2b_offset"] + 8 + 1] = 2.0
+    weights[layout["fc2b_offset"] + 8 + 2] = -2.0
+    weights[layout["fc2b_offset"] + 8 + 3] = 1.0
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
@@ -815,8 +833,8 @@ def _cycle_gate_case(
     )
     core.set_active_count(1)
     environment.reset()
-    # The final substrate channel is the cycle-start probability. Fill it
-    # with exactly 1 so the random draw always succeeds when both gates do.
+    # The final substrate channel drives cycle-start hazard. Saturated signal
+    # preserves the former immediate-admission behavior when both gates pass.
     plane = 256 * 256
     device.queue.write_buffer(
         environment.buffers[0],
@@ -858,13 +876,86 @@ def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
     print("[PASS] cycle_start_gates final_round_only enabled=yes disabled=no static/runtime_cap=no capped_cycle_closed_g_preserved")
 
 
+def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
+    """Weak growth drive accumulates, survives zero-signal gaps, then admits."""
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, 8, 256, 256, 1.0, 1.0)
+    agents = AgentsGPU(
+        device, core, environment, 8, 128,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, True, 2.0,
+        4, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
+    )
+    core.load_scene(
+        np.array([[0.5, 0.5]], dtype=np.float32),
+        np.zeros((1, 2), dtype=np.float32),
+        np.array([[1, 0, 0, 1]], dtype=np.float32),
+        np.zeros((1, 4), dtype=np.float32),
+        np.ones(1, dtype=np.float32),
+    )
+    agents.set_active_count(1)
+    agents.reset_heading(37)
+    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
+    meta = np.frombuffer(
+        device.queue.read_buffer(
+            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
+            agents._particle_meta_dtype.itemsize,
+        ),
+        dtype=agents._particle_meta_dtype, count=1,
+    ).copy()
+    meta["divisionThreshold"][0] = 10.0
+    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
+
+    plane = 256 * 256
+    signal = np.full(plane, 0.2, dtype=np.float32)
+    device.queue.write_buffer(environment.buffers[0], 7 * plane * 4, signal)
+
+    def advance(rounds: int) -> None:
+        encoder = device.create_command_encoder()
+        for _ in range(rounds):
+            environment.encode_sense(encoder)
+            agents.encode_step(encoder, environment.parity, commit_lifecycle=True)
+        device.queue.submit([encoder.finish()])
+
+    def read_meta() -> np.ndarray:
+        raw = device.queue.read_buffer(
+            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
+            agents._particle_meta_dtype.itemsize,
+        )
+        return np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1).copy()
+
+    advance(3)
+    accumulated = read_meta()
+    expected = 3.0 * -np.log(0.8)
+    assert np.isclose(accumulated["divisionHazard"][0], expected, atol=2e-6), accumulated
+    assert _probe(core, 1)[0, 2] == 0.0
+
+    device.queue.write_buffer(environment.buffers[0], 7 * plane * 4, np.zeros(plane, dtype=np.float32))
+    advance(2)
+    paused = read_meta()
+    assert np.isclose(paused["divisionHazard"][0], expected, atol=2e-6), paused
+
+    paused["divisionThreshold"][0] = expected + 0.1
+    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, paused.tobytes())
+    device.queue.write_buffer(environment.buffers[0], 7 * plane * 4, signal)
+    advance(1)
+    admitted = read_meta()
+    assert _probe(core, 1)[0, 2] == 1.0
+    assert admitted["divisionHazard"][0] == 0.0
+    assert admitted["divisionThreshold"][0] == 0.0
+    print(
+        "[PASS] persistent_division_hazard "
+        f"weak_signal_accumulated={expected:.6f} zero_signal_preserved=yes threshold_admitted=yes"
+    )
+
+
 def main() -> None:
     device = pick_device()
     check_morphology_occupancy(device)
+    check_single_cell_rollout_seed(device)
     check_supersampled_communication_rounds(device)
     check_growth_without_repulsion(device)
     check_compression_slows_without_stalling(device)
-    check_cardinal_direction_deposits(device)
+    check_centered_deposits(device)
     check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
     check_polarized_division_uses_signed_growth_direction(device)
@@ -876,6 +967,7 @@ def main() -> None:
     check_p2g_fixed_point_headroom(device)
     check_high_strain_elastic_stability(device)
     check_cycle_start_gates(device)
+    check_persistent_division_hazard(device)
 
 
 if __name__ == "__main__":

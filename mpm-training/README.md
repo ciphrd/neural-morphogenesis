@@ -46,12 +46,13 @@ output, two growth-direction outputs, and three sigmoid RGB cell-color outputs.
 Any checkpoint from before elastic-strain sensing has a 27-column first layer;
 the current policy requires 30 and must be retrained.
 
-The three elastic lanes are currently retained in the architecture but forced
-to zero by `ELASTIC_STRAIN_INPUTS_ENABLED = False`, as a temporary growth
-ablation. Setting it back to `True` restores mechanosensing without changing
-checkpoint dimensions.
+The three elastic lanes can be ablated without changing checkpoint dimensions
+through `ELASTIC_STRAIN_INPUTS_ENABLED`; it is currently enabled.
 
 ## One macro step
+
+New rollouts begin with one seeded particle (`INITIAL_PARTICLE_COUNT = 1`);
+all additional particles must arise through policy-controlled division.
 
 In simplified pseudocode:
 
@@ -85,8 +86,7 @@ repeat neural_updates_per_macro communication rounds:
 
     outputs = neural_policy(inputs)
 
-    for direction in [front, left, back, right]:
-        deposit one chemical output per channel at that directional spot
+    deposit one chemical output per channel underneath the particle
     update angular velocity and heading from the turning output,
       scaled by communication_dt
 
@@ -108,7 +108,7 @@ repeat neural_updates_per_macro communication rounds:
        and population is below the particle cap
        and this particle is not already growing
        and its cooldown is finished
-       and random_uniform() < growth_probability:
+       and division_hazard crosses its persistent random threshold:
           particle.cell_cycle_active = true
 
   merge deposits into the substrate field
@@ -117,7 +117,8 @@ repeat neural_updates_per_macro communication rounds:
 propagate any newly divided particle count to the simulation
 
 repeat MLS-MPM physics substeps:
-    apply bounded particle repulsion
+    splat the particle density field
+    apply bounded short-range repulsion
     particle-to-grid transfer, including elastic stress
     update grid velocities
     grid-to-particle transfer
@@ -132,6 +133,23 @@ deposition, decay, diffusion, or turning by that round count.
 
 A daughter created during the agent pass participates in that macro step's
 physics. It begins running its own neural policy on the following macro step.
+
+Growth admission uses a persistent stochastic clock rather than discarding a
+new Bernoulli draw every macro step. For the bounded final-channel signal `p`:
+
+```text
+division_hazard += -log(1 - p)
+threshold = exponential_random(mean=1)  # drawn once per prospective cycle
+
+if division_hazard >= threshold:
+    begin_cell_cycle()
+    division_hazard = 0
+    threshold = unset
+```
+
+Thus zero signal never advances the clock, weak or intermittent signal retains
+its accumulated contribution, and saturated signal preserves immediate
+admission. Parent and daughter clocks reset independently after division.
 
 ## Morphoelastic deformation model
 
@@ -324,3 +342,77 @@ cap.
   policy, material, growth, damping, and repulsion defaults.
 - [`trainer/growth_check.py`](trainer/growth_check.py) — analytical and GPU
   regression checks for growth and conservative division.
+- [`trainer/capture_policy_inputs.py`](trainer/capture_policy_inputs.py) —
+  records exact raw policy inputs for stable particle slots during a headless
+  rollout and writes an offline HTML dashboard plus its source JSON.
+
+## Inspecting policy inputs over time
+
+From `trainer/`, replay a checkpoint and track the first five stable particle
+slots with:
+
+```bash
+.venv/bin/python capture_policy_inputs.py \
+  --weights checkpoints/best.npy \
+  --meta checkpoints/best_meta.json \
+  --steps 500 \
+  --sample-every 2 \
+  --tracked 5
+```
+
+By default, the tool first tries freshly randomized policies for up to 400
+macro steps each. It logs progress, keeps searching until one splits, saves
+that policy beside the report as `policy_input_report.weights.npy`, then resets
+and measures the successful rollout from step zero. Pass
+`--no-search-for-split` to measure the supplied checkpoint directly instead.
+Use `--initial-particles 5` to seed more cells during both the randomized
+search and its measured replay; split detection then waits for the population
+to rise above five. Without this option, `initial_particle_count` continues to
+come from the checkpoint metadata, falling back to the shared
+`INITIAL_PARTICLE_COUNT` in `core/constants.json` (currently 5) for metadata
+that predates the field. Multiple initial cells are arranged as a
+compact hexagonally packed disk with nearest-neighbor spacing equal to
+`split_displacement`; partial outer shells are distributed around the boundary
+rather than clumped on one side.
+
+This writes `policy_input_report.html`, which opens directly in a browser, and
+`policy_input_report.json`, which contains the same raw data for later scripts.
+The dashboard provides the agent population at every macro step, per-particle
+raw traces, a time-by-feature heatmap, and distribution statistics. Particle slots are stable: an unborn daughter is
+shown as inactive until its slot is claimed, then its samples remain attached
+to that same slot. Values are captured with the same bilinear field sampling,
+heading-frame rotations, morphology blur, and elastic Hencky-strain transform
+used by the live policy.
+
+## Policy input normalization
+
+The policy receives bounded, zero-preserving inputs calibrated from the
+2,000-step live capture in `trainer/policy_input_report.json` (5,005 tracked
+particle samples):
+
+```text
+chemical value[c]       = tanh(raw_value[c] / 0.17)
+chemical gradient[c]    = tanh(raw_gradient[c] / 0.045)
+morphology occupancy    = clamp(2 * raw_occupancy - 1, -1, 1)
+morphology gradient     = tanh(raw_gradient / 0.018)
+elastic strain          = unchanged (already tanh-normalized)
+```
+
+All chemical channels use the same value scale, and every forward/lateral
+chemical gradient uses the same gradient scale. This preserves channel-
+permutation as well as rotation symmetry instead of encoding the accidental
+channel roles of the random policy used for measurement. The scales live in
+`core/constants.json`; they are the rounded absolute P95 of the distributions
+pooled across all channels (and both directions for gradients). A value equal
+to its scale maps to approximately `0.762`, while large outliers approach `±1`
+smoothly.
+
+The last chemical channel's raw value still drives persistent division hazard.
+Normalization only changes the copy sensed by the neural network, not the
+growth probability or timing law. Because this changes first-layer input
+semantics without changing tensor shape, pre-normalization checkpoints should
+be retrained even though they remain structurally loadable.
+
+New policy-input reports store both `raw_inputs` and normalized `inputs`; the
+HTML dashboard's **Input space** selector switches every trace, heatmap, and
+distribution table between them.

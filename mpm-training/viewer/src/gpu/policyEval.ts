@@ -1,5 +1,5 @@
 // Pure-JS reimplementation of core/agents.wgsl's own evalPolicy() —
-// mirrors that function's exact math (Dense(hiddenDim) -> sin ->
+// mirrors that function's exact math (Dense(hiddenDim) -> tanh ->
 // Dense(outDim), tanh-squashed output with per-channel scaling) so
 // ui/NetworkPanel.tsx can visualize the CURRENT generation's policy as
 // a response surface (see that component's own module docstring) using
@@ -16,7 +16,7 @@
 import type { UpdateRuleWeights } from "./types";
 
 export interface PolicyOutput {
-  /** channels*4, spot-major: front, left, back, right. */
+  /** One centered chemical write per channel. */
   envWrite: Float32Array;
   angularAccel: number;
   anisotropy: number;
@@ -34,7 +34,7 @@ export function policyWeightsShapeError(
   hiddenDim: number
 ): string | null {
   const inDim = channels * 3 + 6;
-  const outDim = channels * 4 + 8;
+  const outDim = channels + 8;
   const fc1w = weights?.fc1w;
   const fc1b = weights?.fc1b;
   const fc2w = weights?.fc2w;
@@ -56,7 +56,7 @@ export function policyWeightsShapeError(
   const receivedOut = Array.isArray(fc2w) ? fc2w.length : "missing";
   return (
     `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
-    `(four directional chemical writes plus growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
+    `(one centered chemical write per channel plus growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
     "The current first layer includes three elastic Hencky-strain inputs; restart the training backend and retrain older checkpoints."
   );
 }
@@ -73,7 +73,7 @@ function safeSigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
 }
 
-/** One Dense(hiddenDim) -> sin -> Dense(channels*4+8) forward pass,
+/** One Dense(hiddenDim) -> tanh -> Dense(channels+8) forward pass,
  * squashed exactly like agents.wgsl's own evalPolicy() — see that
  * function's own comment for the exact math this mirrors, and this
  * file's own module docstring for why CHIRALITY's mirror-averaging is
@@ -97,10 +97,10 @@ export function evalPolicy(
     let acc = weights.fc1b[j];
     const row = weights.fc1w[j];
     for (let i = 0; i < input.length; i++) acc += input[i] * row[i];
-    hidden[j] = Math.sin(acc);
+    hidden[j] = safeTanh(acc);
   }
 
-  const outDim = channels * 4 + 8;
+  const outDim = channels + 8;
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -109,7 +109,7 @@ export function evalPolicy(
     outVec[j] = acc;
   }
 
-  const envWriteDim = channels * 4;
+  const envWriteDim = channels;
   const envWrite = new Float32Array(envWriteDim);
   for (let k = 0; k < envWriteDim; k++) envWrite[k] = safeTanh(outVec[k]) * maxEnvWrite;
   const angularAccel = safeTanh(outVec[envWriteDim]) * maxAngularAccel;

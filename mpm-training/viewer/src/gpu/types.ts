@@ -1,8 +1,8 @@
 export interface UpdateRuleWeights {
   fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6) — chemicals, morphology, elastic Hencky strain
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // (channels*4+8, HIDDEN_DIM) — directional deposits + turn + growth controls + direction + RGB
-  fc2b: number[]; // (channels*4+8,)
+  fc2w: number[][]; // (channels+8, HIDDEN_DIM) — centered deposits + turn + growth controls + direction + RGB
+  fc2b: number[]; // (channels+8,)
 }
 
 // Mirrors train_server.py's own GET /settings response, field for field
@@ -21,12 +21,13 @@ export interface UpdateRuleWeights {
 // randomWeights() for how that gap gets filled with a placeholder
 // rollout in the meantime).
 export interface RunSettings {
-  // The growth CAP, not a fixed starting count — every rollout currently
-  // starts with two particles (see gpu/simulation.ts's own
-  // restartRollout()) and grows via splitting from there. This is the
+  // The growth CAP, not the starting count — rollouts start with
+  // initialParticleCount agents (see gpu/simulation.ts's own
+  // restartRollout()) and grow via splitting from there. This is the
   // trained/default ceiling; the viewer may apply a different playback-only
   // cap through AgentPhysics.maxActiveParticles without changing it.
   particles: number;
+  initialParticleCount?: number;
   macroSteps: number;
   // Optional time cutoff for starting new cycles. null/absent means
   // growth remains chemically controlled for the whole replay.
@@ -50,7 +51,7 @@ export interface RunSettings {
   // right before they're folded into the field (core/environment.wgsl's
   // own EnvPhysics/mergeDeposit — see that file's own comment for why
   // this is a different knob from maxEnvWrite below, which caps each
-  // agent's own per-spot, per-channel write magnitude before scatter rather than
+  // agent's own per-channel write magnitude before scatter rather than
   // scaling the whole step's already-accumulated total).
   depositRate: number;
   maxAccel: number;
@@ -59,11 +60,10 @@ export interface RunSettings {
   maxAngularAccel: number;
   angularDamping: number;
   maxAngularVelocity: number;
-  /** Field-pixel offset to each front/left/back/right deposit spot. */
+  /** Legacy ABI field; centered deposits do not use an offset. */
   depositDistance: number;
   // Gaussian splat radius (sigma), field-pixel units — same convention as
-  // depositDistance above. core/agents.wgsl's own
-  // depositGaussian() reads this (AgentPhysics uniform), replacing that
+  // core/agents.wgsl's own depositGaussian() reads this, replacing that
   // shader's old flat 4-corner bilinear deposit scatter. Live-tunable,
   // added specifically for testing this splat's own shape/spread via
   // PhysicsPanel.

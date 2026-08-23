@@ -4,7 +4,7 @@ import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu
 import type { FieldMode, ParticleRenderMode } from "../gpu/render";
 import { GpuSimulation } from "../gpu/simulation";
 import { policyWeightsShapeError } from "../gpu/policyEval";
-import type { PhysicsSettings, SimulationConfig } from "../gpu/types";
+import type { PhysicsSettings, SimulationConfig, UpdateRuleWeights } from "../gpu/types";
 import { CanvasRecorder } from "./canvasRecorder";
 
 /** "none": no click/drag interaction (the default, passive-replay mode).
@@ -48,6 +48,8 @@ interface GridCanvasProps {
   physics: PhysicsSettings | null;
   /** Playback-only growth/interaction cap; does not alter training. */
   particleCap?: number;
+  /** Playback-only number of genuinely seeded agents. */
+  initialParticleCount?: number;
   // View-only rendering options (gpu/render.ts) — none of these are
   // simulation state, so they're plain display props, not part of
   // PhysicsSettings/SimulationConfig.
@@ -117,7 +119,9 @@ export interface GridCanvasHandle {
    * config.weights (loadGeneration() always does — see its own effect
    * below), same as any other in-place override this component exposes
    * (e.g. the Physics panel's own overrides). */
-  randomizeWeights(): void;
+  /** Returns the exact randomized weights loaded into the GPU so callers can
+   * display the same policy instead of the selected generation's weights. */
+  randomizeWeights(): UpdateRuleWeights | null;
   /** Starts capturing the canvas's own rendered output — see
    * canvasRecorder.ts's own CanvasRecorder.start() docstring. Throws if
    * this browser has no MediaRecorder at all — TrainingView checks
@@ -199,6 +203,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     targetVisible = true,
     physics,
     particleCap,
+    initialParticleCount,
     fieldMode = "none",
     particleRenderMode = "dots-white",
     particleRadiusPx,
@@ -226,6 +231,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const configRef = useRef<SimulationConfig | null>(null);
   const physicsRef = useRef(physics);
   const particleCapRef = useRef(particleCap);
+  const initialParticleCountRef = useRef(initialParticleCount);
   const fieldModeRef = useRef(fieldMode);
   const particleRenderModeRef = useRef(particleRenderMode);
   const particleRadiusPxRef = useRef(particleRadiusPx);
@@ -349,6 +355,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   configRef.current = config;
   physicsRef.current = physics;
   particleCapRef.current = particleCap;
+  initialParticleCountRef.current = initialParticleCount;
   fieldModeRef.current = fieldMode;
   particleRenderModeRef.current = particleRenderMode;
   particleRadiusPxRef.current = particleRadiusPx;
@@ -372,7 +379,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulationRef.current?.restartRollout();
     },
     randomizeWeights: () => {
-      simulationRef.current?.randomizeWeights();
+      return simulationRef.current?.randomizeWeights() ?? null;
     },
     startRecording: () => {
       if (canvasRef.current) getRecorder().start(canvasRef.current);
@@ -451,6 +458,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         : null;
       if (initialConfig && !initialWeightsError) simulation.loadGeneration(initialConfig);
       if (particleCapRef.current !== undefined) simulation.setParticleCap(particleCapRef.current);
+      if (initialParticleCountRef.current !== undefined) {
+        simulation.setInitialParticleCount(initialParticleCountRef.current);
+      }
       if (physicsRef.current) simulation.setPhysics(physicsRef.current);
       if (initialWeightsError) {
         setStatus("incompatible");
@@ -679,6 +689,12 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     if (particleCap !== undefined) simulationRef.current?.setParticleCap(particleCap);
   }, [particleCap]);
+
+  useEffect(() => {
+    if (initialParticleCount !== undefined) {
+      simulationRef.current?.setInitialParticleCount(initialParticleCount);
+    }
+  }, [initialParticleCount]);
 
   useEffect(() => {
     simulationRef.current?.setFieldMode(fieldMode);

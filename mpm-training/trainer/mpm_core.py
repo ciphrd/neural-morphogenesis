@@ -83,8 +83,8 @@ NODE_COUNT = (GRID_N + 1) * (GRID_N + 1)
 WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass — see core/clearGrid.wgsl
-# growthF(4), jp, cycleActive, growthDirection(2), growthControls(2),
-# then two alignment-padding floats — core/agents.wgsl's 48-byte layout.
+# growthF(4), jp, cycleActive, growthDirection(2), growthControls(2), then
+# two implicit alignment floats — core/agents.wgsl's 48-byte array stride.
 REST_FIELDS = 12
 REST_GROWTH_F = slice(0, 4)
 REST_JP = 4
@@ -285,7 +285,6 @@ class MpmCore:
             usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC,
         )
         density_texture_view = self.density_texture.create_view()
-
         self.morphology_texture = device.create_texture(
             size=(REPULSION_FIELD_N, REPULSION_FIELD_N, 1),
             format=wgpu.TextureFormat.r32float,
@@ -301,9 +300,9 @@ class MpmCore:
         )
         self.set_morphology(MORPHOLOGY_BLUR_SIGMA, MORPHOLOGY_DENSITY_REFERENCE)
 
-        self.splat_params_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self.splat_params_uniform = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_splat_radius(SPLAT_RADIUS)
-        self.repulsion_params_uniform = device.create_buffer(size=8, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self.repulsion_params_uniform = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_repulsion_strength(REPULSION_STRENGTH, REPULSION_MAX_DELTA)
 
         repulsion_module = device.create_shader_module(
@@ -315,7 +314,9 @@ class MpmCore:
         )
         self.clear_density_bind_group = device.create_bind_group(
             layout=self.clear_density_pipeline.get_bind_group_layout(0),
-            entries=[{"binding": 0, "resource": {"buffer": self.density_accum, "offset": 0, "size": self.density_accum.size}}],
+            entries=[
+                {"binding": 0, "resource": {"buffer": self.density_accum, "offset": 0, "size": self.density_accum.size}},
+            ],
         )
 
         self.splat_density_pipeline = device.create_compute_pipeline(
@@ -477,10 +478,10 @@ class MpmCore:
 
     def reset_growth_buffers(self, max_active: int) -> None:
         """Zero/identity-fills velocities/F/C/ParticleRest for [0, max_active) —
-        call once per rollout, after load_scene(). Every rollout now
-        starts with two real particles (see training_sim.py's own module
+        call once per rollout, after load_scene(). Every rollout starts
+        with its configured number of real particles (see training_sim.py's own module
         docstring for why --particles is a growth CAP now, not a fixed
-        starting count) — every slot beyond that one is destined to
+        starting count) — every slot beyond those particles is destined to
         become a real particle via growth (core/agents.wgsl's own
         agentStep() may claim any slot, so every per-particle physics/rest
         buffer must be initialized before that happens; division then
@@ -563,12 +564,19 @@ class MpmCore:
         )
 
     def set_splat_radius(self, sigma: float) -> None:
-        self.device.queue.write_buffer(self.splat_params_uniform, 0, np.array([sigma], dtype=np.float32))
+        self.device.queue.write_buffer(
+            self.splat_params_uniform, 0, np.array([sigma, 0.0, 0.0, 0.0], dtype=np.float32)
+        )
 
-    def set_repulsion_strength(self, strength: float, max_delta: float) -> None:
+    def set_repulsion_strength(
+        self, strength: float, max_delta: float,
+    ) -> None:
         """`max_delta` is core/repulsion.wgsl's own RepulsionParams.maxDelta
         — see that field's own comment for what it bounds and why."""
-        self.device.queue.write_buffer(self.repulsion_params_uniform, 0, np.array([strength, max_delta], dtype=np.float32))
+        self.device.queue.write_buffer(
+            self.repulsion_params_uniform, 0,
+            np.array([strength, max_delta, 0.0, 0.0], dtype=np.float32),
+        )
 
     # Max substeps encoded into a single command encoder before an
     # intermediate submit() — a real, load-bearing limit discovered by
@@ -711,7 +719,7 @@ class MpmCore:
         """Returns active particles' raw tensor-growth rest-state rows.
 
         Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,dirX,dirY,
-        anisotropy,divisionBias,pad0,pad1]``.
+        anisotropy,divisionBias,padding,padding]``.
         This is diagnostic-only: COPY_SRC is present on the buffer, but the
         normal simulation path performs no readback. Keeping the raw layout
         visible here also makes scalar-vs-tensor growth snapshots explicit
