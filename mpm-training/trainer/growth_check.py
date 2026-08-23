@@ -138,6 +138,79 @@ def check_compression_slows_without_stalling(device: wgpu.GPUDevice) -> None:
     print(f"[PASS] compressed_growth_continues g={growth:.6f}")
 
 
+def check_deposit_is_centered_under_particle(device: wgpu.GPUDevice) -> None:
+    """A legacy nonzero deposit distance must not move or duplicate writes."""
+    channels = 8
+    width = height = 32
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, channels, width, height, 0.91, 1.0)
+    agents = AgentsGPU(
+        device, core, environment, channels, 128,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, True,
+        100.0,  # deliberately huge legacy depositDistance: must be ignored
+        2, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
+    )
+    # Exactly the center of texel (x=8,y=24), avoiding an argmax tie.
+    position = np.array([[(8.5 / width), (24.5 / height)]], dtype=np.float32)
+    core.load_scene(
+        position,
+        np.zeros((1, 2), dtype=np.float32),
+        np.array([[1, 0, 0, 1]], dtype=np.float32),
+        np.zeros((1, 4), dtype=np.float32),
+        np.ones(1, dtype=np.float32),
+    )
+    agents.set_active_count(1)
+    agents.reset_heading(5)
+    layout = weight_layout(channels, 128)
+    weights = np.zeros(layout["total_floats"], dtype=np.float32)
+    weights[layout["fc2b_offset"]] = 20.0  # saturate channel 0 write
+    agents.load_weights(weights)
+
+    count = channels * width * height
+    readback = device.create_buffer(
+        size=count * 4,
+        usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
+    )
+    probe = device.create_shader_module(
+        code="""
+        @group(0) @binding(0) var<storage, read> source: array<i32>;
+        @group(0) @binding(1) var<storage, read_write> destination: array<i32>;
+        @compute @workgroup_size(64)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          if (gid.x < arrayLength(&source)) { destination[gid.x] = source[gid.x]; }
+        }
+        """
+    )
+    pipeline = device.create_compute_pipeline(
+        layout=wgpu.AutoLayoutMode.auto,
+        compute={"module": probe, "entry_point": "main"},
+    )
+    bind_group = device.create_bind_group(
+        layout=pipeline.get_bind_group_layout(0),
+        entries=[
+            {"binding": 0, "resource": {"buffer": environment.deposit_scratch}},
+            {"binding": 1, "resource": {"buffer": readback}},
+        ],
+    )
+
+    encoder = device.create_command_encoder()
+    environment.encode_sense(encoder)
+    agents.encode_step(encoder, environment.parity)
+    compute = encoder.begin_compute_pass()
+    compute.set_pipeline(pipeline)
+    compute.set_bind_group(0, bind_group)
+    compute.dispatch_workgroups((count + 63) // 64)
+    compute.end()
+    device.queue.submit([encoder.finish()])
+
+    scratch = np.frombuffer(device.queue.read_buffer(readback), np.int32).reshape(channels, height, width)
+    max_y, max_x = np.unravel_index(np.argmax(scratch[0]), scratch[0].shape)
+    assert (max_x, max_y) == (8, 24), (max_x, max_y)
+    assert scratch[0, max_y, max_x] > 0
+    assert not np.any(scratch[1:]), "one output channel leaked into another"
+    print("[PASS] one chemical output deposits directly under the particle; legacy distance is ignored")
+
+
 def check_conservative_split(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
@@ -222,7 +295,7 @@ def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float) -> np.ndar
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     # Former local-forward strafe output. +/-20 saturates tanh at +/-1,
     # making the expected fully-polarized geometry exact enough to test.
-    weights[layout["fc2b_offset"] + 8 * 4 + 3] = signed_bias
+    weights[layout["fc2b_offset"] + 8 + 3] = signed_bias
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
@@ -372,7 +445,7 @@ def check_strafe_signal_drives_growth_not_motion(device: wgpu.GPUDevice) -> None
     agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    weights[layout["fc2b_offset"] + 8 * 4 + 3] = 1.0
+    weights[layout["fc2b_offset"] + 8 + 3] = 1.0
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
@@ -522,6 +595,7 @@ def main() -> None:
     device = pick_device()
     check_growth_without_repulsion(device)
     check_compression_slows_without_stalling(device)
+    check_deposit_is_centered_under_particle(device)
     check_conservative_split(device)
     check_polarized_division_uses_signed_growth_direction(device)
     check_anisotropic_tensor_split(device)

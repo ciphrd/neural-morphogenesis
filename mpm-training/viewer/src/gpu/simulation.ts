@@ -20,7 +20,8 @@
 //      over whichever grid buffer is currently "current" (last step's
 //      diffuse+decay output).
 //   2. agents.encodeStep()            — NN forward pass: reads that same
-//      grid + gradient, writes env_write into the deposit scratch and the
+//      grid + gradient, writes one under-particle env_write per channel
+//      into the deposit scratch and the
 //      former strafe pair into ParticleRest.growthDirection (optionally
 //      also physical acceleration through maxStrafe) —
 //      may also grow activeCount (agents.wgsl's own agentStep()).

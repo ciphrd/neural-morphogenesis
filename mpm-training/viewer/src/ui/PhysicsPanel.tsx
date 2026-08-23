@@ -156,12 +156,6 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
       format: (v) => v.toFixed(3),
     },
     {
-      key: "depositDistance",
-      label: "Deposit distance",
-      ...scaledRange(trained.depositDistance, 3),
-      format: (v) => v.toFixed(1),
-    },
-    {
       key: "depositSigma",
       label: "Deposit splat sigma",
       ...scaledRange(trained.depositSigma, 3),
@@ -217,13 +211,12 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
  * to a whole macro step's own accumulated deposits right before they're
  * folded into the field — core/environment.wgsl's own EnvPhysics/
  * mergeDeposit — distinct from maxEnvWrite, which caps each agent's own
- * per-deposit-spot magnitude before scatter), strafe's own maxAccel/maxStrafe/friction (strafe
+ * per-channel write magnitude before scatter), strafe's own maxAccel/maxStrafe/friction (strafe
  * drives MpmCore's own velocity directly — an acceleration, damped by
  * friction — see agents.wgsl's own module docstring for the full
  * history), the heading integrator's maxAngularAccel/angularDamping/
- * maxAngularVelocity, the 4 deposit spots' own shared depositDistance
- * (front/left/back/right around each agent, this many field-pixels out)
- * and depositSigma (each spot's own Gaussian splat radius — see
+ * maxAngularVelocity, and depositSigma (the under-particle Gaussian
+ * splat radius — see
  * agents.wgsl's own depositGaussian() for the exact kernel this drives,
  * replacing that shader's old flat 4-corner bilinear deposit scatter),
  * growth's own splitDisplacement (daughter separation; the signed growth

@@ -83,13 +83,9 @@ function weightLayout(channels: number, hiddenDim: number) {
   // constant's own comment) — hardcoded rather than imported, same
   // convention outDim's own "+5" below already follows.
   const inDim = channels * 3 + 2;
-  // 4 == core/agents.wgsl's own SPOTS / trainer/simulation_settings.py's
-  // own DEPOSIT_SPOTS (env_write, one per channel per deposit spot) + 5
-  // == ANGULAR_DIM(1) + ACCEL_DIM(2) + STRAFE_DIM(2) — hardcoded rather
-  // than imported (this file doesn't read simulation_settings.py at
-  // all), matching how the "+5" tail was already hardcoded here before
-  // DEPOSIT_SPOTS existed.
-  const outDim = channels * 4 + 5;
+  // One under-particle env_write per channel + ANGULAR_DIM(1) +
+  // ACCEL_DIM(2) + STRAFE_DIM(2).
+  const outDim = channels + 5;
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -103,7 +99,20 @@ function weightLayout(channels: number, hiddenDim: number) {
  * the fc1w/fc1b/fc2w/fc2b order agents.wgsl's own FC1W_OFFSET/etc.
  * consts expect. */
 function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim: number): Float32Array {
-  const { totalFloats } = weightLayout(channels, hiddenDim);
+  const { inDim, outDim, totalFloats } = weightLayout(channels, hiddenDim);
+  if (
+    weights.fc1w.length !== hiddenDim ||
+    weights.fc1w.some((row) => row.length !== inDim) ||
+    weights.fc1b.length !== hiddenDim ||
+    weights.fc2w.length !== outDim ||
+    weights.fc2w.some((row) => row.length !== hiddenDim) ||
+    weights.fc2b.length !== outDim
+  ) {
+    throw new Error(
+      `Incompatible policy weights: expected (${hiddenDim},${inDim}) -> (${outDim},${hiddenDim}); ` +
+      "four-direction deposit checkpoints must be retrained for the under-particle deposit architecture"
+    );
+  }
   const out = new Float32Array(totalFloats);
   let i = 0;
   for (const row of weights.fc1w) for (const v of row) out[i++] = v;

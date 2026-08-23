@@ -1,4 +1,4 @@
-"""The evolved per-particle policy: Dense(128) -> sin -> Dense(16) —
+"""The evolved per-particle policy: Dense(128) -> sin -> Dense(C+5) —
 architecture/shape reference and a CPU-only utility class (random weight
 init via a fresh instance's own initialized parameters, JSON export via
 export_weights()), NOT the live forward pass anymore. That now runs
@@ -35,12 +35,8 @@ pipelines now).
   3*C+2 total. This module itself is frame-agnostic (it just concatenates
   whatever it's given) — the rotation (and spawn-center subtraction) is
   entirely the caller's job.
-- Output: env_write (C * DEPOSIT_SPOTS) — one independent deposit value
-  per channel for EACH of DEPOSIT_SPOTS=4 spots around the particle's own
-  position (front/left/back/right relative to its own heading — see
-  core/agents.wgsl's own agentStep() comment for the exact angles and
-  DEPOSIT_DISTANCE for how far out), not just a single deposit at the
-  particle's own position the way this used to work — plus angular_accel
+- Output: env_write (C) — one independent deposit value per channel,
+  written directly under the particle — plus angular_accel
   (1), accel (2), and strafe (2), all raw/local-frame. angular_accel
   nudges the particle's own persistent angular velocity (which in turn
   nudges its persistent heading — see core/agents.wgsl's own module
@@ -49,17 +45,16 @@ pipelines now).
   rotates it to world space for tensor growth and signed division polarity, independently of
   MAX_STRAFE. MAX_STRAFE optionally applies the same signal as physical
   acceleration and is zero by default. accel is a separate output
-  channel, still produced (output width is unchanged) but currently unused. C=8
+  channel, retained but currently unused. C=8
   (simulation_settings.CHEM_CHANNELS) and
-  DEPOSIT_SPOTS=4 (simulation_settings.DEPOSIT_SPOTS) are what pin the
-  output width at exactly 37: 8*4 + 1 + 2 + 2.
+  the output width is exactly 13: 8 + 1 + 2 + 2.
 """
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-from simulation_settings import ACCEL_DIM, ANGULAR_DIM, CHEM_CHANNELS, DEPOSIT_SPOTS, HIDDEN_DIM, STRAFE_DIM
+from simulation_settings import ACCEL_DIM, ANGULAR_DIM, CHEM_CHANNELS, HIDDEN_DIM, STRAFE_DIM
 
 # The agent's own (x,y) spawn-center-relative position, appended after
 # the per-channel value/grad_forward/grad_lateral triples — see this
@@ -84,7 +79,7 @@ class UpdateRule(nn.Module):
         super().__init__()
         self.num_channels = num_channels
         input_dim = 3 * num_channels + POSITION_DIM
-        output_dim = num_channels * DEPOSIT_SPOTS + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM
+        output_dim = num_channels + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM
         # sin hidden activation, not ReLU or tanh: this net is evolved
         # (mutation + selection), never backprop-trained, so ReLU's usual
         # vanishing-gradient advantage doesn't apply, and neither does
@@ -93,8 +88,8 @@ class UpdateRule(nn.Module):
         # project's own explicit request, on the theory that a PERIODIC
         # activation is a more natural fit for a domain where heading/
         # rotation (themselves sin/cos-parameterized throughout
-        # core/agents.wgsl's own sensing rotation, deposit-spot angles,
-        # strafe rotation) are everywhere. Deliberately NOT a full SIREN
+        # core/agents.wgsl's own sensing and strafe rotations) are
+        # everywhere. Deliberately NOT a full SIREN
         # architecture (multiple sin-activated layers + SIREN's own
         # frequency-scaled init, ω₀) — SIREN's actual value proposition is
         # enabling STABLE, GRADIENT-BASED training of deep sinusoidal
@@ -123,12 +118,10 @@ class UpdateRule(nn.Module):
         (env_write, angular_accel, accel, strafe), all raw/un-squashed
         and still in LOCAL frame — squashing (tanh + the MAX_ANGULAR_ACCEL/
         MAX_ACCEL/MAX_ENV_WRITE scale; strafe uses tanh without the
-        MAX_STRAFE scale for growth), reshaping env_write's
-        own flat (N, C*DEPOSIT_SPOTS) output into the (N, DEPOSIT_SPOTS, C)
-        callers actually want one-spot-at-a-time, and rotating accel/
+        MAX_STRAFE scale for growth), and rotating accel/
         strafe to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
-        not deposit-spot geometry), same division of responsibility
+        not spatial deposit geometry), same division of responsibility
         envnca's own UpdateRule/Simulation split. angular_accel needs no
         rotation either way — it nudges the particle's own angular
         velocity directly, there's no "world frame" for a scalar turn
@@ -136,8 +129,8 @@ class UpdateRule(nn.Module):
         x = torch.cat([value, grad_forward, grad_lateral, position], dim=-1)
         out = self.net(x)
         c = self.num_channels
-        d = c * DEPOSIT_SPOTS
-        env_write = out[:, :d]  # (N, DEPOSIT_SPOTS*C), spot-major — reshape to (N, DEPOSIT_SPOTS, C) if needed
+        d = c
+        env_write = out[:, :d]  # (N, C), deposited under the particle
         angular_accel = out[:, d : d + ANGULAR_DIM]
         accel = out[:, d + ANGULAR_DIM : d + ANGULAR_DIM + ACCEL_DIM]
         strafe = out[:, d + ANGULAR_DIM + ACCEL_DIM : d + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM]
@@ -155,6 +148,6 @@ class UpdateRule(nn.Module):
         return {
             "fc1w": fc1.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels+POSITION_DIM)
             "fc1b": fc1.bias.detach().cpu().tolist(),  # (HIDDEN_DIM,)
-            "fc2w": fc2.weight.detach().cpu().tolist(),  # (num_channels*DEPOSIT_SPOTS+5, HIDDEN_DIM)
-            "fc2b": fc2.bias.detach().cpu().tolist(),  # (num_channels*DEPOSIT_SPOTS+5,)
+            "fc2w": fc2.weight.detach().cpu().tolist(),  # (num_channels+5, HIDDEN_DIM)
+            "fc2b": fc2.bias.detach().cpu().tolist(),  # (num_channels+5,)
         }

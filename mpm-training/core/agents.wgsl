@@ -1,5 +1,5 @@
 // The evolved per-particle policy, GPU-resident — WGSL port of
-// trainer/update_rule.py's Dense(128) -> sin -> Dense(16) (hidden
+// trainer/update_rule.py's Dense(128) -> sin -> Dense(CHANNELS+5) (hidden
 // activation swapped from tanh to sin, a periodic activation, per this
 // project's own explicit request — see evalPolicy()'s own comment for
 // why), following envnca/frontend/src/gpu/agents.wgsl's own NN-forward-
@@ -47,19 +47,10 @@
 //   work) in exchange for ruling out an arbitrary, physically
 //   unmotivated left/right turning bias by construction.
 //
-// Deposit — SPOTS=4 independently-controlled spots around the agent
-// (front/left/back/right, evenly spaced 90° apart starting at the
-// agent's own heading direction, each `physics.depositDistance` field-
-// pixels away), not just a single deposit at the agent's own position
-// the way this shader used to work. Each spot gets its own env_write per
-// channel — see PolicyOutput's own comment for the resulting output
-// layout, and depositGaussian()'s own comment (called from agentStep()'s
-// own deposit loop) for the per-spot scatter math: a bounded Gaussian
-// splat (sigma = physics.depositSigma, live-tunable), not the flat
-// 4-corner bilinear scatter this shader used before. CHANNELS was
-// reduced (see simulation_settings.py's own CHEM_CHANNELS comment)
-// specifically to keep OUT_DIM (and so the evolved network's own output
-// layer) from growing 4x along with the spot count — this shader's own
+// Deposit — one independently-controlled write per channel, centered on
+// the particle's own position. The Gaussian radius remains live-tunable,
+// but the policy no longer owns four heading-relative front/left/back/right
+// output vectors. See depositGaussian() for the bounded scatter math.
 // sensing (value/grad_forward/grad_lateral) is unchanged, still sampled
 // once, at the agent's own position, still via the old bilinear
 // corners()/sampleValue()/sampleGrad() (only the deposit SIDE changed).
@@ -171,19 +162,10 @@ const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
 // under CHIRALITY the way grad_lateral is.
 const IN_DIM: u32 = CHANNELS * 3u + 2u;
 
-// 4 deposit spots (front/left/back/right — see agentStep()'s own
-// comment for the exact angles) around the agent, each with its own
-// independent env_write per channel. Must match
-// trainer/simulation_settings.py's own DEPOSIT_SPOTS exactly (that
-// constant is what agents_gpu.py's/agents.ts's own weight_layout()
-// hardcode 4 against too) — not templated in like CHANNELS/HIDDEN_DIM
-// since it's a fixed architecture choice, not something any run varies.
-const SPOTS: u32 = 4u;
-const ENV_WRITE_DIM: u32 = CHANNELS * SPOTS;
-const OUT_DIM: u32 = ENV_WRITE_DIM + 5u; // env_write(SPOTS*CHANNELS) + angular_accel(1) + accel(2) + strafe(2)
+const ENV_WRITE_DIM: u32 = CHANNELS;
+const OUT_DIM: u32 = ENV_WRITE_DIM + 5u; // env_write(CHANNELS) + angular_accel(1) + accel(2) + strafe(2)
 
 const PI: f32 = 3.14159265358979323846;
-const HALF_PI: f32 = PI * 0.5;
 
 const FC1W_OFFSET: u32 = 0u;
 const FC1B_OFFSET: u32 = FC1W_OFFSET + HIDDEN_DIM * IN_DIM;
@@ -214,12 +196,9 @@ struct AgentPhysics {
   maxAngularAccel: f32,
   angularDamping: f32,
   maxAngularVelocity: f32,
-  // Field-pixel distance from the agent's own position out to each of
-  // its SPOTS deposit targets — see agentStep()'s own comment for the
-  // exact per-spot direction. 0 collapses all SPOTS deposits back onto
-  // the agent's own position (degenerates to this shader's old
-  // single-spot behavior). trainer/simulation_settings.py's own
-  // DEPOSIT_DISTANCE (3 field-pixels) is the starting value.
+  // Legacy wire-layout field. Deposits are always centered directly
+  // under the particle, so this value is intentionally unused. Keeping
+  // the slot avoids shifting every following AgentPhysics uniform field.
   depositDistance: f32,
   // World-domain (same [0,1]^2 units as `positions`, NOT field-pixels
   // like depositDistance) distance a newly split particle spawns behind
@@ -247,11 +226,10 @@ struct AgentPhysics {
   // independent knob, not a duplicate of that one). trainer/
   // simulation_settings.py's own FRICTION is the starting value.
   friction: f32,
-  // Gaussian splat radius (sigma), field-pixel units — SAME convention
-  // depositDistance above already uses (not domain [0,1] units like
-  // core/repulsion.wgsl's own splat sigma), since it's spreading a
-  // deposit around a position already computed in field-pixel space
-  // (agentStep()'s own `spotPos`). See depositGaussian()'s own comment
+  // Gaussian splat radius (sigma), field-pixel units (not domain [0,1]
+  // units like core/repulsion.wgsl's own splat sigma), since it spreads
+  // a deposit around the particle's field-pixel position. See
+  // depositGaussian()'s own comment
   // for the exact kernel this drives. trainer/simulation_settings.py's
   // own DEPOSIT_SIGMA is the starting value — live-tunable via
   // PhysicsPanel, for testing this splat's own shape/spread.
@@ -438,13 +416,7 @@ struct Corners {
 
 // WGSL's own `%` keeps the input's sign (like C fmod, not Python's %) —
 // this folds a same-sign-as-divisor result back into [0,size) whichever
-// side of 0 `v` started on. Needed now that corners() can be called with
-// a deposit spot position that's stepped outside [0,size) in either
-// direction (agentStep()'s own fieldPos + depositDistance*dir, which
-// unlike the agent's own always-in-range fieldPos isn't pre-wrapped by
-// the caller) — a no-op for anything already in [0,size), so this
-// doesn't change corners()'s own behavior for that (previously the only)
-// case.
+// side of 0 `v` started on. It is a no-op for values already in range.
 fn wrapCoord(v: f32, size: f32) -> f32 {
   let m = v % size;
   return select(m, m + size, m < 0.0);
@@ -491,10 +463,8 @@ fn sampleGrad(planeOffset: u32, c: u32, k: Corners) -> f32 {
 // MAX_KERNEL_RADIUS_TEXELS gives (see that const's own comment): this is
 // what keeps depositGaussian()'s own per-call cost genuinely bounded
 // rather than growing without limit alongside a live-tunable radius.
-// Smaller than repulsion's own cap (5) since this runs SPOTS(4) *
-// CHANNELS(4) = 16 times per agent per macro step, not once — a wide-
-// open cap here would multiply out much further than repulsion's single
-// per-particle splat does.
+// Smaller than repulsion's own cap (5) to keep each particle's chemical
+// write bounded.
 const MAX_DEPOSIT_KERNEL_RADIUS: i32 = 3;
 
 // Euclidean modulo, i32 in/out — same wraparound idea
@@ -506,10 +476,9 @@ fn wrapDepositIndex(i: i32, size: u32) -> i32 {
   return ((i % n) + n) % n;
 }
 
-// Scatter-adds one spot's own per-channel env_write values as a bounded
-// Gaussian splat around `centerFieldPos` (continuous field-pixel
-// coordinates, possibly outside [0,size) — see agentStep()'s own
-// `spotPos` comment) — replaces this shader's old 4-corner bilinear
+// Scatter-adds one particle's per-channel env_write values as a bounded
+// Gaussian splat around `centerFieldPos` — replaces this shader's old
+// 4-corner bilinear
 // scatter (sensing still uses that: corners()/sampleValue()/
 // sampleGrad() above are untouched, only the DEPOSIT side changed) per
 // this project's own explicit request for finer, live-tunable control
@@ -527,11 +496,11 @@ fn wrapDepositIndex(i: i32, size: u32) -> i32 {
 // UNLIKE the old bilinear scatter, this is NOT mass-normalized — each
 // tap's weight peaks at 1.0 (not 1/(2*pi*sigma^2)), matching
 // splatDensity()'s own convention. That means the TOTAL deposited mass
-// from one spot now grows with depositSigma (more full-weight taps
+// from one particle now grows with depositSigma (more full-weight taps
 // stacking up), not just its spread — a real, visible behavior change
 // worth knowing while testing this slider, not merely a smoother-
 // looking version of the old, mass-conserving 4-corner deposit.
-fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, s: u32, centerFieldPos: vec2<f32>) {
+fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32>) {
   let baseI = i32(floor(centerFieldPos.x));
   let baseJ = i32(floor(centerFieldPos.y));
 
@@ -555,7 +524,7 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, s: u32, centerFieldPos: 
       let wx = u32(wrapDepositIndex(ti, FIELD_WIDTH));
       let wy = u32(wrapDepositIndex(tj, FIELD_HEIGHT));
       for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-        let scaled = envWrite[s * CHANNELS + c] * weight * DEPOSIT_SCALE;
+        let scaled = envWrite[c] * weight * DEPOSIT_SCALE;
         atomicAdd(&depositScratch[fieldIndex(c, wy, wx)], i32(round(scaled)));
       }
     }
@@ -563,9 +532,7 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, s: u32, centerFieldPos: 
 }
 
 // The bounded subset of the network's own raw output
-// this shader actually consumes — env_write (per spot, per channel:
-// envWrite[s * CHANNELS + c], spot-major — see this file's own module
-// docstring for what each of the SPOTS=4 spots physically is) +
+// this shader actually consumes — one env_write per channel +
 // angularAccel + strafeLocal (the growth-direction signal, optionally
 // also physical acceleration), all still in LOCAL frame. accel
 // (outVec[ENV_WRITE_DIM+1u]/[ENV_WRITE_DIM+2u]) is a real, separate
@@ -613,10 +580,8 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
   }
 
   var out: PolicyOutput;
-  for (var s: u32 = 0u; s < SPOTS; s = s + 1u) {
-    for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-      out.envWrite[s * CHANNELS + c] = safeTanh(outVec[s * CHANNELS + c]) * physics.maxEnvWrite;
-    }
+  for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+    out.envWrite[c] = safeTanh(outVec[c]) * physics.maxEnvWrite;
   }
   // No rotation for angularAccel — it nudges angularVelocity directly,
   // there's no "world frame" for a scalar turn rate to be rotated into.
@@ -706,15 +671,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the genuinely symmetric part of its response survives — see
   // simulation_settings.py's own CHIRALITY for the full reasoning.
   // angularAccel/strafeLocal's own lateral component flip sign right
-  // back (a mirrored "turn right" is a "turn left"). envWrite's spots
-  // are handled the same way, just per-spot instead of a single sign
-  // flip: spot 0 (front) and spot 2 (back) sit ON the mirror axis, so
-  // they un-mirror straight across, same as before (average with the
-  // SAME spot index); spots 1 and 3 (left/right) sit OFF axis, so a
-  // reflection swaps them — the mirrored pass's own "left spot" output
-  // is what its "right spot" becomes once un-mirrored back into the real
-  // frame, and vice versa (see agentStep()'s own comment below for why
-  // spot 1 = left, spot 3 = right).
+  // back (a mirrored "turn right" is a "turn left"). A write centered
+  // under the particle has no spatial side to swap, so each channel is
+  // averaged with the same channel from the mirrored pass.
   if (CHIRALITY) {
     var mirroredInput = inputVec;
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
@@ -723,14 +682,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mirrored = evalPolicy(mirroredInput);
 
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-      let front = result.envWrite[0u * CHANNELS + c];
-      let left = result.envWrite[1u * CHANNELS + c];
-      let back = result.envWrite[2u * CHANNELS + c];
-      let right = result.envWrite[3u * CHANNELS + c];
-      result.envWrite[0u * CHANNELS + c] = (front + mirrored.envWrite[0u * CHANNELS + c]) * 0.5;
-      result.envWrite[2u * CHANNELS + c] = (back + mirrored.envWrite[2u * CHANNELS + c]) * 0.5;
-      result.envWrite[1u * CHANNELS + c] = (left + mirrored.envWrite[3u * CHANNELS + c]) * 0.5;
-      result.envWrite[3u * CHANNELS + c] = (right + mirrored.envWrite[1u * CHANNELS + c]) * 0.5;
+      result.envWrite[c] = (result.envWrite[c] + mirrored.envWrite[c]) * 0.5;
     }
     result.angularAccel = (result.angularAccel - mirrored.angularAccel) * 0.5;
     result.strafeLocal = vec2<f32>(
@@ -739,27 +691,10 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
   }
 
-  // Deposit into SPOTS=4 independent spots around the agent — front
-  // (heading direction, s=0), left (+90° from heading, s=1), back
-  // (+180°, s=2), right (+270°/-90°, s=3), each `physics.depositDistance`
-  // field-pixels out. +90° per step in a standard (cos,sin) frame is a
-  // CCW rotation, which is the same direction the sensed gradient's own
-  // lateral component already treats as "left" (inputVec's own
-  // `-gx*sinH+gy*cosH` above is exactly a +90° rotation of the forward
-  // vector) — so this ordering is what makes the CHIRALITY swap above
-  // (spots 1 and 3) correct. depositDistance=0 collapses every spot back
-  // onto the agent's own position. Each spot gets its own bounded
-  // Gaussian splat (depositGaussian(), sigma = physics.depositSigma) —
-  // see that function's own comment for why this replaced the old
-  // 4-corner bilinear scatter, and for the mass-vs-spread tradeoff that
-  // comes with it — since a spot can land in a different field cell than
-  // the agent itself, or than another spot.
-  for (var s: u32 = 0u; s < SPOTS; s = s + 1u) {
-    let angle = headingVal + f32(s) * HALF_PI;
-    let dir = vec2<f32>(cos(angle), sin(angle));
-    let spotPos = fieldPos + dir * physics.depositDistance;
-    depositGaussian(result.envWrite, s, spotPos);
-  }
+  // Deposit one bounded Gaussian directly under the particle. Heading
+  // still affects sensing and growth direction, but no longer moves or
+  // multiplies chemical write locations.
+  depositGaussian(result.envWrite, fieldPos);
 
   let angularAccel = result.angularAccel;
   let strafeLocal = result.strafeLocal;

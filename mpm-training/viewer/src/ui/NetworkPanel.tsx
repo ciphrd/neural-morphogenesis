@@ -18,8 +18,6 @@ interface NetworkPanelProps {
   physics: PhysicsSettings | null
 }
 
-const SPOT_LABELS = ["Front", "Left", "Back", "Right"]
-
 // How many of the sensed channels get their own manual 2D vector pad —
 // capped at 3 purely for sidebar space (each one is a whole square plus
 // a value slider); the remaining channels' own value/gradient, and the
@@ -141,7 +139,7 @@ const VECTOR_PAD_SIZE_PX = 56
  * edge.
  *
  * `heatmap`, when given, paints a coolwarm background UNDER the axes/
- * dot — see buildLeftChannelHeatmap()'s own comment for exactly what
+ * dot — see buildChannelHeatmaps()'s own comment for exactly what
  * it's a sweep of. Deliberately optional (rather than always required)
  * so this component stays reusable as a plain vector picker with no
  * output context at all. */
@@ -255,27 +253,16 @@ function buildInputVector(
   return input
 }
 
-// Which spot's own env-write gets swept into each pad's own background
-// heatmap — see buildLeftChannelHeatmaps()'s own comment. "Left" purely
-// as a single, fixed, representative slice (out of env-write's full
-// spot×channel space) simple enough to paint into a 56px square at a
-// glance — not the only output that channel's gradient drives, just
-// the one picked to illustrate it.
-const LEFT_SPOT_INDEX = SPOT_LABELS.indexOf("Left")
-
 /** For each manually-controlled channel, sweeps THAT channel's own
  * (dx, dy) across the full pad range [-domain, domain]² — holding
  * every other input (that channel's own "value" slider, every OTHER
  * channel's value/dx/dy, position) fixed at whatever `manual` currently
- * has — and records the Left spot's own env-write for that SAME
+ * has — and records the under-particle env-write for that SAME
  * channel at each grid cell. Gives each pad a rough, at-a-glance
- * "what does dragging me actually do" picture — deliberately a single
- * fixed slice of the full output space (one spot, this channel only),
- * not a complete sensitivity map: "doesn't give all insights, but is a
- * simple way to get an understanding." One evalPolicy() call per grid
+ * "what does dragging me actually do" picture. One evalPolicy() call per grid
  * cell per channel (VECTOR_PAD_HEATMAP_RESOLUTION² × manualChannelCount
  * total), cheap enough to just redo on every drag/slider tick. */
-function buildLeftChannelHeatmaps(
+function buildChannelHeatmaps(
   weights: UpdateRuleWeights,
   channels: number,
   hiddenDim: number,
@@ -299,7 +286,7 @@ function buildLeftChannelHeatmaps(
         input[channels + c] = dx
         input[2 * channels + c] = dy
         const result = evalPolicy(input, weights, channels, hiddenDim, maxEnvWrite, maxAngularAccel, maxStrafe)
-        grid[gy * res + gx] = result.envWrite[LEFT_SPOT_INDEX * channels + c]
+        grid[gy * res + gx] = result.envWrite[c]
       }
     }
     return grid
@@ -310,8 +297,8 @@ function buildLeftChannelHeatmaps(
  * particle probe: the first MANUAL_CHANNELS sensed channels are each
  * dialed in by hand here (a square pad for that channel's own local-
  * frame gradient, plus a slider for its own raw sensed value), every
- * other input stays at zero, and the whole output (env-write per spot/
- * channel + turn/strafe) is evalPolicy()'s (gpu/policyEval.ts,
+ * other input stays at zero, and the whole output (one under-particle
+ * env-write per channel + turn/strafe) is evalPolicy()'s (gpu/policyEval.ts,
  * mirroring core/agents.wgsl) own response to THAT exact vector,
  * recomputed live on every pad drag/slider tick — cheap enough (one
  * forward pass, no sweep) to do inline via useMemo, no probe timer
@@ -356,9 +343,9 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
 
   const manualChannelCount = Math.min(MANUAL_CHANNELS, channels)
 
-  const leftHeatmaps = useMemo(() => {
+  const channelHeatmaps = useMemo(() => {
     if (!config?.weights || manualChannelCount < 1 || hiddenDim < 1) return null
-    return buildLeftChannelHeatmaps(
+    return buildChannelHeatmaps(
       config.weights,
       channels,
       hiddenDim,
@@ -405,7 +392,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
                 x={manual[c].dx}
                 y={manual[c].dy}
                 domain={DOMAIN}
-                heatmap={leftHeatmaps?.[c]}
+                heatmap={channelHeatmaps?.[c]}
                 heatmapDomain={maxEnvWrite}
                 onChange={(dx, dy) => updateChannel(c, { dx, dy })}
               />
@@ -445,19 +432,17 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
         <>
           <div className="nn-block">
             <h3>Output — env write</h3>
-            {SPOT_LABELS.map((label, s) => (
-              <div key={label} className="nn-group">
-                <span className="nn-group-label">{label} deposit</span>
-                {Array.from({ length: channels }, (_, c) => (
-                  <ActivationBar
-                    key={c}
-                    label={`ch${c}`}
-                    value={output.envWrite[s * channels + c]}
-                    domain={maxEnvWrite}
-                  />
-                ))}
-              </div>
-            ))}
+            <div className="nn-group">
+              <span className="nn-group-label">Under-particle deposit</span>
+              {Array.from({ length: channels }, (_, c) => (
+                <ActivationBar
+                  key={c}
+                  label={`ch${c}`}
+                  value={output.envWrite[c]}
+                  domain={maxEnvWrite}
+                />
+              ))}
+            </div>
           </div>
 
           <div className="nn-block">

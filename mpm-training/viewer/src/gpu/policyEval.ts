@@ -8,22 +8,15 @@
 // This does NOT replace the real GPU forward pass agentStep() runs
 // during an actual rollout, and deliberately excludes CHIRALITY's own
 // mirror-averaging (see agents.wgsl's own module docstring for what
-// that does): with every gradient input pinned at zero (see
-// NetworkPanel.tsx's own buildResponseSurface()), a mirrored pass would
-// see byte-for-byte the SAME input as the primary one (mirroring only
-// ever negates the lateral-gradient block, already zero), so
-// CHIRALITY's own averaging would silently overwrite the genuinely
-// asymmetric left/right response this tool exists to show with
-// (left+right)/2 for both, and zero out angularAccel/strafe.y outright
-// — a real, deliberate behavior of the live sim's own symmetry
-// enforcement, not something a "what does this weight matrix actually
-// compute" introspection tool should reproduce.
+// that does). This inspector deliberately shows the raw weight matrix's
+// response to the manually supplied vector; live simulation additionally
+// enforces chirality by evaluating the mirrored lateral gradient and
+// combining the two responses.
 
 import type { UpdateRuleWeights } from "./types";
 
 export interface PolicyOutput {
-  /** channels*4, spot-major (front,left,back,right) — see agents.wgsl's
-   * own PolicyOutput.envWrite. */
+  /** One under-particle chemical write per channel. */
   envWrite: Float32Array;
   angularAccel: number;
   strafe: [number, number];
@@ -37,7 +30,7 @@ function safeTanh(x: number): number {
   return Math.tanh(Math.max(-20, Math.min(20, x)));
 }
 
-/** One Dense(hiddenDim) -> sin -> Dense(channels*4+5) forward pass,
+/** One Dense(hiddenDim) -> sin -> Dense(channels+5) forward pass,
  * squashed exactly like agents.wgsl's own evalPolicy() — see that
  * function's own comment for the exact math this mirrors, and this
  * file's own module docstring for why CHIRALITY's mirror-averaging is
@@ -61,7 +54,7 @@ export function evalPolicy(
     hidden[j] = Math.sin(acc);
   }
 
-  const outDim = channels * 4 + 5;
+  const outDim = channels + 5;
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -70,7 +63,7 @@ export function evalPolicy(
     outVec[j] = acc;
   }
 
-  const envWriteDim = channels * 4;
+  const envWriteDim = channels;
   const envWrite = new Float32Array(envWriteDim);
   for (let k = 0; k < envWriteDim; k++) envWrite[k] = safeTanh(outVec[k]) * maxEnvWrite;
   // envWriteDim+1/+2 are the network's own unused "accel" output — see

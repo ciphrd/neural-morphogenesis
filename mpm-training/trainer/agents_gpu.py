@@ -117,12 +117,9 @@ def weight_layout(channels: int, hidden_dim: int) -> dict[str, int]:
     # constant's own comment) — hardcoded rather than imported, same
     # convention out_dim's own "+5" below already follows.
     in_dim = channels * 3 + 2
-    # 4 == core/agents.wgsl's own SPOTS / simulation_settings.py's own
-    # DEPOSIT_SPOTS (env_write, one per channel per deposit spot) + 5 ==
-    # ANGULAR_DIM(1) + ACCEL_DIM(2) + STRAFE_DIM(2) — hardcoded rather
-    # than imported, matching how the "+5" tail was already hardcoded
-    # here before DEPOSIT_SPOTS existed.
-    out_dim = channels * 4 + 5
+    # One under-particle env_write per channel + ANGULAR_DIM(1) +
+    # ACCEL_DIM(2) + STRAFE_DIM(2).
+    out_dim = channels + 5
     fc1w_offset = 0
     fc1b_offset = fc1w_offset + hidden_dim * in_dim
     fc2w_offset = fc1b_offset + hidden_dim

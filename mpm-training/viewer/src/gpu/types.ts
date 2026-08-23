@@ -1,8 +1,8 @@
 export interface UpdateRuleWeights {
   fc1w: number[][]; // (HIDDEN_DIM, 3*channels+2) — +2 for the agent's own spawn-center-relative (x,y) position, see agents.wgsl's own IN_DIM
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // (channels*4+5, HIDDEN_DIM) — *4 for the 4 deposit spots, see agents.wgsl's own SPOTS
-  fc2b: number[]; // (channels*4+5,)
+  fc2w: number[][]; // (channels+5, HIDDEN_DIM) — one deposit per channel plus turn/accel/growth direction
+  fc2b: number[]; // (channels+5,)
 }
 
 // Mirrors train_server.py's own GET /settings response, field for field
@@ -44,7 +44,7 @@ export interface RunSettings {
   // right before they're folded into the field (core/environment.wgsl's
   // own EnvPhysics/mergeDeposit — see that file's own comment for why
   // this is a different knob from maxEnvWrite below, which caps each
-  // agent's own per-deposit-spot magnitude before scatter rather than
+  // agent's own per-channel write magnitude before scatter rather than
   // scaling the whole step's already-accumulated total).
   depositRate: number;
   maxAccel: number;
@@ -53,9 +53,9 @@ export interface RunSettings {
   maxAngularAccel: number;
   angularDamping: number;
   maxAngularVelocity: number;
+  /** Legacy broadcast field; under-particle deposition ignores it. */
   depositDistance: number;
-  // Gaussian splat radius (sigma), field-pixel units — same convention
-  // depositDistance above already uses — core/agents.wgsl's own
+  // Gaussian splat radius (sigma), field-pixel units — core/agents.wgsl's own
   // depositGaussian() reads this (AgentPhysics uniform), replacing that
   // shader's old flat 4-corner bilinear deposit scatter. Live-tunable,
   // added specifically for testing this splat's own shape/spread via

@@ -51,8 +51,10 @@ MAX_ANGULAR_VELOCITY = 0.1
 
 # Deposit
 DEPOSIT_RATE = 1.0
-DEPOSIT_SPOTS = 4
-DEPOSIT_DISTANCE = 2.0
+# Retained in settings/checkpoint metadata and the AgentPhysics wire layout
+# for compatibility. Chemical writes are now always centered under the
+# particle, so this value is intentionally unused.
+DEPOSIT_DISTANCE = 0.0
 DEPOSIT_SIGMA = 0.4
 MAX_ENV_WRITE = 1.0
 

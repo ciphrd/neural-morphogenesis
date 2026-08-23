@@ -3,8 +3,8 @@
 This project evolves particle-based organisms toward arbitrary target shapes.
 Particles are simulated as an elastic material with MLS-MPM, carry a small
 neural policy, sense the values and gradients of multiple chemical substrate
-channels, and write back into those channels at four heading-relative
-locations: front, left, back, and right.
+channels, and write back into those channels directly under their current
+positions.
 
 Growth uses a conservative morphoelastic **grow-then-divide** model. It does
 not insert overlapping particles and rely on repulsion to create space.
@@ -38,6 +38,12 @@ controls growth indirectly by writing the growth substrate, reacting to all
 substrate values and gradients, changing its heading, and selecting a growth
 direction.
 
+The current eight-channel policy has 13 outputs: eight chemical writes, one
+turning output, two retained but unused acceleration outputs, and two growth-
+direction outputs. Checkpoints from the previous four-direction deposit model
+had 37 outputs and are not shape-compatible; training must be restarted for
+this architecture.
+
 ## One macro step
 
 In simplified pseudocode:
@@ -55,7 +61,7 @@ for each active particle:
 
     outputs = neural_policy(inputs)
 
-    deposit chemical outputs at front, left, back, and right
+    deposit one chemical output per channel under the particle
     update heading from the turning output
 
     local_growth_direction = tanh(former_strafe_x, former_strafe_y)
