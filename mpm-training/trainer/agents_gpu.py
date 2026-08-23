@@ -111,12 +111,9 @@ def _spawn_uniform01_batch(seed: int, indices: np.ndarray) -> np.ndarray:
 
 
 def weight_layout(channels: int, hidden_dim: int) -> dict[str, int]:
-    # +2 == core/agents.wgsl's own IN_DIM (value+grad_forward+grad_lateral
-    # per channel, +2 for the agent's own spawn-center-relative (x,y)
-    # position, appended after the per-channel triples — see that
-    # constant's own comment) — hardcoded rather than imported, same
-    # convention out_dim's own "+5" below already follows.
-    in_dim = channels * 3 + 2
+    # core/agents.wgsl's own IN_DIM: value + heading-forward gradient +
+    # lateral gradient per channel, with no positional inputs.
+    in_dim = channels * 3
     # One under-particle env_write per channel + ANGULAR_DIM(1) +
     # ACCEL_DIM(2) + STRAFE_DIM(2).
     out_dim = channels + 5
@@ -165,6 +162,10 @@ class AgentsGPU:
         self.channels = channels
         self.hidden_dim = hidden_dim
         self._max_active_particles = max_active_particles
+        # Public rollout geometry setting: TrainingRollout uses the same
+        # displacement configured on this agent instance for its coordinated
+        # two-particle seed, keeping diagnostic/replay overrides consistent.
+        self.split_displacement = float(split_displacement)
 
         layout = weight_layout(channels, hidden_dim)
         self._total_floats = layout["total_floats"]
@@ -371,17 +372,12 @@ class AgentsGPU:
         )
 
     def set_spawn_center(self, spawn_x: float, spawn_y: float) -> None:
-        """Writes AgentPhysics.spawnX/spawnY — offset 48 (bytes), the last
-        2 of the struct's own 14 f32 fields, past everything set_physics()
-        above writes. A separate setter (not folded into set_physics())
-        since spawn center is fixed for a whole rollout, not something
-        PhysicsPanel-style live tuning ever touches — call once per
-        rollout (training_sim.py's own TrainingRollout.__init__), not on
-        every physics-slider tick the way set_physics() is. See
-        core/agents.wgsl's own AgentPhysics.spawnX/spawnY field comment
-        for what this drives (the NN's own position input, agentStep()'s
-        own inputVec population — relative to spawn center, not the
-        domain's own fixed (0.5,0.5))."""
+        """Writes the legacy AgentPhysics spawn slots at byte offset 48.
+
+        Spawn coordinates still configure rollout initialization, but the
+        policy no longer reads them. The slots remain to preserve the uniform
+        ABI while old and new frontend/backend processes overlap.
+        """
         self.device.queue.write_buffer(self._physics_uniform, 48, np.array([spawn_x, spawn_y], dtype=np.float32))
 
     def set_max_active_particles(self, max_active_particles: int) -> None:

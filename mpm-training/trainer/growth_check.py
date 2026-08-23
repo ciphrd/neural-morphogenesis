@@ -19,9 +19,11 @@ def _rest_state(
     cycle: np.ndarray,
     growth_f: np.ndarray | None = None,
     growth_direction: np.ndarray | None = None,
+    anisotropy: np.ndarray | None = None,
+    division_bias: np.ndarray | None = None,
 ) -> np.ndarray:
     count = len(jp)
-    out = np.zeros((count, 8), dtype=np.float32)
+    out = np.zeros((count, 12), dtype=np.float32)
     if growth_f is None:
         root = np.sqrt(np.asarray(growth, dtype=np.float32))
         out[:, 0] = root
@@ -32,6 +34,10 @@ def _rest_state(
     out[:, 5] = cycle
     if growth_direction is not None:
         out[:, 6:8] = np.asarray(growth_direction, dtype=np.float32)
+    if anisotropy is not None:
+        out[:, 8] = np.asarray(anisotropy, dtype=np.float32)
+    if division_bias is not None:
+        out[:, 9] = np.asarray(division_bias, dtype=np.float32)
     return out
 
 
@@ -39,7 +45,7 @@ def _probe(core: MpmCore, count: int) -> np.ndarray:
     """Returns [Je, g, cycleActive] without adding COPY_SRC to hot buffers."""
     shader = core.device.create_shader_module(
         code="""
-        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthDirection: vec2<f32>, }
+        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthDirection: vec2<f32>, growthControls: vec2<f32>, }
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> rest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
@@ -266,7 +272,7 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
     print("[PASS] conservative_split count=2 sum_g=2 Fe=identity center_and_apic_preserved")
 
 
-def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float) -> np.ndarray:
+def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float, polarity_bias: float = 20.0) -> np.ndarray:
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
     agents = AgentsGPU(
@@ -295,6 +301,7 @@ def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float) -> np.ndar
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     # Former local-forward strafe output. +/-20 saturates tanh at +/-1,
     # making the expected fully-polarized geometry exact enough to test.
+    weights[layout["fc2b_offset"] + 8 + 2] = polarity_bias
     weights[layout["fc2b_offset"] + 8 + 3] = signed_bias
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
@@ -310,10 +317,12 @@ def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float) -> np.ndar
 def check_polarized_division_uses_signed_growth_direction(device: wgpu.GPUDevice) -> None:
     positive = _polarized_split_case(device, 20.0)
     negative = _polarized_split_case(device, -20.0)
+    unbiased = _polarized_split_case(device, 20.0, -20.0)
     expected_positive = np.array([[0.5, 0.5], [0.51, 0.5]], dtype=np.float32)
     expected_negative = np.array([[0.5, 0.5], [0.49, 0.5]], dtype=np.float32)
     assert np.allclose(positive, expected_positive, atol=2e-6), positive
     assert np.allclose(negative, expected_negative, atol=2e-6), negative
+    assert np.allclose(unbiased, [[0.495, 0.5], [0.505, 0.5]], atol=2e-6), unbiased
     assert positive[:, 0].mean() > 0.5 and negative[:, 0].mean() < 0.5
     print("[PASS] signed growth direction places child and shifts division center toward +n")
 
@@ -387,11 +396,25 @@ def check_isotropic_increment_preserves_tensor_shape(device: wgpu.GPUDevice) -> 
     print("[PASS] isotropic tensor increment grows det(Fg) without changing anisotropic shape")
 
 
-def _directional_increment_case(device: wgpu.GPUDevice, rotation_angle: float) -> tuple[np.ndarray, float]:
+def _directional_increment_case(
+    device: wgpu.GPUDevice,
+    rotation_angle: float,
+    anisotropy: float = 1.0,
+    global_anisotropy: float = 1.0,
+) -> tuple[np.ndarray, float]:
     core = MpmCore(device)
     core.set_gravity(0.0)
     core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(0.0, 0.2, 3.0, 1.0, growth_rate=50.0, growth_max=2.0, growth_threshold=0.0)
+    core.set_material(
+        0.0,
+        0.2,
+        3.0,
+        1.0,
+        growth_rate=50.0,
+        growth_max=2.0,
+        growth_threshold=0.0,
+        growth_anisotropy=global_anisotropy,
+    )
     c, s = np.cos(rotation_angle), np.sin(rotation_angle)
     rotation = np.array([[c, -s], [s, c]], dtype=np.float32)
     world_direction = rotation @ np.array([1.0, 0.0], dtype=np.float32)
@@ -405,7 +428,10 @@ def _directional_increment_case(device: wgpu.GPUDevice, rotation_angle: float) -
     device.queue.write_buffer(
         core.rest,
         0,
-        _rest_state(np.ones(1), np.ones(1), np.ones(1), growth_direction=world_direction[None]),
+        _rest_state(
+            np.ones(1), np.ones(1), np.ones(1),
+            growth_direction=world_direction[None], anisotropy=np.array([anisotropy]),
+        ),
     )
     core.step(1)
     return core.read_rest_state()[0, :4].reshape(2, 2), float(np.exp(50.0 * DT))
@@ -414,13 +440,49 @@ def _directional_increment_case(device: wgpu.GPUDevice, rotation_angle: float) -
 def check_directional_increment_and_objectivity(device: wgpu.GPUDevice) -> None:
     fg_axis, expected_area = _directional_increment_case(device, 0.0)
     fg_rotated, _ = _directional_increment_case(device, 0.83)
+    fg_isotropic_with_axis, _ = _directional_increment_case(device, 0.0, anisotropy=0.0)
+    fg_globally_isotropic, _ = _directional_increment_case(device, 0.0, global_anisotropy=0.0)
     # Full-strength direction puts the complete area increment along n;
     # the perpendicular rest stretch stays one. Pulling a rotated world
     # direction back through Re must produce the same intermediate Fg.
     assert np.isclose(np.linalg.det(fg_axis), expected_area, rtol=2e-5)
     assert np.allclose(fg_axis, np.diag([expected_area, 1.0]), atol=3e-6), fg_axis
     assert np.allclose(fg_rotated, fg_axis, atol=3e-6), (fg_axis, fg_rotated)
-    print("[PASS] directional increment preserves det growth and is rotation-objective")
+    assert np.allclose(fg_isotropic_with_axis, np.eye(2) * np.sqrt(expected_area), atol=3e-6), fg_isotropic_with_axis
+    assert np.allclose(fg_globally_isotropic, np.eye(2) * np.sqrt(expected_area), atol=3e-6), fg_globally_isotropic
+    print("[PASS] directional increment is objective and the global anisotropy multiplier can force isotropic growth")
+
+
+def _duration_growth_case(device: wgpu.GPUDevice, substeps: int) -> float:
+    core = MpmCore(device)
+    core.set_gravity(0.0)
+    core.set_repulsion_strength(0.0, 40.0)
+    core.set_material(
+        0.0,
+        0.2,
+        3.0,
+        1.0,
+        growth_duration_macro_steps=20.0,
+        substeps_per_macro=substeps,
+        growth_threshold=0.0,
+    )
+    core.load_scene(
+        np.array([[0.5, 0.5]], dtype=np.float32),
+        np.zeros((1, 2), dtype=np.float32),
+        np.eye(2, dtype=np.float32).reshape(1, 4),
+        np.zeros((1, 4), dtype=np.float32),
+        np.ones(1, dtype=np.float32),
+    )
+    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
+    core.step(substeps)
+    return float(np.linalg.det(core.read_rest_state()[0, :4].reshape(2, 2)))
+
+
+def check_growth_duration_is_substep_invariant(device: wgpu.GPUDevice) -> None:
+    values = np.array([_duration_growth_case(device, s) for s in (1, 16, 64)])
+    expected = 2.0 ** (1.0 / 20.0)
+    assert np.allclose(values, expected, rtol=2e-5, atol=2e-6), (values, expected)
+    print("[PASS] one controller tick advances the same growth at 1/16/64 physics substeps")
 
 
 def check_strafe_signal_drives_growth_not_motion(device: wgpu.GPUDevice) -> None:
@@ -445,6 +507,8 @@ def check_strafe_signal_drives_growth_not_motion(device: wgpu.GPUDevice) -> None
     agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
+    weights[layout["fc2b_offset"] + 8 + 1] = 2.0
+    weights[layout["fc2b_offset"] + 8 + 2] = -2.0
     weights[layout["fc2b_offset"] + 8 + 3] = 1.0
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
@@ -452,9 +516,11 @@ def check_strafe_signal_drives_growth_not_motion(device: wgpu.GPUDevice) -> None
     agents.encode_step(encoder, environment.parity)
     device.queue.submit([encoder.finish()])
     direction = core.read_rest_state()[0, 6:8]
+    controls = core.read_rest_state()[0, 8:10]
     assert np.allclose(core.read_velocities(), initial_velocity, atol=1e-7)
-    assert np.allclose(direction, [np.tanh(1.0), 0.0], atol=2e-6), direction
-    print("[PASS] former strafe output writes growth direction while maxStrafe=0 leaves velocity unchanged")
+    assert np.allclose(direction, [1.0, 0.0], atol=2e-6), direction
+    assert np.allclose(controls, [1 / (1 + np.exp(-2)), 1 / (1 + np.exp(2))], atol=2e-6), controls
+    print("[PASS] direction is normalized and sigmoid anisotropy/division controls are independent")
 
 
 def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
@@ -601,6 +667,7 @@ def main() -> None:
     check_anisotropic_tensor_split(device)
     check_isotropic_increment_preserves_tensor_shape(device)
     check_directional_increment_and_objectivity(device)
+    check_growth_duration_is_substep_invariant(device)
     check_strafe_signal_drives_growth_not_motion(device)
     check_p2g_fixed_point_headroom(device)
     check_high_strain_elastic_stability(device)

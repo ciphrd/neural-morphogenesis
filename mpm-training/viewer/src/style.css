@@ -86,6 +86,18 @@ body {
   cursor: pointer;
 }
 
+.number-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  background: #1a1a1a;
+  color: #e8e8e8;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
 .snapshot-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

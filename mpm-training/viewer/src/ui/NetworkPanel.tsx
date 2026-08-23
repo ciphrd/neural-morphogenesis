@@ -12,17 +12,16 @@ interface NetworkPanelProps {
    * the first generation loads. */
   config: SimulationConfig | null
   /** maxEnvWrite/maxAngularAccel give their output bars' true domains.
-   * The former strafe pair is now an unscaled [-1,1] growth-direction
-   * and division-polarity signal; maxStrafe only controls its optional
-   * physical acceleration. */
+   * Growth direction is normalized; anisotropy and division bias are
+   * independent [0,1] outputs. maxStrafe only controls the direction's
+   * optional physical acceleration. */
   physics: PhysicsSettings | null
 }
 
 // How many of the sensed channels get their own manual 2D vector pad —
 // capped at 3 purely for sidebar space (each one is a whole square plus
-// a value slider); the remaining channels' own value/gradient, and the
-// agent's own spawn-relative position, stay pinned at zero in the input
-// vector this panel builds (see buildInputVector()'s own comment).
+// a value slider); the remaining channels' values/gradients stay pinned
+// at zero in the input vector this panel builds.
 const MANUAL_CHANNELS = 3
 
 // Sweep/pad range for both the vector pads' own dx/dy axes and each
@@ -234,17 +233,15 @@ interface ManualChannelInput {
 const ZERO_CHANNEL: ManualChannelInput = { value: 0, dx: 0, dy: 0 }
 
 /** Builds the full IN_DIM input vector evalPolicy() expects
- * ([value×channels, gradForward×channels, gradLateral×channels, dx, dy]
- * — see agents.wgsl's own IN_DIM) from this panel's own manual per-
- * channel state: the first MANUAL_CHANNELS channels get their own
- * dialed-in value/dx/dy, every other channel (and the agent's own
- * spawn-relative position, appended after the per-channel triples)
- * stays pinned at exactly zero. */
+ * ([value×channels, gradForward×channels, gradLateral×channels] — see
+ * agents.wgsl's own IN_DIM) from this panel's manual per-channel state.
+ * The first MANUAL_CHANNELS channels get their own dialed-in value/dx/dy;
+ * every other channel stays pinned at exactly zero. */
 function buildInputVector(
   channels: number,
   manual: ManualChannelInput[]
 ): Float32Array {
-  const input = new Float32Array(channels * 3 + 2)
+  const input = new Float32Array(channels * 3)
   for (let c = 0; c < Math.min(MANUAL_CHANNELS, channels); c++) {
     input[c] = manual[c].value
     input[channels + c] = manual[c].dx
@@ -255,8 +252,8 @@ function buildInputVector(
 
 /** For each manually-controlled channel, sweeps THAT channel's own
  * (dx, dy) across the full pad range [-domain, domain]² — holding
- * every other input (that channel's own "value" slider, every OTHER
- * channel's value/dx/dy, position) fixed at whatever `manual` currently
+ * every other input (that channel's own "value" slider and every OTHER
+ * channel's value/dx/dy) fixed at whatever `manual` currently
  * has — and records the under-particle env-write for that SAME
  * channel at each grid cell. Gives each pad a rough, at-a-glance
  * "what does dragging me actually do" picture. One evalPolicy() call per grid
@@ -298,7 +295,7 @@ function buildChannelHeatmaps(
  * dialed in by hand here (a square pad for that channel's own local-
  * frame gradient, plus a slider for its own raw sensed value), every
  * other input stays at zero, and the whole output (one under-particle
- * env-write per channel + turn/strafe) is evalPolicy()'s (gpu/policyEval.ts,
+ * env-write per channel + turn/growth controls) is evalPolicy()'s (gpu/policyEval.ts,
  * mirroring core/agents.wgsl) own response to THAT exact vector,
  * recomputed live on every pad drag/slider tick — cheap enough (one
  * forward pass, no sweep) to do inline via useMemo, no probe timer
@@ -381,7 +378,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       <div className="nn-block">
         <h3>Input</h3>
         <p className="hint">
-          Background: this channel's own Left-deposit output, swept across the pad (its own value + every other
+          Background: this channel's own under-particle deposit output, swept across the pad (its own value + every other
           channel held as set). One slice, not the full picture.
         </p>
         {Array.from({ length: manualChannelCount }, (_, c) => (
@@ -455,12 +452,22 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
               />
               <ActivationBar
                 label="direction x"
-                value={output.strafe[0]}
+                value={output.direction[0]}
                 domain={1}
               />
               <ActivationBar
                 label="direction y"
-                value={output.strafe[1]}
+                value={output.direction[1]}
+                domain={1}
+              />
+              <ActivationBar
+                label="anisotropy"
+                value={output.anisotropy}
+                domain={1}
+              />
+              <ActivationBar
+                label="division bias"
+                value={output.divisionBias}
                 domain={1}
               />
             </div>

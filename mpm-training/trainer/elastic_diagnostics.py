@@ -37,6 +37,8 @@ class ElasticParticleState:
     growth_principal_stretch_min: np.ndarray
     growth_deviatoric_log_strain: np.ndarray
     growth_direction: np.ndarray
+    growth_anisotropy: np.ndarray
+    division_bias: np.ndarray
     plastic_jacobian: np.ndarray
     cycle_active: np.ndarray
 
@@ -67,8 +69,8 @@ def particle_elastic_state(
         f = f.reshape(-1, 2, 2)
     if f.ndim != 3 or f.shape[1:] != (2, 2):
         raise ValueError(f"deformation must have shape (n,4) or (n,2,2), got {f.shape}")
-    if rest.ndim != 2 or rest.shape != (f.shape[0], 8):
-        raise ValueError(f"rest_state must have shape ({f.shape[0]},8), got {rest.shape}")
+    if rest.ndim != 2 or rest.shape != (f.shape[0], 12):
+        raise ValueError(f"rest_state must have shape ({f.shape[0]},12), got {rest.shape}")
     if not np.isfinite(f).all() or not np.isfinite(rest).all():
         raise ValueError("deformation and rest_state must be finite")
 
@@ -118,6 +120,8 @@ def particle_elastic_state(
         growth_principal_stretch_min=growth_s_min,
         growth_deviatoric_log_strain=growth_dev_log,
         growth_direction=rest[:, 6:8],
+        growth_anisotropy=rest[:, 8],
+        division_bias=rest[:, 9],
         plastic_jacobian=jp,
         cycle_active=rest[:, 5],
     )
@@ -173,6 +177,8 @@ def summarize_elastic_state(
         "growth_principal_stretch_min": state.growth_principal_stretch_min,
         "growth_deviatoric_log_strain": state.growth_deviatoric_log_strain,
         "growth_direction_magnitude": np.linalg.norm(state.growth_direction, axis=1),
+        "growth_anisotropy": state.growth_anisotropy,
+        "division_bias": state.division_bias,
         "plastic_jacobian": state.plastic_jacobian,
     }
     kinetic_energy: float | None = None

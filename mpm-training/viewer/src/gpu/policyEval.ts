@@ -19,7 +19,9 @@ export interface PolicyOutput {
   /** One under-particle chemical write per channel. */
   envWrite: Float32Array;
   angularAccel: number;
-  strafe: [number, number];
+  anisotropy: number;
+  divisionBias: number;
+  direction: [number, number];
 }
 
 // Same overflow guard as agents.wgsl's own safeTanh() — naive tanh via
@@ -30,13 +32,17 @@ function safeTanh(x: number): number {
   return Math.tanh(Math.max(-20, Math.min(20, x)));
 }
 
+function safeSigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
+}
+
 /** One Dense(hiddenDim) -> sin -> Dense(channels+5) forward pass,
  * squashed exactly like agents.wgsl's own evalPolicy() — see that
  * function's own comment for the exact math this mirrors, and this
  * file's own module docstring for why CHIRALITY's mirror-averaging is
- * NOT applied here. `input` must be exactly channels*3+2 long
- * ([value×channels, gradForward×channels, gradLateral×channels, dx,
- * dy] — see agents.wgsl's own IN_DIM). */
+ * NOT applied here. `input` must be exactly channels*3 long
+ * ([value×channels, gradForward×channels, gradLateral×channels] — see
+ * agents.wgsl's own IN_DIM). */
 export function evalPolicy(
   input: Float32Array,
   weights: UpdateRuleWeights,
@@ -66,12 +72,16 @@ export function evalPolicy(
   const envWriteDim = channels;
   const envWrite = new Float32Array(envWriteDim);
   for (let k = 0; k < envWriteDim; k++) envWrite[k] = safeTanh(outVec[k]) * maxEnvWrite;
-  // envWriteDim+1/+2 are the network's own unused "accel" output — see
-  // agents.wgsl's own PolicyOutput comment, intentionally skipped here too.
   const angularAccel = safeTanh(outVec[envWriteDim]) * maxAngularAccel;
-  const strafe: [number, number] = [
-    safeTanh(outVec[envWriteDim + 3]),
-    safeTanh(outVec[envWriteDim + 4]),
-  ];
-  return { envWrite, angularAccel, strafe };
+  // The two former acceleration outputs are independent bounded growth
+  // controls; the former strafe pair supplies direction only.
+  const anisotropy = safeSigmoid(outVec[envWriteDim + 1]);
+  const divisionBias = safeSigmoid(outVec[envWriteDim + 2]);
+  const rawX = safeTanh(outVec[envWriteDim + 3]);
+  const rawY = safeTanh(outVec[envWriteDim + 4]);
+  const magnitude = Math.hypot(rawX, rawY);
+  const direction: [number, number] = magnitude > 1e-6
+    ? [rawX / magnitude, rawY / magnitude]
+    : [0, 0];
+  return { envWrite, angularAccel, anisotropy, divisionBias, direction };
 }

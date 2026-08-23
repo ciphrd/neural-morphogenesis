@@ -1,7 +1,7 @@
 export interface UpdateRuleWeights {
-  fc1w: number[][]; // (HIDDEN_DIM, 3*channels+2) — +2 for the agent's own spawn-center-relative (x,y) position, see agents.wgsl's own IN_DIM
+  fc1w: number[][]; // (HIDDEN_DIM, 3*channels) — value + forward/lateral gradient per channel
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // (channels+5, HIDDEN_DIM) — one deposit per channel plus turn/accel/growth direction
+  fc2w: number[][]; // (channels+5, HIDDEN_DIM) — deposits + turn + anisotropy/polarity + direction
   fc2b: number[]; // (channels+5,)
 }
 
@@ -24,7 +24,7 @@ export interface RunSettings {
   // The growth CAP, not a fixed starting count — every rollout currently
   // starts with two particles (see gpu/simulation.ts's own
   // restartRollout()) and grows via splitting from there. This is the
-  // trained/default ceiling; the viewer may apply a lower playback-only
+  // trained/default ceiling; the viewer may apply a different playback-only
   // cap through AgentPhysics.maxActiveParticles without changing it.
   particles: number;
   macroSteps: number;
@@ -72,8 +72,11 @@ export interface RunSettings {
   // Kinematic growth (the multiplicative decomposition F = Fe*Fg) — see
   // core/g2p.wgsl's own Material struct for what each of these does, and
   // core/agents.wgsl's own ParticleRest.growthF for what they accumulate
-  // into. growthRate 0 disables growth entirely.
-  growthRate: number;
+  // into. Duration is measured in neural/chemical controller ticks and is
+  // independent of substepsPerMacro. 0 disables growth.
+  growthDuration?: number;
+  /** Legacy run field, converted to a duration when growthDuration is absent. */
+  growthRate?: number;
   growthMax: number;
   growthThreshold: number;
   // Debug/testing toggle — off skips MpmCore's own physics substeps
@@ -184,9 +187,12 @@ export interface PhysicsSettings {
   divisionCooldown: number;
   friction: number;
   massRampMacroSteps: number;
-  growthRate: number;
+  growthDuration: number;
   growthMax: number;
   growthThreshold: number;
+  // Playback-only global multiplier on the neural per-particle anisotropy.
+  // 0 forces isotropic Fg increments; 1 preserves the policy output.
+  growthAnisotropy: number;
   splatRadius: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;
@@ -194,6 +200,9 @@ export interface PhysicsSettings {
 }
 
 export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSettings {
+  const legacyDuration = (config.growthRate ?? 0) > 0
+    ? Math.log(2) / ((config.growthRate ?? 0) * coreConstants.DT * Math.max(config.substepsPerMacro, 1))
+    : 0;
   return {
     gravity: config.gravity,
     damping: config.damping,
@@ -231,9 +240,10 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     // same reasoning depositRate's/depositSigma's own fallbacks above
     // give.
     massRampMacroSteps: config.massRampMacroSteps ?? 20.0,
-    growthRate: config.growthRate ?? 0.0,
+    growthDuration: config.growthDuration ?? legacyDuration,
     growthMax: config.growthMax ?? 2.0,
     growthThreshold: config.growthThreshold ?? 0.0,
+    growthAnisotropy: 1.0,
     splatRadius: config.splatRadius,
     repulsionStrength: config.repulsionStrength,
     // Falls back to 40.0 (trainer/simulation_settings.py's own
@@ -259,3 +269,4 @@ export interface SceneData {
   C: Float32Array; // (count,4), zero
   Jp: Float32Array; // (count,), ones
 }
+import coreConstants from "../../../core/constants.json";

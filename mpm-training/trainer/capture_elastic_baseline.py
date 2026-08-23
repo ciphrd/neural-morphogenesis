@@ -2,9 +2,8 @@
 
 The base scenario is policy-independent: zero network weights and a saturated
 growth-chemical channel force every eligible particle into a cell cycle. The
-``--directional`` changes only the former strafe bias, producing a constant
-local-forward tensor-growth axis and signed division polarity for an isolated
-comparison.
+``--directional`` selects a constant local-forward axis and saturates the
+independent anisotropy and division-bias controls for comparison.
 
 Run from trainer/:
     .venv/bin/python capture_elastic_baseline.py
@@ -28,7 +27,6 @@ from simulation_settings import (
     ANGULAR_DAMPING,
     CHEM_CHANNELS,
     CHIRALITY,
-    DECAY,
     DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
     DEPOSIT_SIGMA,
@@ -37,7 +35,6 @@ from simulation_settings import (
     FIELD_N,
     FRICTION,
     GROWTH_MAX,
-    GROWTH_RATE,
     GROWTH_THRESHOLD,
     HIDDEN_DIM,
     MATERIAL_E,
@@ -50,9 +47,7 @@ from simulation_settings import (
     MAX_ENV_WRITE,
     MAX_STRAFE,
     REPULSION_MAX_DELTA,
-    REPULSION_STRENGTH,
     SPLAT_RADIUS,
-    SPLIT_DISPLACEMENT,
 )
 from training_sim import TrainingRollout
 
@@ -65,6 +60,13 @@ SUBSTEPS = 16
 GROWTH_STEPS = 32
 TOTAL_STEPS = 80
 CHECKPOINTS = {0, 8, 16, 24, 32, 40, 48, 64, 80}
+# Preserve the original diagnostic trajectory exactly. Production growth now
+# uses a controller-tick duration; this historical scalar/tensor comparison
+# deliberately retains its old low-level rate.
+BASELINE_GROWTH_RATE = 50.0
+BASELINE_DECAY = 0.91
+BASELINE_SPLIT_DISPLACEMENT = 0.01
+BASELINE_REPULSION_STRENGTH = 0.2
 
 
 def _sha256(path: Path) -> str:
@@ -87,7 +89,7 @@ def _build_agents(device, core: MpmCore, environment: EnvironmentGPU) -> AgentsG
         CHIRALITY,
         DEPOSIT_DISTANCE,
         MAX_ACTIVE,
-        SPLIT_DISPLACEMENT,
+        BASELINE_SPLIT_DISPLACEMENT,
         DIVISION_COOLDOWN,
         FRICTION,
         DEPOSIT_SIGMA,
@@ -129,20 +131,27 @@ def main() -> None:
     output_path = DIRECTIONAL_OUTPUT if args.directional else ISOTROPIC_OUTPUT
     device = pick_device()
     core = MpmCore(device)
-    environment = EnvironmentGPU(device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE)
+    environment = EnvironmentGPU(device, CHEM_CHANNELS, FIELD_N, FIELD_N, BASELINE_DECAY, DEPOSIT_RATE)
     agents = _build_agents(device, core, environment)
     weights = np.zeros(agents._total_floats, dtype=np.float32)
     if args.directional:
         layout = weight_layout(CHEM_CHANNELS, HIDDEN_DIM)
-        # Constant local-forward signal tanh(1). CHIRALITY preserves the
-        # forward component, then agentStep rotates it by each heading.
-        weights[layout["fc2b_offset"] + CHEM_CHANNELS * 4 + 3] = 1.0
+        # Saturated anisotropy/polarity plus a constant local-forward axis.
+        weights[layout["fc2b_offset"] + CHEM_CHANNELS + 1] = 20.0
+        weights[layout["fc2b_offset"] + CHEM_CHANNELS + 2] = 20.0
+        weights[layout["fc2b_offset"] + CHEM_CHANNELS + 3] = 1.0
     agents.load_weights(weights)
 
-    core.set_material(MATERIAL_E, MATERIAL_NU, MATERIAL_HARDENING, MATERIAL_ELASTICITY)
+    core.set_material(
+        MATERIAL_E,
+        MATERIAL_NU,
+        MATERIAL_HARDENING,
+        MATERIAL_ELASTICITY,
+        growth_rate=BASELINE_GROWTH_RATE,
+    )
     core.set_damping(DAMPING_LOSS_FRACTION, SUBSTEPS)
     core.set_splat_radius(SPLAT_RADIUS)
-    core.set_repulsion_strength(REPULSION_STRENGTH, REPULSION_MAX_DELTA)
+    core.set_repulsion_strength(BASELINE_REPULSION_STRENGTH, REPULSION_MAX_DELTA)
     sim = TrainingRollout(
         core,
         agents,
@@ -215,9 +224,9 @@ def main() -> None:
             "initial_particles": 2,
             "max_active_particles": MAX_ACTIVE,
             "growth_field": "last substrate channel refilled uniformly to 1 during growth phase",
-            "policy_weights": "zero except local-forward strafe bias=1" if args.directional else "all zero",
+            "policy_weights": "anisotropy/polarity logits=20, local-forward direction bias=1" if args.directional else "all zero",
             "growth_direction": (
-                "former strafe output, local-forward tanh(1); controls Fg anisotropy and +n division bias"
+                "normalized local-forward axis with sigmoid anisotropy=1 and division bias=1"
                 if args.directional
                 else "zero vector"
             ),
@@ -234,14 +243,14 @@ def main() -> None:
                 "elasticity": MATERIAL_ELASTICITY,
             },
             "growth": {
-                "rate": GROWTH_RATE,
+                "legacy_internal_rate": BASELINE_GROWTH_RATE,
                 "division_area_ratio": GROWTH_MAX,
                 "compression_reference": GROWTH_THRESHOLD,
-                "split_displacement": SPLIT_DISPLACEMENT,
+                "split_displacement": BASELINE_SPLIT_DISPLACEMENT,
                 "division_cooldown": DIVISION_COOLDOWN,
             },
             "repulsion": {
-                "strength": REPULSION_STRENGTH,
+                "strength": BASELINE_REPULSION_STRENGTH,
                 "max_delta": REPULSION_MAX_DELTA,
                 "splat_radius": SPLAT_RADIUS,
             },

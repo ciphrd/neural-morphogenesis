@@ -77,12 +77,9 @@ export interface AgentsConfig {
 }
 
 function weightLayout(channels: number, hiddenDim: number) {
-  // +2 == core/agents.wgsl's own IN_DIM (value+grad_forward+grad_lateral
-  // per channel, +2 for the agent's own spawn-center-relative (x,y)
-  // position, appended after the per-channel triples — see that
-  // constant's own comment) — hardcoded rather than imported, same
-  // convention outDim's own "+5" below already follows.
-  const inDim = channels * 3 + 2;
+  // core/agents.wgsl's IN_DIM: value + heading-forward gradient + lateral
+  // gradient per channel, with no positional inputs.
+  const inDim = channels * 3;
   // One under-particle env_write per channel + ANGULAR_DIM(1) +
   // ACCEL_DIM(2) + STRAFE_DIM(2).
   const outDim = channels + 5;
@@ -354,16 +351,10 @@ export class Agents {
     );
   }
 
-  /** Writes AgentPhysics.spawnX/spawnY — offset 48 (bytes), the last 2 of
-   * the struct's own 14 f32 fields, past everything setPhysics() above
-   * writes. A separate setter (not folded into setPhysics()) since spawn
-   * center is fixed for a whole rollout, not something PhysicsPanel-style
-   * live tuning ever touches — call once per rollout (simulation.ts's own
-   * restartRollout()), not on every physics-slider tick the way
-   * setPhysics() is. See core/agents.wgsl's own AgentPhysics.spawnX/
-   * spawnY field comment for what this drives (the NN's own position
-   * input, agentStep()'s own inputVec population — relative to spawn
-   * center, not the domain's own fixed (0.5,0.5)). */
+  /** Writes the legacy AgentPhysics spawn slots at byte offset 48.
+   * Rollout initialization still uses spawn coordinates, but the policy no
+   * longer reads them; the slots remain to avoid an unrelated uniform ABI
+   * change while backend/frontend processes overlap. */
   setSpawnCenter(spawnX: number, spawnY: number): void {
     writeFloat32(this.device, this.physicsUniform, 48, new Float32Array([spawnX, spawnY]));
   }

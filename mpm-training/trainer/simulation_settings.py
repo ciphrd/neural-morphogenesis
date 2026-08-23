@@ -36,7 +36,7 @@ STRAFE_DIM = 2
 
 # --- Chemical field (environment_gpu.py / core/environment.wgsl) ---
 FIELD_N = 256
-DECAY = 0.91
+DECAY = 0.5
 
 # Motion
 MAX_ACCEL = 0.0 # 0.1 # not used rn
@@ -67,7 +67,7 @@ MATERIAL_HARDENING = 3.0
 MATERIAL_ELASTICITY = 0.2
 
 # Growth
-SPLIT_DISPLACEMENT = 0.01
+SPLIT_DISPLACEMENT = 0.0027
 DIVISION_COOLDOWN = 1.0
 # Retained in broadcasts for compatibility with older viewers. The
 # conservative grow-then-divide model no longer fades mass in after a
@@ -83,10 +83,13 @@ MASS_RAMP_MACRO_STEPS = 1.0
 # equivalence; a nonzero direction produces anisotropic rest growth. See
 # core/g2p.wgsl and core/agents.wgsl's ParticleRest.growthF comment.
 #
-# Exponential stress-free area growth rate while a substrate-triggered
-# cell cycle is active. Growth is imposed first; elastic relaxation then
-# expands the compatible body. 0 disables growth.
-GROWTH_RATE = 50.0
+# Approximate number of neural sense/act/chemical-field updates an
+# uncompressed particle receives between entering a cell cycle and doubling
+# its stress-free area. The host derives the shader's per-physics-substep
+# exponential rate from this and the run's actual substeps-per-macro, so
+# increasing substeps for numerical stability no longer accelerates growth
+# relative to communication and control. 0 disables growth.
+GROWTH_DURATION_MACRO_STEPS = 48.0
 # Division area ratio. 2 makes one g=2 parent exactly equivalent in mass
 # and rest area to two g=1 daughters.
 GROWTH_MAX = 2.0
@@ -94,6 +97,10 @@ GROWTH_MAX = 2.0
 # elastic volume Je, growth is slowed by Je/reference; it is never
 # switched off at a threshold. 0 disables inhibition.
 GROWTH_THRESHOLD = 0.85
+
+# CLI default shared with MpmCore's construction-time material initialization.
+# Individual runs still override it through --substeps-per-macro.
+DEFAULT_SUBSTEPS_PER_MACRO = 16
 
 # Simulation. This is stronger than the previous 0.999 per-substep
 # retention so kinetic energy from completed divisions decays instead of
@@ -103,7 +110,7 @@ DAMPING_LOSS_FRACTION = 1 - 0.995**SUBSTEPS_PER_DAMPING_FRAME
 
 # Repulsion
 SPLAT_RADIUS = 0.004
-REPULSION_STRENGTH = 0.2
+REPULSION_STRENGTH = 0.0
 # Hard cap on the MAGNITUDE of one physics substep's own repulsion
 # velocity delta — see core/repulsion.wgsl's own RepulsionParams.maxDelta
 # field comment for the full reasoning (an unclamped delta at the

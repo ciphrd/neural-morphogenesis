@@ -105,7 +105,9 @@ from raster import build_target_distance_field, build_target_raster
 from simulation_settings import (
     CHEM_CHANNELS,
     DAMPING_LOSS_FRACTION,
+    DEFAULT_SUBSTEPS_PER_MACRO,
     FIELD_N,
+    GROWTH_DURATION_MACRO_STEPS,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
@@ -242,7 +244,14 @@ def rollout(
     path, which only ever wants the scalar fitness."""
     agents.load_weights(weights)
 
-    core.set_material(MATERIAL_E, MATERIAL_NU, MATERIAL_HARDENING, MATERIAL_ELASTICITY)
+    core.set_material(
+        MATERIAL_E,
+        MATERIAL_NU,
+        MATERIAL_HARDENING,
+        MATERIAL_ELASTICITY,
+        growth_duration_macro_steps=GROWTH_DURATION_MACRO_STEPS,
+        substeps_per_macro=args.substeps_per_macro,
+    )
     core.set_damping(DAMPING_LOSS_FRACTION, args.substeps_per_macro)
     core.set_splat_radius(SPLAT_RADIUS)
     core.set_repulsion_strength(REPULSION_STRENGTH, REPULSION_MAX_DELTA)
@@ -357,7 +366,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--substeps-per-macro",
         type=int,
-        default=16,
+        default=DEFAULT_SUBSTEPS_PER_MACRO,
         help="MLS-MPM physics substeps run between each NN intervention (mpm_core.MpmCore.step's own substep unit)",
     )
     parser.add_argument("--gravity", type=float, default=200.0)
@@ -472,6 +481,7 @@ def main() -> None:
                         "macro_steps": args.macro_steps,
                         "growth_steps": args.growth_steps,
                         "substeps_per_macro": args.substeps_per_macro,
+                        "growth_duration_macro_steps": GROWTH_DURATION_MACRO_STEPS,
                         "gravity": args.gravity,
                         "spawn_x": args.spawn_x,
                         "spawn_y": args.spawn_y,

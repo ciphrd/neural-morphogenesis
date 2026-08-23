@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthRate" | "growthThreshold"
+  "growthDuration" | "growthThreshold" | "growthAnisotropy"
 >
 
 interface GrowthSliderSpec {
@@ -37,13 +37,13 @@ interface GrowthSliderSpec {
 // run happened to be trained with.
 const SPECS: GrowthSliderSpec[] = [
   {
-    key: "growthRate",
-    label: "Growth rate",
-    hint: "How fast an active cell cycle adds stress-free area. 0 = growth off.",
+    key: "growthDuration",
+    label: "Growth duration",
+    hint: "Approximate neural/chemical updates required to double stress-free area. Larger values give agents more time to coordinate. 0 = growth off.",
     min: 0,
-    max: 200,
-    step: 0.5,
-    format: (v) => v.toFixed(1),
+    max: 160,
+    step: 1,
+    format: (v) => `${v.toFixed(0)} ticks`,
   },
   {
     key: "growthThreshold",
@@ -53,6 +53,15 @@ const SPECS: GrowthSliderSpec[] = [
     max: 1,
     step: 0.001,
     format: (v) => v.toFixed(3),
+  },
+  {
+    key: "growthAnisotropy",
+    label: "Anisotropy",
+    hint: "Global multiplier on the neural anisotropy output. 0 forces isotropic blob growth; 1 leaves the learned directional growth unchanged.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => v.toFixed(2),
   },
 ]
 
@@ -64,8 +73,9 @@ const SPECS: GrowthSliderSpec[] = [
  *
  * Split into its own section rather than appended to PhysicsPanel's own
  * flat list because these four behave as a group and are tuned together:
- * growthRate/growthThreshold control the substrate-driven
- * cell cycle and its optional continuous mechanical feedback. Same
+ * growthDuration/growthThreshold control the substrate-driven cell cycle and
+ * its optional continuous mechanical feedback; growthAnisotropy scales the
+ * policy's per-particle anisotropy without replacing its spatial variation. Same
  * live-uniform-write path as every
  * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
  * any of these never disturbs the rollout in flight and never affects

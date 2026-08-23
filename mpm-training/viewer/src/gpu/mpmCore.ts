@@ -69,9 +69,9 @@ const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
 const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
-// growthF(row-major 2x2), jp, cycleActive, growthDirection(2) — shared
-// 32-byte ParticleRest layout in ../../../core/agents.wgsl.
-const REST_FIELDS = 8;
+// growthF(4), jp, cycleActive, growthDirection(2), growthControls(2),
+// then two alignment-padding floats — shared 48-byte ParticleRest layout.
+const REST_FIELDS = 12;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own
  * tensor-rest layout, defaulting growthF=I and cycleActive=0.
@@ -199,10 +199,9 @@ export class MpmCore {
     this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
 
     this.gravityUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    // 32 bytes — mu0/lambda0/hardening/yieldLow/yieldHigh + the three
-    // growth params, matching ../../../core/p2g.wgsl's and g2p.wgsl's own
-    // identical Material struct declarations exactly.
-    this.materialUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // 48 bytes — nine material/growth floats plus uniform-struct padding,
+    // matching ../../../core/p2g.wgsl's and g2p.wgsl's identical Material.
+    this.materialUniform = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.activeCountUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.dampingUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -397,7 +396,7 @@ export class MpmCore {
     writeFloat32(this.device, this.velocities, i * 2 * 4, new Float32Array([0, 0]));
     writeFloat32(this.device, this.F, i * 4 * 4, new Float32Array([1, 0, 0, 1]));
     writeFloat32(this.device, this.C, i * 4 * 4, new Float32Array([0, 0, 0, 0]));
-    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 0, 0, 1, 1, 0, 0, 0]));
+    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0]));
     this.setActiveCount(this._activeCount + 1);
     return true;
   }
@@ -410,7 +409,7 @@ export class MpmCore {
     writeFloat32(this.device, this.dampingUniform, 0, new Float32Array([perSubstepDamping(lossFraction, substeps)]));
   }
 
-  /** The three growth params drive ../../../core/g2p.wgsl's own growth
+  /** The growth params drive ../../../core/g2p.wgsl's own growth
    * relaxation (the multiplicative F = Fe*Fg decomposition) — see that
    * file's own Material struct for what each does. */
   setMaterial(
@@ -418,17 +417,29 @@ export class MpmCore {
     nu: number,
     hardening: number,
     elasticity: number,
-    growthRate: number,
+    growthDuration: number,
     growthMax: number,
-    growthThreshold: number
+    growthThreshold: number,
+    growthAnisotropy: number,
+    substepsPerMacro: number
   ): void {
     const [mu0, lambda0] = lameParams(e, nu);
     const [yieldLow, yieldHigh] = yieldBounds(elasticity);
+    // The shader integrates exponential growth once per physics substep.
+    // Deriving its low-level rate here makes one doubling consume the same
+    // number of neural/chemical ticks at every numerical substep count.
+    const growthRate = growthDuration > 0
+      ? Math.log(2) / (growthDuration * Math.max(substepsPerMacro, 1) * DT)
+      : 0;
     writeFloat32(
       this.device,
       this.materialUniform,
       0,
-      new Float32Array([mu0, lambda0, hardening, yieldLow, yieldHigh, growthRate, growthMax, growthThreshold])
+      new Float32Array([
+        mu0, lambda0, hardening, yieldLow,
+        yieldHigh, growthRate, growthMax, growthThreshold,
+        growthAnisotropy, 0, 0, 0,
+      ])
     );
   }
 

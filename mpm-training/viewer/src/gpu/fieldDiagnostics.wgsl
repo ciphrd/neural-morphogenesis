@@ -70,6 +70,7 @@ struct ParticleRest {
   jp: f32,
   cycleActive: f32,
   growthDirection: vec2<f32>,
+  growthControls: vec2<f32>,
 }
 @group(0) @binding(2) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(3) var<storage, read_write> diagnostics: array<atomic<i32>>;

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { FitnessChart } from "./charts/FitnessChart"
+import { MAX_PARTICLES } from "./gpu/mpmCore"
 import type { FieldMode, ParticleRenderMode } from "./gpu/render"
 import type { PhysicsSettings } from "./gpu/types"
 import { physicsSettingsFromConfig } from "./gpu/types"
@@ -114,6 +115,8 @@ export function TrainingView() {
     useState<ParticleRenderMode>("dots-white")
   const [particleRadiusPx, setParticleRadiusPx] = useState(4)
   const [frontendParticleCap, setFrontendParticleCap] = useState(2)
+  const [frontendParticleCapInput, setFrontendParticleCapInput] = useState("2")
+  const particleCapRunRef = useRef<string | null>(null)
   const [targetVisible, setTargetVisible] = useState(true)
   const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(1)
   const [activationAlpha, setActivationAlpha] = useState(0.2)
@@ -153,11 +156,16 @@ export function TrainingView() {
     setCellCount(0)
   }, [activeConfig?.generation])
   useEffect(() => {
-    if (activeConfig) setFrontendParticleCap(activeConfig.particles)
-  }, [viewingRunId, activeConfig?.generation])
-  // null = following this generation's own trained gravity/decay/
-  // maxAccel/maxStrafe/maxEnvWrite; non-null once the "Physics" panel's
-  // sliders have been touched. Reset whenever the run or the generation
+    if (!activeConfig) return
+    const runKey = viewingRunId ?? "current"
+    if (particleCapRunRef.current === runKey) return
+    particleCapRunRef.current = runKey
+    setFrontendParticleCap(activeConfig.particles)
+    setFrontendParticleCapInput(String(activeConfig.particles))
+  }, [viewingRunId, activeConfig?.particles])
+  // null = following this generation's own trained physics/growth values;
+  // non-null once either live-control panel's sliders have been touched.
+  // Reset whenever the run or the generation
   // being viewed changes — an override dialed in for one generation's
   // behavior means nothing once a different one is loaded.
   const [physicsOverride, setPhysicsOverride] =
@@ -291,14 +299,30 @@ export function TrainingView() {
           </label>
           <label className="slider-row">
             <span>Playback particle cap</span>
-            <Slider
+            <input
+              className="number-input"
+              type="number"
               min={2}
-              max={activeConfig?.particles ?? 2}
+              max={MAX_PARTICLES}
               step={1}
-              value={frontendParticleCap}
-              onChange={setFrontendParticleCap}
+              value={frontendParticleCapInput}
+              onChange={(e) => {
+                setFrontendParticleCapInput(e.currentTarget.value)
+                const value = e.currentTarget.valueAsNumber
+                if (Number.isFinite(value) && value >= 2 && value <= MAX_PARTICLES) {
+                  setFrontendParticleCap(Math.floor(value))
+                }
+              }}
+              onBlur={(e) => {
+                const value = e.currentTarget.valueAsNumber
+                const cap = Math.min(
+                  MAX_PARTICLES,
+                  Math.max(2, Number.isFinite(value) ? Math.floor(value) : frontendParticleCap)
+                )
+                setFrontendParticleCapInput(String(cap))
+                setFrontendParticleCap(cap)
+              }}
             />
-            <span className="slider-value">{frontendParticleCap}</span>
           </label>
           <label className="slider-row">
             <span>Particles</span>

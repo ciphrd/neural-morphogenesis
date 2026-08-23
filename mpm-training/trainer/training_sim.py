@@ -52,14 +52,13 @@ self.heading/self.angular_velocity numpy arrays, computing the rotation
 in torch every macro step; there's nothing left for this module to do
 there now).
 
-The two former strafe channels now drive tensor growth direction and signed
-division polarity. The
-agent shader rotates their bounded local vector into world space and
-stores it with the particle's growth state; g2p.wgsl uses its magnitude
-as anisotropy strength. A zero vector gives exactly isotropic growth.
-MAX_STRAFE independently controls whether the same signal also acts as
-physical acceleration and is zero by default. The network's separate
-`accel` output remains a real channel but stays intentionally unused.
+The two former strafe channels now drive a normalized tensor-growth direction.
+The agent shader rotates that local axis into world space and stores it with
+two independent sigmoid controls: the former acceleration outputs now select
+anisotropy and signed division-placement bias. A zero direction gives exactly
+isotropic growth and symmetric random-axis division regardless of those
+controls. MAX_STRAFE independently controls whether the same direction also
+acts as physical acceleration and is zero by default.
 
 Growth: every rollout currently starts with a coordinated two-particle
 seed — core/agents.wgsl's own agentStep() may spawn
@@ -95,7 +94,6 @@ import numpy as np
 from agents_gpu import AgentsGPU, _spawn_uniform01
 from environment_gpu import EnvironmentGPU
 from mpm_core import MpmCore
-from simulation_settings import SPLIT_DISPLACEMENT
 
 
 def seed_blob(count: int, center: tuple[float, float], half_width: float, seed: int) -> tuple[np.ndarray, ...]:
@@ -168,12 +166,12 @@ class TrainingRollout:
         core.set_gravity(gravity)
         # Every rollout — same "run-constant in practice today, but a
         # rollout-scoped setter regardless" reasoning set_gravity() above
-        # already follows. See AgentsGPU.set_spawn_center()'s own
-        # docstring for what this drives (the NN's own position input).
+        # already follows. The Agents uniform retains legacy spawn slots for
+        # wire compatibility, although position is no longer a policy input.
         agents.set_spawn_center(*spawn_center)
         # HARDCODED experiment: start with 2 particles, back to back,
         # instead of the usual single starting particle — particle 1 is
-        # placed SPLIT_DISPLACEMENT behind particle 0 along a shared
+        # placed agents.split_displacement behind particle 0 along a shared
         # random axis (same displacement/direction convention growth's
         # own split uses, agents.wgsl's own agentStep() `behindDir`), but
         # with its heading FLIPPED (theta + pi) rather than copied, so
@@ -187,7 +185,7 @@ class TrainingRollout:
         # ../viewer/src/gpu/simulation.ts's own theta draw.
         theta = _spawn_uniform01(seed, 4) * (2.0 * np.pi) - np.pi
         behind_dir = np.array([-np.cos(theta), -np.sin(theta)], dtype=np.float32)
-        positions[1] = (positions[0] + behind_dir * SPLIT_DISPLACEMENT) % 1.0
+        positions[1] = (positions[0] + behind_dir * agents.split_displacement) % 1.0
         core.load_scene(positions, velocities, F, C, Jp)
         # Every slot beyond these 2 starting particles is destined to
         # become a real particle via growth, at some unknown point in

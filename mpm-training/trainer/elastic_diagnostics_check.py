@@ -42,7 +42,7 @@ def check_analytic_invariants() -> None:
     known_fe = np.array([[1.08, 0.04], [-0.03, 0.94]])
     deformation.append(known_fe @ anisotropic_fg)
     deformation = np.stack(deformation)
-    rest = np.zeros((6, 8))
+    rest = np.zeros((6, 12))
     rest[:, 0] = 1.0
     rest[:, 3] = 1.0
     rest[:, 4] = 1.0
@@ -96,7 +96,7 @@ def _gpu_constitutive_probe(
         const MU0: f32 = {mu0};
         const LAMBDA0: f32 = {lambda0};
         const HARDENING: f32 = {HARDENING};
-        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthDirection: vec2<f32>, }}
+        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthDirection: vec2<f32>, growthControls: vec2<f32>, }}
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> particleRest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> output: array<vec4<f32>>;
@@ -179,7 +179,7 @@ def check_gpu_consistency(device: wgpu.GPUDevice) -> None:
         fe = left @ np.diag(stretches[i]) @ right
         deformation[i] = fe * np.sqrt(growth[i])
     deformation32 = deformation.astype(np.float32).reshape(-1, 4)
-    rest32 = np.zeros((count, 8), dtype=np.float32)
+    rest32 = np.zeros((count, 12), dtype=np.float32)
     root_growth = np.sqrt(growth).astype(np.float32)
     rest32[:, 0] = root_growth
     rest32[:, 3] = root_growth
@@ -216,7 +216,7 @@ def check_core_readback(device: wgpu.GPUDevice) -> None:
         np.zeros((3, 4), dtype=np.float32),
         np.ones(3, dtype=np.float32),
     )
-    rest = np.zeros((3, 8), dtype=np.float32)
+    rest = np.zeros((3, 12), dtype=np.float32)
     root_growth = np.sqrt(growth)
     rest[:, 0] = root_growth
     rest[:, 3] = root_growth

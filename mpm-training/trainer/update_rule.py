@@ -28,24 +28,18 @@ pipelines now).
 
 - Input: value (C) + grad_forward (C) + grad_lateral (C) — the
   *rotated*, local-frame gradient the caller (core/agents.wgsl, or this
-  method's own torch equivalent if called directly) computes, 3*C total —
-  plus the agent's own (x,y) domain position (2), RELATIVE TO THE
-  ROLLOUT'S OWN SPAWN CENTER (not rotated into local frame — there's no
-  meaningful "local-frame position" the way a gradient has one), for
-  3*C+2 total. This module itself is frame-agnostic (it just concatenates
-  whatever it's given) — the rotation (and spawn-center subtraction) is
-  entirely the caller's job.
+  method's own torch equivalent if called directly) computes, for 3*C total.
+  There is no absolute or spawn-relative position input. This module itself
+  is frame-agnostic; the gradient rotation is entirely the caller's job.
 - Output: env_write (C) — one independent deposit value per channel,
-  written directly under the particle — plus angular_accel
-  (1), accel (2), and strafe (2), all raw/local-frame. angular_accel
+  written directly under the particle — plus angular_accel (1),
+  anisotropy/polarity logits (2), and direction (2), all raw/local-frame. angular_accel
   nudges the particle's own persistent angular velocity (which in turn
   nudges its persistent heading — see core/agents.wgsl's own module
   docstring for why heading is no longer derived from velocity); the two
-  former strafe channels now encode a local growth direction. The shader
-  rotates it to world space for tensor growth and signed division polarity, independently of
-  MAX_STRAFE. MAX_STRAFE optionally applies the same signal as physical
-  acceleration and is zero by default. accel is a separate output
-  channel, retained but currently unused. C=8
+  former strafe channels now encode a normalized local growth direction.
+  The two former acceleration channels independently control tensor
+  anisotropy and signed division bias through sigmoid. C=8
   (simulation_settings.CHEM_CHANNELS) and
   the output width is exactly 13: 8 + 1 + 2 + 2.
 """
@@ -55,15 +49,6 @@ import torch
 import torch.nn as nn
 
 from simulation_settings import ACCEL_DIM, ANGULAR_DIM, CHEM_CHANNELS, HIDDEN_DIM, STRAFE_DIM
-
-# The agent's own (x,y) spawn-center-relative position, appended after
-# the per-channel value/grad_forward/grad_lateral triples — see this
-# module's own module docstring and core/agents.wgsl's own IN_DIM
-# comment. Hardcoded rather than added to simulation_settings.py, same
-# convention ANGULAR_DIM/ACCEL_DIM/STRAFE_DIM already follow (fixed
-# architecture constants, not CLI-configurable).
-POSITION_DIM = 2
-
 
 class Sin(nn.Module):
     """torch has no built-in sin activation module (unlike Tanh/ReLU) —
@@ -78,7 +63,7 @@ class UpdateRule(nn.Module):
     def __init__(self, num_channels: int = CHEM_CHANNELS) -> None:
         super().__init__()
         self.num_channels = num_channels
-        input_dim = 3 * num_channels + POSITION_DIM
+        input_dim = 3 * num_channels
         output_dim = num_channels + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM
         # sin hidden activation, not ReLU or tanh: this net is evolved
         # (mutation + selection), never backprop-trained, so ReLU's usual
@@ -105,36 +90,31 @@ class UpdateRule(nn.Module):
         )
 
     def forward(
-        self, value: torch.Tensor, grad_forward: torch.Tensor, grad_lateral: torch.Tensor, position: torch.Tensor
+        self, value: torch.Tensor, grad_forward: torch.Tensor, grad_lateral: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """value/grad_forward/grad_lateral are (N, C); position is (N, 2)
-        — the agent's own (x,y), already spawn-center-relative and NOT
-        rotated into local frame (see this module's own module docstring
-        for why position has no local-frame rotation the way a gradient
-        does). The local-frame rotation of grad_forward/grad_lateral, and
-        the spawn-center subtraction for position, are both the caller's
-        job (training_sim.py/core/agents.wgsl) — this method is frame-
-        agnostic, it just concatenates whatever it's given. Returns
-        (env_write, angular_accel, accel, strafe), all raw/un-squashed
+        """value/grad_forward/grad_lateral are all (N, C). The local-frame
+        rotation of the gradients is the caller's job
+        (training_sim.py/core/agents.wgsl); this method is frame-agnostic and
+        simply concatenates the three channel blocks. Returns
+        (env_write, angular_accel, growth_controls, direction), all raw/un-squashed
         and still in LOCAL frame — squashing (tanh + the MAX_ANGULAR_ACCEL/
-        MAX_ACCEL/MAX_ENV_WRITE scale; strafe uses tanh without the
-        MAX_STRAFE scale for growth), and rotating accel/
-        strafe to world frame are all training_sim.py's/core/agents.wgsl's
+        MAX_ACCEL/MAX_ENV_WRITE scale; controls use sigmoid and direction
+        uses normalized tanh outputs), and rotating direction to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
         not spatial deposit geometry), same division of responsibility
         envnca's own UpdateRule/Simulation split. angular_accel needs no
         rotation either way — it nudges the particle's own angular
         velocity directly, there's no "world frame" for a scalar turn
         rate to be rotated into."""
-        x = torch.cat([value, grad_forward, grad_lateral, position], dim=-1)
+        x = torch.cat([value, grad_forward, grad_lateral], dim=-1)
         out = self.net(x)
         c = self.num_channels
         d = c
         env_write = out[:, :d]  # (N, C), deposited under the particle
         angular_accel = out[:, d : d + ANGULAR_DIM]
-        accel = out[:, d + ANGULAR_DIM : d + ANGULAR_DIM + ACCEL_DIM]
-        strafe = out[:, d + ANGULAR_DIM + ACCEL_DIM : d + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM]
-        return env_write, angular_accel, accel, strafe
+        growth_controls = out[:, d + ANGULAR_DIM : d + ANGULAR_DIM + ACCEL_DIM]
+        direction = out[:, d + ANGULAR_DIM + ACCEL_DIM : d + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM]
+        return env_write, angular_accel, growth_controls, direction
 
     def export_weights(self) -> dict:
         """JSON-ready weights for a from-scratch forward-pass
@@ -146,7 +126,7 @@ class UpdateRule(nn.Module):
         documents."""
         fc1, fc2 = self.net[0], self.net[2]
         return {
-            "fc1w": fc1.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels+POSITION_DIM)
+            "fc1w": fc1.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels)
             "fc1b": fc1.bias.detach().cpu().tolist(),  # (HIDDEN_DIM,)
             "fc2w": fc2.weight.detach().cpu().tolist(),  # (num_channels+5, HIDDEN_DIM)
             "fc2b": fc2.bias.detach().cpu().tolist(),  # (num_channels+5,)

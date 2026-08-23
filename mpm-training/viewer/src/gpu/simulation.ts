@@ -22,8 +22,9 @@
 //   2. agents.encodeStep()            — NN forward pass: reads that same
 //      grid + gradient, writes one under-particle env_write per channel
 //      into the deposit scratch and the
-//      former strafe pair into ParticleRest.growthDirection (optionally
-//      also physical acceleration through maxStrafe) —
+//      normalized former-strafe pair into ParticleRest.growthDirection and
+//      sigmoid anisotropy/division-bias controls into growthControls
+//      (optionally also physical acceleration through maxStrafe) —
 //      may also grow activeCount (agents.wgsl's own agentStep()).
 //   3. environment.encodeMergeAndDecay() — folds the deposit into the
 //      current grid, blurs+decays into the other buffer, flips parity.
@@ -50,7 +51,7 @@ import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
 import { Renderer, type FieldMode, type ParticleRenderMode } from "./render";
 import { seedBlob, spawnUniform01 } from "./rng";
-import type { PhysicsSettings, SimulationConfig } from "./types";
+import { physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig } from "./types";
 
 export class GpuSimulation {
   private readonly device: GPUDevice;
@@ -188,7 +189,7 @@ export class GpuSimulation {
     } else {
       this.agents!.loadWeights(config.weights);
       this.config = config;
-      this.applyPhysics(config);
+      this.applyPhysics(physicsSettingsFromConfig(config));
     }
     this.restartRollout();
   }
@@ -264,7 +265,7 @@ export class GpuSimulation {
     this.interact = interact;
     this.deform = deform;
     this.config = config;
-    this.applyPhysics(config);
+    this.applyPhysics(physicsSettingsFromConfig(config));
   }
 
   /** Re-seeds particles from the current config's spawn params + winner
@@ -313,8 +314,8 @@ export class GpuSimulation {
     // Every rollout — same "run-constant in practice today, but a
     // rollout-scoped setter regardless" convention this method's own
     // seedBlob()/setActiveCount() calls already follow. See
-    // Agents.setSpawnCenter()'s own docstring for what this drives (the
-    // NN's own position input).
+    // The Agents uniform retains legacy spawn slots for wire compatibility,
+    // although position is no longer a policy input.
     this.agents.setSpawnCenter(this.config.spawnX, this.config.spawnY);
     this.agents.setMaxActiveParticles(this.particleCap);
     this.agents.setActiveCount(2);
@@ -337,9 +338,9 @@ export class GpuSimulation {
    * rebuild, just uniform writes — every field here has a live setter on
    * MpmCore/Environment/Agents, so this is safe to call on every
    * PhysicsPanel slider tick without disturbing the rollout in flight.
-   * `physics` only needs to structurally match PhysicsSettings — a full
-   * SimulationConfig (e.g. from rebuild()/loadGeneration()) works too,
-   * extra fields simply ignored. damping's own substep count comes from
+   * Run configs are normalized through physicsSettingsFromConfig() before
+   * reaching this method, including legacy growth-rate conversion. Damping's
+   * own substep count comes from
    * `this.config` (not `physics`), matching evolve.py's own rollout()
    * (which converts a run's damping loss-fraction using its own
    * --substeps-per-macro, not a fixed constant) — this.config must
@@ -352,12 +353,13 @@ export class GpuSimulation {
       physics.materialNu,
       physics.materialHardening,
       physics.materialElasticity,
-      // ?? guards a raw SimulationConfig from a train_server.py still
-      // running pre-growth code, same convention every other knob here
-      // already follows. 0 rate = growth disabled.
-      physics.growthRate ?? 0.0,
+      // Controller ticks per uncompressed area doubling. MpmCore derives
+      // the shader's internal per-substep rate from this and the run cadence.
+      physics.growthDuration,
       physics.growthMax ?? 2.0,
-      physics.growthThreshold ?? 0.0
+      physics.growthThreshold ?? 0.0,
+      physics.growthAnisotropy,
+      this.config.substepsPerMacro
     );
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
     this.mpmCore.setSplatRadius(physics.splatRadius);

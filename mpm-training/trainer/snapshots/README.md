@@ -12,7 +12,7 @@ file must remain unchanged as historical evidence.
 scenario but sets the former local-forward strafe bias to 1. The physical
 strafe scale remains zero: the output controls tensor anisotropy and signed
 division polarity. The child and the positional center of its daughter pair
-are biased toward `+n`, in proportion to signal magnitude. This is the
+are biased toward `+n`, in proportion to the independent division-bias output. This is the
 directional-growth comparison trajectory.
 
 The capture is intentionally independent of evolved policy weights. A zero

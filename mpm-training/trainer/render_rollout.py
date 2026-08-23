@@ -46,7 +46,7 @@ from simulation_settings import (
     FRICTION,
     HIDDEN_DIM,
     GROWTH_MAX,
-    GROWTH_RATE,
+    GROWTH_DURATION_MACRO_STEPS,
     GROWTH_THRESHOLD,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
@@ -73,14 +73,25 @@ def main() -> int:
     wgpu_device = pick_device()
 
     core = MpmCore(wgpu_device)
+    material_kwargs = {
+        "growth_max": meta.get("growth_max", GROWTH_MAX),
+        "growth_threshold": meta.get("growth_threshold", GROWTH_THRESHOLD),
+    }
+    if "growth_rate" in meta and "growth_duration_macro_steps" not in meta:
+        # Preserve exact playback of checkpoints created before growth was
+        # expressed in controller ticks.
+        material_kwargs["growth_rate"] = meta["growth_rate"]
+    else:
+        material_kwargs["growth_duration_macro_steps"] = meta.get(
+            "growth_duration_macro_steps", GROWTH_DURATION_MACRO_STEPS
+        )
+        material_kwargs["substeps_per_macro"] = meta["substeps_per_macro"]
     core.set_material(
         MATERIAL_E,
         MATERIAL_NU,
         MATERIAL_HARDENING,
         elasticity=meta.get("material_elasticity", MATERIAL_ELASTICITY),
-        growth_rate=meta.get("growth_rate", GROWTH_RATE),
-        growth_max=meta.get("growth_max", GROWTH_MAX),
-        growth_threshold=meta.get("growth_threshold", GROWTH_THRESHOLD),
+        **material_kwargs,
     )
     core.set_damping(DAMPING_LOSS_FRACTION, meta["substeps_per_macro"])
 

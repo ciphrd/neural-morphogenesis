@@ -35,8 +35,9 @@ import wgpu
 from shader_template import load_core_shader
 from simulation_settings import (
     DAMPING_LOSS_FRACTION,
+    DEFAULT_SUBSTEPS_PER_MACRO,
+    GROWTH_DURATION_MACRO_STEPS,
     GROWTH_MAX,
-    GROWTH_RATE,
     GROWTH_THRESHOLD,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
@@ -63,13 +64,26 @@ MAX_PARTICLES: int = CONSTANTS["MAX_PARTICLES"]
 # chemical field's own (unrelated) FIELD_N in simulation_settings.py.
 REPULSION_FIELD_N: int = CONSTANTS["FIELD_N"]
 
+
+def growth_rate_for_duration(duration_macro_steps: float, substeps_per_macro: int) -> float:
+    """Return the internal continuous rate for a controller-tick duration.
+
+    With no compression, applying this rate for ``substeps_per_macro`` G2P
+    updates per macro step doubles det(Fg) after ``duration_macro_steps``.
+    The conversion is deliberately centralized here so numerical physics
+    cadence cannot silently change developmental cadence.
+    """
+    if duration_macro_steps <= 0.0:
+        return 0.0
+    return math.log(2.0) / (duration_macro_steps * max(int(substeps_per_macro), 1) * DT)
+
 NODE_COUNT = (GRID_N + 1) * (GRID_N + 1)
 WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass — see core/clearGrid.wgsl
-# growthF(row-major 2x2), jp, cycleActive, growthDirection(2) — core/agents.wgsl's
-# own 32-byte ParticleRest layout. vec4 growthF imposes 16-byte alignment.
-REST_FIELDS = 8
+# growthF(4), jp, cycleActive, growthDirection(2), growthControls(2),
+# then two alignment-padding floats — core/agents.wgsl's 48-byte layout.
+REST_FIELDS = 12
 REST_GROWTH_F = slice(0, 4)
 REST_JP = 4
 REST_CYCLE_ACTIVE = 5
@@ -77,8 +91,8 @@ REST_CYCLE_ACTIVE = 5
 
 def _pack_rest(jp: np.ndarray) -> np.ndarray:
     """Expands a flat (count,) Jp array into ParticleRest's own
-    (count, 8) tensor-rest layout, defaulting growthF=I (baseline rest
-    configuration), cycleActive=0, and growthDirection=0.
+    (count, 12) tensor-rest layout, defaulting growthF=I (baseline rest
+    configuration), cycleActive=0, direction/controls=0, and padding=0.
 
     Exists so load_scene()/reset_growth_buffers() can keep their original
     scalar-Jp signatures — every scene seeder in this project
@@ -180,21 +194,21 @@ class MpmCore:
         self.gravity_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_gravity(0.0)  # not a "simulation setting" — gravity is CLI-configurable (evolve.py's --gravity)
 
-        # Material: mu0 + lambda0 + hardening + yieldLow + yieldHigh +
-        # growthRate + growthMax + growthThreshold = 8 floats / 32 bytes —
+        # Material: nine floats plus uniform-struct padding = 48 bytes —
         # must match p2g.wgsl's/g2p.wgsl's identical Material struct
         # declarations exactly. p2g reads the first five, g2p reads
-        # yieldLow/yieldHigh plus the three growth params; one shared
+        # yieldLow/yieldHigh plus the growth params; one shared
         # struct regardless, same convention this buffer already followed.
-        self.material_uniform = device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self.material_uniform = device.create_buffer(size=48, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_material(
             MATERIAL_E,
             MATERIAL_NU,
             MATERIAL_HARDENING,
             MATERIAL_ELASTICITY,
-            GROWTH_RATE,
-            GROWTH_MAX,
-            GROWTH_THRESHOLD,
+            growth_max=GROWTH_MAX,
+            growth_threshold=GROWTH_THRESHOLD,
+            growth_duration_macro_steps=GROWTH_DURATION_MACRO_STEPS,
+            substeps_per_macro=DEFAULT_SUBSTEPS_PER_MACRO,
         )
 
         self.active_count_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
@@ -416,22 +430,45 @@ class MpmCore:
         nu: float,
         hardening: float,
         elasticity: float,
-        growth_rate: float = GROWTH_RATE,
+        growth_rate: float | None = None,
         growth_max: float = GROWTH_MAX,
         growth_threshold: float = GROWTH_THRESHOLD,
+        growth_anisotropy: float = 1.0,
+        growth_duration_macro_steps: float = GROWTH_DURATION_MACRO_STEPS,
+        substeps_per_macro: int = DEFAULT_SUBSTEPS_PER_MACRO,
     ) -> None:
-        """The three growth params default to simulation_settings.py's own
-        constants so existing callers that only tune the elastic material
-        (evolve.py, feasibility_check.py, render_rollout.py, ...) keep
-        working unchanged — see core/g2p.wgsl's own Material struct for
-        what each one does."""
+        """Write elastic material and the derived internal growth rate.
+
+        Production callers specify a controller-tick duration and their real
+        substep count. ``growth_rate`` remains as an explicit low-level escape
+        hatch for analytical tests and legacy checkpoints that recorded the
+        old rate directly; when supplied it takes precedence.
+        """
         mu0, lambda0 = lame_params(e, nu)
         yield_low, yield_high = yield_bounds(elasticity)
+        effective_growth_rate = (
+            growth_rate
+            if growth_rate is not None
+            else growth_rate_for_duration(growth_duration_macro_steps, substeps_per_macro)
+        )
         self.device.queue.write_buffer(
             self.material_uniform,
             0,
             np.array(
-                [mu0, lambda0, hardening, yield_low, yield_high, growth_rate, growth_max, growth_threshold],
+                [
+                    mu0,
+                    lambda0,
+                    hardening,
+                    yield_low,
+                    yield_high,
+                    effective_growth_rate,
+                    growth_max,
+                    growth_threshold,
+                    growth_anisotropy,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
                 dtype=np.float32,
             ),
         )
@@ -584,7 +621,8 @@ class MpmCore:
     def read_rest_state(self) -> np.ndarray:
         """Returns active particles' raw tensor-growth rest-state rows.
 
-        Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,dirX,dirY]``.
+        Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,dirX,dirY,
+        anisotropy,divisionBias,pad0,pad1]``.
         This is diagnostic-only: COPY_SRC is present on the buffer, but the
         normal simulation path performs no readback. Keeping the raw layout
         visible here also makes scalar-vs-tensor growth snapshots explicit

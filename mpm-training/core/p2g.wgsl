@@ -75,6 +75,7 @@ struct ParticleRest {
   jp: f32,
   cycleActive: f32,
   growthDirection: vec2<f32>,
+  growthControls: vec2<f32>,
 }
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read_write> gridAccum: array<atomic<i32>>;
@@ -108,6 +109,7 @@ struct Material {
   growthRate: f32,
   growthMax: f32,
   growthThreshold: f32,
+  growthAnisotropy: f32,
 }
 @group(0) @binding(6) var<uniform> material: Material;
 

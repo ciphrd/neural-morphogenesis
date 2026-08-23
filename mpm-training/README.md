@@ -24,25 +24,24 @@ Three signals have distinct responsibilities:
 1. **The last substrate channel starts growth.** Its value at a particle is
    clamped to `[0, 1]` and treated as the per-macro-step probability of
    entering a cell cycle.
-2. **The former neural strafe outputs direct growth.** Their two bounded values
-   form a local growth vector, which is rotated by the particle heading into
-   world space. Its direction selects the growth axis; its magnitude selects
-   how anisotropic growth is.
+2. **Four neural outputs control growth geometry.** Two bounded outputs form a
+   normalized local growth direction. Independent sigmoid outputs select the
+   tensor anisotropy and the signed division-placement bias.
 3. **The morphoelastic law supplies the amount of growth.** Once a cell cycle
-   is active, a configured exponential growth rate increases stress-free area.
-   Elastic compression slows this rate continuously, without a hard mechanical
-   cutoff.
+   is active, a configured duration determines approximately how many neural
+   and chemical updates it takes to double stress-free area. Elastic compression
+   lengthens this duration continuously, without a hard mechanical cutoff.
 
 The policy therefore does not directly output a scalar growth amount. It
 controls growth indirectly by writing the growth substrate, reacting to all
 substrate values and gradients, changing its heading, and selecting a growth
-direction.
+direction, anisotropy, and division polarity.
 
 The current eight-channel policy has 13 outputs: eight chemical writes, one
-turning output, two retained but unused acceleration outputs, and two growth-
-direction outputs. Checkpoints from the previous four-direction deposit model
-had 37 outputs and are not shape-compatible; training must be restarted for
-this architecture.
+turning output, one growth-anisotropy output, one division-bias output, and two
+growth-direction outputs. Older 37-output checkpoints are not shape-compatible.
+Earlier 13-output checkpoints have the same tensor shapes but different output
+semantics, so they must also be retrained rather than resumed.
 
 ## One macro step
 
@@ -57,16 +56,19 @@ for each active particle:
         inputs += gradient along particle heading
         inputs += gradient perpendicular to heading
 
-    inputs += wrapped position relative to the rollout spawn center
-
     outputs = neural_policy(inputs)
 
     deposit one chemical output per channel under the particle
     update heading from the turning output
 
-    local_growth_direction = tanh(former_strafe_x, former_strafe_y)
+    raw_growth_direction = tanh(direction_x, direction_y)
+    local_growth_direction = normalize_or_zero(raw_growth_direction)
+    growth_anisotropy = sigmoid(anisotropy_output)
+    division_bias = sigmoid(polarity_output)
     world_growth_direction = rotate(local_growth_direction, heading)
     particle.growth_direction = world_growth_direction
+    particle.growth_anisotropy = growth_anisotropy
+    particle.division_bias = division_bias
 
     growth_probability = clamp(last_substrate_value, 0, 1)
     decrement division cooldown
@@ -125,15 +127,25 @@ For a particle in an active cell cycle:
 
 ```text
 compression_scale = clamp(Je / compression_reference, 0, 1)
+log_area_per_substep = ln(2) / (growth_duration * substeps_per_macro)
 
 new_g = min(
-    g * exp(growth_rate * compression_scale * dt),
+    g * exp(log_area_per_substep * compression_scale),
     division_area
 )
 
 area_factor = new_g / g
-strength = clamp(length(growth_direction), 0, 1)
+strength = neural_growth_anisotropy * global_anisotropy
 ```
+
+`growth_duration` is measured in macro/controller updates, not physics time.
+Consequently, changing `substeps_per_macro` for numerical stability does not
+change how many opportunities agents have to sense, communicate, and reorient
+before division. A duration of 48 gives an uncompressed particle approximately
+48 policy evaluations per doubling; zero disables growth. Its trained value is
+the backend constant `GROWTH_DURATION_MACRO_STEPS` in
+`trainer/simulation_settings.py`. The backend sends that initial value to the
+viewer, whose Growth-panel slider is a playback-only override.
 
 With no directional signal, the rest deformation grows isotropically:
 
@@ -152,6 +164,10 @@ At `strength = 0`, this is isotropic. At `strength = 1`, the entire area
 increment is placed along the selected axis. The axis is transformed through
 the elastic rotation so that rotating the organism rotates the growth response
 without changing the material law.
+
+The viewer's Growth panel exposes `global_anisotropy` from 0 to 1. It is a
+playback-only multiplier: 0 forces isotropic, blob-favoring rest growth, while
+1 preserves the neural policy's full per-particle anisotropy.
 
 The tensor increment treats `n` and `-n` identically because an axial stretch
 depends on `n n^T`. The sign is retained and used during division.
@@ -174,7 +190,7 @@ distance `d`:
 
 ```text
 q = world_growth_direction
-strength = clamp(length(q), 0, 1)
+bias = division_bias
 
 if length(q) is nonzero:
     n = normalize(q)
@@ -182,17 +198,18 @@ else:
     n = random_unit_direction()
 
 half_offset = n * d / 2
-center_shift = strength * half_offset
+center_shift = bias * half_offset
 
 parent_position   = old_position - half_offset + center_shift
 daughter_position = old_position + half_offset + center_shift
 ```
 
-With zero direction strength, the split is symmetric around the old position
-and uses a random axis. With full strength, the parent remains at the old
-position and the daughter is placed one split distance along `+n`.
-Intermediate values smoothly interpolate between those cases. Positions wrap
-around the toroidal simulation domain.
+With no direction, the split is symmetric around the old position and uses a
+random axis; the bias is ignored. With a direction and zero bias, the split is
+symmetric along that axis. With full bias, the parent remains at the old
+position and the daughter is placed one split distance along `+n`. Intermediate
+values smoothly interpolate between those cases. Positions wrap around the
+toroidal simulation domain.
 
 Division conserves mass and rest area:
 

@@ -47,15 +47,16 @@ fn particleFragment(in: VOut) -> @location(0) vec4<f32> {
 }
 
 // --- growth-neuron activation dots ------------------------------------------
-// The two former strafe neurons are the live signed growth output. Hue encodes
-// their 2D direction and saturation/brightness increases with magnitude. This
-// reads ParticleRest directly, exactly like the directional-arrow pass below.
+// Hue encodes the normalized growth direction and saturation/brightness
+// increases with the independent anisotropy output. This reads ParticleRest
+// directly, exactly like the directional-arrow pass below.
 
 struct ParticleRest {
   growthF: vec4<f32>,
   jp: f32,
   cycleActive: f32,
   growthDirection: vec2<f32>,
+  growthControls: vec2<f32>,
 }
 
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
@@ -74,7 +75,8 @@ fn activationParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(in
   var out: ActivationDotOut;
   out.position = vec4<f32>(center + offset * pointRadius, 0.0, 1.0);
   out.uv = offset;
-  out.activation = particleRest[instanceIndex].growthDirection;
+  let rest = particleRest[instanceIndex];
+  out.activation = rest.growthDirection * rest.growthControls.x;
   return out;
 }
 
@@ -166,8 +168,8 @@ fn triangleFragment() -> @location(0) vec4<f32> {
 // core/g2p.wgsl and core/agents.wgsl's polarized division. Tensor stretch
 // alone is axial, but division now uses the SIGN: the new daughter and pair
 // center bias toward +n. Therefore this is a one-way arrow pointing toward
-// the actual division polarity. Signal magnitude controls glyph length and
-// matches both anisotropy and division-bias strength after clamping to [0,1].
+// the selected axis. The independent anisotropy output controls glyph length;
+// division bias is reported separately in the network inspector.
 // This pass reads the live GPU buffers directly; there is no diagnostic
 // readback or duplicated frontend approximation.
 
@@ -183,9 +185,10 @@ struct GrowthAxisOut {
 @vertex
 fn growthAxisVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> GrowthAxisOut {
   let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
-  let raw = particleRest[instanceIndex].growthDirection;
+  let rest = particleRest[instanceIndex];
+  let raw = rest.growthDirection;
   let rawMagnitude = length(raw);
-  let strength = clamp(rawMagnitude, 0.0, 1.0);
+  let strength = select(0.0, clamp(rest.growthControls.x, 0.0, 1.0), rawMagnitude > 1e-6);
   var axis = vec2<f32>(1.0, 0.0);
   if (rawMagnitude > 1e-6) {
     axis = raw / rawMagnitude;
