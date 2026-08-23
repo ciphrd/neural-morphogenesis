@@ -1,7 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { DeformDirection, DeformMode } from "../gpu/deform";
 import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu/device";
-import type { FieldMode, ParticleShape } from "../gpu/render";
+import type { FieldMode, ParticleRenderMode } from "../gpu/render";
 import { GpuSimulation } from "../gpu/simulation";
 import type { PhysicsSettings, SimulationConfig } from "../gpu/types";
 import { CanvasRecorder } from "./canvasRecorder";
@@ -36,6 +36,8 @@ interface GridCanvasProps {
   config: SimulationConfig | null;
   /** Flat [x0,y0,x1,y1,...] in MpmCore's own [0,1]^2 domain. */
   targetPoints: Float32Array | null;
+  /** Rendering-only visibility of the training-target overlay. */
+  targetVisible?: boolean;
   // Live gravity/decay/maxAccel/maxStrafe/maxEnvWrite for the Physics
   // panel's sliders — the caller (TrainingView) always resolves this to
   // a concrete value once a config is loaded (either the config's own
@@ -43,15 +45,20 @@ interface GridCanvasProps {
   // nothing has loaded yet. Applied via a plain uniform-buffer write
   // (GpuSimulation.setPhysics()), never a rebuild.
   physics: PhysicsSettings | null;
+  /** Playback-only growth/interaction cap; does not alter training. */
+  particleCap?: number;
   // View-only rendering options (gpu/render.ts) — none of these are
   // simulation state, so they're plain display props, not part of
   // PhysicsSettings/SimulationConfig.
   fieldMode?: FieldMode;
-  particleShape?: ParticleShape;
+  particleRenderMode?: ParticleRenderMode;
   particleRadiusPx?: number;
-  /** [0,2] — see gpu/render.ts's own setAccent()/field.wgsl's own accent
-   * uniform comment. Default 0 (identity, every background mode renders
-   * exactly as it did before this knob existed). */
+  whiteDotsAlpha?: number;
+  activationAlpha?: number;
+  /** Full-strength axis length in device pixels. */
+  growthAxisLengthPx?: number;
+  /** [-2,2] — negative suppresses background-field contrast, 0 is
+   * identity, positive accentuates faint values. */
   accent?: number;
   /** [0,2] — see gpu/render.ts's own setBlur()/field.wgsl's own
    * blurDensity() comment. Only the "gradient" background mode's own
@@ -185,10 +192,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   {
     config,
     targetPoints,
+    targetVisible = true,
     physics,
+    particleCap,
     fieldMode = "none",
-    particleShape = "circle",
+    particleRenderMode = "dots-white",
     particleRadiusPx,
+    whiteDotsAlpha = 1,
+    activationAlpha = 0.2,
+    growthAxisLengthPx = 24,
     accent = 0,
     blur = 0,
     gradientExponent = 1,
@@ -206,9 +218,13 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const deviceRef = useRef<GPUDevice | null>(null);
   const configRef = useRef<SimulationConfig | null>(null);
   const physicsRef = useRef(physics);
+  const particleCapRef = useRef(particleCap);
   const fieldModeRef = useRef(fieldMode);
-  const particleShapeRef = useRef(particleShape);
+  const particleRenderModeRef = useRef(particleRenderMode);
   const particleRadiusPxRef = useRef(particleRadiusPx);
+  const whiteDotsAlphaRef = useRef(whiteDotsAlpha);
+  const activationAlphaRef = useRef(activationAlpha);
+  const growthAxisLengthPxRef = useRef(growthAxisLengthPx);
   const accentRef = useRef(accent);
   const blurRef = useRef(blur);
   const gradientExponentRef = useRef(gradientExponent);
@@ -322,9 +338,13 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
 
   configRef.current = config;
   physicsRef.current = physics;
+  particleCapRef.current = particleCap;
   fieldModeRef.current = fieldMode;
-  particleShapeRef.current = particleShape;
+  particleRenderModeRef.current = particleRenderMode;
   particleRadiusPxRef.current = particleRadiusPx;
+  whiteDotsAlphaRef.current = whiteDotsAlpha;
+  activationAlphaRef.current = activationAlpha;
+  growthAxisLengthPxRef.current = growthAxisLengthPx;
   accentRef.current = accent;
   blurRef.current = blur;
   gradientExponentRef.current = gradientExponent;
@@ -399,13 +419,18 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       const simulation = new GpuSimulation(device, format);
       simulation.setCanvasSizePx(canvas.width, canvas.height);
       if (targetPoints) simulation.setTargetPoints(targetPoints);
+      simulation.setTargetVisible(targetVisible);
       simulation.setFieldMode(fieldModeRef.current);
-      simulation.setParticleShape(particleShapeRef.current);
+      simulation.setParticleRenderMode(particleRenderModeRef.current);
+      simulation.setWhiteDotsAlpha(whiteDotsAlphaRef.current);
+      simulation.setActivationAlpha(activationAlphaRef.current);
       if (particleRadiusPxRef.current !== undefined) simulation.setPointRadiusPx(particleRadiusPxRef.current);
+      simulation.setGrowthAxisLengthPx(growthAxisLengthPxRef.current);
       simulation.setAccent(accentRef.current);
       simulation.setBlur(blurRef.current);
       simulation.setGradientExponent(gradientExponentRef.current);
       if (configRef.current) simulation.loadGeneration(configRef.current);
+      if (particleCapRef.current !== undefined) simulation.setParticleCap(particleCapRef.current);
       if (physicsRef.current) simulation.setPhysics(physicsRef.current);
       simulationRef.current = simulation;
 
@@ -606,6 +631,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [targetPoints]);
 
   useEffect(() => {
+    simulationRef.current?.setTargetVisible(targetVisible);
+  }, [targetVisible]);
+
+  useEffect(() => {
     if (config) simulationRef.current?.loadGeneration(config);
   }, [config]);
 
@@ -614,16 +643,32 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [physics]);
 
   useEffect(() => {
+    if (particleCap !== undefined) simulationRef.current?.setParticleCap(particleCap);
+  }, [particleCap]);
+
+  useEffect(() => {
     simulationRef.current?.setFieldMode(fieldMode);
   }, [fieldMode]);
 
   useEffect(() => {
-    simulationRef.current?.setParticleShape(particleShape);
-  }, [particleShape]);
+    simulationRef.current?.setParticleRenderMode(particleRenderMode);
+  }, [particleRenderMode]);
+
+  useEffect(() => {
+    simulationRef.current?.setWhiteDotsAlpha(whiteDotsAlpha);
+  }, [whiteDotsAlpha]);
+
+  useEffect(() => {
+    simulationRef.current?.setActivationAlpha(activationAlpha);
+  }, [activationAlpha]);
 
   useEffect(() => {
     if (particleRadiusPx !== undefined) simulationRef.current?.setPointRadiusPx(particleRadiusPx);
   }, [particleRadiusPx]);
+
+  useEffect(() => {
+    simulationRef.current?.setGrowthAxisLengthPx(growthAxisLengthPx);
+  }, [growthAxisLengthPx]);
 
   useEffect(() => {
     simulationRef.current?.setAccent(accent);

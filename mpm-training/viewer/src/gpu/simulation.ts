@@ -1,7 +1,7 @@
 // Ties MpmCore + Environment + Agents + Renderer into one autonomous
 // macro step — the browser analogue of trainer/training_sim.py's own
 // TrainingRollout.macro_step(). GPU-resident for every data-related
-// buffer (positions, velocities, F/C/Jp, the chemical field, weights),
+// buffer (positions, velocities, F/C/ParticleRest, the chemical field, weights),
 // matching envnca/frontend/src/gpu/simulation.ts's own "GPU-resident is
 // the whole point" design — with ONE exception: step() is now async and
 // reads back a 4-byte grown-particle count every macro step (see its own
@@ -20,10 +20,9 @@
 //      over whichever grid buffer is currently "current" (last step's
 //      diffuse+decay output).
 //   2. agents.encodeStep()            — NN forward pass: reads that same
-//      grid + gradient, writes env_write into the deposit scratch, and
-//      nudges MpmCore's own velocities buffer directly in place (strafe
-//      — an acceleration, damped by friction, see agents.wgsl's own
-//      module docstring; the separate `accel` output stays unused) —
+//      grid + gradient, writes env_write into the deposit scratch and the
+//      former strafe pair into ParticleRest.growthDirection (optionally
+//      also physical acceleration through maxStrafe) —
 //      may also grow activeCount (agents.wgsl's own agentStep()).
 //   3. environment.encodeMergeAndDecay() — folds the deposit into the
 //      current grid, blurs+decays into the other buffer, flips parity.
@@ -47,8 +46,8 @@ import { Agents } from "./agents";
 import { Deform, type DeformDirection, type DeformMode } from "./deform";
 import { Environment } from "./environment";
 import { Interact } from "./interact";
-import { MpmCore } from "./mpmCore";
-import { Renderer, type FieldMode, type ParticleShape } from "./render";
+import { MAX_PARTICLES, MpmCore } from "./mpmCore";
+import { Renderer, type FieldMode, type ParticleRenderMode } from "./render";
 import { seedBlob, spawnUniform01 } from "./rng";
 import type { PhysicsSettings, SimulationConfig } from "./types";
 
@@ -77,8 +76,11 @@ export class GpuSimulation {
   // gets a brand-new Renderer instance; the user's own render-option
   // choices shouldn't reset just because that happened).
   private pendingFieldMode: FieldMode = "none";
-  private pendingParticleShape: ParticleShape = "circle";
+  private pendingParticleRenderMode: ParticleRenderMode = "dots-white";
+  private pendingWhiteDotsAlpha = 1.0;
+  private pendingActivationAlpha = 0.2;
   private pendingPointRadiusPx: number | null = null;
+  private pendingGrowthAxisLengthPx = 24;
   // 0 = identity — see gpu/render.ts's own setAccent()/field.wgsl's own
   // accent uniform comment. Same "view-only, survives rebuild()" reasoning
   // pendingFieldMode above already has.
@@ -91,6 +93,9 @@ export class GpuSimulation {
   // field.wgsl's own colorizeGradient() comment. Same "view-only,
   // survives rebuild()" reasoning pendingAccent above already has.
   private pendingGradientExponent = 1;
+  private pendingParticleCap: number | null = null;
+  private particleCap = 2;
+  private pendingTargetVisible = true;
   // The canvas's own backing-store size in DEVICE pixels, as last
   // reported by GridCanvas's own applySquareSize()/ResizeObserver.
   // Same "view-only, survives rebuild()" reasoning as the pending
@@ -124,7 +129,7 @@ export class GpuSimulation {
   // rewrites position[0] (a genuinely new particle's own position is
   // only ever written at the moment IT is claimed by a real split, not
   // pre-filled — see MpmCore.resetGrowthBuffers()'s own docstring for
-  // why velocities/F/C/Jp get that treatment but positions doesn't).
+  // why velocities/F/C/ParticleRest get that treatment but positions doesn't).
   private epoch = 0;
 
   // Debug/testing toggle — see step()'s own comment for exactly what
@@ -190,6 +195,7 @@ export class GpuSimulation {
   private rebuild(config: SimulationConfig): void {
     this.epoch++;
     this.destroySimObjects();
+    this.particleCap = Math.min(MAX_PARTICLES, Math.max(2, Math.floor(this.pendingParticleCap ?? config.particles)));
 
     const mpmCore = new MpmCore(this.device);
 
@@ -227,20 +233,22 @@ export class GpuSimulation {
       divisionCooldown: config.divisionCooldown,
       friction: config.friction,
       growthEnabled: 1.0,
-      // config.particles is the growth CAP, not a starting count — see
-      // types.ts's own SimulationConfig.particles docstring.
-      maxActiveParticles: config.particles,
+      maxActiveParticles: this.particleCap,
       spawnX: config.spawnX,
       spawnY: config.spawnY,
     });
     agents.loadWeights(config.weights);
 
-    const renderer = new Renderer(this.device, this.format, mpmCore, environment, agents);
+    const renderer = new Renderer(this.device, this.format, mpmCore, environment);
     if (this.pendingCanvasSizePx) renderer.setCanvasSizePx(...this.pendingCanvasSizePx);
     if (this.pendingTargetPoints) renderer.setTargetPoints(this.pendingTargetPoints);
+    renderer.setTargetVisible(this.pendingTargetVisible);
     renderer.setFieldMode(this.pendingFieldMode);
-    renderer.setParticleShape(this.pendingParticleShape);
+    renderer.setParticleRenderMode(this.pendingParticleRenderMode);
+    renderer.setWhiteDotsAlpha(this.pendingWhiteDotsAlpha);
+    renderer.setActivationAlpha(this.pendingActivationAlpha);
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
+    renderer.setGrowthAxisLengthPx(this.pendingGrowthAxisLengthPx);
     renderer.setAccent(this.pendingAccent);
     renderer.setBlur(this.pendingBlur);
     renderer.setGradientExponent(this.pendingGradientExponent);
@@ -299,7 +307,7 @@ export class GpuSimulation {
     // has to run every rollout (not just once, ever) despite seedBlob()
     // already giving genuinely-seeded particles these exact same fresh
     // defaults.
-    this.mpmCore.resetGrowthBuffers(this.config.particles);
+    this.mpmCore.resetGrowthBuffers(this.particleCap);
     this.environment.reset();
     // Every rollout — same "run-constant in practice today, but a
     // rollout-scoped setter regardless" convention this method's own
@@ -307,6 +315,7 @@ export class GpuSimulation {
     // Agents.setSpawnCenter()'s own docstring for what this drives (the
     // NN's own position input).
     this.agents.setSpawnCenter(this.config.spawnX, this.config.spawnY);
+    this.agents.setMaxActiveParticles(this.particleCap);
     this.agents.setActiveCount(2);
     // Heading's own per-slot fill and growth's own seed are both bit-
     // exact via rng.ts's own spawnUniform01()/growthSeed() respectively
@@ -390,12 +399,31 @@ export class GpuSimulation {
     this.applyPhysics(physics);
   }
 
+  /** Playback-only live growth cap. Lowering it below the current count
+   * restarts the rollout instead of deleting already-materialized mass. */
+  setParticleCap(maxParticles: number): void {
+    const cap = Math.min(MAX_PARTICLES, Math.max(2, Math.floor(maxParticles)));
+    this.pendingParticleCap = cap;
+    this.particleCap = cap;
+    this.agents?.setMaxActiveParticles(cap);
+    if (this.mpmCore && this.mpmCore.activeCount > cap) {
+      this.restartRollout();
+    }
+  }
+
   /** `points`: flat [x0,y0,x1,y1,...] in MpmCore's own [0,1]^2 domain.
    * Cached (not just forwarded) since it can arrive before the first
    * rebuild() ever runs. */
   setTargetPoints(points: Float32Array): void {
     this.pendingTargetPoints = points;
     this.renderer?.setTargetPoints(points);
+  }
+
+  /** Controls only the target overlay; target data and simulation state
+   * are left untouched. */
+  setTargetVisible(visible: boolean): void {
+    this.pendingTargetVisible = visible;
+    this.renderer?.setTargetVisible(visible);
   }
 
   /** Async — see this module's own module docstring for why (WebGPU's
@@ -426,9 +454,8 @@ export class GpuSimulation {
     this.agents.encodeReadGrownCount(encoder);
     this.device.queue.submit([encoder.finish()]);
 
-    // min(...) — growth's own atomic counter can overshoot config.particles
-    // (the growth cap — see types.ts's own SimulationConfig.particles
-    // docstring) slightly (several agents claiming a slot the same step,
+    // min(...) — growth's own atomic counter can overshoot particleCap
+    // slightly (several agents claiming a slot the same step,
     // right at the cap — see core/agents.wgsl's own agentStep() comment
     // for why that's left unguarded rather than compare-exchanged away);
     // clamping the *reported* count here is what actually enforces the
@@ -436,7 +463,7 @@ export class GpuSimulation {
     // slot past that either way. A plain != check below, not
     // unconditional writes, so a macro step where nothing actually split
     // costs one 4-byte readback and nothing else.
-    const grown = Math.min(await this.agents.readGrownCount(), this.config.particles);
+    const grown = Math.min(await this.agents.readGrownCount(), this.particleCap);
     if (this.epoch !== stepEpoch) return;
     if (!this.mpmCore || !this.agents || !this.config) return;
     if (grown !== this.mpmCore.activeCount) {
@@ -484,13 +511,24 @@ export class GpuSimulation {
     this.renderer?.setFieldMode(mode);
   }
 
-  /** Circle (default) or a triangle pointing along each particle's own
-   * heading (Agents' own persistent per-particle heading state, not
-   * velocity — see agents.wgsl's own module docstring) — see render.wgsl's
-   * own triangleVertex. */
-  setParticleShape(shape: ParticleShape): void {
-    this.pendingParticleShape = shape;
-    this.renderer?.setParticleShape(shape);
+  setParticleRenderMode(mode: ParticleRenderMode): void {
+    this.pendingParticleRenderMode = mode;
+    this.renderer?.setParticleRenderMode(mode);
+  }
+
+  setActivationAlpha(alpha: number): void {
+    this.pendingActivationAlpha = alpha;
+    this.renderer?.setActivationAlpha(alpha);
+  }
+
+  setWhiteDotsAlpha(alpha: number): void {
+    this.pendingWhiteDotsAlpha = alpha;
+    this.renderer?.setWhiteDotsAlpha(alpha);
+  }
+
+  setGrowthAxisLengthPx(px: number): void {
+    this.pendingGrowthAxisLengthPx = px;
+    this.renderer?.setGrowthAxisLengthPx(px);
   }
 
   setPointRadiusPx(px: number): void {
@@ -498,9 +536,8 @@ export class GpuSimulation {
     this.renderer?.setPointRadiusPx(px);
   }
 
-  /** [0,2] — see gpu/render.ts's own setAccent()/field.wgsl's own
-   * accent uniform comment for the exact exponential curve. Applies to
-   * every background field mode at once. */
+  /** [-2,2] — see gpu/render.ts's setAccent()/field.wgsl's accent curve.
+   * Negative suppresses and positive accentuates every background mode. */
   setAccent(accent: number): void {
     this.pendingAccent = accent;
     this.renderer?.setAccent(accent);
@@ -536,6 +573,7 @@ export class GpuSimulation {
    * every other GpuSimulation method already takes. */
   addParticleAt(x: number, y: number): void {
     if (!this.mpmCore || !this.agents) return;
+    if (this.mpmCore.activeCount >= this.particleCap) return;
     if (this.mpmCore.addParticleAt(x, y)) {
       this.agents.setActiveCount(this.mpmCore.activeCount);
     }

@@ -119,7 +119,7 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
     },
     {
       key: "maxStrafe",
-      label: "Max strafe",
+      label: "Physical strafe scale",
       ...scaledRange(trained.maxStrafe, 3),
       format: (v) => v.toFixed(3),
     },
@@ -226,8 +226,9 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
  * and depositSigma (each spot's own Gaussian splat radius — see
  * agents.wgsl's own depositGaussian() for the exact kernel this drives,
  * replacing that shader's old flat 4-corner bilinear deposit scatter),
- * growth's own splitDisplacement (how far behind a parent a newly split
- * particle spawns) and divisionCooldown (macro steps a particle refuses
+ * growth's own splitDisplacement (daughter separation; the signed growth
+ * vector biases the new daughter and pair center toward +n) and
+ * divisionCooldown (macro steps a particle refuses
  * to split again for, right after splitting, whether as parent or child
  * — see agents.wgsl's own module docstring for the full growth design;
  * the growth cap itself is `particles` — see types.ts's own

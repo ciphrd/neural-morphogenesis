@@ -64,11 +64,11 @@
 // once, at the agent's own position, still via the old bilinear
 // corners()/sampleValue()/sampleGrad() (only the deposit SIDE changed).
 //
-// Growth — each particle may spawn a copy of itself, a short
-// `physics.splitDisplacement` away from its own current position, in a
-// UNIFORMLY RANDOM direction (not fixed behind its own heading — see
-// agentStep()'s own growth comment for why, and for the extra xorshift32
-// draw this spends), with a per-step probability read straight off
+// Growth — each particle may spawn a copy of itself after completing its
+// tensor-growth cycle. The signed network growth vector polarizes division:
+// the child is placed along +n and the pair's center shifts toward +n in
+// proportion to signal magnitude. A zero signal retains the old symmetric,
+// uniformly-random split exactly. Growth admission has a per-step probability read straight off
 // the LAST channel's own sensed VALUE (inputVec[CHANNELS-1u] — the same
 // value already fed into this step's own NN input, clamped to [0,1];
 // NOT a network output, so CHIRALITY's mirror-averaging never touches
@@ -77,12 +77,10 @@
 // See agentStep()'s own comment for the exact split logic.
 //
 // A new particle claims the next free slot via an atomic counter
-// (`agentState.growthCount`, binding 7) — MAX_ACTIVE_PARTICLES (a compile-time
-// const, like CHANNELS/HIDDEN_DIM: this shapes buffer-index bounds
-// checking, not something live-tunable mid-rollout makes sense for) caps
-// how many claims actually get written. Unlike CHANNELS/HIDDEN_DIM this
-// isn't a fixed simulation_settings.py constant — it's evolve.py's own
-// --particles (a per-run CLI choice, now the growth CAP, not a fixed
+// (`agentState.growthCount`, binding 7) — physics.maxActiveParticles caps
+// how many claims actually get written. Training fixes it to evolve.py's
+// --particles; the viewer may override it live for playback only. It is
+// the growth CAP, not a fixed
 // starting count — every rollout currently starts with two particles;
 // see training_sim.py's own module docstring) —
 // see trainer/training_sim.py's/gpu/simulation.ts's own module
@@ -93,7 +91,7 @@
 // claimed particle only starts getting its own agentStep()/physics
 // once the CPU has propagated the grown count, one macro step after it
 // split — a same-step alternative (always over-dispatching every pass
-// to MAX_ACTIVE_PARTICLES, relying on a shared activeCount storage
+// to the particle-capacity ceiling, relying on a shared activeCount storage
 // buffer instead of a uniform) was considered and rejected: P2G/
 // gridUpdate/G2P/repulsion run once per PHYSICS SUBSTEP (many times
 // per macro step, not once), so over-dispatching all of them to a
@@ -106,8 +104,10 @@
 // Division is conservative grow-then-split. The substrate probabilistically
 // starts a cell cycle; g2p increases the parent's stress-free area and mass
 // to the division target; agentStep then replaces it with two baseline
-// daughters. Their F is rescaled so Fe, stress and velocity are continuous,
-// and their symmetric placement preserves the center of mass.
+// daughters. Their F is rescaled so Fe and stress are continuous. APIC
+// velocities remain centered around the pre-split velocity, preserving total
+// linear momentum even when a directional signal deliberately shifts the
+// daughters' positional center toward +n.
 //
 // agentState.particleMeta (binding 7, byte offset 256) packs FOUR
 // per-particle scalars into one
@@ -141,24 +141,15 @@
 // Bound directly to MpmCore's own positions/velocities/activeCount
 // buffers (see simulation.ts/agents_gpu.py).
 //
-// Strafe drives VELOCITY again (an acceleration, added onto the
-// particle's own velocity then damped by physics.friction, integrated
-// forward into position by MpmCore's own physics substeps) — see
-// agentStep()'s own comment for the exact integration. This is the
-// SECOND time this shader has flipped between the two interpretations:
-// a direct, un-accumulating position nudge was tried in between (after
-// measuring that a velocity-driving channel gets dominated by forces
-// well outside this shader's own control — MpmCore's own repulsion
-// produced ~20x more displacement than even a 1500x-larger strafe scale
-// managed via velocity, and the corotated elastic material's own
-// restoring stress measured losing 30-40% of an injected velocity within
-// a single macro step's own substeps) — reverted back to velocity by
-// explicit request despite those measurements, which still hold; the
-// friction knob (trainer/simulation_settings.py's own FRICTION) is the
-// tool available to fight that dominance, same as before. `accel` (a
-// separate output channel, outVec[ENV_WRITE_DIM+1u]/[ENV_WRITE_DIM+2u])
-// stays a real channel evalPolicy() computes but intentionally unread,
-// unrelated to strafe either way.
+// The two former strafe channels now primarily encode a bounded LOCAL
+// growth direction. agentStep() rotates that vector to world space and
+// stores it in ParticleRest for g2p.wgsl's tensor growth update. Its
+// magnitude controls anisotropy (zero is exactly isotropic). Fg itself
+// sees an unoriented axis, but division below uses the sign to place the
+// new daughter and bias the pair center toward +n. physics.maxStrafe remains an
+// optional scale for also applying the signal as physical acceleration,
+// but it is zero by default and does not scale the growth signal. `accel`
+// is a separate output channel that remains intentionally unused.
 
 // Chirality — see simulation_settings.py's own CHIRALITY for the full
 // reasoning (why averaging a mirrored second pass is what actually
@@ -193,12 +184,6 @@ const OUT_DIM: u32 = ENV_WRITE_DIM + 5u; // env_write(SPOTS*CHANNELS) + angular_
 
 const PI: f32 = 3.14159265358979323846;
 const HALF_PI: f32 = PI * 0.5;
-
-// Growth cap — see this file's own module docstring for why this is
-// templated in (like CHANNELS/HIDDEN_DIM) rather than a live uniform.
-// Must match trainer/simulation_settings.py's own MAX_ACTIVE_PARTICLES
-// exactly.
-const MAX_ACTIVE_PARTICLES: u32 = __MAX_ACTIVE_PARTICLES__u;
 
 const FC1W_OFFSET: u32 = 0u;
 const FC1B_OFFSET: u32 = FC1W_OFFSET + HIDDEN_DIM * IN_DIM;
@@ -287,6 +272,9 @@ struct AgentPhysics {
   // instead.
   spawnX: f32,
   spawnY: f32,
+  // Runtime growth cap. Training writes its fixed --particles value;
+  // the frontend can lower/raise it without recompiling this shader.
+  maxActiveParticles: u32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -328,8 +316,8 @@ struct AgentState {
 // local velocity field at both daughter offsets, preserving linear and
 // affine momentum rather than silently giving the child C=0 for a step.
 @group(0) @binding(8) var<storage, read_write> particleC: array<vec4<f32>>;
-// MpmCore's own velocity buffer — see this file's own module docstring
-// for why strafe drives this directly again.
+// MpmCore's own velocity buffer. The growth-direction signal only affects
+// this through the optional physics.maxStrafe scale (zero by default).
 @group(0) @binding(9) var<storage, read_write> velocities: array<vec2<f32>>;
 // MpmCore's own F/rest buffers (self.F/self.rest, same buffers
 // core/p2g.wgsl and core/g2p.wgsl read/write every physics substep) —
@@ -348,10 +336,10 @@ struct AgentState {
 
 // Per-particle REST-STATE bookkeeping — every quantity describing how a
 // particle's own stress-free reference configuration differs from the
-// pristine one it was seeded with. Three unrelated scalars deliberately
+// pristine one it was seeded with. Tensor Fg and the two scalars remain
 // PACKED into one struct/buffer, exactly like ParticleMeta above and for
 // exactly the same reason: this shader is at the hard 10-storage-buffer
-// Dawn ceiling, and growth (`growth`) plus the cell-cycle latch (`cycleActive`)
+// Dawn ceiling, and growthF plus the cell-cycle latch (`cycleActive`)
 // both need to be written HERE, at the split site, for a newly-claimed
 // child. Three separate bindings were never an option; widening the
 // buffer that was already bound (the old `particleJp: array<f32>`) costs
@@ -362,25 +350,24 @@ struct AgentState {
 // overwrite the whole element unconditionally. Now that siblings share
 // it, a partial update must preserve the fields it doesn't own.
 struct ParticleRest {
+  // Full row-major 2x2 growth tensor in F = Fe*Fg. g2p applies either an
+  // isotropic increment (zero direction) or a determinant-preserving
+  // directional increment selected by growthDirection below.
+  growthF: vec4<f32>,
   // Plastic Jacobian — g2p.wgsl's own yield clamp accumulates genuine
   // plastic damage here, and p2g.wgsl's own `e = exp(hardening*(1-jp))`
   // reads it for hardening. Growth NO LONGER touches this: an earlier
   // revision (growthJpRelief) piggybacked growth onto Jp precisely
   // because there was nowhere else to put it, which entangled two
-  // unrelated meanings; `growth` below is now that home.
+  // unrelated meanings; `growthF` above is now that home.
   jp: f32,
-  // Isotropic growth factor g = det(Fg), the multiplicative growth
-  // decomposition's own rest-configuration change (F = Fe*Fg, with
-  // Fg = sqrt(g)*I in 2D, so Fe = F/sqrt(g)). 1.0 = ungrown. Grown
-  // volume is STRESS-FREE by construction — p2g.wgsl evaluates the
-  // constitutive law on Fe, never on raw F, so elasticity resists only
-  // deviation from the newly-grown rest state rather than trying to
-  // restore the original one. g2p.wgsl advances it (see that file's own
-  // substrate-driven growth comment).
-  growth: f32,
   // Cell-cycle latch. The last substrate channel probabilistically sets
   // this to 1; g2p advances growth until division and both daughters reset it.
   cycleActive: f32,
+  // World-frame directional-growth signal from the network's former
+  // strafe channels. Direction selects the growth axis; magnitude in
+  // [0,1] blends isotropic toward fully directional growth.
+  growthDirection: vec2<f32>,
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 
@@ -395,6 +382,27 @@ fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
 // this file's other differences from that one.
 fn safeTanh(x: f32) -> f32 {
   return tanh(clamp(x, -20.0, 20.0));
+}
+
+fn matMul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
+  return vec4<f32>(
+    a.x * b.x + a.y * b.z,
+    a.x * b.y + a.y * b.w,
+    a.z * b.x + a.w * b.z,
+    a.z * b.y + a.w * b.w
+  );
+}
+
+fn matDet(m: vec4<f32>) -> f32 {
+  return m.x * m.w - m.y * m.z;
+}
+
+fn matInverse(m: vec4<f32>) -> vec4<f32> {
+  let det = matDet(m);
+  if (abs(det) < 1e-8) {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+  }
+  return vec4<f32>(m.w, -m.y, -m.z, m.x) / det;
 }
 
 // Simple, deterministic PRNG (xorshift32) — growth's own random draw
@@ -554,12 +562,12 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, s: u32, centerFieldPos: 
   }
 }
 
-// The squashed, physics-scaled subset of the network's own raw output
+// The bounded subset of the network's own raw output
 // this shader actually consumes — env_write (per spot, per channel:
 // envWrite[s * CHANNELS + c], spot-major — see this file's own module
 // docstring for what each of the SPOTS=4 spots physically is) +
-// angularAccel + strafeLocal (a velocity-driving acceleration, see this
-// file's own module docstring), all still in LOCAL frame. accel
+// angularAccel + strafeLocal (the growth-direction signal, optionally
+// also physical acceleration), all still in LOCAL frame. accel
 // (outVec[ENV_WRITE_DIM+1u]/[ENV_WRITE_DIM+2u]) is a real, separate
 // output channel but intentionally not carried through here at all —
 // unused.
@@ -613,7 +621,10 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
   // No rotation for angularAccel — it nudges angularVelocity directly,
   // there's no "world frame" for a scalar turn rate to be rotated into.
   out.angularAccel = safeTanh(outVec[ENV_WRITE_DIM]) * physics.maxAngularAccel;
-  out.strafeLocal = vec2<f32>(safeTanh(outVec[ENV_WRITE_DIM + 3u]), safeTanh(outVec[ENV_WRITE_DIM + 4u])) * physics.maxStrafe;
+  // Keep the raw bounded signal independent of maxStrafe. maxStrafe only
+  // controls physical acceleration below; with MAX_STRAFE=0 these two NN
+  // channels can still direct growth without moving particles directly.
+  out.strafeLocal = vec2<f32>(safeTanh(outVec[ENV_WRITE_DIM + 3u]), safeTanh(outVec[ENV_WRITE_DIM + 4u]));
   return out;
 }
 
@@ -755,6 +766,10 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Local -> world, exact inverse of the sensing rotation above.
   let strafeWorld = vec2<f32>(strafeLocal.x * cosH - strafeLocal.y * sinH, strafeLocal.x * sinH + strafeLocal.y * cosH);
+  // Reuse the otherwise-disabled strafe signal as the tensor growth axis.
+  // Stored every macro step, including the step that starts a cell cycle,
+  // so all following G2P substeps see the current policy decision.
+  particleRest[pi].growthDirection = strafeWorld;
 
   // Strafe as acceleration: added onto this particle's own CURRENT
   // velocity, then damped by physics.friction (a per-macro-step
@@ -765,7 +780,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // during this macro step's own physics substeps (see
   // training_sim.py's/simulation.ts's own step ordering: agentStep()
   // always runs before those substeps).
-  velocities[pi] = (velocities[pi] + strafeWorld) * physics.friction;
+  velocities[pi] = (velocities[pi] + strafeWorld * physics.maxStrafe) * physics.friction;
 
   // Grow-then-divide cell cycle. The last substrate channel remains a
   // per-macro-step probability, but a successful draw STARTS growth
@@ -797,7 +812,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // accumulated rest area/mass and require a compensating F change,
   // while letting the latch remain active would keep injecting growth
   // forever even though this particle can never obtain a daughter slot.
-  if (activeCount >= MAX_ACTIVE_PARTICLES && particleRest[pi].cycleActive > 0.5) {
+  if (activeCount >= physics.maxActiveParticles && particleRest[pi].cycleActive > 0.5) {
     particleRest[pi].cycleActive = 0.0;
   }
   // Never start a cycle that cannot produce a daughter. This matters at
@@ -806,7 +821,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the visible particle count had already stopped changing.
   if (
     physics.growthEnabled > 0.5 &&
-    activeCount < MAX_ACTIVE_PARTICLES &&
+    activeCount < physics.maxActiveParticles &&
     particleRest[pi].cycleActive < 0.5 &&
     cooldownNow <= 0.0 &&
     draw < splitProb
@@ -815,37 +830,47 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let divisionTarget = 2.0;
-  if (activeCount < MAX_ACTIVE_PARTICLES && particleRest[pi].cycleActive > 0.5 && particleRest[pi].growth >= divisionTarget * 0.9999) {
+  if (
+    activeCount < physics.maxActiveParticles &&
+    particleRest[pi].cycleActive > 0.5 &&
+    matDet(particleRest[pi].growthF) >= divisionTarget * 0.9999
+  ) {
     // atomicAdd returns the OLD value — the slot THIS particle just
     // claimed. Never gated before the add (that would need a compare-
     // exchange loop to stay race-free against every OTHER agent that
     // might also split this exact step) — instead a claim landing at or
-    // past MAX_ACTIVE_PARTICLES is simply never written below (this
+    // past physics.maxActiveParticles is simply never written below (this
     // buffer is sized to the much larger MAX_PARTICLES — see
     // mpm_core.py's own module docstring — so an over-claimed index is
     // never actually out of bounds, just wasted atomic traffic on a step
     // where many agents split near the cap at once); trainer/
     // training_sim.py's/gpu/simulation.ts's own readback separately
-    // clamps the *reported* activeCount to MAX_ACTIVE_PARTICLES
+    // clamps the *reported* activeCount to physics.maxActiveParticles
     // regardless of how high this atomic itself climbs.
     let newIndex = atomicAdd(&agentState.growthCount, 1u);
-    if (newIndex < MAX_ACTIVE_PARTICLES) {
-      // Uniformly random spawn direction — a second xorshift32 draw off
-      // the SAME persistent per-particle stream `rngNext` above already
-      // advanced (not a hash of position/heading/anything else that
-      // might not change — see this file's own xorshift32() comment for
-      // why persistent, always-advancing state matters here), only spent
-      // when a split actually happens, not every step. Was a fixed
-      // -1*(cosH,sinH) (directly behind heading) — now a fresh angle
-      // each split instead, per this project's own explicit request.
+    if (newIndex < physics.maxActiveParticles) {
+      // Always consume the historical random-angle draw so zero-direction
+      // policies remain bit-for-bit deterministic. A nonzero signed growth
+      // vector replaces that random axis: +n is the NEW daughter's side.
       let angleState = xorshift32(rngNext);
       agentState.particleMeta[pi].rng = angleState; // parent's own rng now reflects BOTH draws this step
       let angleDraw = f32(angleState >> 8u) * (1.0 / 16777216.0);
       let spawnAngle = angleDraw * 2.0 * PI;
-      let spawnDir = vec2<f32>(cos(spawnAngle), sin(spawnAngle));
+      var spawnDir = vec2<f32>(cos(spawnAngle), sin(spawnAngle));
+      let directionMagnitude = length(strafeWorld);
+      let directionStrength = clamp(directionMagnitude, 0.0, 1.0);
+      if (directionMagnitude > 1e-6) {
+        spawnDir = strafeWorld / directionMagnitude;
+      }
       let halfOffset = spawnDir * (0.5 * physics.splitDisplacement);
-      positions[pi] = fract(pos - halfOffset);
-      positions[newIndex] = fract(pos + halfOffset);
+      // Smoothly interpolate from the old center-preserving split (s=0)
+      // to a fully polarized split (s=1): the parent remains at its old
+      // position and the child appears one full splitDisplacement along
+      // +n. Thus sign now matters even though n*n^T tensor stretch itself
+      // remains axial. The deliberate pair-center shift is s*halfOffset.
+      let centerShift = halfOffset * directionStrength;
+      positions[pi] = fract(pos - halfOffset + centerShift);
+      positions[newIndex] = fract(pos + halfOffset + centerShift);
       // "A copy of itself": heading/angularVelocity copied from this
       // particle's own CURRENT state (its pre-integration values — the
       // integrator below hasn't run yet at this point in the function).
@@ -868,8 +893,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       agentState.particleMeta[pi].cooldown = physics.divisionCooldown;
       agentState.particleMeta[newIndex].cooldown = physics.divisionCooldown;
       // Preserve velocity and elastic/plastic state. Returning each
-      // daughter to g=1 requires Fdaughter=Fparent/sqrt(gparent), which
-      // preserves Fe exactly while one g=2 weight becomes two g=1 weights.
+      // daughter to Fg=I requires Fdaughter=Fparent*inverse(Fgparent),
+      // which preserves Fe exactly while one det(Fg)=2 weight becomes two
+      // det(Fg)=1 weights. This remains correct for anisotropic Fg.
       let parentVelocity = velocities[pi];
       let parentC = particleC[pi];
       let affineOffsetVelocity = vec2<f32>(
@@ -879,15 +905,17 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       velocities[pi] = parentVelocity - affineOffsetVelocity;
       velocities[newIndex] = parentVelocity + affineOffsetVelocity;
       particleC[newIndex] = parentC;
-      let daughterF = particleF[pi] * (1.0 / sqrt(max(particleRest[pi].growth, 1e-6)));
+      let daughterF = matMul(particleF[pi], matInverse(particleRest[pi].growthF));
       particleF[pi] = daughterF;
       particleF[newIndex] = daughterF;
       let parentJp = particleRest[pi].jp;
-      particleRest[pi] = ParticleRest(parentJp, 1.0, 0.0);
+      let identity = vec4<f32>(1.0, 0.0, 0.0, 1.0);
+      particleRest[pi] = ParticleRest(identity, parentJp, 0.0, vec2<f32>(0.0));
       particleRest[newIndex] = ParticleRest(
+        identity,
         parentJp,
-        1.0,
         0.0,
+        vec2<f32>(0.0),
       );
     } else {
       particleRest[pi].cycleActive = 0.0;

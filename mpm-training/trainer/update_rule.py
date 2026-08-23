@@ -20,8 +20,8 @@ convention envnca's own agents use: heading is core/agents.wgsl's own
 persistent per-particle state (NOT derived from velocity — see that
 file's own module docstring for why), which that shader uses to rotate
 the sensed gradient into forward/lateral before this net ever sees it,
-and this net's own strafe output is rotated back out to world frame by
-that same shader afterward — see core/agents.wgsl's own module docstring
+and this net's two former strafe outputs are rotated back out to world
+frame by that same shader afterward — see core/agents.wgsl's own module docstring
 for the exact rotation (training_sim.py, unlike an earlier revision, no
 longer does any of this itself — it only orchestrates GPU buffers/
 pipelines now).
@@ -44,13 +44,12 @@ pipelines now).
   (1), accel (2), and strafe (2), all raw/local-frame. angular_accel
   nudges the particle's own persistent angular velocity (which in turn
   nudges its persistent heading — see core/agents.wgsl's own module
-  docstring for why heading is no longer derived from velocity); strafe
-  is rotated to world frame and nudges VELOCITY — an acceleration, damped
-  by a FRICTION retention fraction, integrated forward into position by
-  MpmCore's own physics (see core/agents.wgsl's own module docstring for
-  the full history: this has flipped between velocity and a direct
-  position nudge twice now). accel is a separate output channel, still
-  produced (output width is unchanged) but currently unused. C=8
+  docstring for why heading is no longer derived from velocity); the two
+  former strafe channels now encode a local growth direction. The shader
+  rotates it to world space for tensor growth and signed division polarity, independently of
+  MAX_STRAFE. MAX_STRAFE optionally applies the same signal as physical
+  acceleration and is zero by default. accel is a separate output
+  channel, still produced (output width is unchanged) but currently unused. C=8
   (simulation_settings.CHEM_CHANNELS) and
   DEPOSIT_SPOTS=4 (simulation_settings.DEPOSIT_SPOTS) are what pin the
   output width at exactly 37: 8*4 + 1 + 2 + 2.
@@ -123,7 +122,8 @@ class UpdateRule(nn.Module):
         agnostic, it just concatenates whatever it's given. Returns
         (env_write, angular_accel, accel, strafe), all raw/un-squashed
         and still in LOCAL frame — squashing (tanh + the MAX_ANGULAR_ACCEL/
-        MAX_ACCEL/MAX_STRAFE/MAX_ENV_WRITE scale), reshaping env_write's
+        MAX_ACCEL/MAX_ENV_WRITE scale; strafe uses tanh without the
+        MAX_STRAFE scale for growth), reshaping env_write's
         own flat (N, C*DEPOSIT_SPOTS) output into the (N, DEPOSIT_SPOTS, C)
         callers actually want one-spot-at-a-time, and rotating accel/
         strafe to world frame are all training_sim.py's/core/agents.wgsl's

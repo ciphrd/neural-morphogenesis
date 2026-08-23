@@ -1,6 +1,6 @@
 // Pure-JS reimplementation of core/agents.wgsl's own evalPolicy() —
 // mirrors that function's exact math (Dense(hiddenDim) -> sin ->
-// Dense(outDim), tanh-squashed + physics-scaled output) so
+// Dense(outDim), tanh-squashed output with per-channel scaling) so
 // ui/NetworkPanel.tsx can visualize the CURRENT generation's policy as
 // a response surface (see that component's own module docstring) using
 // activeConfig.weights directly (already plain JS number[][]/number[] —
@@ -51,7 +51,7 @@ export function evalPolicy(
   hiddenDim: number,
   maxEnvWrite: number,
   maxAngularAccel: number,
-  maxStrafe: number
+  _maxStrafe: number
 ): PolicyOutput {
   const hidden = new Float32Array(hiddenDim);
   for (let j = 0; j < hiddenDim; j++) {
@@ -77,8 +77,8 @@ export function evalPolicy(
   // agents.wgsl's own PolicyOutput comment, intentionally skipped here too.
   const angularAccel = safeTanh(outVec[envWriteDim]) * maxAngularAccel;
   const strafe: [number, number] = [
-    safeTanh(outVec[envWriteDim + 3]) * maxStrafe,
-    safeTanh(outVec[envWriteDim + 4]) * maxStrafe,
+    safeTanh(outVec[envWriteDim + 3]),
+    safeTanh(outVec[envWriteDim + 4]),
   ];
   return { envWrite, angularAccel, strafe };
 }

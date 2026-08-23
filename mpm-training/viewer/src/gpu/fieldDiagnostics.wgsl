@@ -61,14 +61,15 @@ const CHANNELS: u32 = 4u;
 
 @group(0) @binding(0) var<storage, read> particlePos: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read> particleF: array<vec4<f32>>;
-// Per-particle rest-state bookkeeping (jp / growth / cycleActive) — see
+// Per-particle rest-state bookkeeping (growthF / jp / cycleActive) — see
 // ../../../core/agents.wgsl's own ParticleRest struct for the full docs.
 // Duplicated here, same convention this file's own Material struct and
 // quadraticWeights()/wrapIndex() already follow (WGSL has no #include).
 struct ParticleRest {
+  growthF: vec4<f32>,
   jp: f32,
-  growth: f32,
   cycleActive: f32,
+  growthDirection: vec2<f32>,
 }
 @group(0) @binding(2) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(3) var<storage, read_write> diagnostics: array<atomic<i32>>;
@@ -98,6 +99,14 @@ fn matTranspose(m: vec4<f32>) -> vec4<f32> {
 
 fn matDet(m: vec4<f32>) -> f32 {
   return m.x * m.w - m.y * m.z;
+}
+
+fn matInverse(m: vec4<f32>) -> vec4<f32> {
+  let det = matDet(m);
+  if (abs(det) < 1e-8) {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+  }
+  return vec4<f32>(m.w, -m.y, -m.z, m.x) / det;
 }
 
 struct Polar {
@@ -172,8 +181,8 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Diagnostics must use the same elastic deformation as P2G. Raw F also
   // contains stress-free growth and would falsely display grown tissue as
   // strained/pressurized.
-  let g = max(rest.growth, 1e-6);
-  let Fe = F * (1.0 / sqrt(g));
+  let g = max(matDet(rest.growthF), 1e-6);
+  let Fe = matMul(F, matInverse(rest.growthF));
   let J = matDet(Fe);
   let polar = polarDecompose(Fe);
   let r = polar.r;

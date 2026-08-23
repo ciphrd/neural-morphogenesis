@@ -23,11 +23,9 @@ export interface UpdateRuleWeights {
 export interface RunSettings {
   // The growth CAP, not a fixed starting count — every rollout currently
   // starts with two particles (see gpu/simulation.ts's own
-  // restartRollout()) and grows via splitting from there, up to this
-  // many (core/agents.wgsl's own MAX_ACTIVE_PARTICLES template const —
-  // see that file's own module docstring for the full growth design).
-  // Rebuild-triggering (baked into GPU buffer sizes/WGSL compile-time
-  // consts — see resetKeyFor()), same as channels/fieldN/hiddenDim below.
+  // restartRollout()) and grows via splitting from there. This is the
+  // trained/default ceiling; the viewer may apply a lower playback-only
+  // cap through AgentPhysics.maxActiveParticles without changing it.
   particles: number;
   macroSteps: number;
   // Optional time cutoff for starting new cycles. null/absent means
@@ -73,7 +71,7 @@ export interface RunSettings {
   massRampMacroSteps: number;
   // Kinematic growth (the multiplicative decomposition F = Fe*Fg) — see
   // core/g2p.wgsl's own Material struct for what each of these does, and
-  // core/agents.wgsl's own ParticleRest.growth for what they accumulate
+  // core/agents.wgsl's own ParticleRest.growthF for what they accumulate
   // into. growthRate 0 disables growth entirely.
   growthRate: number;
   growthMax: number;

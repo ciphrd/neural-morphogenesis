@@ -161,13 +161,12 @@ export class Agents {
 
     const { totalFloats } = weightLayout(config.channels, config.hiddenDim);
     this.weightsBuffer = device.createBuffer({ size: totalFloats * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // 56 bytes — core/agents.wgsl's own AgentPhysics struct is 14 f32
-    // fields (see that struct's own definition for the exact order
-    // setPhysics() below must match) — the last 2 (spawnX/spawnY) are
+    // 60 bytes — core/agents.wgsl's AgentPhysics is 14 f32 plus one u32.
+    // The final spawnX/spawnY/maxActiveParticles fields are
     // NOT written by setPhysics() below; see setSpawnCenter()'s own
     // docstring for why those get a separate setter into this same
     // buffer instead.
-    this.physicsUniform = device.createBuffer({ size: 56, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.physicsUniform = device.createBuffer({ size: 60, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setPhysics({
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
@@ -183,6 +182,7 @@ export class Agents {
       growthEnabled: config.growthEnabled,
     });
     this.setSpawnCenter(config.spawnX, config.spawnY);
+    this.setMaxActiveParticles(config.maxActiveParticles);
 
     // Persistent per-particle state — owned here (not MpmCore, not
     // Environment), zeroed at creation and whenever resetHeading() is
@@ -236,7 +236,6 @@ export class Agents {
         HIDDEN_DIM: config.hiddenDim,
         FIELD_WIDTH: environment.width,
         FIELD_HEIGHT: environment.height,
-        MAX_ACTIVE_PARTICLES: config.maxActiveParticles,
         // WGSL wants lowercase `true`/`false` — a raw JS boolean would
         // template-substitute as "true"/"false" too via String(), so
         // this one actually works either way, but spelled out for
@@ -360,6 +359,12 @@ export class Agents {
     writeFloat32(this.device, this.physicsUniform, 48, new Float32Array([spawnX, spawnY]));
   }
 
+  /** Runtime growth cap at AgentPhysics byte offset 56. */
+  setMaxActiveParticles(maxActiveParticles: number): void {
+    const cap = Math.max(1, Math.floor(maxActiveParticles));
+    this.device.queue.writeBuffer(this.physicsUniform, 56, new Uint32Array([cap]));
+  }
+
   /** Updates this class's own agentStep() dispatch size AND growth's own
    * atomic "next free slot" counter (core/agents.wgsl's own module
    * docstring), which always needs to start from the current
@@ -481,11 +486,10 @@ export class Agents {
   }
 
   /** Encodes the NN forward pass — reads the environment's current
-   * parity buffer (must match `parity`, see simulation.ts), writes a
-   * strafe-driven acceleration straight into MpmCore's own velocities
-   * buffer and env_write into the environment's deposit scratch (see
-   * agents.wgsl's own module docstring for the full strafe/velocity
-   * history). Does not submit. */
+   * parity buffer (must match `parity`, see simulation.ts), writes the
+   * policy's growth direction into MpmCore's particle-rest buffer,
+   * optionally applies it to velocity through maxStrafe, and writes
+   * env_write into the environment's deposit scratch. Does not submit. */
   encodeStep(encoder: GPUCommandEncoder, parity: number): void {
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.pipeline);

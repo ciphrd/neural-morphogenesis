@@ -174,13 +174,12 @@ class AgentsGPU:
         self._weights_buffer = device.create_buffer(
             size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
         )
-        # 56 bytes — core/agents.wgsl's own AgentPhysics struct is 14 f32
-        # fields (see that struct's own definition for the exact order
-        # set_physics() below must match) — the last 2 (spawnX/spawnY) are
+        # 60 bytes — core/agents.wgsl's AgentPhysics is 14 f32 plus one
+        # u32. spawnX/spawnY/maxActiveParticles are written separately.
         # NOT written by set_physics() below; see set_spawn_center()'s own
         # docstring for why those get a separate setter into this same
         # buffer instead.
-        self._physics_uniform = device.create_buffer(size=56, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self._physics_uniform = device.create_buffer(size=60, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_physics(
             max_accel,
             max_strafe,
@@ -196,6 +195,7 @@ class AgentsGPU:
             growth_enabled,
         )
         self.set_spawn_center(spawn_x, spawn_y)
+        self.set_max_active_particles(max_active_particles)
 
         # Persistent per-particle state — owned here (not MpmCore, not
         # EnvironmentGPU), zeroed at creation (randomized/reseeded
@@ -253,7 +253,6 @@ class AgentsGPU:
                     "HIDDEN_DIM": hidden_dim,
                     "FIELD_WIDTH": environment.width,
                     "FIELD_HEIGHT": environment.height,
-                    "MAX_ACTIVE_PARTICLES": max_active_particles,
                     # WGSL wants lowercase `true`/`false` — Python's own
                     # str(bool) gives "True"/"False", invalid WGSL syntax,
                     # so this can't just be passed through as-is.
@@ -388,6 +387,14 @@ class AgentsGPU:
         domain's own fixed (0.5,0.5))."""
         self.device.queue.write_buffer(self._physics_uniform, 48, np.array([spawn_x, spawn_y], dtype=np.float32))
 
+    def set_max_active_particles(self, max_active_particles: int) -> None:
+        """Writes AgentPhysics.maxActiveParticles at byte offset 56."""
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            56,
+            np.array([max(1, int(max_active_particles))], dtype=np.uint32),
+        )
+
     def set_active_count(self, active_count: int) -> None:
         """Updates this class's own agentStep() dispatch size AND
         growth's own atomic "next free slot" counter (core/agents.wgsl's
@@ -515,11 +522,10 @@ class AgentsGPU:
 
     def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int) -> None:
         """Encodes the NN forward pass — reads environment's current
-        parity buffer (must match `parity`), writes a strafe-driven
-        acceleration straight into MpmCore's own velocities buffer and
-        env_write into environment's deposit scratch (see core/agents.wgsl's
-        own module docstring for the full strafe/velocity history). Does
-        not submit."""
+        parity buffer (must match `parity`), writes the policy's growth
+        direction into MpmCore's particle-rest buffer, optionally applies
+        that signal to velocity through maxStrafe, and writes env_write
+        into the environment's deposit scratch. Does not submit."""
         p = encoder.begin_compute_pass()
         p.set_pipeline(self._pipeline)
         p.set_bind_group(0, self._bind_groups[parity])

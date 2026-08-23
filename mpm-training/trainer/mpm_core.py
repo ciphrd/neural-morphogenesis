@@ -67,15 +67,18 @@ NODE_COUNT = (GRID_N + 1) * (GRID_N + 1)
 WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass — see core/clearGrid.wgsl
-# jp, growth, cycleActive — core/agents.wgsl's own ParticleRest struct (a
-# 3-f32 struct packs to a 12-byte array stride in WGSL, no padding).
-REST_FIELDS = 3
+# growthF(row-major 2x2), jp, cycleActive, growthDirection(2) — core/agents.wgsl's
+# own 32-byte ParticleRest layout. vec4 growthF imposes 16-byte alignment.
+REST_FIELDS = 8
+REST_GROWTH_F = slice(0, 4)
+REST_JP = 4
+REST_CYCLE_ACTIVE = 5
 
 
 def _pack_rest(jp: np.ndarray) -> np.ndarray:
     """Expands a flat (count,) Jp array into ParticleRest's own
-    (count, 3) (jp, growth, cycleActive) layout, defaulting growth=1.0
-    (baseline cell area) and cycleActive=0.0.
+    (count, 8) tensor-rest layout, defaulting growthF=I (baseline rest
+    configuration), cycleActive=0, and growthDirection=0.
 
     Exists so load_scene()/reset_growth_buffers() can keep their original
     scalar-Jp signatures — every scene seeder in this project
@@ -83,10 +86,10 @@ def _pack_rest(jp: np.ndarray) -> np.ndarray:
     and the viewer's own rng.ts) still hands over a plain (count,) ones
     array, unaware that the underlying buffer grew two siblings."""
     count = jp.shape[0]
-    packed = np.empty((count, REST_FIELDS), dtype=np.float32)
-    packed[:, 0] = jp
-    packed[:, 1] = 1.0
-    packed[:, 2] = 0.0
+    packed = np.zeros((count, REST_FIELDS), dtype=np.float32)
+    packed[:, 0] = 1.0
+    packed[:, 3] = 1.0
+    packed[:, REST_JP] = jp
     return packed
 
 SNOW_YIELD_LOW = 1.0 - 2.5e-2
@@ -150,13 +153,16 @@ class MpmCore:
         )
         self.F = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC)
         self.C = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC)
-        # Per-particle rest state — 3 f32 (jp, growth, cycleActive), see
+        # Per-particle rest state — growthF(4), jp, cycleActive, direction(2), see
         # core/agents.wgsl's own ParticleRest struct. Was a bare
         # array<f32> of Jp alone; widened rather than adding sibling
         # buffers because core/agents.wgsl is at the hard
         # 10-storage-buffer Dawn ceiling and needs all three at its
         # split site (see that file's own binding comments).
-        self.rest = device.create_buffer(size=MAX_PARTICLES * REST_FIELDS * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
+        self.rest = device.create_buffer(
+            size=MAX_PARTICLES * REST_FIELDS * f32,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
+        )
 
         # COPY_SRC supports the focused stability/headroom regressions; it
         # does not add a transfer to the hot path unless a check reads it.
@@ -344,7 +350,7 @@ class MpmCore:
         self.device.queue.write_buffer(self.C, 0, C.astype(np.float32))
         # Scene API deliberately unchanged: callers still hand over a
         # flat (count,) Jp array. Expanded here into ParticleRest's own
-        # (jp, growth, cycleActive) layout — growth=1 and cycleActive=0
+        # tensor layout — growthF=I and cycleActive=0 for
         # genuinely-seeded particles, which unlike growth-spawned
         # children have no ramp to serve.
         self.device.queue.write_buffer(self.rest, 0, _pack_rest(np.asarray(Jp, dtype=np.float32)))
@@ -367,15 +373,16 @@ class MpmCore:
         self.device.queue.write_buffer(self.active_count_uniform, 0, np.array([count], dtype=np.uint32))
 
     def reset_growth_buffers(self, max_active: int) -> None:
-        """Zero/identity-fills velocities/F/C/Jp for [0, max_active) —
+        """Zero/identity-fills velocities/F/C/ParticleRest for [0, max_active) —
         call once per rollout, after load_scene(). Every rollout now
         starts with two real particles (see training_sim.py's own module
         docstring for why --particles is a growth CAP now, not a fixed
         starting count) — every slot beyond that one is destined to
         become a real particle via growth (core/agents.wgsl's own
-        agentStep() — see that file's own module docstring for why it
-        never writes velocities/F/C/Jp itself at all, relying entirely on
-        this method's own pre-fill instead), and needs to start from the
+        agentStep() may claim any slot, so every per-particle physics/rest
+        buffer must be initialized before that happens; division then
+        overwrites the claimed slot with its inherited live state), and needs
+        to start from the
         exact same fresh MPM state seed_blob() already gives that one
         genuinely-seeded particle — WITHOUT this, a slot THIS rollout's
         own growth later claims could inherit a PREVIOUS rollout's stale,
@@ -385,7 +392,7 @@ class MpmCore:
         writes the HEAD of each buffer, never the tail a previous
         rollout's growth may have touched). Safe (idempotent) to run over
         the one index load_scene() ALSO just wrote — seed_blob()'s own
-        velocity/F/C/Jp defaults are identical to these — so this can
+        velocity/F/C/ParticleRest defaults are identical to these — so this can
         unconditionally cover the whole [0, max_active) range rather than
         needing to carefully skip the one already-real particle."""
         zeros2 = np.zeros((max_active, 2), dtype=np.float32)
@@ -573,3 +580,15 @@ class MpmCore:
     def read_affine(self) -> np.ndarray:
         raw = self.device.queue.read_buffer(self.C, 0, self._active_count * 4 * 4)
         return np.frombuffer(raw, dtype=np.float32).reshape(-1, 4).copy()
+
+    def read_rest_state(self) -> np.ndarray:
+        """Returns active particles' raw tensor-growth rest-state rows.
+
+        Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,dirX,dirY]``.
+        This is diagnostic-only: COPY_SRC is present on the buffer, but the
+        normal simulation path performs no readback. Keeping the raw layout
+        visible here also makes scalar-vs-tensor growth snapshots explicit
+        when ParticleRest is upgraded later.
+        """
+        raw = self.device.queue.read_buffer(self.rest, 0, self._active_count * REST_FIELDS * 4)
+        return np.frombuffer(raw, dtype=np.float32).reshape(-1, REST_FIELDS).copy()

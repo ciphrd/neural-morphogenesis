@@ -65,15 +65,16 @@ const CHANNELS: u32 = 3u;
 @group(0) @binding(1) var<storage, read> particleVel: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> particleF: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read> particleC: array<vec4<f32>>;
-// Per-particle rest-state bookkeeping (jp / growth / cycleActive) — see
+// Per-particle rest-state bookkeeping (growthF / jp / cycleActive) — see
 // core/agents.wgsl's own ParticleRest struct for the full field-by-field
-// docs and for why three scalars share one buffer. Declared identically
+// docs. Declared identically
 // here (WGSL has no #include, same duplication tradeoff as the Material
 // struct above).
 struct ParticleRest {
+  growthF: vec4<f32>,
   jp: f32,
-  growth: f32,
   cycleActive: f32,
+  growthDirection: vec2<f32>,
 }
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read_write> gridAccum: array<atomic<i32>>;
@@ -131,6 +132,14 @@ fn matTranspose(m: vec4<f32>) -> vec4<f32> {
 
 fn matDet(m: vec4<f32>) -> f32 {
   return m.x * m.w - m.y * m.z;
+}
+
+fn matInverse(m: vec4<f32>) -> vec4<f32> {
+  let det = matDet(m);
+  if (abs(det) < 1e-8) {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+  }
+  return vec4<f32>(m.w, -m.y, -m.z, m.x) / det;
 }
 
 fn matAddScaledIdentity(m: vec4<f32>, s: f32) -> vec4<f32> {
@@ -214,18 +223,18 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // MULTIPLICATIVE GROWTH DECOMPOSITION: F = Fe*Fg, where Fg is a
   // stress-free change of this particle's own REST configuration and Fe
-  // is the only part elasticity is allowed to see. Growth here is
-  // isotropic, so Fg = sqrt(g)*I in 2D (det(Fg) = g exactly) and
-  // Fe = F*Fg^-1 collapses to a plain scalar divide — no matrix inverse
-  // needed. THIS SUBSTITUTION IS THE WHOLE POINT: evaluating the
+  // is the only part elasticity is allowed to see. Fg is stored as a full
+  // row-major 2x2 tensor and can accumulate directional rest deformation.
+  // THIS SUBSTITUTION IS THE WHOLE POINT: evaluating the
   // constitutive law below on Fe rather than raw F means grown volume
   // costs zero stress by construction, so elasticity resists only
   // deviation from the newly-grown rest state instead of forever trying
-  // to restore the original one. See core/g2p.wgsl for where g is
-  // advanced, and core/agents.wgsl's own ParticleRest.growth field
+  // to restore the original one. See core/g2p.wgsl for where Fg is
+  // advanced, and core/agents.wgsl's own ParticleRest.growthF field
   // comment for the full rationale.
-  let g = max(rest.growth, 1e-6); // guard a degenerate/uninitialized 0
-  let Fe = F * (1.0 / sqrt(g));
+  let Fg = rest.growthF;
+  let g = max(matDet(Fg), 1e-6); // det(Fg): grown rest-area ratio
+  let Fe = matMul(F, matInverse(Fg));
   let Je = matDet(Fe);
   let polar = polarDecompose(Fe);
   let r = polar.r;

@@ -69,12 +69,12 @@ const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
 const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
-// jp, growth, cycleActive — ../../../core/agents.wgsl's own ParticleRest
-// struct (a 3-f32 struct packs to a 12-byte array stride in WGSL).
-const REST_FIELDS = 3;
+// growthF(row-major 2x2), jp, cycleActive, growthDirection(2) — shared
+// 32-byte ParticleRest layout in ../../../core/agents.wgsl.
+const REST_FIELDS = 8;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own
- * (jp, growth, cycleActive) layout, defaulting growth=1 and cycleActive=0.
+ * tensor-rest layout, defaulting growthF=I and cycleActive=0.
  * Mirrors trainer/mpm_core.py's own
  * _pack_rest() exactly — exists so loadScene()/resetGrowthBuffers() keep
  * their original scalar-Jp signatures and rng.ts's own seedBlob() never
@@ -82,9 +82,9 @@ const REST_FIELDS = 3;
 function packRest(jp: Float32Array): Float32Array {
   const packed = new Float32Array(jp.length * REST_FIELDS);
   for (let i = 0; i < jp.length; i++) {
-    packed[i * REST_FIELDS] = jp[i];
-    packed[i * REST_FIELDS + 1] = 1;
-    packed[i * REST_FIELDS + 2] = 0;
+    packed[i * REST_FIELDS] = 1;
+    packed[i * REST_FIELDS + 3] = 1;
+    packed[i * REST_FIELDS + 4] = jp[i];
   }
   return packed;
 }
@@ -326,8 +326,8 @@ export class MpmCore {
     writeFloat32(this.device, this.C, 0, scene.C);
     // Scene API deliberately unchanged: callers still hand over a flat
     // (count,) Jp array (rng.ts's own seedBlob()). Expanded here into
-    // ParticleRest's own (jp, growth, cycleActive) layout — growth=1,
-    // cycleActive=0 are exactly right for
+    // ParticleRest's tensor layout — growthF=I and cycleActive=0 are
+    // exactly right for
     // genuinely-seeded particles, which have no ramp to serve.
     writeFloat32(this.device, this.rest, 0, packRest(scene.Jp));
     this.setActiveCount(scene.count);
@@ -348,12 +348,12 @@ export class MpmCore {
     writeFloat32(this.device, this.activeCountUniform, 0, new Uint32Array([count]));
   }
 
-  /** Zero/identity-fills velocities/F/C/Jp for [0, maxActive) — call once
+  /** Zero/identity-fills velocities/F/C/ParticleRest for [0, maxActive) — call once
    * per rollout, after loadScene(). Slots beyond this rollout's own
    * particle count are destined to become real particles via growth
    * (core/agents.wgsl's own agentStep() — see that file's own module
-   * docstring for why it never writes velocities/F/C/Jp itself at all,
-   * relying entirely on this method's own pre-fill instead), and need to
+   * docstring for why every claimable slot must be initialized before
+   * division overwrites it with inherited live state), and need to
    * start from the exact same fresh MPM state seedBlob() already gives
    * every genuinely-seeded particle — WITHOUT this, a slot THIS
    * rollout's own growth later claims could inherit a PREVIOUS rollout's
@@ -363,7 +363,7 @@ export class MpmCore {
    * touched — and unlike the Python trainer, this object is reused
    * across every rollout a session ever plays, not rebuilt). Safe
    * (idempotent) to run over indices loadScene() ALSO just wrote —
-   * seedBlob()'s own velocity/F/C/Jp defaults are identical to these —
+   * seedBlob()'s own velocity/F/C/ParticleRest defaults are identical —
    * so this can unconditionally cover the whole [0, maxActive) range
    * rather than needing to carefully skip the already-real particles. */
   resetGrowthBuffers(maxActive: number): void {
@@ -397,7 +397,7 @@ export class MpmCore {
     writeFloat32(this.device, this.velocities, i * 2 * 4, new Float32Array([0, 0]));
     writeFloat32(this.device, this.F, i * 4 * 4, new Float32Array([1, 0, 0, 1]));
     writeFloat32(this.device, this.C, i * 4 * 4, new Float32Array([0, 0, 0, 0]));
-    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 1, 0]));
+    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 0, 0, 1, 1, 0, 0, 0]));
     this.setActiveCount(this._activeCount + 1);
     return true;
   }

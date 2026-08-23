@@ -40,6 +40,9 @@ DECAY = 0.91
 
 # Motion
 MAX_ACCEL = 0.0 # 0.1 # not used rn
+# Optional physical acceleration scale for the two policy channels that
+# now direct tensor growth. Growth reads their raw bounded direction and
+# remains active when this is zero.
 MAX_STRAFE = 0.0 # 5.3
 FRICTION = 0.9
 MAX_ANGULAR_ACCEL = 1.4
@@ -72,10 +75,11 @@ MASS_RAMP_MACRO_STEPS = 1.0
 # --- Kinematic growth (multiplicative decomposition F = Fe*Fg) ---
 # The mechanism that lets a shape actually GROW as particles are added,
 # instead of elasticity fighting to restore its original volume: growth
-# accumulates in a per-particle stress-free rest factor g (det(Fg)), and
-# core/p2g.wgsl evaluates the constitutive law on Fe = F/sqrt(g) rather
-# than raw F. See core/g2p.wgsl's own substrate-driven growth block (where g is
-# advanced) and core/agents.wgsl's own ParticleRest.growth field comment.
+# accumulates in a full per-particle stress-free tensor Fg, and
+# core/p2g.wgsl evaluates the constitutive law on Fe = F*inverse(Fg) rather
+# than raw F. A zero policy direction preserves exact isotropic scalar-model
+# equivalence; a nonzero direction produces anisotropic rest growth. See
+# core/g2p.wgsl and core/agents.wgsl's ParticleRest.growthF comment.
 #
 # Exponential stress-free area growth rate while a substrate-triggered
 # cell cycle is active. Growth is imposed first; elastic relaxation then

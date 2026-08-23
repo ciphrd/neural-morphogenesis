@@ -190,7 +190,7 @@ fn cividis(t: f32) -> vec3<f32> {
   return mix(CIVIDIS[i0], CIVIDIS[i1], fract(c));
 }
 
-// Live-adjustable "accent" — a [0,2] exponential contrast curve applied
+// Live-adjustable "accent" — a [-2,2] exponential contrast curve applied
 // to EVERY background mode's own normalized value before color-mapping
 // (accentedMagnitude()/accentedSigned() below, which scalarColor()/
 // graypoint() and the growth/repulsion modes' own standalone code all
@@ -198,21 +198,24 @@ fn cividis(t: f32) -> vec3<f32> {
 // project's own explicit request: a single shared knob to make a mode's
 // own effect "more visible" without touching that mode's own MAX/scale
 // constant. accent=0 leaves every mode exactly as it already rendered
-// (identity curve); increasing toward 2 exaggerates faint signal
-// rapidly (see accentedMagnitude()'s own comment for the exact curve).
+// (identity curve); increasing toward 2 exaggerates faint signal, while
+// decreasing toward -2 suppresses submaximal values toward the neutral
+// background/midpoint (see accentedMagnitude() for the exact curve).
 // PhysicsPanel-style live uniform, not compile-time — plain buffer
 // write, no pipeline rebuild (gpu/render.ts's own setAccent()).
 @group(0) @binding(13) var<uniform> accent: f32;
 
 // Exponential accent curve for an UNSIGNED magnitude already normalized
 // to [0,1] (density/speed/shear via scalarColor() below, repulsion's
-// own standalone t) — accent=0 -> exponent 1.0 (exp(-0), identity);
-// increasing accent shrinks the exponent toward exp(-2)~=0.135, and
+// own standalone t) — accent=0 -> exponent 1.0 (exp(-0), identity).
+// Positive accent shrinks the exponent toward exp(-2)~=0.135, and
 // pow(t, exponent<1) pushes ANY nonzero t rapidly up toward 1 (a value
 // that would otherwise read as a faint tint saturates well before
 // accent reaches its own max) — exactly the "accentuates the effects
 // exponentially so they're more visible" behavior this slider was
-// requested for.
+// requested for. Negative accent raises the exponent above 1 (up to
+// exp(2)~=7.39), pushing submaximal values toward 0 and reducing their
+// impact on the resulting color.
 fn accentedMagnitude(t: f32) -> f32 {
   return pow(clamp(t, 0.0, 1.0), exp(-accent));
 }

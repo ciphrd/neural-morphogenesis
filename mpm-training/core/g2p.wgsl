@@ -24,17 +24,18 @@ const DT: f32 = __DT__;
 @group(0) @binding(1) var<storage, read_write> particleVel: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> particleF: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> particleC: array<vec4<f32>>;
-// Per-particle rest-state bookkeeping (jp / growth / cycleActive) — see
+// Per-particle rest-state bookkeeping (growthF / jp / cycleActive) — see
 // core/agents.wgsl's own ParticleRest struct for the full field-by-field
-// docs. THIS SHADER OWNS two of the three: it advances `jp` (the plastic
-// clamp below) and `growth` (the substrate-driven growth law below).
-// `cycleActive` is owned by core/agents.wgsl and must be PRESERVED on write — the
+// docs. THIS SHADER advances `jp` (the plastic clamp below) and `growthF`
+// (the substrate-driven growth law below). `cycleActive` and
+// `growthDirection` are owned by core/agents.wgsl and must be PRESERVED on write — the
 // element used to be a bare f32 this shader could overwrite wholesale,
 // and it no longer is.
 struct ParticleRest {
+  growthF: vec4<f32>,
   jp: f32,
-  growth: f32,
   cycleActive: f32,
+  growthDirection: vec2<f32>,
 }
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
@@ -83,6 +84,14 @@ fn matTranspose(m: vec4<f32>) -> vec4<f32> {
 
 fn matDet(m: vec4<f32>) -> f32 {
   return m.x * m.w - m.y * m.z;
+}
+
+fn matInverse(m: vec4<f32>) -> vec4<f32> {
+  let det = matDet(m);
+  if (abs(det) < 1e-8) {
+    return vec4<f32>(1.0, 0.0, 0.0, 1.0);
+  }
+  return vec4<f32>(m.w, -m.y, -m.z, m.x) / det;
 }
 
 fn identityPlusScaled(m: vec4<f32>, s: f32) -> vec4<f32> {
@@ -195,7 +204,8 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let F0 = particleF[pi];
   let rest0 = particleRest[pi];
   let Jp0 = rest0.jp;
-  let g0 = max(rest0.growth, 1e-6); // guard a degenerate/uninitialized 0
+  let Fg0 = rest0.growthF;
+  let g0 = max(matDet(Fg0), 1e-6); // det(Fg): grown rest-area ratio
 
   // base = floor(y - 0.5), fx = y - base, landing in [0.5, 1.5) — must
   // match p2g.wgsl's own note on this exactly (G2P has to gather from
@@ -240,36 +250,33 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var F = matMul(identityPlusScaled(C, DT), F0);
 
-  let svd = svd2(F);
+  let FeTrial = matMul(F, matInverse(Fg0));
+  let svd = svd2(FeTrial);
   // Bounds are the world's own Material.yieldLow/yieldHigh — how much of
   // a stretch/compression the corotated elastic term is allowed to fully
   // recover from versus how much gets baked in as permanent (plastic)
   // deformation via Jp below.
   //
-  // SCALED BY sqrt(g): yield is a property of ELASTIC strain, so the
-  // clamp belongs on Fe's singular values, not raw F's. Because growth
-  // is isotropic (Fg = sqrt(g)*I — see p2g.wgsl's own Fe derivation),
-  // svd(Fe).sigma is exactly svd(F).sigma / sqrt(g), so clamping Fe to
-  // [yieldLow, yieldHigh] is identical to clamping F to those bounds
-  // scaled by sqrt(g) — no second SVD needed. This matters a lot:
-  // WITHOUT the scaling, accumulated growth would eventually push F's
-  // own singular values past the yield bounds all on its own and get
+  // Yield is a property of ELASTIC strain, so the clamp belongs directly
+  // on Fe's singular values, never raw F's. This matters a lot: otherwise
+  // accumulated growth would eventually push total F's singular values
+  // past the yield bounds all on its own and get
   // silently converted into plastic deformation, which is precisely the
   // "elasticity fights growth" failure the whole decomposition exists to
   // eliminate.
-  let yieldScale = sqrt(g0);
   let sigma = clamp(
     svd.sigma,
-    vec2<f32>(material.yieldLow * yieldScale),
-    vec2<f32>(material.yieldHigh * yieldScale)
+    vec2<f32>(material.yieldLow),
+    vec2<f32>(material.yieldHigh)
   );
 
-  let oldJ = matDet(F);
+  let oldJe = matDet(FeTrial);
   let sigmaMat = vec4<f32>(sigma.x, 0.0, 0.0, sigma.y);
-  F = matMul(matMul(svd.u, sigmaMat), matTranspose(svd.v));
-  let newJ = matDet(F);
+  let Fe = matMul(matMul(svd.u, sigmaMat), matTranspose(svd.v));
+  F = matMul(Fe, Fg0);
+  let newJe = matDet(Fe);
 
-  let JpNew = clamp(Jp0 * oldJ / newJ, 0.6, 20.0);
+  let JpNew = clamp(Jp0 * oldJe / newJe, 0.6, 20.0);
 
   // SUBSTRATE-DRIVEN GROWTH. agentStep probabilistically starts a cell
   // cycle from the last substrate channel and latches cycleActive. Once
@@ -278,8 +285,9 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // then expands the compatible body. This is growth followed by elastic
   // relaxation, rather than the old circular repulsion -> dilation ->
   // growth ratchet.
-  let je = oldJ / g0;
+  let je = oldJe;
   var gNew = g0;
+  var FgNew = Fg0;
   // Continuous feedback, not a checkpoint. At and above the reference,
   // growth runs at its full configured rate; compression below it slows
   // the rate smoothly. Any physically valid Je > 0 retains a positive
@@ -295,6 +303,37 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       g0 * exp(material.growthRate * compressionScale * DT),
       2.0
     );
+    let areaFactor = gNew / g0;
+    let signalStrength = clamp(length(rest0.growthDirection), 0.0, 1.0);
+    if (signalStrength < 1e-6) {
+      // Exact scalar-model equivalence when the network emits no axis.
+      FgNew = Fg0 * sqrt(areaFactor);
+    } else {
+      // The policy direction is expressed in the spatial/world frame.
+      // Pull it back through Fe's polar rotation so H acts objectively in
+      // Fg's intermediate configuration: rotating the whole body and its
+      // heading rotates the result rather than changing its material law.
+      let r = polarDecompose(FeTrial).r;
+      let worldDir = rest0.growthDirection / length(rest0.growthDirection);
+      let n = vec2<f32>(
+        r.x * worldDir.x + r.z * worldDir.y,
+        r.y * worldDir.x + r.w * worldDir.y
+      );
+      // det(H)=areaFactor exactly. signalStrength=0 is isotropic;
+      // signalStrength=1 places the full area increment along n while the
+      // perpendicular rest stretch stays unchanged.
+      let logArea = log(max(areaFactor, 1.0));
+      let parallel = exp(0.5 * logArea * (1.0 + signalStrength));
+      let perpendicular = exp(0.5 * logArea * (1.0 - signalStrength));
+      let delta = parallel - perpendicular;
+      let H = vec4<f32>(
+        perpendicular + delta * n.x * n.x,
+        delta * n.x * n.y,
+        delta * n.y * n.x,
+        perpendicular + delta * n.y * n.y
+      );
+      FgNew = matMul(H, Fg0);
+    }
   }
 
   particlePos[pi] = newPos;
@@ -304,5 +343,5 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // cycleActive carried through untouched — owned by core/agents.wgsl (see
   // this file's own ParticleRest comment); this element is shared now,
   // not a bare f32 to overwrite wholesale.
-  particleRest[pi] = ParticleRest(JpNew, gNew, rest0.cycleActive);
+  particleRest[pi] = ParticleRest(FgNew, JpNew, rest0.cycleActive, rest0.growthDirection);
 }

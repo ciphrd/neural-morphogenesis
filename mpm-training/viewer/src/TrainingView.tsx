@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { FitnessChart } from "./charts/FitnessChart"
-import type { FieldMode, ParticleShape } from "./gpu/render"
+import type { FieldMode, ParticleRenderMode } from "./gpu/render"
 import type { PhysicsSettings } from "./gpu/types"
 import { physicsSettingsFromConfig } from "./gpu/types"
 import { generationImageUrl } from "./net/images"
@@ -95,10 +95,8 @@ export function TrainingView() {
   // View-only rendering options (gpu/render.ts) — not simulation state,
   // so plain component state, never reset by a run/generation change.
   const [fieldMode, setFieldMode] = useState<FieldMode>("none")
-  // [0,2] — exponentially accentuates whichever background mode is
-  // active (see gpu/render.ts's own setAccent()/field.wgsl's own accent
-  // uniform comment for the exact curve). 0 = identity, every mode
-  // renders exactly as it did before this knob existed.
+  // [-2,2] exponential background contrast. Negative suppresses submaximal
+  // field values, 0 is identity, positive accentuates faint values.
   const [accent, setAccent] = useState(0)
   // [0,2] — Gaussian sigma, in repulsion-field texels, for the "gradient"
   // mode's own blur pass (see gpu/render.ts's own setBlur()/field.wgsl's
@@ -112,8 +110,14 @@ export function TrainingView() {
   // 1 = identity, unchanged from before this knob existed; only read by
   // that one background mode.
   const [gradientExponent, setGradientExponent] = useState(1)
-  const [particleShape, setParticleShape] = useState<ParticleShape>("triangle")
+  const [particleRenderMode, setParticleRenderMode] =
+    useState<ParticleRenderMode>("dots-white")
   const [particleRadiusPx, setParticleRadiusPx] = useState(4)
+  const [frontendParticleCap, setFrontendParticleCap] = useState(2)
+  const [targetVisible, setTargetVisible] = useState(true)
+  const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(1)
+  const [activationAlpha, setActivationAlpha] = useState(0.2)
+  const [growthAxisLengthPx, setGrowthAxisLengthPx] = useState(28)
   // "Add"/"Move"/"Deform" interaction tools (render/GridCanvas.tsx's own
   // Tool type) — toggled on/off by clicking their own icon button again
   // (see the Tools section below), not reset by a run/generation change
@@ -148,6 +152,9 @@ export function TrainingView() {
     setReplayStep(0)
     setCellCount(0)
   }, [activeConfig?.generation])
+  useEffect(() => {
+    if (activeConfig) setFrontendParticleCap(activeConfig.particles)
+  }, [viewingRunId, activeConfig?.generation])
   // null = following this generation's own trained gravity/decay/
   // maxAccel/maxStrafe/maxEnvWrite; non-null once the "Physics" panel's
   // sliders have been touched. Reset whenever the run or the generation
@@ -240,13 +247,11 @@ export function TrainingView() {
                 : "—"}
             </span>
           </div>
-          {/* Live count, not the cap — grows as growth splits. The
-              "Max particles" row further down is config.particles, the
-              ceiling this can climb to. */}
+          {/* Live count, not the cap — grows as growth splits. */}
           <div className="stat-row">
             <span>Cells</span>
             <span>
-              {activeConfig ? `${cellCount} / ${activeConfig.particles}` : "—"}
+              {activeConfig ? `${cellCount} / ${frontendParticleCap}` : "—"}
             </span>
           </div>
           <div className="stat-row">
@@ -254,7 +259,7 @@ export function TrainingView() {
             <span>{activeStat ? activeStat.allTimeBest.toFixed(3) : "—"}</span>
           </div>
           <div className="stat-row">
-            <span>Max particles</span>
+            <span>Training particle cap</span>
             <span>{activeConfig ? activeConfig.particles : "—"}</span>
           </div>
           <div className="stat-row">
@@ -284,16 +289,79 @@ export function TrainingView() {
             />
             <span className="slider-value">{particleRadiusPx}px</span>
           </label>
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={particleShape === "triangle"}
-              onChange={(e) =>
-                setParticleShape(e.target.checked ? "triangle" : "circle")
-              }
+          <label className="slider-row">
+            <span>Playback particle cap</span>
+            <Slider
+              min={2}
+              max={activeConfig?.particles ?? 2}
+              step={1}
+              value={frontendParticleCap}
+              onChange={setFrontendParticleCap}
             />
-            Point particles toward heading
+            <span className="slider-value">{frontendParticleCap}</span>
           </label>
+          <label className="slider-row">
+            <span>Particles</span>
+            <select
+              className="select"
+              value={particleRenderMode}
+              onChange={(e) =>
+                setParticleRenderMode(e.target.value as ParticleRenderMode)
+              }
+            >
+              <option value="dots-white">Dots (white)</option>
+              <option value="dots-activation">Dots (neurons)</option>
+              <option value="dots-activation-translucent">
+                Dots (translucent neurons)
+              </option>
+              <option value="directional-arrows">Directional arrows</option>
+            </select>
+          </label>
+          {particleRenderMode === "dots-white" && (
+            <label className="slider-row">
+              <span>Dots alpha</span>
+              <Slider
+                min={0}
+                max={1}
+                step={0.01}
+                value={whiteDotsAlpha}
+                onChange={setWhiteDotsAlpha}
+              />
+              <span className="slider-value">{whiteDotsAlpha.toFixed(2)}</span>
+            </label>
+          )}
+          {particleRenderMode === "dots-activation-translucent" && (
+            <label className="slider-row">
+              <span>Activation alpha</span>
+              <Slider
+                min={0}
+                max={1}
+                step={0.01}
+                value={activationAlpha}
+                onChange={setActivationAlpha}
+              />
+              <span className="slider-value">{activationAlpha.toFixed(2)}</span>
+            </label>
+          )}
+          {particleRenderMode === "directional-arrows" && (
+            <>
+              <label className="slider-row">
+                <span>Growth axis length</span>
+                <Slider
+                  min={8}
+                  max={80}
+                  step={1}
+                  value={growthAxisLengthPx}
+                  onChange={setGrowthAxisLengthPx}
+                />
+                <span className="slider-value">{growthAxisLengthPx}px</span>
+              </label>
+              <p className="hint">
+                Cyan arrows point toward +n division polarity; length shows
+                signal strength.
+              </p>
+            </>
+          )}
           <label className="slider-row">
             <span>Background</span>
             <select
@@ -313,10 +381,18 @@ export function TrainingView() {
               <option value="gradient">Boundary gradient</option>
             </select>
           </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={targetVisible}
+              onChange={(e) => setTargetVisible(e.target.checked)}
+            />
+            Show training target
+          </label>
           <label className="slider-row">
             <span>Accent</span>
             <Slider
-              min={0}
+              min={-2}
               max={2}
               step={0.01}
               value={accent}
@@ -384,13 +460,18 @@ export function TrainingView() {
             ref={gridCanvasRef}
             config={activeConfig}
             targetPoints={targetPoints}
+            targetVisible={targetVisible}
             physics={physicsValues}
+            particleCap={frontendParticleCap}
             fieldMode={fieldMode}
             accent={accent}
             blur={blur}
             gradientExponent={gradientExponent}
-            particleShape={particleShape}
+            particleRenderMode={particleRenderMode}
             particleRadiusPx={particleRadiusPx}
+            whiteDotsAlpha={whiteDotsAlpha}
+            activationAlpha={activationAlpha}
+            growthAxisLengthPx={growthAxisLengthPx}
             tool={tool}
             deformSettings={deformSettings}
             onStep={(step, particles) => {

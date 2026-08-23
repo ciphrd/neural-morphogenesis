@@ -5,7 +5,7 @@ adapted to a real physics substrate instead of a bare point-agent grid.
 
 Fully GPU-resident, matching ../viewer/src/gpu/simulation.ts's own
 "GPU-resident is the whole point" design for every data-related buffer
-(positions, velocities, F/C/Jp, the chemical field, weights): each macro
+(positions, velocities, F/C/ParticleRest, the chemical field, weights): each macro
 step is one command encoder (environment.encode_sense -> agents.encode_step
 -> environment.encode_merge_and_decay), one submit, immediately followed
 by core.step(substeps_per_macro)'s own physics submission — see
@@ -52,20 +52,14 @@ self.heading/self.angular_velocity numpy arrays, computing the rotation
 in torch every macro step; there's nothing left for this module to do
 there now).
 
-Strafe drives velocity — rotated from the network's local (heading-
-relative) frame into world space and added onto `velocities` every macro
-step as an acceleration, damped by a FRICTION retention fraction,
-integrated forward into position by MpmCore's own physics substeps (this
-module itself never touches positions/velocities for this — core/agents.wgsl's
-own agentStep() does it all, on the GPU). A direct, un-accumulating
-position nudge was tried in between (after measuring that a velocity-
-driving channel gets dominated by MpmCore's own repulsion and elastic
-restoring stress) and then reverted back to velocity by explicit
-request; see core/agents.wgsl's own module docstring and
-simulation_settings.py's own MAX_STRAFE/FRICTION comments for the full
-history and the measured numbers behind it. The network's own separate
-`accel` output remains a real channel (core/agents.wgsl's own
-evalPolicy() still computes it) but stays intentionally unused.
+The two former strafe channels now drive tensor growth direction and signed
+division polarity. The
+agent shader rotates their bounded local vector into world space and
+stores it with the particle's growth state; g2p.wgsl uses its magnitude
+as anisotropy strength. A zero vector gives exactly isotropic growth.
+MAX_STRAFE independently controls whether the same signal also acts as
+physical acceleration and is zero by default. The network's separate
+`accel` output remains a real channel but stays intentionally unused.
 
 Growth: every rollout currently starts with a coordinated two-particle
 seed — core/agents.wgsl's own agentStep() may spawn

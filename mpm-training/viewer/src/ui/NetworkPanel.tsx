@@ -11,11 +11,10 @@ interface NetworkPanelProps {
    * picking those three fields apart at every call site. null before
    * the first generation loads. */
   config: SimulationConfig | null
-  /** maxEnvWrite/maxAngularAccel/maxStrafe give the output bars their
-   * TRUE domain — evalPolicy() (gpu/policyEval.ts, mirroring
-   * core/agents.wgsl) literally scales its squashed output by these, so
-   * ±max is the real range those values can ever reach, not an
-   * approximation picked after the fact. */
+  /** maxEnvWrite/maxAngularAccel give their output bars' true domains.
+   * The former strafe pair is now an unscaled [-1,1] growth-direction
+   * and division-polarity signal; maxStrafe only controls its optional
+   * physical acceleration. */
   physics: PhysicsSettings | null
 }
 
@@ -462,7 +461,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           </div>
 
           <div className="nn-block">
-            <h3>Output — motion</h3>
+            <h3>Output — growth direction</h3>
             <div className="nn-group">
               <ActivationBar
                 label="turn"
@@ -470,14 +469,14 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
                 domain={maxAngularAccel}
               />
               <ActivationBar
-                label="strafe x"
+                label="direction x"
                 value={output.strafe[0]}
-                domain={maxStrafe}
+                domain={1}
               />
               <ActivationBar
-                label="strafe y"
+                label="direction y"
                 value={output.strafe[1]}
-                domain={maxStrafe}
+                domain={1}
               />
             </div>
           </div>

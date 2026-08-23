@@ -60,7 +60,7 @@ const SPECS: GrowthSliderSpec[] = [
  * PhysicsPanel — the knobs behind this project's own kinematic growth
  * model (the multiplicative decomposition F = Fe*Fg, see
  * ../../../core/g2p.wgsl's own substrate-driven growth block and
- * ../../../core/agents.wgsl's own ParticleRest.growth field).
+ * ../../../core/agents.wgsl's own ParticleRest.growthF field).
  *
  * Split into its own section rather than appended to PhysicsPanel's own
  * flat list because these four behave as a group and are tuned together:

@@ -1,11 +1,9 @@
 // Canvas rendering — particles (render.wgsl) and mls-mpm's own
 // field-visualize background system (field.wgsl), ported with the same
 // options mls-mpm/src/gpu/render.ts
-// exposes: a Field-mode background dropdown, a particle-size control,
-// plus this project's own addition — a particle-shape toggle that draws
-// each particle as a triangle pointing along its own heading (Agents'
-// own persistent per-particle heading state, not velocity — see
-// agents.wgsl's own module docstring) instead of a circle.
+// exposes: a Field-mode background dropdown and particle-size control,
+// plus particle render modes for white dots, growth-neuron-colored dots,
+// translucent activation dots, and signed directional-growth arrows.
 //
 // Field modes: "none" | "density" | "speed" | "deformation" | "pressure"
 // | "shear" | "repulsion" | "substrate" | "growth" | "gradient" — the
@@ -35,13 +33,12 @@ import fieldSrc from "./field.wgsl?raw";
 import fieldDiagnosticsSrc from "./fieldDiagnostics.wgsl?raw";
 import renderSrc from "./render.wgsl?raw";
 import { writeFloat32, ceilDiv } from "./gpuUtil";
-import { PARTICLE_META_BUFFER_OFFSET, type Agents } from "./agents";
 import type { Environment } from "./environment";
 import { DX, GRID_N, INV_DX, PARTICLE_MASS, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
 export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "substrate" | "growth" | "gradient";
-export type ParticleShape = "circle" | "triangle";
+export type ParticleRenderMode = "dots-white" | "dots-activation" | "dots-activation-translucent" | "directional-arrows";
 
 const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "substrate" | "growth" | "gradient">, number> = {
   none: 0,
@@ -61,6 +58,7 @@ const GRID_FIELD_MODES: ReadonlySet<FieldMode> = new Set(["density", "speed", "d
 
 const PARTICLE_COLOR = [1, 1, 1, 1]; // white — matches debug_images.py's GROWN_COLOR
 const TARGET_COLOR = [0.95, 0.4, 0.25, 0.8]; // warm accent, alpha-blended under the particles
+const GROWTH_AXIS_COLOR = [0.2, 0.95, 0.85, 0.95]; // cyan-green, distinct from particles/target
 
 // mls-mpm/src/gpu/render.ts's own DEFAULT_POINT_RADIUS_PX is 1 — this
 // project's particle counts run smaller by default (hundreds, not
@@ -82,21 +80,30 @@ export class Renderer {
   // --- particles/target (render.wgsl) ---
   private readonly pointLayout: GPUBindGroupLayout;
   private readonly circlePipeline: GPURenderPipeline;
-  private readonly trianglePipeline: GPURenderPipeline;
 
   private readonly particleRadiusUniform: GPUBuffer;
   private readonly particleColorUniform: GPUBuffer;
   private readonly circleParticleBindGroup: GPUBindGroup;
-  private readonly triangleParticleBindGroup: GPUBindGroup;
+  private readonly activationParticlePipeline: GPURenderPipeline;
+  private readonly activationParticleBindGroup: GPUBindGroup;
+  private readonly activationAlphaUniform: GPUBuffer;
+  private readonly growthAxisPipeline: GPURenderPipeline;
+  private readonly growthAxisBindGroup: GPUBindGroup;
+  private readonly growthAxisStyleUniform: GPUBuffer;
+  private readonly growthAxisColorUniform: GPUBuffer;
 
   private readonly targetRadiusUniform: GPUBuffer;
   private readonly targetColorUniform: GPUBuffer;
   private targetPositions: GPUBuffer | null = null;
   private targetBindGroup: GPUBindGroup | null = null;
   private targetCount = 0;
+  private targetVisible = true;
 
-  private particleShape: ParticleShape = "circle";
+  private particleRenderMode: ParticleRenderMode = "dots-white";
+  private whiteDotsAlpha = 1.0;
+  private activationAlpha = 0.2;
   private particleRadiusPx = DEFAULT_PARTICLE_RADIUS_PX;
+  private growthAxisLengthPx = 24;
   private canvasMinDimPx = 512;
 
   // --- field-visualize background (field.wgsl) ---
@@ -191,7 +198,7 @@ export class Renderer {
 
   private fieldMode: FieldMode = "none";
 
-  constructor(device: GPUDevice, format: GPUTextureFormat, mpmCore: MpmCore, environment: Environment, agents: Agents) {
+  constructor(device: GPUDevice, format: GPUTextureFormat, mpmCore: MpmCore, environment: Environment) {
     this.device = device;
     this.environment = environment;
     const renderModule = device.createShaderModule({ code: renderSrc });
@@ -213,24 +220,6 @@ export class Renderer {
       primitive: { topology: "triangle-list" },
     });
 
-    // Its own bind group layout — triangleVertex additionally reads
-    // Agents' own persistent heading buffer (binding 3) the circle
-    // pipeline never touches.
-    const triangleLayout = device.createBindGroupLayout({
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
-        { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
-      ],
-    });
-    this.trianglePipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [triangleLayout] }),
-      vertex: { module: renderModule, entryPoint: "triangleVertex" },
-      fragment: { module: renderModule, entryPoint: "triangleFragment", targets: [{ format, blend: alphaBlend() }] },
-      primitive: { topology: "triangle-list" },
-    });
-
     this.particleRadiusUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.particleColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     writeFloat32(device, this.particleColorUniform, 0, new Float32Array(PARTICLE_COLOR));
@@ -242,13 +231,60 @@ export class Renderer {
         { binding: 2, resource: { buffer: this.particleColorUniform } },
       ],
     });
-    this.triangleParticleBindGroup = device.createBindGroup({
-      layout: triangleLayout,
+    const activationLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+      ],
+    });
+    this.activationParticlePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [activationLayout] }),
+      vertex: { module: renderModule, entryPoint: "activationParticleVertex" },
+      fragment: { module: renderModule, entryPoint: "activationParticleFragment", targets: [{ format, blend: alphaBlend() }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.activationAlphaUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    writeFloat32(device, this.activationAlphaUniform, 0, new Float32Array([1]));
+    this.activationParticleBindGroup = device.createBindGroup({
+      layout: activationLayout,
       entries: [
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: this.particleRadiusUniform } },
-        { binding: 2, resource: { buffer: this.particleColorUniform } },
-        { binding: 3, resource: { buffer: agents.particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
+        { binding: 6, resource: { buffer: this.activationAlphaUniform } },
+      ],
+    });
+
+    // Live directional-growth overlay. It reads MpmCore.rest directly,
+    // so the glyph is exactly the signal g2p consumes rather than a
+    // reconstructed NN preview. Binding numbers 0/2 reuse the positions
+    // and color declarations in render.wgsl; 4/5 are overlay-specific.
+    const growthAxisLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 5, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+      ],
+    });
+    this.growthAxisPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [growthAxisLayout] }),
+      vertex: { module: renderModule, entryPoint: "growthAxisVertex" },
+      fragment: { module: renderModule, entryPoint: "growthAxisFragment", targets: [{ format, blend: alphaBlend() }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.growthAxisStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.growthAxisColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    writeFloat32(device, this.growthAxisColorUniform, 0, new Float32Array(GROWTH_AXIS_COLOR));
+    this.growthAxisBindGroup = device.createBindGroup({
+      layout: growthAxisLayout,
+      entries: [
+        { binding: 0, resource: { buffer: mpmCore.positions } },
+        { binding: 2, resource: { buffer: this.growthAxisColorUniform } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
+        { binding: 5, resource: { buffer: this.growthAxisStyleUniform } },
       ],
     });
 
@@ -511,9 +547,10 @@ export class Renderer {
     }
   }
 
-  /** [0,2] — see field.wgsl's own accent uniform/accentedMagnitude()/
-   * accentedSigned() comments for the exact exponential curve. Applies
-   * to every background mode at once (one shared uniform, read by
+  /** [-2,2] — see field.wgsl's accent uniform/accentedMagnitude()/
+   * accentedSigned() comments for the exact exponential curve. Negative
+   * suppresses submaximal values; positive accentuates them. Applies to
+   * every background mode at once (one shared uniform, read by
    * whichever mode's own colorize pass currently runs); a plain buffer
    * write, no pipeline rebuild, same as setFieldMode() above's own
    * fieldModeUniform write — safe to call every frame off a live slider. */
@@ -544,8 +581,32 @@ export class Renderer {
     writeFloat32(this.device, this.gradientExponentUniform, 0, new Float32Array([exponent]));
   }
 
-  setParticleShape(shape: ParticleShape): void {
-    this.particleShape = shape;
+  setParticleRenderMode(mode: ParticleRenderMode): void {
+    this.particleRenderMode = mode;
+    if (mode === "dots-activation" || mode === "dots-activation-translucent") {
+      writeFloat32(this.device, this.activationAlphaUniform, 0, new Float32Array([
+        mode === "dots-activation-translucent" ? this.activationAlpha : 1.0,
+      ]));
+    }
+  }
+
+  setActivationAlpha(alpha: number): void {
+    this.activationAlpha = Math.min(1, Math.max(0, alpha));
+    if (this.particleRenderMode === "dots-activation-translucent") {
+      writeFloat32(this.device, this.activationAlphaUniform, 0, new Float32Array([this.activationAlpha]));
+    }
+  }
+
+  setWhiteDotsAlpha(alpha: number): void {
+    this.whiteDotsAlpha = Math.min(1, Math.max(0, alpha));
+    writeFloat32(this.device, this.particleColorUniform, 0, new Float32Array([1, 1, 1, this.whiteDotsAlpha]));
+  }
+
+  /** Total device-pixel length of a full-strength signed growth-polarity
+   * arrow. Signal magnitude scales this length linearly. */
+  setGrowthAxisLengthPx(px: number): void {
+    this.growthAxisLengthPx = px;
+    this.writeGrowthAxisStyle();
   }
 
   /** Device-pixel particle radius — mirrors mls-mpm/src/gpu/render.ts's
@@ -560,11 +621,22 @@ export class Renderer {
   setCanvasSizePx(widthPx: number, heightPx: number): void {
     this.canvasMinDimPx = Math.max(1, Math.min(widthPx, heightPx));
     this.writeParticleRadius();
+    this.writeGrowthAxisStyle();
     writeFloat32(this.device, this.targetRadiusUniform, 0, new Float32Array([(TARGET_RADIUS_PX * 2) / this.canvasMinDimPx]));
   }
 
   private writeParticleRadius(): void {
     writeFloat32(this.device, this.particleRadiusUniform, 0, new Float32Array([(this.particleRadiusPx * 2) / this.canvasMinDimPx]));
+  }
+
+  private writeGrowthAxisStyle(): void {
+    const pxToNdc = 2 / this.canvasMinDimPx;
+    writeFloat32(this.device, this.growthAxisStyleUniform, 0, new Float32Array([
+      this.growthAxisLengthPx * 0.5 * pxToNdc,
+      0.8 * pxToNdc,
+      4.0 * pxToNdc,
+      2.7 * pxToNdc,
+    ]));
   }
 
   /** `points`: flat [x0,y0,x1,y1,...] in MpmCore's own [0,1]^2 domain
@@ -590,6 +662,13 @@ export class Renderer {
         { binding: 2, resource: { buffer: this.targetColorUniform } },
       ],
     });
+  }
+
+  /** Rendering-only visibility switch. Target points remain uploaded so
+   * toggling the overlay back on is immediate and does not rebuild or
+   * restart the simulation. */
+  setTargetVisible(visible: boolean): void {
+    this.targetVisible = visible;
   }
 
   render(context: GPUCanvasContext, activeCount: number): void {
@@ -680,21 +759,25 @@ export class Renderer {
       pass.draw(6);
     }
 
-    if (this.targetBindGroup && this.targetCount > 0) {
+    if (this.targetVisible && this.targetBindGroup && this.targetCount > 0) {
       pass.setPipeline(this.circlePipeline);
       pass.setBindGroup(0, this.targetBindGroup);
       pass.draw(6, this.targetCount);
     }
 
     if (activeCount > 0) {
-      if (this.particleShape === "triangle") {
-        pass.setPipeline(this.trianglePipeline);
-        pass.setBindGroup(0, this.triangleParticleBindGroup);
-        pass.draw(3, activeCount);
-      } else {
+      if (this.particleRenderMode === "dots-white") {
         pass.setPipeline(this.circlePipeline);
         pass.setBindGroup(0, this.circleParticleBindGroup);
         pass.draw(6, activeCount);
+      } else if (this.particleRenderMode === "dots-activation" || this.particleRenderMode === "dots-activation-translucent") {
+        pass.setPipeline(this.activationParticlePipeline);
+        pass.setBindGroup(0, this.activationParticleBindGroup);
+        pass.draw(6, activeCount);
+      } else {
+        pass.setPipeline(this.growthAxisPipeline);
+        pass.setBindGroup(0, this.growthAxisBindGroup);
+        pass.draw(9, activeCount);
       }
     }
 
@@ -705,6 +788,9 @@ export class Renderer {
   destroy(): void {
     this.particleRadiusUniform.destroy();
     this.particleColorUniform.destroy();
+    this.activationAlphaUniform.destroy();
+    this.growthAxisStyleUniform.destroy();
+    this.growthAxisColorUniform.destroy();
     this.targetRadiusUniform.destroy();
     this.targetColorUniform.destroy();
     this.targetPositions?.destroy();
