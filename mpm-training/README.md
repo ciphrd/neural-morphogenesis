@@ -3,8 +3,8 @@
 This project evolves particle-based organisms toward arbitrary target shapes.
 Particles are simulated as an elastic material with MLS-MPM, carry a small
 neural policy, sense the values and gradients of multiple chemical substrate
-channels, and write back into those channels directly under their current
-positions.
+channels, and write back into those channels at four heading-relative
+positions (front, left, back, and right).
 
 Growth uses a conservative morphoelastic **grow-then-divide** model. It does
 not insert overlapping particles and rely on repulsion to create space.
@@ -37,17 +37,21 @@ controls growth indirectly by writing the growth substrate, reacting to all
 substrate values and gradients, changing its heading, and selecting a growth
 direction, anisotropy, and division polarity.
 
-The current eight-channel policy has 13 outputs: eight chemical writes, one
-turning output, one growth-anisotropy output, one division-bias output, and two
-growth-direction outputs. Older 37-output checkpoints are not shape-compatible.
-Earlier 13-output checkpoints have the same tensor shapes but different output
-semantics, so they must also be retrained rather than resumed.
+The current eight-channel policy has 27 inputs: 24 chemical value/gradient
+components plus morphology occupancy and its two heading-relative gradient
+components. It has 37 outputs: 32 chemical writes (four per
+channel), one turning output, one growth-anisotropy output, one division-bias
+output, and two growth-direction outputs. Any checkpoint from before morphology
+sensing (including the earlier 24-input architecture) is not shape-compatible
+and must be retrained.
 
 ## One macro step
 
 In simplified pseudocode:
 
 ```text
+morphology = blur_and_normalize(particle_density)
+
 for each active particle:
     inputs = []
 
@@ -56,9 +60,14 @@ for each active particle:
         inputs += gradient along particle heading
         inputs += gradient perpendicular to heading
 
+    inputs += morphology occupancy at particle
+    inputs += morphology gradient along particle heading
+    inputs += morphology gradient perpendicular to heading
+
     outputs = neural_policy(inputs)
 
-    deposit one chemical output per channel under the particle
+    for direction in [front, left, back, right]:
+        deposit one chemical output per channel at that directional spot
     update heading from the turning output
 
     raw_growth_direction = tanh(direction_x, direction_y)

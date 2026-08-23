@@ -20,8 +20,8 @@
 //      over whichever grid buffer is currently "current" (last step's
 //      diffuse+decay output).
 //   2. agents.encodeStep()            — NN forward pass: reads that same
-//      grid + gradient, writes one under-particle env_write per channel
-//      into the deposit scratch and the
+//      grid + gradient, writes independent front/left/back/right
+//      env_write values per channel into the deposit scratch and the
 //      normalized former-strafe pair into ParticleRest.growthDirection and
 //      sigmoid anisotropy/division-bias controls into growthControls
 //      (optionally also physical acceleration through maxStrafe) —
@@ -87,6 +87,8 @@ export class GpuSimulation {
   // accent uniform comment. Same "view-only, survives rebuild()" reasoning
   // pendingFieldMode above already has.
   private pendingAccent = 0;
+  private pendingMorphologyGradientVisible = true;
+  private pendingMorphologyDensityVisible = true;
   // 0 = no blur — see gpu/render.ts's own setBlur()/field.wgsl's own
   // blurDensity() comment. Same "view-only, survives rebuild()" reasoning
   // pendingAccent above already has.
@@ -252,6 +254,7 @@ export class GpuSimulation {
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
     renderer.setGrowthAxisLengthPx(this.pendingGrowthAxisLengthPx);
     renderer.setAccent(this.pendingAccent);
+    renderer.setMorphologyDisplay(this.pendingMorphologyGradientVisible, this.pendingMorphologyDensityVisible);
     renderer.setBlur(this.pendingBlur);
     renderer.setGradientExponent(this.pendingGradientExponent);
 
@@ -358,7 +361,10 @@ export class GpuSimulation {
       physics.growthDuration,
       physics.growthMax ?? 2.0,
       physics.growthThreshold ?? 0.0,
-      physics.growthAnisotropy,
+      // The NN's per-particle sigmoid output is the sole anisotropy
+      // controller in playback. MpmCore retains this lower-level global
+      // multiplier for diagnostics, fixed at the neutral value here.
+      1.0,
       this.config.substepsPerMacro
     );
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
@@ -368,6 +374,10 @@ export class GpuSimulation {
     // train_server.py process still running pre-repulsionMaxDelta code,
     // same reasoning depositRate's own guard below gives.
     this.mpmCore.setRepulsionStrength(physics.repulsionStrength, physics.repulsionMaxDelta ?? 40.0);
+    this.mpmCore.setMorphology(
+      this.config.morphologyBlurSigma ?? 0.01,
+      this.config.morphologyDensityReference ?? 1.0
+    );
     // ?? 1.0 (= unchanged) guards a call to this with a raw SimulationConfig
     // from a train_server.py process still running pre-depositRate code
     // (loadGeneration()/rebuild() both pass `config` straight through here,
@@ -451,6 +461,7 @@ export class GpuSimulation {
     const stepEpoch = this.epoch;
     this.agents.setGrowthEnabled(this.growthIsEnabled());
     const encoder = this.device.createCommandEncoder();
+    this.mpmCore.encodeMorphology(encoder);
     this.environment.encodeSense(encoder);
     this.agents.encodeStep(encoder, this.environment.parity);
     this.environment.encodeMergeAndDecay(encoder);
@@ -544,6 +555,12 @@ export class GpuSimulation {
   setAccent(accent: number): void {
     this.pendingAccent = accent;
     this.renderer?.setAccent(accent);
+  }
+
+  setMorphologyDisplay(gradientVisible: boolean, densityVisible: boolean): void {
+    this.pendingMorphologyGradientVisible = gradientVisible;
+    this.pendingMorphologyDensityVisible = densityVisible;
+    this.renderer?.setMorphologyDisplay(gradientVisible, densityVisible);
   }
 
   /** [0,2] — see gpu/render.ts's own setBlur()/field.wgsl's own

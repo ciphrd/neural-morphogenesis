@@ -137,9 +137,10 @@ def main() -> None:
     if args.directional:
         layout = weight_layout(CHEM_CHANNELS, HIDDEN_DIM)
         # Saturated anisotropy/polarity plus a constant local-forward axis.
-        weights[layout["fc2b_offset"] + CHEM_CHANNELS + 1] = 20.0
-        weights[layout["fc2b_offset"] + CHEM_CHANNELS + 2] = 20.0
-        weights[layout["fc2b_offset"] + CHEM_CHANNELS + 3] = 1.0
+        env_write_dim = CHEM_CHANNELS * 4
+        weights[layout["fc2b_offset"] + env_write_dim + 1] = 20.0
+        weights[layout["fc2b_offset"] + env_write_dim + 2] = 20.0
+        weights[layout["fc2b_offset"] + env_write_dim + 3] = 1.0
     agents.load_weights(weights)
 
     core.set_material(

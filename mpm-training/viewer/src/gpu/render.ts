@@ -6,7 +6,7 @@
 // translucent activation dots, and signed directional-growth arrows.
 //
 // Field modes: "none" | "density" | "speed" | "deformation" | "pressure"
-// | "shear" | "repulsion" | "substrate" | "growth" | "gradient" — the
+// | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient" — the
 // same set mls-mpm/src/gpu/render.ts exposes, plus "substrate"/"growth"/
 // "gradient" (this project's own chemical field/repulsion density, mls-
 // mpm has no equivalent of). "deformation"/"pressure"/"shear" read
@@ -37,10 +37,10 @@ import type { Environment } from "./environment";
 import { DX, GRID_N, INV_DX, PARTICLE_MASS, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
-export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "substrate" | "growth" | "gradient";
+export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient";
 export type ParticleRenderMode = "dots-white" | "dots-activation" | "dots-activation-translucent" | "directional-arrows";
 
-const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "substrate" | "growth" | "gradient">, number> = {
+const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "growth" | "gradient">, number> = {
   none: 0,
   density: 1,
   speed: 2,
@@ -117,11 +117,14 @@ export class Renderer {
   // — see that file's own comment), so it's threaded into each of THEIR
   // bind groups below, not just this class's own field one.
   private readonly accentUniform: GPUBuffer;
+  private readonly morphologyDisplayUniform: GPUBuffer;
   private readonly fieldTexture: GPUTexture;
   private readonly fieldPresentPipeline: GPURenderPipeline;
   private readonly fieldPresentBindGroup: GPUBindGroup;
   private readonly repulsionPresentPipeline: GPURenderPipeline;
   private readonly repulsionPresentBindGroup: GPUBindGroup;
+  private readonly morphologyPresentPipeline: GPURenderPipeline;
+  private readonly morphologyPresentBindGroup: GPUBindGroup;
   private readonly fieldDispatch: [number, number];
 
   // --- deformation/pressure/shear diagnostics (fieldDiagnostics.wgsl) ---
@@ -316,6 +319,8 @@ export class Renderer {
     // comment.
     this.accentUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     writeFloat32(device, this.accentUniform, 0, new Float32Array([0]));
+    this.morphologyDisplayUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.setMorphologyDisplay(true, true);
 
     // fieldDiagnostics.wgsl's own accumulator — 4 channels (J, shear,
     // pressure, mass — see that file's own header), i32-per-channel,
@@ -395,6 +400,21 @@ export class Renderer {
       entries: [
         { binding: 6, resource: mpmCore.densityTexture.createView() },
         { binding: 13, resource: { buffer: this.accentUniform } },
+      ],
+    });
+
+    this.morphologyPresentPipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: fieldModule, entryPoint: "fieldVertex" },
+      fragment: { module: fieldModule, entryPoint: "morphologyFragment", targets: [{ format }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.morphologyPresentBindGroup = device.createBindGroup({
+      layout: this.morphologyPresentPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 13, resource: { buffer: this.accentUniform } },
+        { binding: 19, resource: mpmCore.morphologyTexture.createView() },
+        { binding: 20, resource: { buffer: this.morphologyDisplayUniform } },
       ],
     });
 
@@ -542,7 +562,7 @@ export class Renderer {
 
   setFieldMode(mode: FieldMode): void {
     this.fieldMode = mode;
-    if (mode !== "repulsion" && mode !== "substrate" && mode !== "growth" && mode !== "gradient") {
+    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "growth" && mode !== "gradient") {
       writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode]]));
     }
   }
@@ -556,6 +576,15 @@ export class Renderer {
    * fieldModeUniform write — safe to call every frame off a live slider. */
   setAccent(accent: number): void {
     writeFloat32(this.device, this.accentUniform, 0, new Float32Array([accent]));
+  }
+
+  setMorphologyDisplay(gradientEnabled: boolean, densityEnabled: boolean): void {
+    writeFloat32(
+      this.device,
+      this.morphologyDisplayUniform,
+      0,
+      new Float32Array([gradientEnabled ? 1 : 0, densityEnabled ? 1 : 0, 0, 0])
+    );
   }
 
   /** Gaussian sigma (texels, [0, 2] — see field.wgsl's own BLUR_MAX_RADIUS
@@ -745,6 +774,10 @@ export class Renderer {
       pass.setPipeline(this.repulsionPresentPipeline);
       pass.setBindGroup(0, this.repulsionPresentBindGroup);
       pass.draw(6);
+    } else if (this.fieldMode === "morphology") {
+      pass.setPipeline(this.morphologyPresentPipeline);
+      pass.setBindGroup(0, this.morphologyPresentBindGroup);
+      pass.draw(6);
     } else if (this.fieldMode === "substrate") {
       pass.setPipeline(this.substratePresentPipeline);
       pass.setBindGroup(0, this.substratePresentBindGroup);
@@ -796,6 +829,7 @@ export class Renderer {
     this.targetPositions?.destroy();
     this.fieldModeUniform.destroy();
     this.accentUniform.destroy();
+    this.morphologyDisplayUniform.destroy();
     this.fieldTexture.destroy();
     this.diagnosticsBuffer.destroy();
     this.substrateTexture.destroy();

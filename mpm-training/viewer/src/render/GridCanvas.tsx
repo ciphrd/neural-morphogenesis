@@ -3,6 +3,7 @@ import type { DeformDirection, DeformMode } from "../gpu/deform";
 import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu/device";
 import type { FieldMode, ParticleRenderMode } from "../gpu/render";
 import { GpuSimulation } from "../gpu/simulation";
+import { policyWeightsShapeError } from "../gpu/policyEval";
 import type { PhysicsSettings, SimulationConfig } from "../gpu/types";
 import { CanvasRecorder } from "./canvasRecorder";
 
@@ -60,6 +61,8 @@ interface GridCanvasProps {
   /** [-2,2] — negative suppresses background-field contrast, 0 is
    * identity, positive accentuates faint values. */
   accent?: number;
+  morphologyGradientVisible?: boolean;
+  morphologyDensityVisible?: boolean;
   /** [0,2] — see gpu/render.ts's own setBlur()/field.wgsl's own
    * blurDensity() comment. Only the "gradient" background mode's own
    * blur pass reads this. Default 0 (no blur, unchanged from before this
@@ -127,7 +130,7 @@ export interface GridCanvasHandle {
   stopRecording(): Promise<void>;
 }
 
-type Status = "loading" | "ready" | "unsupported" | "lost";
+type Status = "loading" | "ready" | "unsupported" | "lost" | "incompatible";
 
 /** Sizes `canvas` to a SQUARE that fits inside its own parent element
  * (`.grid-canvas-container`, see this file's own JSX) — the simulation's
@@ -202,6 +205,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     activationAlpha = 0.2,
     growthAxisLengthPx = 24,
     accent = 0,
+    morphologyGradientVisible = true,
+    morphologyDensityVisible = true,
     blur = 0,
     gradientExponent = 1,
     tool = "none",
@@ -226,6 +231,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const activationAlphaRef = useRef(activationAlpha);
   const growthAxisLengthPxRef = useRef(growthAxisLengthPx);
   const accentRef = useRef(accent);
+  const morphologyGradientVisibleRef = useRef(morphologyGradientVisible);
+  const morphologyDensityVisibleRef = useRef(morphologyDensityVisible);
   const blurRef = useRef(blur);
   const gradientExponentRef = useRef(gradientExponent);
   const toolRef = useRef(tool);
@@ -346,6 +353,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   activationAlphaRef.current = activationAlpha;
   growthAxisLengthPxRef.current = growthAxisLengthPx;
   accentRef.current = accent;
+  morphologyGradientVisibleRef.current = morphologyGradientVisible;
+  morphologyDensityVisibleRef.current = morphologyDensityVisible;
   blurRef.current = blur;
   gradientExponentRef.current = gradientExponent;
   toolRef.current = tool;
@@ -427,14 +436,24 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       if (particleRadiusPxRef.current !== undefined) simulation.setPointRadiusPx(particleRadiusPxRef.current);
       simulation.setGrowthAxisLengthPx(growthAxisLengthPxRef.current);
       simulation.setAccent(accentRef.current);
+      simulation.setMorphologyDisplay(morphologyGradientVisibleRef.current, morphologyDensityVisibleRef.current);
       simulation.setBlur(blurRef.current);
       simulation.setGradientExponent(gradientExponentRef.current);
-      if (configRef.current) simulation.loadGeneration(configRef.current);
+      simulationRef.current = simulation;
+      const initialConfig = configRef.current;
+      const initialWeightsError = initialConfig
+        ? policyWeightsShapeError(initialConfig.weights, initialConfig.channels, initialConfig.hiddenDim)
+        : null;
+      if (initialConfig && !initialWeightsError) simulation.loadGeneration(initialConfig);
       if (particleCapRef.current !== undefined) simulation.setParticleCap(particleCapRef.current);
       if (physicsRef.current) simulation.setPhysics(physicsRef.current);
-      simulationRef.current = simulation;
-
-      setStatus("ready");
+      if (initialWeightsError) {
+        setStatus("incompatible");
+        setStatusMessage(initialWeightsError);
+      } else {
+        setStatus("ready");
+        setStatusMessage("");
+      }
 
       // Re-validate the size ONE more time on the next painted frame.
       // The synchronous applySquareSize() above is necessary (see its own
@@ -635,7 +654,17 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [targetVisible]);
 
   useEffect(() => {
-    if (config) simulationRef.current?.loadGeneration(config);
+    const simulation = simulationRef.current;
+    if (!config || !simulation) return;
+    const weightsError = policyWeightsShapeError(config.weights, config.channels, config.hiddenDim);
+    if (weightsError) {
+      setStatus("incompatible");
+      setStatusMessage(weightsError);
+      return;
+    }
+    simulation.loadGeneration(config);
+    setStatus("ready");
+    setStatusMessage("");
   }, [config]);
 
   useEffect(() => {
@@ -673,6 +702,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     simulationRef.current?.setAccent(accent);
   }, [accent]);
+
+  useEffect(() => {
+    simulationRef.current?.setMorphologyDisplay(morphologyGradientVisible, morphologyDensityVisible);
+  }, [morphologyGradientVisible, morphologyDensityVisible]);
 
   useEffect(() => {
     simulationRef.current?.setBlur(blur);
@@ -785,6 +818,12 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       {status === "lost" && (
         <div className="webgpu-banner">
           <p>WebGPU device lost.</p>
+          <p className="hint">{statusMessage}</p>
+        </div>
+      )}
+      {status === "incompatible" && (
+        <div className="webgpu-banner">
+          <p>Policy architecture mismatch.</p>
           <p className="hint">{statusMessage}</p>
         </div>
       )}

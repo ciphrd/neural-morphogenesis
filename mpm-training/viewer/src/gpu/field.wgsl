@@ -361,6 +361,38 @@ fn repulsionFragment(in: QuadOut) -> @location(0) vec4<f32> {
   return vec4<f32>(color, 1.0);
 }
 
+// Exact policy morphology input: already Gaussian-blurred and normalized to
+// [0,1] by core/morphology.wgsl. RGB packs the three sensed quantities:
+// R=density gradient X, G=density gradient Y, B=density. Gradients use the
+// same one-texel central difference core/agents.wgsl samples before rotating
+// it into each agent's heading-relative frame. Signed components are encoded
+// around 0.5: 0.5 means zero, below 0.5 negative, above 0.5 positive.
+@group(0) @binding(19) var morphologyTex: texture_2d<f32>;
+struct MorphologyDisplay {
+  gradientEnabled: f32,
+  densityEnabled: f32,
+}
+@group(0) @binding(20) var<uniform> morphologyDisplay: MorphologyDisplay;
+const MORPHOLOGY_GRADIENT_DISPLAY_MAX: f32 = 0.05;
+
+fn morphologyAt(p: vec2<i32>) -> f32 {
+  let n = i32(REPULSION_FIELD_N);
+  let wrapped = ((p % vec2<i32>(n)) + vec2<i32>(n)) % vec2<i32>(n);
+  return textureLoad(morphologyTex, wrapped, 0).r;
+}
+
+@fragment
+fn morphologyFragment(in: QuadOut) -> @location(0) vec4<f32> {
+  let texel = clamp(vec2<i32>(in.uv * f32(REPULSION_FIELD_N)), vec2<i32>(0), vec2<i32>(i32(REPULSION_FIELD_N) - 1));
+  let density = morphologyAt(texel);
+  let gx = 0.5 * (morphologyAt(texel + vec2<i32>(1, 0)) - morphologyAt(texel - vec2<i32>(1, 0)));
+  let gy = 0.5 * (morphologyAt(texel + vec2<i32>(0, 1)) - morphologyAt(texel - vec2<i32>(0, 1)));
+  let red = morphologyDisplay.gradientEnabled * (accentedSigned(gx / MORPHOLOGY_GRADIENT_DISPLAY_MAX) * 0.5 + 0.5);
+  let green = morphologyDisplay.gradientEnabled * (accentedSigned(gy / MORPHOLOGY_GRADIENT_DISPLAY_MAX) * 0.5 + 0.5);
+  let blue = morphologyDisplay.densityEnabled * accentedMagnitude(density);
+  return vec4<f32>(red, green, blue, 1.0);
+}
+
 // --- Substrate background: environment.wgsl's own chemical field
 // (gpu/environment.ts's ping-pong buffers), first 3 channels -> RGB via
 // graypoint() per channel independently — the exact technique

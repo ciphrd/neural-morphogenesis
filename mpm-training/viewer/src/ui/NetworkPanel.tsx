@@ -1,6 +1,6 @@
 import type { PointerEvent as ReactPointerEvent } from "react"
 import { useEffect, useMemo, useRef, useState } from "react"
-import { evalPolicy } from "../gpu/policyEval"
+import { evalPolicy, policyWeightsShapeError } from "../gpu/policyEval"
 import type { PhysicsSettings, SimulationConfig, UpdateRuleWeights } from "../gpu/types"
 import { Slider } from "./Slider"
 
@@ -23,6 +23,7 @@ interface NetworkPanelProps {
 // a value slider); the remaining channels' values/gradients stay pinned
 // at zero in the input vector this panel builds.
 const MANUAL_CHANNELS = 3
+const DEPOSIT_SPOT_NAMES = ["Front", "Left", "Back", "Right"] as const
 
 // Sweep/pad range for both the vector pads' own dx/dy axes and each
 // channel's own raw-value slider — a representative window over the
@@ -239,14 +240,18 @@ const ZERO_CHANNEL: ManualChannelInput = { value: 0, dx: 0, dy: 0 }
  * every other channel stays pinned at exactly zero. */
 function buildInputVector(
   channels: number,
-  manual: ManualChannelInput[]
+  manual: ManualChannelInput[],
+  morphology: ManualChannelInput
 ): Float32Array {
-  const input = new Float32Array(channels * 3)
+  const input = new Float32Array(channels * 3 + 3)
   for (let c = 0; c < Math.min(MANUAL_CHANNELS, channels); c++) {
     input[c] = manual[c].value
     input[channels + c] = manual[c].dx
     input[2 * channels + c] = manual[c].dy
   }
+  input[3 * channels] = morphology.value
+  input[3 * channels + 1] = morphology.dx
+  input[3 * channels + 2] = morphology.dy
   return input
 }
 
@@ -254,8 +259,8 @@ function buildInputVector(
  * (dx, dy) across the full pad range [-domain, domain]² — holding
  * every other input (that channel's own "value" slider and every OTHER
  * channel's value/dx/dy) fixed at whatever `manual` currently
- * has — and records the under-particle env-write for that SAME
- * channel at each grid cell. Gives each pad a rough, at-a-glance
+ * has — and records the front env-write for that SAME channel at each
+ * grid cell. Gives each pad a rough, at-a-glance
  * "what does dragging me actually do" picture. One evalPolicy() call per grid
  * cell per channel (VECTOR_PAD_HEATMAP_RESOLUTION² × manualChannelCount
  * total), cheap enough to just redo on every drag/slider tick. */
@@ -264,6 +269,7 @@ function buildChannelHeatmaps(
   channels: number,
   hiddenDim: number,
   manual: ManualChannelInput[],
+  morphology: ManualChannelInput,
   manualChannelCount: number,
   maxEnvWrite: number,
   maxAngularAccel: number,
@@ -272,7 +278,7 @@ function buildChannelHeatmaps(
   const res = VECTOR_PAD_HEATMAP_RESOLUTION
   return Array.from({ length: manualChannelCount }, (_, c) => {
     const grid = new Float32Array(res * res)
-    const input = buildInputVector(channels, manual)
+    const input = buildInputVector(channels, manual, morphology)
     for (let gy = 0; gy < res; gy++) {
       // Row 0 = top = +domain — matches VectorPad's own py mapping, so
       // the heatmap's own "up" lines up with where the dot actually
@@ -294,8 +300,8 @@ function buildChannelHeatmaps(
  * particle probe: the first MANUAL_CHANNELS sensed channels are each
  * dialed in by hand here (a square pad for that channel's own local-
  * frame gradient, plus a slider for its own raw sensed value), every
- * other input stays at zero, and the whole output (one under-particle
- * env-write per channel + turn/growth controls) is evalPolicy()'s (gpu/policyEval.ts,
+ * other input stays at zero, and the whole output (four directional
+ * env-writes per channel + turn/growth controls) is evalPolicy()'s (gpu/policyEval.ts,
  * mirroring core/agents.wgsl) own response to THAT exact vector,
  * recomputed live on every pad drag/slider tick — cheap enough (one
  * forward pass, no sweep) to do inline via useMemo, no probe timer
@@ -306,10 +312,14 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
   const maxEnvWrite = physics?.maxEnvWrite ?? 1
   const maxAngularAccel = physics?.maxAngularAccel ?? 1
   const maxStrafe = physics?.maxStrafe ?? 1
+  const weightsError = config?.weights
+    ? policyWeightsShapeError(config.weights, channels, hiddenDim)
+    : null
 
   const [manual, setManual] = useState<ManualChannelInput[]>(
     Array.from({ length: MANUAL_CHANNELS }, () => ({ ...ZERO_CHANNEL }))
   )
+  const [morphology, setMorphology] = useState<ManualChannelInput>({ ...ZERO_CHANNEL })
   const updateChannel = (c: number, patch: Partial<ManualChannelInput>) => {
     setManual((prev) =>
       prev.map((ch, i) => (i === c ? { ...ch, ...patch } : ch))
@@ -317,8 +327,8 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
   }
 
   const output = useMemo(() => {
-    if (!config?.weights || channels < 1 || hiddenDim < 1) return null
-    const input = buildInputVector(channels, manual)
+    if (!config?.weights || weightsError || channels < 1 || hiddenDim < 1) return null
+    const input = buildInputVector(channels, manual, morphology)
     return evalPolicy(
       input,
       config.weights,
@@ -333,20 +343,23 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     channels,
     hiddenDim,
     manual,
+    morphology,
     maxEnvWrite,
     maxAngularAccel,
     maxStrafe,
+    weightsError,
   ])
 
   const manualChannelCount = Math.min(MANUAL_CHANNELS, channels)
 
   const channelHeatmaps = useMemo(() => {
-    if (!config?.weights || manualChannelCount < 1 || hiddenDim < 1) return null
+    if (!config?.weights || weightsError || manualChannelCount < 1 || hiddenDim < 1) return null
     return buildChannelHeatmaps(
       config.weights,
       channels,
       hiddenDim,
       manual,
+      morphology,
       manualChannelCount,
       maxEnvWrite,
       maxAngularAccel,
@@ -357,10 +370,12 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     channels,
     hiddenDim,
     manual,
+    morphology,
     manualChannelCount,
     maxEnvWrite,
     maxAngularAccel,
     maxStrafe,
+    weightsError,
   ])
 
   if (!config?.weights) {
@@ -372,13 +387,22 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     )
   }
 
+  if (weightsError) {
+    return (
+      <section className="nn-panel">
+        <h2>Network</h2>
+        <p className="hint">{weightsError}</p>
+      </section>
+    )
+  }
+
   return (
     <section className="nn-panel">
       <h2>Network</h2>
       <div className="nn-block">
         <h3>Input</h3>
         <p className="hint">
-          Background: this channel's own under-particle deposit output, swept across the pad (its own value + every other
+          Background: this channel's own front deposit output, swept across the pad (its own value + every other
           channel held as set). One slice, not the full picture.
         </p>
         {Array.from({ length: manualChannelCount }, (_, c) => (
@@ -423,23 +447,45 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
             </div>
           </div>
         ))}
+        <div className="nn-vector-channel">
+          <span className="nn-group-label">morphology</span>
+          <div className="nn-vector-row">
+            <VectorPad
+              x={morphology.dx}
+              y={morphology.dy}
+              domain={1}
+              onChange={(dx, dy) => setMorphology((prev) => ({ ...prev, dx, dy }))}
+            />
+            <div className="nn-vector-readout">
+              <div className="nn-vector-readout-row"><span>forward</span><span className="nn-vector-readout-value">{morphology.dx.toFixed(2)}</span></div>
+              <div className="nn-vector-readout-row"><span>lateral</span><span className="nn-vector-readout-value">{morphology.dy.toFixed(2)}</span></div>
+              <label className="slider-row">
+                <span>occupancy</span>
+                <Slider min={0} max={1} step={0.01} value={morphology.value} onChange={(value) => setMorphology((prev) => ({ ...prev, value }))} />
+                <span className="slider-value">{morphology.value.toFixed(2)}</span>
+              </label>
+            </div>
+          </div>
+        </div>
       </div>
 
       {output && (
         <>
           <div className="nn-block">
             <h3>Output — env write</h3>
-            <div className="nn-group">
-              <span className="nn-group-label">Under-particle deposit</span>
-              {Array.from({ length: channels }, (_, c) => (
-                <ActivationBar
-                  key={c}
-                  label={`ch${c}`}
-                  value={output.envWrite[c]}
-                  domain={maxEnvWrite}
-                />
-              ))}
-            </div>
+            {DEPOSIT_SPOT_NAMES.map((spotName, spot) => (
+              <div className="nn-group" key={spotName}>
+                <span className="nn-group-label">{spotName}</span>
+                {Array.from({ length: channels }, (_, c) => (
+                  <ActivationBar
+                    key={c}
+                    label={`ch${c}`}
+                    value={output.envWrite[spot * channels + c]}
+                    domain={maxEnvWrite}
+                  />
+                ))}
+              </div>
+            ))}
           </div>
 
           <div className="nn-block">

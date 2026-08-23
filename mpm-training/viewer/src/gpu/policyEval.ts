@@ -16,12 +16,48 @@
 import type { UpdateRuleWeights } from "./types";
 
 export interface PolicyOutput {
-  /** One under-particle chemical write per channel. */
+  /** channels*4, spot-major: front, left, back, right. */
   envWrite: Float32Array;
   angularAccel: number;
   anisotropy: number;
   divisionBias: number;
   direction: [number, number];
+}
+
+/** Validates serialized weights at the untyped network boundary. A training
+ * process can remain alive across a viewer hot-reload and keep broadcasting
+ * weights from the former output architecture. */
+export function policyWeightsShapeError(
+  weights: UpdateRuleWeights,
+  channels: number,
+  hiddenDim: number
+): string | null {
+  const inDim = channels * 3 + 3;
+  const outDim = channels * 4 + 5;
+  const fc1w = weights?.fc1w;
+  const fc1b = weights?.fc1b;
+  const fc2w = weights?.fc2w;
+  const fc2b = weights?.fc2b;
+  const valid =
+    Array.isArray(fc1w) &&
+    fc1w.length === hiddenDim &&
+    fc1w.every((row) => Array.isArray(row) && row.length === inDim) &&
+    Array.isArray(fc1b) &&
+    fc1b.length === hiddenDim &&
+    Array.isArray(fc2w) &&
+    fc2w.length === outDim &&
+    fc2w.every((row) => Array.isArray(row) && row.length === hiddenDim) &&
+    Array.isArray(fc2b) &&
+    fc2b.length === outDim;
+  if (valid) return null;
+
+  const receivedIn = Array.isArray(fc1w) && Array.isArray(fc1w[0]) ? fc1w[0].length : "missing";
+  const receivedOut = Array.isArray(fc2w) ? fc2w.length : "missing";
+  return (
+    `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
+    `(chemical sensing plus morphology occupancy/gradient), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
+    "Restart the training backend and retrain checkpoints created with an older policy architecture."
+  );
 }
 
 // Same overflow guard as agents.wgsl's own safeTanh() — naive tanh via
@@ -36,12 +72,12 @@ function safeSigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
 }
 
-/** One Dense(hiddenDim) -> sin -> Dense(channels+5) forward pass,
+/** One Dense(hiddenDim) -> sin -> Dense(channels*4+5) forward pass,
  * squashed exactly like agents.wgsl's own evalPolicy() — see that
  * function's own comment for the exact math this mirrors, and this
  * file's own module docstring for why CHIRALITY's mirror-averaging is
- * NOT applied here. `input` must be exactly channels*3 long
- * ([value×channels, gradForward×channels, gradLateral×channels] — see
+ * NOT applied here. `input` must be exactly channels*3+3 long
+ * ([chemical value/forward/lateral, morphology occupancy/forward/lateral] — see
  * agents.wgsl's own IN_DIM). */
 export function evalPolicy(
   input: Float32Array,
@@ -52,6 +88,8 @@ export function evalPolicy(
   maxAngularAccel: number,
   _maxStrafe: number
 ): PolicyOutput {
+  const shapeError = policyWeightsShapeError(weights, channels, hiddenDim);
+  if (shapeError) throw new Error(shapeError);
   const hidden = new Float32Array(hiddenDim);
   for (let j = 0; j < hiddenDim; j++) {
     let acc = weights.fc1b[j];
@@ -60,7 +98,7 @@ export function evalPolicy(
     hidden[j] = Math.sin(acc);
   }
 
-  const outDim = channels + 5;
+  const outDim = channels * 4 + 5;
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -69,7 +107,7 @@ export function evalPolicy(
     outVec[j] = acc;
   }
 
-  const envWriteDim = channels;
+  const envWriteDim = channels * 4;
   const envWrite = new Float32Array(envWriteDim);
   for (let k = 0; k < envWriteDim; k++) envWrite[k] = safeTanh(outVec[k]) * maxEnvWrite;
   const angularAccel = safeTanh(outVec[envWriteDim]) * maxAngularAccel;

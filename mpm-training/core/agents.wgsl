@@ -1,5 +1,5 @@
 // The evolved per-particle policy, GPU-resident — WGSL port of
-// trainer/update_rule.py's Dense(128) -> sin -> Dense(CHANNELS+5) (hidden
+// trainer/update_rule.py's Dense(128) -> sin -> Dense(4*CHANNELS+5) (hidden
 // activation swapped from tanh to sin, a periodic activation, per this
 // project's own explicit request — see evalPolicy()'s own comment for
 // why), following envnca/frontend/src/gpu/agents.wgsl's own NN-forward-
@@ -47,10 +47,10 @@
 //   work) in exchange for ruling out an arbitrary, physically
 //   unmotivated left/right turning bias by construction.
 //
-// Deposit — one independently-controlled write per channel, centered on
-// the particle's own position. The Gaussian radius remains live-tunable,
-// but the policy no longer owns four heading-relative front/left/back/right
-// output vectors. See depositGaussian() for the bounded scatter math.
+// Deposit — four independently-controlled writes per channel at
+// heading-relative front/left/back/right spots. Their distance from the
+// particle and Gaussian radius are live-tunable. See depositGaussian()
+// and agentStep() for the bounded scatter and spot geometry.
 // sensing (value/grad_forward/grad_lateral) is unchanged, still sampled
 // once, at the agent's own position, still via the old bilinear
 // corners()/sampleValue()/sampleGrad() (only the deposit SIDE changed).
@@ -152,14 +152,19 @@ const CHIRALITY: bool = __CHIRALITY__;
 
 const CHANNELS: u32 = __CHANNELS__u;
 const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
-// Per channel: local value, heading-forward gradient, and lateral gradient.
-// No absolute or spawn-relative position enters the policy.
-const IN_DIM: u32 = CHANNELS * 3u;
+// Per chemical channel: value, heading-forward gradient, lateral gradient;
+// followed by morphology occupancy and its forward/lateral gradients.
+const IN_DIM: u32 = CHANNELS * 3u + 3u;
+const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
 
-const ENV_WRITE_DIM: u32 = CHANNELS;
-const OUT_DIM: u32 = ENV_WRITE_DIM + 5u; // env_write(CHANNELS) + angular_accel(1) + accel(2) + strafe(2)
+// Four heading-relative deposit spots in spot-major order:
+// front, left, back, right. Each spot has an independent write per channel.
+const SPOTS: u32 = 4u;
+const ENV_WRITE_DIM: u32 = CHANNELS * SPOTS;
+const OUT_DIM: u32 = ENV_WRITE_DIM + 5u; // env_write(SPOTS*CHANNELS) + angular_accel(1) + accel(2) + strafe(2)
 
 const PI: f32 = 3.14159265358979323846;
+const HALF_PI: f32 = PI * 0.5;
 
 const FC1W_OFFSET: u32 = 0u;
 const FC1B_OFFSET: u32 = FC1W_OFFSET + HIDDEN_DIM * IN_DIM;
@@ -190,9 +195,8 @@ struct AgentPhysics {
   maxAngularAccel: f32,
   angularDamping: f32,
   maxAngularVelocity: f32,
-  // Legacy wire-layout field. Deposits are always centered directly
-  // under the particle, so this value is intentionally unused. Keeping
-  // the slot avoids shifting every following AgentPhysics uniform field.
+  // Field-pixel distance from the particle to each heading-relative
+  // deposit spot. Zero collapses all four writes onto the particle.
   depositDistance: f32,
   // World-domain (same [0,1]^2 units as `positions`, NOT field-pixels
   // like depositDistance) distance a newly split particle spawns behind
@@ -338,6 +342,21 @@ struct ParticleRest {
   growthControls: vec2<f32>,
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
+@group(0) @binding(12) var morphologyTexture: texture_2d<f32>;
+
+fn morphologyLoad(p: vec2<i32>) -> f32 {
+  let n = i32(MORPHOLOGY_FIELD_N);
+  let q = ((p % vec2<i32>(n)) + vec2<i32>(n)) % vec2<i32>(n);
+  return textureLoad(morphologyTexture, q, 0).x;
+}
+
+fn sampleMorphology(p: vec2<f32>) -> f32 {
+  let base = vec2<i32>(floor(p));
+  let f = fract(p);
+  let a = mix(morphologyLoad(base), morphologyLoad(base + vec2<i32>(1, 0)), f.x);
+  let b = mix(morphologyLoad(base + vec2<i32>(0, 1)), morphologyLoad(base + vec2<i32>(1, 1)), f.x);
+  return mix(a, b, f.y);
+}
 
 fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
   return c * FIELD_PLANE + y * FIELD_WIDTH + x;
@@ -490,7 +509,7 @@ fn wrapDepositIndex(i: i32, size: u32) -> i32 {
 // stacking up), not just its spread — a real, visible behavior change
 // worth knowing while testing this slider, not merely a smoother-
 // looking version of the old, mass-conserving 4-corner deposit.
-fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32>) {
+fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, spot: u32, centerFieldPos: vec2<f32>) {
   let baseI = i32(floor(centerFieldPos.x));
   let baseJ = i32(floor(centerFieldPos.y));
 
@@ -514,7 +533,7 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32
       let wx = u32(wrapDepositIndex(ti, FIELD_WIDTH));
       let wy = u32(wrapDepositIndex(tj, FIELD_HEIGHT));
       for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-        let scaled = envWrite[c] * weight * DEPOSIT_SCALE;
+        let scaled = envWrite[spot * CHANNELS + c] * weight * DEPOSIT_SCALE;
         atomicAdd(&depositScratch[fieldIndex(c, wy, wx)], i32(round(scaled)));
       }
     }
@@ -522,7 +541,7 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32
 }
 
 // The bounded subset of the network's own raw output
-// this shader actually consumes — one env_write per channel +
+// this shader actually consumes — one env_write per spot per channel +
 // angularAccel, independent anisotropy/division-bias controls, and the
 // growth-direction signal (optionally also physical acceleration), all
 // still in LOCAL frame.
@@ -574,8 +593,11 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
   }
 
   var out: PolicyOutput;
-  for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-    out.envWrite[c] = safeTanh(outVec[c]) * physics.maxEnvWrite;
+  for (var spot: u32 = 0u; spot < SPOTS; spot = spot + 1u) {
+    for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+      let writeIndex = spot * CHANNELS + c;
+      out.envWrite[writeIndex] = safeTanh(outVec[writeIndex]) * physics.maxEnvWrite;
+    }
   }
   // No rotation for angularAccel — it nudges angularVelocity directly,
   // there's no "world frame" for a scalar turn rate to be rotated into.
@@ -632,6 +654,12 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     inputVec[CHANNELS + c] = gx * cosH + gy * sinH;
     inputVec[2u * CHANNELS + c] = -gx * sinH + gy * cosH;
   }
+  let morphologyPos = fract(pos) * f32(MORPHOLOGY_FIELD_N);
+  let morphologyGx = 0.5 * (sampleMorphology(morphologyPos + vec2<f32>(1.0, 0.0)) - sampleMorphology(morphologyPos - vec2<f32>(1.0, 0.0)));
+  let morphologyGy = 0.5 * (sampleMorphology(morphologyPos + vec2<f32>(0.0, 1.0)) - sampleMorphology(morphologyPos - vec2<f32>(0.0, 1.0)));
+  inputVec[3u * CHANNELS] = sampleMorphology(morphologyPos);
+  inputVec[3u * CHANNELS + 1u] = morphologyGx * cosH + morphologyGy * sinH;
+  inputVec[3u * CHANNELS + 2u] = -morphologyGx * sinH + morphologyGy * cosH;
   var result = evalPolicy(inputVec);
 
   // CHIRALITY: a second pass on the mirror-reflected input (lateral —
@@ -643,18 +671,26 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the genuinely symmetric part of its response survives — see
   // simulation_settings.py's own CHIRALITY for the full reasoning.
   // angularAccel/strafeLocal's own lateral component flip sign right
-  // back (a mirrored "turn right" is a "turn left"). A write centered
-  // under the particle has no spatial side to swap, so each channel is
-  // averaged with the same channel from the mirrored pass.
+  // back (a mirrored "turn right" is a "turn left"). Front/back lie on
+  // the mirror axis; left/right swap when the mirrored result is mapped
+  // back into the particle's real local frame.
   if (CHIRALITY) {
     var mirroredInput = inputVec;
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
       mirroredInput[2u * CHANNELS + c] = -mirroredInput[2u * CHANNELS + c];
     }
+    mirroredInput[3u * CHANNELS + 2u] = -mirroredInput[3u * CHANNELS + 2u];
     let mirrored = evalPolicy(mirroredInput);
 
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-      result.envWrite[c] = (result.envWrite[c] + mirrored.envWrite[c]) * 0.5;
+      let front = result.envWrite[0u * CHANNELS + c];
+      let left = result.envWrite[1u * CHANNELS + c];
+      let back = result.envWrite[2u * CHANNELS + c];
+      let right = result.envWrite[3u * CHANNELS + c];
+      result.envWrite[0u * CHANNELS + c] = (front + mirrored.envWrite[0u * CHANNELS + c]) * 0.5;
+      result.envWrite[2u * CHANNELS + c] = (back + mirrored.envWrite[2u * CHANNELS + c]) * 0.5;
+      result.envWrite[1u * CHANNELS + c] = (left + mirrored.envWrite[3u * CHANNELS + c]) * 0.5;
+      result.envWrite[3u * CHANNELS + c] = (right + mirrored.envWrite[1u * CHANNELS + c]) * 0.5;
     }
     result.angularAccel = (result.angularAccel - mirrored.angularAccel) * 0.5;
     result.anisotropy = (result.anisotropy + mirrored.anisotropy) * 0.5;
@@ -665,10 +701,16 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
   }
 
-  // Deposit one bounded Gaussian directly under the particle. Heading
-  // still affects sensing and growth direction, but no longer moves or
-  // multiplies chemical write locations.
-  depositGaussian(result.envWrite, fieldPos);
+  // Four independent bounded Gaussian writes at the heading-relative
+  // front/left/back/right spots. Positions are left unwrapped here so
+  // depositGaussian can measure continuous distance across a seam; only
+  // its destination indices wrap.
+  for (var spot: u32 = 0u; spot < SPOTS; spot = spot + 1u) {
+    let angle = headingVal + f32(spot) * HALF_PI;
+    let spotDirection = vec2<f32>(cos(angle), sin(angle));
+    let spotPos = fieldPos + physics.depositDistance * spotDirection;
+    depositGaussian(result.envWrite, spot, spotPos);
+  }
 
   let angularAccel = result.angularAccel;
   var directionLocal = vec2<f32>(0.0);

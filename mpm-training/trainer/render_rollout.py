@@ -57,6 +57,8 @@ from simulation_settings import (
     MAX_ANGULAR_VELOCITY,
     MAX_ENV_WRITE,
     MAX_STRAFE,
+    MORPHOLOGY_BLUR_SIGMA,
+    MORPHOLOGY_DENSITY_REFERENCE,
     SPLIT_DISPLACEMENT,
 )
 from targets import load_target
@@ -73,6 +75,10 @@ def main() -> int:
     wgpu_device = pick_device()
 
     core = MpmCore(wgpu_device)
+    core.set_morphology(
+        meta.get("morphology_blur_sigma", MORPHOLOGY_BLUR_SIGMA),
+        meta.get("morphology_density_reference", MORPHOLOGY_DENSITY_REFERENCE),
+    )
     material_kwargs = {
         "growth_max": meta.get("growth_max", GROWTH_MAX),
         "growth_threshold": meta.get("growth_threshold", GROWTH_THRESHOLD),

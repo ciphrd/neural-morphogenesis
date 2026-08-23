@@ -1,8 +1,8 @@
 export interface UpdateRuleWeights {
-  fc1w: number[][]; // (HIDDEN_DIM, 3*channels) — value + forward/lateral gradient per channel
+  fc1w: number[][]; // (HIDDEN_DIM, 3*channels+3) — chemicals plus morphology occupancy/gradient
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // (channels+5, HIDDEN_DIM) — deposits + turn + anisotropy/polarity + direction
-  fc2b: number[]; // (channels+5,)
+  fc2w: number[][]; // (channels*4+5, HIDDEN_DIM) — directional deposits + turn + anisotropy/polarity + direction
+  fc2b: number[]; // (channels*4+5,)
 }
 
 // Mirrors train_server.py's own GET /settings response, field for field
@@ -38,13 +38,15 @@ export interface RunSettings {
   spawnHalfWidth: number;
   channels: number;
   fieldN: number;
+  morphologyBlurSigma?: number;
+  morphologyDensityReference?: number;
   hiddenDim: number;
   decay: number;
   // Multiplier on this macro step's own accumulated deposits, applied
   // right before they're folded into the field (core/environment.wgsl's
   // own EnvPhysics/mergeDeposit — see that file's own comment for why
   // this is a different knob from maxEnvWrite below, which caps each
-  // agent's own per-channel write magnitude before scatter rather than
+  // agent's own per-spot, per-channel write magnitude before scatter rather than
   // scaling the whole step's already-accumulated total).
   depositRate: number;
   maxAccel: number;
@@ -53,9 +55,10 @@ export interface RunSettings {
   maxAngularAccel: number;
   angularDamping: number;
   maxAngularVelocity: number;
-  /** Legacy broadcast field; under-particle deposition ignores it. */
+  /** Field-pixel offset to each front/left/back/right deposit spot. */
   depositDistance: number;
-  // Gaussian splat radius (sigma), field-pixel units — core/agents.wgsl's own
+  // Gaussian splat radius (sigma), field-pixel units — same convention as
+  // depositDistance above. core/agents.wgsl's own
   // depositGaussian() reads this (AgentPhysics uniform), replacing that
   // shader's old flat 4-corner bilinear deposit scatter. Live-tunable,
   // added specifically for testing this splat's own shape/spread via
@@ -190,8 +193,9 @@ export interface PhysicsSettings {
   growthDuration: number;
   growthMax: number;
   growthThreshold: number;
-  // Playback-only global multiplier on the neural per-particle anisotropy.
-  // 0 forces isotropic Fg increments; 1 preserves the policy output.
+  // Internal neutral multiplier retained for settings-object compatibility.
+  // Playback pins the material uniform to 1 so the neural per-particle
+  // anisotropy output remains the sole controller.
   growthAnisotropy: number;
   splatRadius: number;
   repulsionStrength: number;

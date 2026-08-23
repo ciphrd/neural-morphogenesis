@@ -43,6 +43,8 @@ from simulation_settings import (
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
+    MORPHOLOGY_BLUR_SIGMA,
+    MORPHOLOGY_DENSITY_REFERENCE,
     REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
@@ -280,9 +282,24 @@ class MpmCore:
         self.density_texture = device.create_texture(
             size=(REPULSION_FIELD_N, REPULSION_FIELD_N, 1),
             format=wgpu.TextureFormat.r32float,
-            usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING,
+            usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC,
         )
         density_texture_view = self.density_texture.create_view()
+
+        self.morphology_texture = device.create_texture(
+            size=(REPULSION_FIELD_N, REPULSION_FIELD_N, 1),
+            format=wgpu.TextureFormat.r32float,
+            usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC,
+        )
+        self.morphology_blur_texture = device.create_texture(
+            size=(REPULSION_FIELD_N, REPULSION_FIELD_N, 1),
+            format=wgpu.TextureFormat.r32float,
+            usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING,
+        )
+        self.morphology_params_uniform = device.create_buffer(
+            size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+        )
+        self.set_morphology(MORPHOLOGY_BLUR_SIGMA, MORPHOLOGY_DENSITY_REFERENCE)
 
         self.splat_params_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_splat_radius(SPLAT_RADIUS)
@@ -342,9 +359,81 @@ class MpmCore:
         self.density_clear_dispatch = ceil_div(texel_count, WORKGROUP)
         self.density_texture_dispatch = (ceil_div(REPULSION_FIELD_N, FIELD_WORKGROUP), ceil_div(REPULSION_FIELD_N, FIELD_WORKGROUP))
 
+        morphology_module = device.create_shader_module(
+            code=load_core_shader("morphology.wgsl", {"FIELD_N": REPULSION_FIELD_N})
+        )
+        self.morphology_horizontal_pipeline = device.create_compute_pipeline(
+            layout=wgpu.AutoLayoutMode.auto,
+            compute={"module": morphology_module, "entry_point": "blurHorizontal"},
+        )
+        self.morphology_vertical_pipeline = device.create_compute_pipeline(
+            layout=wgpu.AutoLayoutMode.auto,
+            compute={"module": morphology_module, "entry_point": "blurVerticalAndNormalize"},
+        )
+        self.morphology_horizontal_bind_group = device.create_bind_group(
+            layout=self.morphology_horizontal_pipeline.get_bind_group_layout(0),
+            entries=[
+                {"binding": 0, "resource": density_texture_view},
+                {"binding": 1, "resource": self.morphology_blur_texture.create_view()},
+                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": 16}},
+            ],
+        )
+        self.morphology_vertical_bind_group = device.create_bind_group(
+            layout=self.morphology_vertical_pipeline.get_bind_group_layout(0),
+            entries=[
+                {"binding": 0, "resource": self.morphology_blur_texture.create_view()},
+                {"binding": 1, "resource": self.morphology_texture.create_view()},
+                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": 16}},
+            ],
+        )
+
     @property
     def active_count(self) -> int:
         return self._active_count
+
+    def set_morphology(self, sigma_domain: float, density_reference: float) -> None:
+        self.device.queue.write_buffer(
+            self.morphology_params_uniform,
+            0,
+            np.asarray([sigma_domain, density_reference, 0.0, 0.0], dtype=np.float32),
+        )
+
+    def encode_morphology(self, encoder: wgpu.GPUCommandEncoder) -> None:
+        """Rebuild the blurred occupancy field from current particle positions.
+
+        Called once per controller tick, immediately before policy sensing.
+        Physics may rebuild the raw density again per substep for repulsion.
+        """
+        particle_dispatch = ceil_div(self._active_count, WORKGROUP)
+        for pipeline, bind_group, dispatch in (
+            (self.clear_density_pipeline, self.clear_density_bind_group, (self.density_clear_dispatch,)),
+            (self.splat_density_pipeline, self.splat_density_bind_group, (particle_dispatch,)),
+            (self.density_to_texture_pipeline, self.density_to_texture_bind_group, self.density_texture_dispatch),
+            (self.morphology_horizontal_pipeline, self.morphology_horizontal_bind_group, self.density_texture_dispatch),
+            (self.morphology_vertical_pipeline, self.morphology_vertical_bind_group, self.density_texture_dispatch),
+        ):
+            p = encoder.begin_compute_pass()
+            p.set_pipeline(pipeline)
+            p.set_bind_group(0, bind_group)
+            p.dispatch_workgroups(*dispatch)
+            p.end()
+
+    def read_morphology(self) -> np.ndarray:
+        """Diagnostic-only synchronous readback of the occupancy texture."""
+        byte_count = REPULSION_FIELD_N * REPULSION_FIELD_N * 4
+        staging = self.device.create_buffer(
+            size=byte_count, usage=wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC
+        )
+        encoder = self.device.create_command_encoder()
+        encoder.copy_texture_to_buffer(
+            {"texture": self.morphology_texture, "mip_level": 0, "origin": (0, 0, 0)},
+            {"buffer": staging, "offset": 0, "bytes_per_row": REPULSION_FIELD_N * 4, "rows_per_image": REPULSION_FIELD_N},
+            (REPULSION_FIELD_N, REPULSION_FIELD_N, 1),
+        )
+        self.device.queue.submit([encoder.finish()])
+        result = np.frombuffer(self.device.queue.read_buffer(staging), dtype=np.float32).copy()
+        staging.destroy()
+        return result.reshape(REPULSION_FIELD_N, REPULSION_FIELD_N)
 
     def load_scene(
         self,

@@ -35,9 +35,10 @@ import agentsSrc from "../../../core/agents.wgsl?raw";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
 import type { Environment } from "./environment";
-import { MAX_PARTICLES, type MpmCore } from "./mpmCore";
+import { MAX_PARTICLES, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { growthSeed, spawnUniform01 } from "./rng";
 import type { UpdateRuleWeights } from "./types";
+import { policyWeightsShapeError } from "./policyEval";
 
 const WORKGROUP = 64;
 
@@ -79,10 +80,10 @@ export interface AgentsConfig {
 function weightLayout(channels: number, hiddenDim: number) {
   // core/agents.wgsl's IN_DIM: value + heading-forward gradient + lateral
   // gradient per channel, with no positional inputs.
-  const inDim = channels * 3;
-  // One under-particle env_write per channel + ANGULAR_DIM(1) +
-  // ACCEL_DIM(2) + STRAFE_DIM(2).
-  const outDim = channels + 5;
+  const inDim = channels * 3 + 3;
+  // Four heading-relative env_write values per channel + ANGULAR_DIM(1)
+  // + ACCEL_DIM(2) + STRAFE_DIM(2).
+  const outDim = channels * 4 + 5;
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -96,20 +97,9 @@ function weightLayout(channels: number, hiddenDim: number) {
  * the fc1w/fc1b/fc2w/fc2b order agents.wgsl's own FC1W_OFFSET/etc.
  * consts expect. */
 function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim: number): Float32Array {
-  const { inDim, outDim, totalFloats } = weightLayout(channels, hiddenDim);
-  if (
-    weights.fc1w.length !== hiddenDim ||
-    weights.fc1w.some((row) => row.length !== inDim) ||
-    weights.fc1b.length !== hiddenDim ||
-    weights.fc2w.length !== outDim ||
-    weights.fc2w.some((row) => row.length !== hiddenDim) ||
-    weights.fc2b.length !== outDim
-  ) {
-    throw new Error(
-      `Incompatible policy weights: expected (${hiddenDim},${inDim}) -> (${outDim},${hiddenDim}); ` +
-      "four-direction deposit checkpoints must be retrained for the under-particle deposit architecture"
-    );
-  }
+  const { totalFloats } = weightLayout(channels, hiddenDim);
+  const shapeError = policyWeightsShapeError(weights, channels, hiddenDim);
+  if (shapeError) throw new Error(shapeError);
   const out = new Float32Array(totalFloats);
   let i = 0;
   for (const row of weights.fc1w) for (const v of row) out[i++] = v;
@@ -242,6 +232,7 @@ export class Agents {
         HIDDEN_DIM: config.hiddenDim,
         FIELD_WIDTH: environment.width,
         FIELD_HEIGHT: environment.height,
+        MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
         // WGSL wants lowercase `true`/`false` — a raw JS boolean would
         // template-substitute as "true"/"false" too via String(), so
         // this one actually works either way, but spelled out for
@@ -276,6 +267,7 @@ export class Agents {
           // binding 8 so the split preserves the complete APIC state.
           { binding: 10, resource: { buffer: mpmCore.F } },
           { binding: 11, resource: { buffer: mpmCore.rest } },
+          { binding: 12, resource: mpmCore.morphologyTexture.createView() },
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];

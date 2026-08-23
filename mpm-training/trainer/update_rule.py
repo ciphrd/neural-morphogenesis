@@ -1,4 +1,4 @@
-"""The evolved per-particle policy: Dense(128) -> sin -> Dense(C+5) —
+"""The evolved per-particle policy: Dense(128) -> sin -> Dense(4*C+5) —
 architecture/shape reference and a CPU-only utility class (random weight
 init via a fresh instance's own initialized parameters, JSON export via
 export_weights()), NOT the live forward pass anymore. That now runs
@@ -31,8 +31,8 @@ pipelines now).
   method's own torch equivalent if called directly) computes, for 3*C total.
   There is no absolute or spawn-relative position input. This module itself
   is frame-agnostic; the gradient rotation is entirely the caller's job.
-- Output: env_write (C) — one independent deposit value per channel,
-  written directly under the particle — plus angular_accel (1),
+- Output: env_write (4*C) — one independent deposit value per channel at
+  each heading-relative cardinal spot (front/left/back/right) — plus angular_accel (1),
   anisotropy/polarity logits (2), and direction (2), all raw/local-frame. angular_accel
   nudges the particle's own persistent angular velocity (which in turn
   nudges its persistent heading — see core/agents.wgsl's own module
@@ -41,14 +41,14 @@ pipelines now).
   The two former acceleration channels independently control tensor
   anisotropy and signed division bias through sigmoid. C=8
   (simulation_settings.CHEM_CHANNELS) and
-  the output width is exactly 13: 8 + 1 + 2 + 2.
+  the output width is exactly 37: 4*8 + 1 + 2 + 2.
 """
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-from simulation_settings import ACCEL_DIM, ANGULAR_DIM, CHEM_CHANNELS, HIDDEN_DIM, STRAFE_DIM
+from simulation_settings import ACCEL_DIM, ANGULAR_DIM, CHEM_CHANNELS, DEPOSIT_SPOTS, HIDDEN_DIM, STRAFE_DIM
 
 class Sin(nn.Module):
     """torch has no built-in sin activation module (unlike Tanh/ReLU) —
@@ -63,8 +63,8 @@ class UpdateRule(nn.Module):
     def __init__(self, num_channels: int = CHEM_CHANNELS) -> None:
         super().__init__()
         self.num_channels = num_channels
-        input_dim = 3 * num_channels
-        output_dim = num_channels + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM
+        input_dim = 3 * num_channels + 3
+        output_dim = num_channels * DEPOSIT_SPOTS + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM
         # sin hidden activation, not ReLU or tanh: this net is evolved
         # (mutation + selection), never backprop-trained, so ReLU's usual
         # vanishing-gradient advantage doesn't apply, and neither does
@@ -90,9 +90,14 @@ class UpdateRule(nn.Module):
         )
 
     def forward(
-        self, value: torch.Tensor, grad_forward: torch.Tensor, grad_lateral: torch.Tensor
+        self,
+        value: torch.Tensor,
+        grad_forward: torch.Tensor,
+        grad_lateral: torch.Tensor,
+        morphology: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """value/grad_forward/grad_lateral are all (N, C). The local-frame
+        """Chemical tensors are (N, C); morphology is (N, 3) containing
+        occupancy, forward gradient, and lateral gradient. The local-frame
         rotation of the gradients is the caller's job
         (training_sim.py/core/agents.wgsl); this method is frame-agnostic and
         simply concatenates the three channel blocks. Returns
@@ -106,11 +111,12 @@ class UpdateRule(nn.Module):
         rotation either way — it nudges the particle's own angular
         velocity directly, there's no "world frame" for a scalar turn
         rate to be rotated into."""
-        x = torch.cat([value, grad_forward, grad_lateral], dim=-1)
+        x = torch.cat([value, grad_forward, grad_lateral, morphology], dim=-1)
         out = self.net(x)
         c = self.num_channels
-        d = c
-        env_write = out[:, :d]  # (N, C), deposited under the particle
+        d = c * DEPOSIT_SPOTS
+        # (N, DEPOSIT_SPOTS*C), spot-major: front, left, back, right.
+        env_write = out[:, :d]
         angular_accel = out[:, d : d + ANGULAR_DIM]
         growth_controls = out[:, d + ANGULAR_DIM : d + ANGULAR_DIM + ACCEL_DIM]
         direction = out[:, d + ANGULAR_DIM + ACCEL_DIM : d + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM]
@@ -126,8 +132,8 @@ class UpdateRule(nn.Module):
         documents."""
         fc1, fc2 = self.net[0], self.net[2]
         return {
-            "fc1w": fc1.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels)
+            "fc1w": fc1.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels+3)
             "fc1b": fc1.bias.detach().cpu().tolist(),  # (HIDDEN_DIM,)
-            "fc2w": fc2.weight.detach().cpu().tolist(),  # (num_channels+5, HIDDEN_DIM)
-            "fc2b": fc2.bias.detach().cpu().tolist(),  # (num_channels+5,)
+            "fc2w": fc2.weight.detach().cpu().tolist(),  # (num_channels*DEPOSIT_SPOTS+5, HIDDEN_DIM)
+            "fc2b": fc2.bias.detach().cpu().tolist(),  # (num_channels*DEPOSIT_SPOTS+5,)
         }

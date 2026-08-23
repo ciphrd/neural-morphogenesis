@@ -45,6 +45,7 @@ import p2gSrc from "../../../core/p2g.wgsl?raw";
 import gridUpdateSrc from "../../../core/gridUpdate.wgsl?raw";
 import g2pSrc from "../../../core/g2p.wgsl?raw";
 import repulsionSrc from "../../../core/repulsion.wgsl?raw";
+import morphologySrc from "../../../core/morphology.wgsl?raw";
 import coreConstants from "../../../core/constants.json";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
@@ -150,12 +151,16 @@ export class MpmCore {
   private readonly dampingUniform: GPUBuffer;
   private readonly splatParamsUniform: GPUBuffer;
   private readonly repulsionParamsUniform: GPUBuffer;
+  private readonly morphologyParamsUniform: GPUBuffer;
 
   private readonly densityAccum: GPUBuffer;
   // Public — gpu/render.ts's own "Repulsion" background mode samples this
   // r32float texture directly (textureLoad, same as core/repulsion.wgsl's
   // own applyRepulsion pass does internally).
   readonly densityTexture: GPUTexture;
+  /** Bounded, blurred particle occupancy sampled by the neural policy. */
+  readonly morphologyTexture: GPUTexture;
+  private readonly morphologyBlurTexture: GPUTexture;
 
   private readonly clearGridPipeline: GPUComputePipeline;
   private readonly clearGridBindGroup: GPUBindGroup;
@@ -174,6 +179,10 @@ export class MpmCore {
   private readonly densityToTextureBindGroup: GPUBindGroup;
   private readonly applyRepulsionPipeline: GPUComputePipeline;
   private readonly applyRepulsionBindGroup: GPUBindGroup;
+  private readonly morphologyHorizontalPipeline: GPUComputePipeline;
+  private readonly morphologyVerticalPipeline: GPUComputePipeline;
+  private readonly morphologyHorizontalBindGroup: GPUBindGroup;
+  private readonly morphologyVerticalBindGroup: GPUBindGroup;
 
   private readonly gridDispatch: number;
   private readonly densityClearDispatch: number;
@@ -269,6 +278,17 @@ export class MpmCore {
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
     const densityTextureView = this.densityTexture.createView();
+    this.morphologyTexture = device.createTexture({
+      size: [REPULSION_FIELD_N, REPULSION_FIELD_N, 1],
+      format: "r32float",
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.morphologyBlurTexture = device.createTexture({
+      size: [REPULSION_FIELD_N, REPULSION_FIELD_N, 1],
+      format: "r32float",
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.morphologyParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
     this.splatParamsUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.repulsionParamsUniform = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -315,6 +335,26 @@ export class MpmCore {
 
     this.densityClearDispatch = ceilDiv(texelCount, WORKGROUP);
     this.densityTextureDispatch = [ceilDiv(REPULSION_FIELD_N, FIELD_WORKGROUP), ceilDiv(REPULSION_FIELD_N, FIELD_WORKGROUP)];
+
+    const morphologyModule = device.createShaderModule({ code: templateShader(morphologySrc, { FIELD_N: REPULSION_FIELD_N }) });
+    this.morphologyHorizontalPipeline = device.createComputePipeline({ layout: "auto", compute: { module: morphologyModule, entryPoint: "blurHorizontal" } });
+    this.morphologyVerticalPipeline = device.createComputePipeline({ layout: "auto", compute: { module: morphologyModule, entryPoint: "blurVerticalAndNormalize" } });
+    this.morphologyHorizontalBindGroup = device.createBindGroup({
+      layout: this.morphologyHorizontalPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: densityTextureView },
+        { binding: 1, resource: this.morphologyBlurTexture.createView() },
+        { binding: 2, resource: { buffer: this.morphologyParamsUniform } },
+      ],
+    });
+    this.morphologyVerticalBindGroup = device.createBindGroup({
+      layout: this.morphologyVerticalPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.morphologyBlurTexture.createView() },
+        { binding: 1, resource: this.morphologyTexture.createView() },
+        { binding: 2, resource: { buffer: this.morphologyParamsUniform } },
+      ],
+    });
   }
 
   loadScene(scene: SceneData): void {
@@ -453,6 +493,29 @@ export class MpmCore {
     writeFloat32(this.device, this.repulsionParamsUniform, 0, new Float32Array([strength, maxDelta]));
   }
 
+  setMorphology(sigmaDomain: number, densityReference: number): void {
+    writeFloat32(this.device, this.morphologyParamsUniform, 0, new Float32Array([sigmaDomain, densityReference, 0, 0]));
+  }
+
+  /** Rebuilds policy occupancy from current positions once per controller tick. */
+  encodeMorphology(encoder: GPUCommandEncoder): void {
+    const particleDispatch = ceilDiv(this._activeCount, WORKGROUP);
+    const passes: [GPUComputePipeline, GPUBindGroup, [number, number?]][] = [
+      [this.clearDensityPipeline, this.clearDensityBindGroup, [this.densityClearDispatch]],
+      [this.splatDensityPipeline, this.splatDensityBindGroup, [particleDispatch]],
+      [this.densityToTexturePipeline, this.densityToTextureBindGroup, this.densityTextureDispatch],
+      [this.morphologyHorizontalPipeline, this.morphologyHorizontalBindGroup, this.densityTextureDispatch],
+      [this.morphologyVerticalPipeline, this.morphologyVerticalBindGroup, this.densityTextureDispatch],
+    ];
+    for (const [pipeline, bindGroup, dispatch] of passes) {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(dispatch[0], dispatch[1]);
+      pass.end();
+    }
+  }
+
   /** Encodes `substeps` full advance() iterations into `encoder` — does
    * NOT submit; callers (simulation.ts) fold this into a larger per-
    * macro-step encoder alongside the chemical-field/NN passes, one
@@ -524,7 +587,10 @@ export class MpmCore {
     this.dampingUniform.destroy();
     this.splatParamsUniform.destroy();
     this.repulsionParamsUniform.destroy();
+    this.morphologyParamsUniform.destroy();
     this.densityAccum.destroy();
     this.densityTexture.destroy();
+    this.morphologyTexture.destroy();
+    this.morphologyBlurTexture.destroy();
   }
 }

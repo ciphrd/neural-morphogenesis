@@ -104,6 +104,27 @@ def _load_two(core: MpmCore) -> None:
     core.load_scene(positions, velocities, deformation, affine, np.ones(2, dtype=np.float32))
 
 
+def check_morphology_occupancy(device: wgpu.GPUDevice) -> None:
+    core = MpmCore(device)
+    _load_two(core)
+    encoder = device.create_command_encoder()
+    core.encode_morphology(encoder)
+    device.queue.submit([encoder.finish()])
+    occupancy = core.read_morphology()
+    assert np.isfinite(occupancy).all()
+    assert 0.0 <= float(occupancy.min()) <= float(occupancy.max()) < 1.0
+    assert float(occupancy.max()) > 0.0
+    assert int(np.count_nonzero(occupancy > occupancy.max() * 0.05)) > 4
+
+    core.set_morphology(0.01, 10.0)
+    encoder = device.create_command_encoder()
+    core.encode_morphology(encoder)
+    device.queue.submit([encoder.finish()])
+    weaker = core.read_morphology()
+    assert float(weaker.max()) < float(occupancy.max())
+    print(f"[PASS] morphology_occupancy bounded=yes blurred=yes reference_response=yes peak={occupancy.max():.6f}")
+
+
 def check_growth_without_repulsion(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     core.set_gravity(0.0)
@@ -144,17 +165,17 @@ def check_compression_slows_without_stalling(device: wgpu.GPUDevice) -> None:
     print(f"[PASS] compressed_growth_continues g={growth:.6f}")
 
 
-def check_deposit_is_centered_under_particle(device: wgpu.GPUDevice) -> None:
-    """A legacy nonzero deposit distance must not move or duplicate writes."""
+def check_cardinal_direction_deposits(device: wgpu.GPUDevice) -> None:
+    """Each spot-major output must write to its own heading-relative target."""
     channels = 8
     width = height = 32
     core = MpmCore(device)
     environment = EnvironmentGPU(device, channels, width, height, 0.91, 1.0)
     agents = AgentsGPU(
         device, core, environment, channels, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, True,
-        100.0,  # deliberately huge legacy depositDistance: must be ignored
-        2, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False,
+        3.0,  # field-pixel offset for each cardinal write
+        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
     )
     # Exactly the center of texel (x=8,y=24), avoiding an argmax tie.
     position = np.array([[(8.5 / width), (24.5 / height)]], dtype=np.float32)
@@ -167,9 +188,13 @@ def check_deposit_is_centered_under_particle(device: wgpu.GPUDevice) -> None:
     )
     agents.set_active_count(1)
     agents.reset_heading(5)
+    agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(channels, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    weights[layout["fc2b_offset"]] = 20.0  # saturate channel 0 write
+    # Give spot s a saturated write only in channel s. With heading=0 the
+    # expected targets are front(+x), left(+y), back(-x), right(-y).
+    for spot in range(4):
+        weights[layout["fc2b_offset"] + spot * channels + spot] = 20.0
     agents.load_weights(weights)
 
     count = channels * width * height
@@ -210,11 +235,13 @@ def check_deposit_is_centered_under_particle(device: wgpu.GPUDevice) -> None:
     device.queue.submit([encoder.finish()])
 
     scratch = np.frombuffer(device.queue.read_buffer(readback), np.int32).reshape(channels, height, width)
-    max_y, max_x = np.unravel_index(np.argmax(scratch[0]), scratch[0].shape)
-    assert (max_x, max_y) == (8, 24), (max_x, max_y)
-    assert scratch[0, max_y, max_x] > 0
-    assert not np.any(scratch[1:]), "one output channel leaked into another"
-    print("[PASS] one chemical output deposits directly under the particle; legacy distance is ignored")
+    expected = [(11, 24), (8, 27), (5, 24), (8, 21)]
+    for channel, target in enumerate(expected):
+        max_y, max_x = np.unravel_index(np.argmax(scratch[channel]), scratch[channel].shape)
+        assert (max_x, max_y) == target, (channel, (max_x, max_y), target)
+        assert scratch[channel, max_y, max_x] > 0
+    assert not np.any(scratch[4:]), "one output channel leaked into another"
+    print("[PASS] four independent writes land at front/left/back/right targets")
 
 
 def check_conservative_split(device: wgpu.GPUDevice) -> None:
@@ -301,8 +328,8 @@ def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float, polarity_b
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     # Former local-forward strafe output. +/-20 saturates tanh at +/-1,
     # making the expected fully-polarized geometry exact enough to test.
-    weights[layout["fc2b_offset"] + 8 + 2] = polarity_bias
-    weights[layout["fc2b_offset"] + 8 + 3] = signed_bias
+    weights[layout["fc2b_offset"] + 8 * 4 + 2] = polarity_bias
+    weights[layout["fc2b_offset"] + 8 * 4 + 3] = signed_bias
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
@@ -507,9 +534,9 @@ def check_strafe_signal_drives_growth_not_motion(device: wgpu.GPUDevice) -> None
     agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    weights[layout["fc2b_offset"] + 8 + 1] = 2.0
-    weights[layout["fc2b_offset"] + 8 + 2] = -2.0
-    weights[layout["fc2b_offset"] + 8 + 3] = 1.0
+    weights[layout["fc2b_offset"] + 8 * 4 + 1] = 2.0
+    weights[layout["fc2b_offset"] + 8 * 4 + 2] = -2.0
+    weights[layout["fc2b_offset"] + 8 * 4 + 3] = 1.0
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
@@ -659,9 +686,10 @@ def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
 
 def main() -> None:
     device = pick_device()
+    check_morphology_occupancy(device)
     check_growth_without_repulsion(device)
     check_compression_slows_without_stalling(device)
-    check_deposit_is_centered_under_particle(device)
+    check_cardinal_direction_deposits(device)
     check_conservative_split(device)
     check_polarized_division_uses_signed_growth_direction(device)
     check_anisotropic_tensor_split(device)

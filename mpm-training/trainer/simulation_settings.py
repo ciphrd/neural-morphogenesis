@@ -30,6 +30,7 @@ _GRID_N: int = _CORE_CONSTANTS["GRID_N"]
 # --- Policy architecture (UpdateRule) ---
 HIDDEN_DIM = 128
 CHEM_CHANNELS = 8  # last channel is always growth's own split-probability field
+DEPOSIT_SPOTS = 4
 ANGULAR_DIM = 1
 ACCEL_DIM = 2
 STRAFE_DIM = 2
@@ -51,10 +52,9 @@ MAX_ANGULAR_VELOCITY = 0.1
 
 # Deposit
 DEPOSIT_RATE = 1.0
-# Retained in settings/checkpoint metadata and the AgentPhysics wire layout
-# for compatibility. Chemical writes are now always centered under the
-# particle, so this value is intentionally unused.
-DEPOSIT_DISTANCE = 0.0
+# Field-pixel distance to the heading-relative front/left/back/right writes.
+# Set to 0 to collapse all four writes back onto the particle position.
+DEPOSIT_DISTANCE = 3.0
 DEPOSIT_SIGMA = 0.4
 MAX_ENV_WRITE = 1.0
 
@@ -111,6 +111,11 @@ DAMPING_LOSS_FRACTION = 1 - 0.995**SUBSTEPS_PER_DAMPING_FRAME
 # Repulsion
 SPLAT_RADIUS = 0.004
 REPULSION_STRENGTH = 0.0
+# Policy morphology sensing uses a simulation-owned smoothed density field.
+# Sigma is in normalized domain units, independent of texture resolution.
+MORPHOLOGY_BLUR_SIGMA = 0.01
+# Blurred density rho becomes bounded occupancy rho/(rho+reference).
+MORPHOLOGY_DENSITY_REFERENCE = 1.0
 # Hard cap on the MAGNITUDE of one physics substep's own repulsion
 # velocity delta — see core/repulsion.wgsl's own RepulsionParams.maxDelta
 # field comment for the full reasoning (an unclamped delta at the

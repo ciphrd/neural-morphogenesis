@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthThreshold" | "growthAnisotropy"
+  "growthDuration" | "growthThreshold"
 >
 
 interface GrowthSliderSpec {
@@ -54,15 +54,6 @@ const SPECS: GrowthSliderSpec[] = [
     step: 0.001,
     format: (v) => v.toFixed(3),
   },
-  {
-    key: "growthAnisotropy",
-    label: "Anisotropy",
-    hint: "Global multiplier on the neural anisotropy output. 0 forces isotropic blob growth; 1 leaves the learned directional growth unchanged.",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    format: (v) => v.toFixed(2),
-  },
 ]
 
 /** Collapsible "Growth" section (default closed), sibling to
@@ -72,11 +63,11 @@ const SPECS: GrowthSliderSpec[] = [
  * ../../../core/agents.wgsl's own ParticleRest.growthF field).
  *
  * Split into its own section rather than appended to PhysicsPanel's own
- * flat list because these four behave as a group and are tuned together:
+ * flat list because these controls behave as a group:
  * growthDuration/growthThreshold control the substrate-driven cell cycle and
- * its optional continuous mechanical feedback; growthAnisotropy scales the
- * policy's per-particle anisotropy without replacing its spatial variation. Same
- * live-uniform-write path as every
+ * its optional continuous mechanical feedback. Anisotropy is deliberately not
+ * exposed here: the policy's per-particle sigmoid output owns it directly.
+ * Same live-uniform-write path as every
  * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
  * any of these never disturbs the rollout in flight and never affects
  * training itself — playback only. */

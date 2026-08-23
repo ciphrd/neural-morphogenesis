@@ -227,6 +227,7 @@ class TrainingRollout:
         # sense/act/deposit block into that same chunking logic would
         # only complicate it for no benefit.
         encoder = core.device.create_command_encoder()
+        core.encode_morphology(encoder)
         self.environment.encode_sense(encoder)
         self.agents.encode_step(encoder, self.environment.parity)
         self.environment.encode_merge_and_decay(encoder)

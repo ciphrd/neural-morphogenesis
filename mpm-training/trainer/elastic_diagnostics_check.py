@@ -266,6 +266,41 @@ def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
     print("[PASS] viewer white-dot, activation-dot, heading, and signed growth-axis render pipelines compile")
 
 
+def check_viewer_morphology_visualization_shader(device: wgpu.GPUDevice) -> None:
+    source = (Path(__file__).parent.parent / "viewer" / "src" / "gpu" / "field.wgsl").read_text()
+    code = template_shader(
+        source,
+        {"GRID_N": 64, "REPULSION_FIELD_N": 256, "SUBSTRATE_WIDTH": 256, "SUBSTRATE_HEIGHT": 256, "CHANNELS": 8},
+    )
+    module = device.create_shader_module(code=code)
+    pipeline = device.create_render_pipeline(
+        layout=wgpu.AutoLayoutMode.auto,
+        vertex={"module": module, "entry_point": "fieldVertex"},
+        primitive={"topology": wgpu.PrimitiveTopology.triangle_list},
+        fragment={
+            "module": module,
+            "entry_point": "morphologyFragment",
+            "targets": [{"format": wgpu.TextureFormat.bgra8unorm}],
+        },
+    )
+    morphology = device.create_texture(
+        size=(256, 256, 1),
+        format=wgpu.TextureFormat.r32float,
+        usage=wgpu.TextureUsage.TEXTURE_BINDING,
+    )
+    accent = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM)
+    display = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM)
+    device.create_bind_group(
+        layout=pipeline.get_bind_group_layout(0),
+        entries=[
+            {"binding": 13, "resource": {"buffer": accent}},
+            {"binding": 19, "resource": morphology.create_view()},
+            {"binding": 20, "resource": {"buffer": display}},
+        ],
+    )
+    print("[PASS] viewer policy-morphology RGB gradient-density pipeline and display-toggle bindings compile")
+
+
 def check_saved_snapshot() -> None:
     if not SNAPSHOT_PATH.exists():
         raise AssertionError(f"missing baseline snapshot: {SNAPSHOT_PATH}")
@@ -319,6 +354,7 @@ def main() -> None:
     check_core_readback(device)
     check_viewer_diagnostic_shader(device)
     check_viewer_render_shader(device)
+    check_viewer_morphology_visualization_shader(device)
     check_saved_snapshot()
 
 

@@ -22,7 +22,7 @@ import numpy as np
 import wgpu
 
 from environment_gpu import EnvironmentGPU, ceil_div
-from mpm_core import MpmCore
+from mpm_core import MpmCore, REPULSION_FIELD_N
 from shader_template import load_core_shader
 
 WORKGROUP = 64
@@ -113,10 +113,10 @@ def _spawn_uniform01_batch(seed: int, indices: np.ndarray) -> np.ndarray:
 def weight_layout(channels: int, hidden_dim: int) -> dict[str, int]:
     # core/agents.wgsl's own IN_DIM: value + heading-forward gradient +
     # lateral gradient per channel, with no positional inputs.
-    in_dim = channels * 3
-    # One under-particle env_write per channel + ANGULAR_DIM(1) +
-    # ACCEL_DIM(2) + STRAFE_DIM(2).
-    out_dim = channels + 5
+    in_dim = channels * 3 + 3
+    # Four heading-relative env_write values per channel + ANGULAR_DIM(1)
+    # + ACCEL_DIM(2) + STRAFE_DIM(2).
+    out_dim = channels * 4 + 5
     fc1w_offset = 0
     fc1b_offset = fc1w_offset + hidden_dim * in_dim
     fc2w_offset = fc1b_offset + hidden_dim
@@ -250,7 +250,8 @@ class AgentsGPU:
                     "CHANNELS": channels,
                     "HIDDEN_DIM": hidden_dim,
                     "FIELD_WIDTH": environment.width,
-                    "FIELD_HEIGHT": environment.height,
+                "FIELD_HEIGHT": environment.height,
+                "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
                     # WGSL wants lowercase `true`/`false` — Python's own
                     # str(bool) gives "True"/"False", invalid WGSL syntax,
                     # so this can't just be passed through as-is.
@@ -285,6 +286,7 @@ class AgentsGPU:
                     # inheritance across division.
                     {"binding": 10, "resource": {"buffer": core.F, "offset": 0, "size": core.F.size}},
                     {"binding": 11, "resource": {"buffer": core.rest, "offset": 0, "size": core.rest.size}},
+                    {"binding": 12, "resource": core.morphology_texture.create_view()},
                 ],
             )
 

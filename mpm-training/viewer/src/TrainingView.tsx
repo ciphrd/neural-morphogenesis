@@ -96,6 +96,8 @@ export function TrainingView() {
   // View-only rendering options (gpu/render.ts) — not simulation state,
   // so plain component state, never reset by a run/generation change.
   const [fieldMode, setFieldMode] = useState<FieldMode>("none")
+  const [morphologyGradientVisible, setMorphologyGradientVisible] = useState(true)
+  const [morphologyDensityVisible, setMorphologyDensityVisible] = useState(true)
   // [-2,2] exponential background contrast. Negative suppresses submaximal
   // field values, 0 is identity, positive accentuates faint values.
   const [accent, setAccent] = useState(0)
@@ -400,11 +402,37 @@ export function TrainingView() {
               <option value="pressure">Pressure</option>
               <option value="shear">Shear</option>
               <option value="repulsion">Repulsion field</option>
+              <option value="morphology">Policy morphology (gradient + density)</option>
               <option value="substrate">Substrate</option>
               <option value="growth">Growth (cividis)</option>
               <option value="gradient">Boundary gradient</option>
             </select>
           </label>
+          {fieldMode === "morphology" && (
+            <>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={morphologyGradientVisible}
+                  onChange={(e) => setMorphologyGradientVisible(e.target.checked)}
+                />
+                Show morphology gradient (R/G)
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={morphologyDensityVisible}
+                  onChange={(e) => setMorphologyDensityVisible(e.target.checked)}
+                />
+                Show morphology density (B)
+              </label>
+              <p className="hint">
+                R/G encode the signed world-space density gradient (0.5 is
+                zero); B is the blurred, normalized density. These are the
+                exact quantities sampled by the policy before heading rotation.
+              </p>
+            </>
+          )}
           <label className="checkbox-row">
             <input
               type="checkbox"
@@ -489,6 +517,8 @@ export function TrainingView() {
             particleCap={frontendParticleCap}
             fieldMode={fieldMode}
             accent={accent}
+            morphologyGradientVisible={morphologyGradientVisible}
+            morphologyDensityVisible={morphologyDensityVisible}
             blur={blur}
             gradientExponent={gradientExponent}
             particleRenderMode={particleRenderMode}
