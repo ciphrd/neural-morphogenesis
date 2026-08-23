@@ -121,8 +121,8 @@ fn activationParticleFragment(in: ActivationDotOut) -> @location(0) vec4<f32> {
 // ParticleMeta is a small, deliberate DUPLICATE of core/agents.wgsl's
 // own struct of the same name (WGSL has no cross-module share
 // mechanism) — heading used to be its own tightly-packed array<f32>
-// buffer; it got folded into this 4-field struct alongside rng/cooldown/
-// angularVelocity specifically to free storage-buffer slots
+// buffer; it got folded into this packed struct alongside rng/cooldown/
+// angularVelocity and neural color specifically to free storage-buffer slots
 // core/agents.wgsl needed for growth's parent-state inheritance (see
 // that file's own module docstring) — this pipeline only ever reads the
 // one field it needs (.heading), but the FULL struct layout (all 4
@@ -135,8 +135,49 @@ struct ParticleMeta {
   cooldown: f32,
   heading: f32,
   angularVelocity: f32,
+  color: vec4<f32>,
 }
 @group(0) @binding(3) var<storage, read> particleMeta: array<ParticleMeta>;
+// x: alpha, y: saturation amplification, z: contrast around sigmoid neutral.
+@group(0) @binding(7) var<uniform> neuralColorStyle: vec4<f32>;
+
+// --- neural RGB dots --------------------------------------------------------
+
+struct NeuralColorDotOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) color: vec3<f32>,
+}
+
+@vertex
+fn neuralColorParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
+  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let offset = QUAD_OFFSETS[vertexIndex];
+  var out: NeuralColorDotOut;
+  out.position = vec4<f32>(center + offset * pointRadius * 1.6, 0.0, 1.0);
+  out.uv = offset;
+  out.color = particleMeta[instanceIndex].color.rgb;
+  return out;
+}
+
+@fragment
+fn neuralColorParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
+  let radiusSquared = dot(in.uv, in.uv);
+  if (radiusSquared > 1.0) {
+    discard;
+  }
+  // Expand small differences between sigmoid RGB channels so early neural
+  // colors don't all read as neutral gray. This affects visualization only;
+  // the inspector and particle state retain the exact raw values.
+  let contrasted = vec3<f32>(0.5) + (in.color - vec3<f32>(0.5)) * neuralColorStyle.z;
+  let luminance = dot(contrasted, vec3<f32>(0.2126, 0.7152, 0.0722));
+  let boosted = clamp(
+    vec3<f32>(luminance) + (contrasted - vec3<f32>(luminance)) * neuralColorStyle.y,
+    vec3<f32>(0.0),
+    vec3<f32>(1.0),
+  );
+  return vec4<f32>(boosted, neuralColorStyle.x);
+}
 
 // Local-space wedge pointing along +X, rotated by each particle's own
 // heading before translating to its position — an isoceles triangle, not
@@ -162,19 +203,19 @@ fn triangleFragment() -> @location(0) vec4<f32> {
   return pointColor;
 }
 
-// --- directional-growth axes -------------------------------------------------
+// --- directional-growth triangles ------------------------------------------
 //
 // ParticleRest.growthDirection is the world-frame signal consumed by
 // core/g2p.wgsl and core/agents.wgsl's polarized division. Tensor stretch
 // alone is axial, but division now uses the SIGN: the new daughter and pair
-// center bias toward +n. Therefore this is a one-way arrow pointing toward
-// the selected axis. The independent anisotropy output controls glyph length;
-// division bias is reported separately in the network inspector.
+// center bias toward +n. The glyph is a deliberately X-squashed isosceles
+// triangle whose tip points toward +n. The independent anisotropy output
+// controls glyph size; division bias is reported in the network inspector.
 // This pass reads the live GPU buffers directly; there is no diagnostic
 // readback or duplicated frontend approximation.
 
-// x=max half-length, y=shaft half-width, z=head length, w=head half-width,
-// all in NDC and derived from device pixels by render.ts.
+// x=full-strength triangle scale in NDC. The remaining fields are retained as
+// padding so the existing 16-byte uniform layout stays stable.
 @group(0) @binding(5) var<uniform> growthAxisStyle: vec4<f32>;
 
 struct GrowthAxisOut {
@@ -195,27 +236,15 @@ fn growthAxisVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_i
   }
   let normal = vec2<f32>(-axis.y, axis.x);
 
-  let halfLength = growthAxisStyle.x * strength;
-  let widthScale = sqrt(strength);
-  let halfWidth = growthAxisStyle.y * widthScale;
-  let headLength = min(growthAxisStyle.z * widthScale, halfLength * 0.55);
-  let headHalfWidth = growthAxisStyle.w * widthScale;
-  let inner = max(halfLength - headLength, 0.0);
-
-  // 0..5: shaft quad; 6..8: arrow head pointing toward +n.
+  let size = growthAxisStyle.x * sqrt(strength);
+  // Local +X points toward +n. Along-axis extent is deliberately smaller
+  // than the perpendicular extent: an X-squashed isosceles triangle.
   var along = 0.0;
   var across = 0.0;
   switch vertexIndex {
-    case 0u: { along = -inner; across = -halfWidth; }
-    case 1u: { along =  inner; across = -halfWidth; }
-    case 2u: { along =  inner; across =  halfWidth; }
-    case 3u: { along = -inner; across = -halfWidth; }
-    case 4u: { along =  inner; across =  halfWidth; }
-    case 5u: { along = -inner; across =  halfWidth; }
-    case 6u: { along =  halfLength; across = 0.0; }
-    case 7u: { along =  inner; across = -headHalfWidth; }
-    case 8u: { along =  inner; across =  headHalfWidth; }
-    default: { along = inner; across = headHalfWidth; }
+    case 0u: { along =  0.55 * size; across = 0.0; }
+    case 1u: { along = -0.55 * size; across = -size; }
+    default: { along = -0.55 * size; across = size; }
   }
 
   var out: GrowthAxisOut;

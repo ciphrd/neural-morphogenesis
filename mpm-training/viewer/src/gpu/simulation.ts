@@ -81,6 +81,7 @@ export class GpuSimulation {
   private pendingParticleRenderMode: ParticleRenderMode = "dots-white";
   private pendingWhiteDotsAlpha = 1.0;
   private pendingActivationAlpha = 0.2;
+  private pendingNeuralColorAlpha = 1.0;
   private pendingPointRadiusPx: number | null = null;
   private pendingGrowthAxisLengthPx = 24;
   // 0 = identity — see gpu/render.ts's own setAccent()/field.wgsl's own
@@ -100,6 +101,7 @@ export class GpuSimulation {
   private pendingParticleCap: number | null = null;
   private particleCap = 2;
   private pendingTargetVisible = true;
+  private neuralUpdatesPerMacro = 1;
   // The canvas's own backing-store size in DEVICE pixels, as last
   // reported by GridCanvas's own applySquareSize()/ResizeObserver.
   // Same "view-only, survives rebuild()" reasoning as the pending
@@ -180,7 +182,15 @@ export class GpuSimulation {
   }
 
   private resetKeyFor(config: SimulationConfig): string {
-    return [config.particles, config.channels, config.fieldN, config.hiddenDim, config.chirality].join(":");
+    return [
+      config.particles,
+      config.channels,
+      config.fieldN,
+      config.hiddenDim,
+      config.chirality,
+      config.elasticStrainScale ?? 0.15,
+      config.elasticStrainInputsEnabled ?? false,
+    ].join(":");
   }
 
   loadGeneration(config: SimulationConfig): void {
@@ -240,10 +250,12 @@ export class GpuSimulation {
       maxActiveParticles: this.particleCap,
       spawnX: config.spawnX,
       spawnY: config.spawnY,
+      elasticStrainScale: config.elasticStrainScale ?? 0.15,
+      elasticStrainInputsEnabled: config.elasticStrainInputsEnabled ?? false,
     });
     agents.loadWeights(config.weights);
 
-    const renderer = new Renderer(this.device, this.format, mpmCore, environment);
+    const renderer = new Renderer(this.device, this.format, mpmCore, environment, agents.particleMetaState);
     if (this.pendingCanvasSizePx) renderer.setCanvasSizePx(...this.pendingCanvasSizePx);
     if (this.pendingTargetPoints) renderer.setTargetPoints(this.pendingTargetPoints);
     renderer.setTargetVisible(this.pendingTargetVisible);
@@ -251,6 +263,7 @@ export class GpuSimulation {
     renderer.setParticleRenderMode(this.pendingParticleRenderMode);
     renderer.setWhiteDotsAlpha(this.pendingWhiteDotsAlpha);
     renderer.setActivationAlpha(this.pendingActivationAlpha);
+    renderer.setNeuralColorAlpha(this.pendingNeuralColorAlpha);
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
     renderer.setGrowthAxisLengthPx(this.pendingGrowthAxisLengthPx);
     renderer.setAccent(this.pendingAccent);
@@ -351,6 +364,8 @@ export class GpuSimulation {
   private applyPhysics(physics: PhysicsSettings): void {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     this.mpmCore.setGravity(physics.gravity);
+    this.neuralUpdatesPerMacro = Math.max(1, Math.round(physics.neuralUpdatesPerMacro));
+    const communicationDt = Math.max(0, physics.communicationSpeed ?? 1.0) / this.neuralUpdatesPerMacro;
     this.mpmCore.setMaterial(
       physics.materialE,
       physics.materialNu,
@@ -382,7 +397,13 @@ export class GpuSimulation {
     // from a train_server.py process still running pre-depositRate code
     // (loadGeneration()/rebuild() both pass `config` straight through here,
     // bypassing types.ts's own physicsSettingsFromConfig() guard).
-    this.environment.setPhysics({ decay: physics.decay, depositRate: physics.depositRate ?? 1.0 });
+    const macroDecay = Math.max(0, Math.min(1, physics.decay));
+    this.environment.setPhysics({
+      decay: Math.pow(macroDecay, communicationDt),
+      depositRate: (physics.depositRate ?? 1.0) * communicationDt,
+      diffusionStep: Math.min(communicationDt, 1.0),
+    });
+    this.agents.setCommunicationTimestep(communicationDt);
     this.agents.setPhysics({
       maxAccel: physics.maxAccel,
       maxStrafe: physics.maxStrafe,
@@ -462,9 +483,15 @@ export class GpuSimulation {
     this.agents.setGrowthEnabled(this.growthIsEnabled());
     const encoder = this.device.createCommandEncoder();
     this.mpmCore.encodeMorphology(encoder);
-    this.environment.encodeSense(encoder);
-    this.agents.encodeStep(encoder, this.environment.parity);
-    this.environment.encodeMergeAndDecay(encoder);
+    for (let communicationRound = 0; communicationRound < this.neuralUpdatesPerMacro; communicationRound++) {
+      this.environment.encodeSense(encoder);
+      this.agents.encodeStep(
+        encoder,
+        this.environment.parity,
+        communicationRound === this.neuralUpdatesPerMacro - 1
+      );
+      this.environment.encodeMergeAndDecay(encoder);
+    }
     this.agents.encodeReadGrownCount(encoder);
     this.device.queue.submit([encoder.finish()]);
 
@@ -538,6 +565,11 @@ export class GpuSimulation {
   setWhiteDotsAlpha(alpha: number): void {
     this.pendingWhiteDotsAlpha = alpha;
     this.renderer?.setWhiteDotsAlpha(alpha);
+  }
+
+  setNeuralColorAlpha(alpha: number): void {
+    this.pendingNeuralColorAlpha = alpha;
+    this.renderer?.setNeuralColorAlpha(alpha);
   }
 
   setGrowthAxisLengthPx(px: number): void {

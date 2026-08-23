@@ -1,5 +1,5 @@
 {
-  "captured_at_utc": "2026-08-23T03:28:23.852270+00:00",
+  "captured_at_utc": "2026-08-23T05:26:38.431680+00:00",
   "checkpoints": [
     {
       "active_cycle_count": 0,
@@ -1938,7 +1938,7 @@
   },
   "schema_version": 1,
   "source_sha256": {
-    "core/agents.wgsl": "9739745e6c0a0a3601d24fbefef0fbc3df94f36fdd709899faf7ac5ad02f876b",
+    "core/agents.wgsl": "1b4e5a28a1bd2ef15b83f45cb18da270260eb2823e851ba76dba40636f38e532",
     "core/constants.json": "48477bcd34eadb4aad152aac4028c3854b66b7639ce066801a7c78fe37e0cd31",
     "core/g2p.wgsl": "0af534ff8a5b00cce0a40e8e49d2fb3ef09cc9dd8a3c7fd556c4abbf77a3711c",
     "core/gridUpdate.wgsl": "2ffa6e1107f74f7a040ac5ff3e13f897d3c941c95cd5da0bebe7422ae34621a2",

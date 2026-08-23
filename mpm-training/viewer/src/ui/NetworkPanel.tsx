@@ -231,19 +231,27 @@ interface ManualChannelInput {
   dy: number
 }
 
+interface ManualElasticInput {
+  volume: number
+  axial: number
+  shear: number
+}
+
 const ZERO_CHANNEL: ManualChannelInput = { value: 0, dx: 0, dy: 0 }
 
 /** Builds the full IN_DIM input vector evalPolicy() expects
- * ([value×channels, gradForward×channels, gradLateral×channels] — see
+ * ([value×channels, gradForward×channels, gradLateral×channels,
+ * morphology×3, elastic Hencky strain×3] — see
  * agents.wgsl's own IN_DIM) from this panel's manual per-channel state.
  * The first MANUAL_CHANNELS channels get their own dialed-in value/dx/dy;
  * every other channel stays pinned at exactly zero. */
 function buildInputVector(
   channels: number,
   manual: ManualChannelInput[],
-  morphology: ManualChannelInput
+  morphology: ManualChannelInput,
+  elastic: ManualElasticInput
 ): Float32Array {
-  const input = new Float32Array(channels * 3 + 3)
+  const input = new Float32Array(channels * 3 + 6)
   for (let c = 0; c < Math.min(MANUAL_CHANNELS, channels); c++) {
     input[c] = manual[c].value
     input[channels + c] = manual[c].dx
@@ -252,6 +260,9 @@ function buildInputVector(
   input[3 * channels] = morphology.value
   input[3 * channels + 1] = morphology.dx
   input[3 * channels + 2] = morphology.dy
+  input[3 * channels + 3] = elastic.volume
+  input[3 * channels + 4] = elastic.axial
+  input[3 * channels + 5] = elastic.shear
   return input
 }
 
@@ -270,6 +281,7 @@ function buildChannelHeatmaps(
   hiddenDim: number,
   manual: ManualChannelInput[],
   morphology: ManualChannelInput,
+  elastic: ManualElasticInput,
   manualChannelCount: number,
   maxEnvWrite: number,
   maxAngularAccel: number,
@@ -278,7 +290,7 @@ function buildChannelHeatmaps(
   const res = VECTOR_PAD_HEATMAP_RESOLUTION
   return Array.from({ length: manualChannelCount }, (_, c) => {
     const grid = new Float32Array(res * res)
-    const input = buildInputVector(channels, manual, morphology)
+    const input = buildInputVector(channels, manual, morphology, elastic)
     for (let gy = 0; gy < res; gy++) {
       // Row 0 = top = +domain — matches VectorPad's own py mapping, so
       // the heatmap's own "up" lines up with where the dot actually
@@ -301,7 +313,7 @@ function buildChannelHeatmaps(
  * dialed in by hand here (a square pad for that channel's own local-
  * frame gradient, plus a slider for its own raw sensed value), every
  * other input stays at zero, and the whole output (four directional
- * env-writes per channel + turn/growth controls) is evalPolicy()'s (gpu/policyEval.ts,
+ * env-writes per channel + turn/growth controls + RGB) is evalPolicy()'s (gpu/policyEval.ts,
  * mirroring core/agents.wgsl) own response to THAT exact vector,
  * recomputed live on every pad drag/slider tick — cheap enough (one
  * forward pass, no sweep) to do inline via useMemo, no probe timer
@@ -312,6 +324,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
   const maxEnvWrite = physics?.maxEnvWrite ?? 1
   const maxAngularAccel = physics?.maxAngularAccel ?? 1
   const maxStrafe = physics?.maxStrafe ?? 1
+  const elasticInputsEnabled = config?.elasticStrainInputsEnabled ?? false
   const weightsError = config?.weights
     ? policyWeightsShapeError(config.weights, channels, hiddenDim)
     : null
@@ -320,6 +333,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     Array.from({ length: MANUAL_CHANNELS }, () => ({ ...ZERO_CHANNEL }))
   )
   const [morphology, setMorphology] = useState<ManualChannelInput>({ ...ZERO_CHANNEL })
+  const [elastic, setElastic] = useState<ManualElasticInput>({ volume: 0, axial: 0, shear: 0 })
   const updateChannel = (c: number, patch: Partial<ManualChannelInput>) => {
     setManual((prev) =>
       prev.map((ch, i) => (i === c ? { ...ch, ...patch } : ch))
@@ -328,7 +342,10 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
 
   const output = useMemo(() => {
     if (!config?.weights || weightsError || channels < 1 || hiddenDim < 1) return null
-    const input = buildInputVector(channels, manual, morphology)
+    const input = buildInputVector(
+      channels, manual, morphology,
+      elasticInputsEnabled ? elastic : { volume: 0, axial: 0, shear: 0 }
+    )
     return evalPolicy(
       input,
       config.weights,
@@ -344,6 +361,8 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     hiddenDim,
     manual,
     morphology,
+    elastic,
+    elasticInputsEnabled,
     maxEnvWrite,
     maxAngularAccel,
     maxStrafe,
@@ -360,6 +379,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       hiddenDim,
       manual,
       morphology,
+      elasticInputsEnabled ? elastic : { volume: 0, axial: 0, shear: 0 },
       manualChannelCount,
       maxEnvWrite,
       maxAngularAccel,
@@ -371,6 +391,8 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     hiddenDim,
     manual,
     morphology,
+    elastic,
+    elasticInputsEnabled,
     manualChannelCount,
     maxEnvWrite,
     maxAngularAccel,
@@ -467,6 +489,31 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
             </div>
           </div>
         </div>
+        <div className="nn-vector-channel">
+          <span className="nn-group-label">elastic strain</span>
+          <div className="nn-vector-readout">
+            <label className="slider-row">
+              <span>volume</span>
+              <Slider min={-1} max={1} step={0.01} value={elastic.volume} disabled={!elasticInputsEnabled} onChange={(volume) => setElastic((prev) => ({ ...prev, volume }))} />
+              <span className="slider-value">{elastic.volume.toFixed(2)}</span>
+            </label>
+            <label className="slider-row">
+              <span>forward − lateral</span>
+              <Slider min={-1} max={1} step={0.01} value={elastic.axial} disabled={!elasticInputsEnabled} onChange={(axial) => setElastic((prev) => ({ ...prev, axial }))} />
+              <span className="slider-value">{elastic.axial.toFixed(2)}</span>
+            </label>
+            <label className="slider-row">
+              <span>shear</span>
+              <Slider min={-1} max={1} step={0.01} value={elastic.shear} disabled={!elasticInputsEnabled} onChange={(shear) => setElastic((prev) => ({ ...prev, shear }))} />
+              <span className="slider-value">{elastic.shear.toFixed(2)}</span>
+            </label>
+          </div>
+          <p className="hint">
+            {elasticInputsEnabled
+              ? "Normalized heading-relative Hencky strain as received by the policy."
+              : "Temporarily unwired: all three policy lanes are forced to zero."}
+          </p>
+        </div>
       </div>
 
       {output && (
@@ -516,6 +563,25 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
                 value={output.divisionBias}
                 domain={1}
               />
+            </div>
+          </div>
+
+          <div className="nn-block">
+            <h3>Output — cell color</h3>
+            <div
+              aria-label="Current neural RGB color"
+              style={{
+                height: "2rem",
+                borderRadius: "0.35rem",
+                backgroundColor: `rgb(${output.color.map((v) => Math.round(v * 255)).join(",")})`,
+                border: "1px solid rgba(255,255,255,0.18)",
+                marginBottom: "0.5rem",
+              }}
+            />
+            <div className="nn-group">
+              <ActivationBar label="red" value={output.color[0]} domain={1} />
+              <ActivationBar label="green" value={output.color[1]} domain={1} />
+              <ActivationBar label="blue" value={output.color[2]} domain={1} />
             </div>
           </div>
         </>

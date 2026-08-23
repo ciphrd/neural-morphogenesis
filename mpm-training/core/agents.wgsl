@@ -1,5 +1,5 @@
 // The evolved per-particle policy, GPU-resident — WGSL port of
-// trainer/update_rule.py's Dense(128) -> sin -> Dense(4*CHANNELS+5) (hidden
+// trainer/update_rule.py's Dense(128) -> sin -> Dense(4*CHANNELS+8) (hidden
 // activation swapped from tanh to sin, a periodic activation, per this
 // project's own explicit request — see evalPolicy()'s own comment for
 // why), following envnca/frontend/src/gpu/agents.wgsl's own NN-forward-
@@ -149,19 +149,21 @@
 // runs per agent, not a physics knob PhysicsPanel-style live tuning
 // makes sense for.
 const CHIRALITY: bool = __CHIRALITY__;
+const ELASTIC_STRAIN_INPUTS_ENABLED: bool = __ELASTIC_STRAIN_INPUTS_ENABLED__;
 
 const CHANNELS: u32 = __CHANNELS__u;
 const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
 // Per chemical channel: value, heading-forward gradient, lateral gradient;
-// followed by morphology occupancy and its forward/lateral gradients.
-const IN_DIM: u32 = CHANNELS * 3u + 3u;
+// followed by morphology occupancy/forward/lateral gradient and three
+// heading-relative elastic Hencky-strain components.
+const IN_DIM: u32 = CHANNELS * 3u + 6u;
 const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
 
 // Four heading-relative deposit spots in spot-major order:
 // front, left, back, right. Each spot has an independent write per channel.
 const SPOTS: u32 = 4u;
 const ENV_WRITE_DIM: u32 = CHANNELS * SPOTS;
-const OUT_DIM: u32 = ENV_WRITE_DIM + 5u; // env_write(SPOTS*CHANNELS) + angular_accel(1) + accel(2) + strafe(2)
+const OUT_DIM: u32 = ENV_WRITE_DIM + 8u; // env_write(SPOTS*CHANNELS) + turn(1) + growth controls(2) + direction(2) + RGB(3)
 
 const PI: f32 = 3.14159265358979323846;
 const HALF_PI: f32 = PI * 0.5;
@@ -244,13 +246,16 @@ struct AgentPhysics {
   // Runtime growth cap. Training writes its fixed --particles value;
   // the frontend can lower/raise it without recompiling this shader.
   maxActiveParticles: u32,
+  // Log-strain magnitude mapped to roughly tanh(1). This is input
+  // normalization only; it does not change mechanics.
+  elasticStrainScale: f32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
 // Persistent per-particle state, owned by this shader (not MpmCore, not
 // Environment) — heading/angularVelocity used to each have their OWN
 // binding, same as rng/cooldown once did before THEY got packed
-// together; all four are now ONE struct/buffer for the same reason:
+// together; the scalar state and neural color are now ONE struct/buffer for the same reason:
 // this shader hit the WebGPU CORE (not just spec-default) hard ceiling
 // of 10 storage buffers per stage on real browser adapters (Dawn/Chrome
 // on this project's own dev machine reports exactly 10, not the much
@@ -270,6 +275,9 @@ struct ParticleMeta {
   cooldown: f32,
   heading: f32,
   angularVelocity: f32,
+  // Current neural cell color. vec4 keeps the packed record naturally
+  // aligned while the unused alpha lane remains fixed at 1.
+  color: vec4<f32>,
 }
 // Pack growth's counter and particle metadata into one allocation. The
 // explicit 252-byte pad puts particleMeta at byte 256, allowing the render
@@ -343,6 +351,14 @@ struct ParticleRest {
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(12) var morphologyTexture: texture_2d<f32>;
+struct StepMode {
+  commitLifecycle: u32,
+  // Chemical/orientation time represented by this neural evaluation.
+  // Host sets this to communicationSpeed / neuralUpdatesPerMacro.
+  communicationDt: f32,
+  _padding: vec2<f32>,
+}
+@group(0) @binding(13) var<uniform> stepMode: StepMode;
 
 fn morphologyLoad(p: vec2<i32>) -> f32 {
   let n = i32(MORPHOLOGY_FIELD_N);
@@ -390,6 +406,49 @@ fn matInverse(m: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(1.0, 0.0, 0.0, 1.0);
   }
   return vec4<f32>(m.w, -m.y, -m.z, m.x) / det;
+}
+
+// Objective elastic deformation input. The constitutive model uses
+// F = Fe*Fg, so sensing raw F would incorrectly report stress-free growth as
+// load. B=Fe*Fe^T removes elastic rigid rotation; rotating B into the
+// particle's heading frame makes the result covariant with the chemical and
+// morphology forward/lateral inputs. The closed-form eigensystem below
+// computes H=0.5*log(B), i.e. spatial Hencky strain, without an SVD.
+fn elasticStrainInput(F: vec4<f32>, Fg: vec4<f32>, forward: vec2<f32>, lateral: vec2<f32>, scale: f32) -> vec3<f32> {
+  let Fe = matMul(F, matInverse(Fg));
+  let bxx = Fe.x * Fe.x + Fe.y * Fe.y;
+  let bxy = Fe.x * Fe.z + Fe.y * Fe.w;
+  let byy = Fe.z * Fe.z + Fe.w * Fe.w;
+
+  let bf = vec2<f32>(bxx * forward.x + bxy * forward.y, bxy * forward.x + byy * forward.y);
+  let bl = vec2<f32>(bxx * lateral.x + bxy * lateral.y, bxy * lateral.x + byy * lateral.y);
+  let a = dot(forward, bf);
+  let b = dot(forward, bl);
+  let d = dot(lateral, bl);
+
+  let midpoint = 0.5 * (a + d);
+  let radius = sqrt(max(0.25 * (a - d) * (a - d) + b * b, 0.0));
+  let lambda1 = max(midpoint + radius, 1e-8);
+  let lambda2 = max(midpoint - radius, 1e-8);
+  let e1 = 0.5 * log(lambda1);
+  let e2 = 0.5 * log(lambda2);
+  let average = 0.5 * (e1 + e2);
+  var h00 = average;
+  var h11 = average;
+  var h01 = 0.0;
+  if (radius > 1e-7) {
+    let factor = 0.25 * (e1 - e2) / radius;
+    h00 = average + factor * (a - d);
+    h11 = average - factor * (a - d);
+    h01 = factor * 2.0 * b;
+  }
+
+  let invScale = 1.0 / max(scale, 1e-6);
+  return vec3<f32>(
+    safeTanh((h00 + h11) * invScale),
+    safeTanh((h00 - h11) * invScale),
+    safeTanh((2.0 * h01) * invScale),
+  );
 }
 
 // Simple, deterministic PRNG (xorshift32) — growth's own random draw
@@ -551,6 +610,7 @@ struct PolicyOutput {
   anisotropy: f32,
   divisionBias: f32,
   strafeLocal: vec2<f32>,
+  color: vec3<f32>,
 }
 
 fn safeSigmoid(x: f32) -> f32 {
@@ -610,6 +670,11 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
   // controls physical acceleration below; with MAX_STRAFE=0 these two NN
   // channels can still direct growth without moving particles directly.
   out.strafeLocal = vec2<f32>(safeTanh(outVec[ENV_WRITE_DIM + 3u]), safeTanh(outVec[ENV_WRITE_DIM + 4u]));
+  out.color = vec3<f32>(
+    safeSigmoid(outVec[ENV_WRITE_DIM + 5u]),
+    safeSigmoid(outVec[ENV_WRITE_DIM + 6u]),
+    safeSigmoid(outVec[ENV_WRITE_DIM + 7u]),
+  );
   return out;
 }
 
@@ -660,6 +725,17 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   inputVec[3u * CHANNELS] = sampleMorphology(morphologyPos);
   inputVec[3u * CHANNELS + 1u] = morphologyGx * cosH + morphologyGy * sinH;
   inputVec[3u * CHANNELS + 2u] = -morphologyGx * sinH + morphologyGy * cosH;
+  let forward = vec2<f32>(cosH, sinH);
+  let lateral = vec2<f32>(-sinH, cosH);
+  var elasticInput = vec3<f32>(0.0);
+  if (ELASTIC_STRAIN_INPUTS_ENABLED) {
+    elasticInput = elasticStrainInput(
+      particleF[pi], particleRest[pi].growthF, forward, lateral, physics.elasticStrainScale
+    );
+  }
+  inputVec[3u * CHANNELS + 3u] = elasticInput.x;
+  inputVec[3u * CHANNELS + 4u] = elasticInput.y;
+  inputVec[3u * CHANNELS + 5u] = elasticInput.z;
   var result = evalPolicy(inputVec);
 
   // CHIRALITY: a second pass on the mirror-reflected input (lateral —
@@ -680,6 +756,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       mirroredInput[2u * CHANNELS + c] = -mirroredInput[2u * CHANNELS + c];
     }
     mirroredInput[3u * CHANNELS + 2u] = -mirroredInput[3u * CHANNELS + 2u];
+    // Reflection across the heading axis preserves volumetric and axial
+    // strain while reversing the signed forward/lateral shear component.
+    mirroredInput[3u * CHANNELS + 5u] = -mirroredInput[3u * CHANNELS + 5u];
     let mirrored = evalPolicy(mirroredInput);
 
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
@@ -699,12 +778,12 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       (result.strafeLocal.x + mirrored.strafeLocal.x) * 0.5,
       (result.strafeLocal.y - mirrored.strafeLocal.y) * 0.5
     );
+    result.color = (result.color + mirrored.color) * 0.5;
   }
 
   // Four independent bounded Gaussian writes at the heading-relative
-  // front/left/back/right spots. Positions are left unwrapped here so
-  // depositGaussian can measure continuous distance across a seam; only
-  // its destination indices wrap.
+  // front/left/back/right spots. Positions stay unwrapped here so only
+  // the destination indices wrap inside depositGaussian.
   for (var spot: u32 = 0u; spot < SPOTS; spot = spot + 1u) {
     let angle = headingVal + f32(spot) * HALF_PI;
     let spotDirection = vec2<f32>(cos(angle), sin(angle));
@@ -727,7 +806,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // so all following G2P substeps see the current policy decision.
   particleRest[pi].growthDirection = strafeWorld;
   particleRest[pi].growthControls = vec2<f32>(result.anisotropy, result.divisionBias);
+  agentState.particleMeta[pi].color = vec4<f32>(result.color, 1.0);
 
+  if (stepMode.commitLifecycle != 0u) {
   // Strafe as acceleration: added onto this particle's own CURRENT
   // velocity, then damped by physics.friction (a per-macro-step
   // retention fraction — see AgentPhysics's own friction field comment
@@ -836,6 +917,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       // POSITION is random now, not the child's own facing direction.
       agentState.particleMeta[newIndex].heading = headingVal;
       agentState.particleMeta[newIndex].angularVelocity = agentState.particleMeta[pi].angularVelocity;
+      agentState.particleMeta[newIndex].color = agentState.particleMeta[pi].color;
       // Reseeded from the parent's own latest post-advance state (both
       // draws, `angleState`) mixed with the new slot index, not copied
       // outright — two particles sharing an identical RNG state would
@@ -881,6 +963,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       agentState.particleMeta[pi].cooldown = physics.divisionCooldown;
     }
   }
+  }
 
   // Second-order heading integrator — angularAccel nudges angularVelocity,
   // angularVelocity (after its own damping, applied here since nothing
@@ -890,8 +973,14 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // still visibly too fast a spin (see simulation_settings.py's own
   // comment on the exact bound); this clamp is the real turn-rate
   // ceiling. Matches training_sim.py's own macro_step() exactly.
-  let newAngularVelocity = clamp((agentState.particleMeta[pi].angularVelocity + angularAccel) * physics.angularDamping, -physics.maxAngularVelocity, physics.maxAngularVelocity);
+  let communicationDt = max(stepMode.communicationDt, 0.0);
+  let roundDamping = pow(clamp(physics.angularDamping, 0.000001, 1.0), communicationDt);
+  let newAngularVelocity = clamp(
+    (agentState.particleMeta[pi].angularVelocity + angularAccel * communicationDt) * roundDamping,
+    -physics.maxAngularVelocity,
+    physics.maxAngularVelocity,
+  );
   agentState.particleMeta[pi].angularVelocity = newAngularVelocity;
-  agentState.particleMeta[pi].heading = headingVal + newAngularVelocity;
+  agentState.particleMeta[pi].heading = headingVal + newAngularVelocity * communicationDt;
 
 }

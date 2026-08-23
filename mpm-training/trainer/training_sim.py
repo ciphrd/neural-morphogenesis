@@ -91,6 +91,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from simulation_settings import COMMUNICATION_SPEED, NEURAL_UPDATES_PER_MACRO
+
 from agents_gpu import AgentsGPU, _spawn_uniform01
 from environment_gpu import EnvironmentGPU
 from mpm_core import MpmCore
@@ -152,6 +154,8 @@ class TrainingRollout:
         gravity: float,
         seed: int,
         mpm_enabled: bool = True,
+        neural_updates_per_macro: int = NEURAL_UPDATES_PER_MACRO,
+        communication_speed: float = COMMUNICATION_SPEED,
     ) -> None:
         self.core = core
         self.agents = agents
@@ -162,6 +166,12 @@ class TrainingRollout:
         # caveat: with this off, a shape-matching fitness against a
         # spread-out target becomes close to meaningless).
         self.mpm_enabled = mpm_enabled
+        self.neural_updates_per_macro = max(1, int(neural_updates_per_macro))
+        self.communication_speed = max(0.0, float(communication_speed))
+        communication_dt = environment.set_communication_timestep(
+            self.neural_updates_per_macro, self.communication_speed
+        )
+        agents.set_communication_timestep(communication_dt)
 
         core.set_gravity(gravity)
         # Every rollout — same "run-constant in practice today, but a
@@ -228,9 +238,14 @@ class TrainingRollout:
         # only complicate it for no benefit.
         encoder = core.device.create_command_encoder()
         core.encode_morphology(encoder)
-        self.environment.encode_sense(encoder)
-        self.agents.encode_step(encoder, self.environment.parity)
-        self.environment.encode_merge_and_decay(encoder)
+        for communication_round in range(self.neural_updates_per_macro):
+            self.environment.encode_sense(encoder)
+            self.agents.encode_step(
+                encoder,
+                self.environment.parity,
+                commit_lifecycle=communication_round == self.neural_updates_per_macro - 1,
+            )
+            self.environment.encode_merge_and_decay(encoder)
         core.device.queue.submit([encoder.finish()])
 
         # Growth's own readback — see this module's own module docstring

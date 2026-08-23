@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 import wgpu
 
-from agents_gpu import AgentsGPU, weight_layout
+from agents_gpu import PARTICLE_META_BUFFER_OFFSET, AgentsGPU, weight_layout
 from device import pick_device
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, MpmCore
@@ -125,6 +125,84 @@ def check_morphology_occupancy(device: wgpu.GPUDevice) -> None:
     print(f"[PASS] morphology_occupancy bounded=yes blurred=yes reference_response=yes peak={occupancy.max():.6f}")
 
 
+def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, 1, 64, 64, 0.5, 1.0)
+    agents = AgentsGPU(
+        device, core, environment, 1, 128,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
+        2, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
+    )
+    core.load_scene(
+        np.array([[0.5, 0.5]], dtype=np.float32),
+        np.zeros((1, 2), dtype=np.float32),
+        np.array([[1, 0, 0, 1]], dtype=np.float32),
+        np.zeros((1, 4), dtype=np.float32),
+        np.ones(1, dtype=np.float32),
+    )
+    agents.set_active_count(1)
+    agents.set_growth_enabled(False)
+    layout = weight_layout(1, 128)
+    weights = np.zeros(layout["total_floats"], dtype=np.float32)
+    for spot in range(4):
+        weights[layout["fc2b_offset"] + spot] = 1.0
+    agents.load_weights(weights)
+    readback = device.create_buffer(
+        size=environment.buffers[0].size,
+        usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
+    )
+    copy_module = device.create_shader_module(code="""
+        @group(0) @binding(0) var<storage, read> source: array<f32>;
+        @group(0) @binding(1) var<storage, read_write> destination: array<f32>;
+        @compute @workgroup_size(64)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          if (gid.x < arrayLength(&source)) { destination[gid.x] = source[gid.x]; }
+        }
+    """)
+    copy_pipeline = device.create_compute_pipeline(
+        layout=wgpu.AutoLayoutMode.auto, compute={"module": copy_module, "entry_point": "main"}
+    )
+    copy_groups = [
+        device.create_bind_group(
+            layout=copy_pipeline.get_bind_group_layout(0),
+            entries=[
+                {"binding": 0, "resource": {"buffer": environment.buffers[p]}},
+                {"binding": 1, "resource": {"buffer": readback}},
+            ],
+        )
+        for p in range(2)
+    ]
+
+    def field_sum(rounds: int) -> float:
+        environment.reset()
+        agents.reset_heading(23)
+        communication_dt = environment.set_communication_timestep(rounds, 1.0)
+        agents.set_communication_timestep(communication_dt)
+        encoder = device.create_command_encoder()
+        core.encode_morphology(encoder)
+        for communication_round in range(rounds):
+            environment.encode_sense(encoder)
+            agents.encode_step(encoder, environment.parity, commit_lifecycle=communication_round == rounds - 1)
+            environment.encode_merge_and_decay(encoder)
+        copy_pass = encoder.begin_compute_pass()
+        copy_pass.set_pipeline(copy_pipeline)
+        copy_pass.set_bind_group(0, copy_groups[environment.parity])
+        copy_pass.dispatch_workgroups((environment.buffers[0].size // 4 + 63) // 64)
+        copy_pass.end()
+        device.queue.submit([encoder.finish()])
+        values = np.frombuffer(device.queue.read_buffer(readback), np.float32)
+        return float(values.sum())
+
+    once = field_sum(1)
+    four = field_sum(4)
+    # Deposits are now integrated through the interval rather than all
+    # arriving at its endpoint, so exact equality is neither expected nor
+    # desirable. The important regression guard is that four evaluations no
+    # longer inject four full rounds of signal (the former ratio was ~1.88).
+    assert once * 0.6 < four < once * 1.2, (once, four)
+    print(f"[PASS] supersampled_communication scaled_signal sum1={once:.3f} sum4={four:.3f}")
+
+
 def check_growth_without_repulsion(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     core.set_gravity(0.0)
@@ -166,7 +244,7 @@ def check_compression_slows_without_stalling(device: wgpu.GPUDevice) -> None:
 
 
 def check_cardinal_direction_deposits(device: wgpu.GPUDevice) -> None:
-    """Each spot-major output must write to its own heading-relative target."""
+    """Each spot-major output writes to its heading-relative target."""
     channels = 8
     width = height = 32
     core = MpmCore(device)
@@ -195,6 +273,10 @@ def check_cardinal_direction_deposits(device: wgpu.GPUDevice) -> None:
     # expected targets are front(+x), left(+y), back(-x), right(-y).
     for spot in range(4):
         weights[layout["fc2b_offset"] + spot * channels + spot] = 20.0
+    env_write_dim = channels * 4
+    weights[layout["fc2b_offset"] + env_write_dim + 5] = 20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 6] = -20.0
+    # Blue stays at logit 0 -> sigmoid 0.5.
     agents.load_weights(weights)
 
     count = channels * width * height
@@ -242,6 +324,96 @@ def check_cardinal_direction_deposits(device: wgpu.GPUDevice) -> None:
         assert scratch[channel, max_y, max_x] > 0
     assert not np.any(scratch[4:]), "one output channel leaked into another"
     print("[PASS] four independent writes land at front/left/back/right targets")
+
+    meta_raw = device.queue.read_buffer(
+        agents._agent_state_buffer,
+        PARTICLE_META_BUFFER_OFFSET,
+        agents._particle_meta_dtype.itemsize,
+    )
+    meta = np.frombuffer(meta_raw, dtype=agents._particle_meta_dtype, count=1)
+    assert np.allclose(meta["color"][0, :3], [1.0, 0.0, 0.5], atol=1e-6), meta["color"][0]
+    assert np.isclose(meta["color"][0, 3], 1.0), meta["color"][0]
+    print("[PASS] sigmoid RGB outputs are stored as the particle's current color")
+
+
+def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
+    """Route each new GPU strain input to one RGB output and compare it to
+    an independent NumPy matrix-log calculation."""
+    from elastic_diagnostics import policy_elastic_strain_input
+
+    channels = 1
+    hidden = 128
+    scale = 0.15
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, channels, 32, 32, 1.0, 1.0)
+    agents = AgentsGPU(
+        device, core, environment, channels, hidden,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
+        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5, scale, True,
+    )
+    layout = weight_layout(channels, hidden)
+    weights = np.zeros(layout["total_floats"], dtype=np.float32)
+    elastic_offset = channels * 3 + 3
+    color_start = channels * 4 + 5
+    for component in range(3):
+        weights[layout["fc1w_offset"] + component * layout["in_dim"] + elastic_offset + component] = 1.0
+        weights[layout["fc2w_offset"] + (color_start + component) * hidden + component] = 1.0
+    agents.load_weights(weights)
+
+    def gpu_color(active_agents: AgentsGPU, f: np.ndarray, fg: np.ndarray, heading: float) -> np.ndarray:
+        core.reset_growth_buffers(2)
+        core.load_scene(
+            np.array([[0.5, 0.5]], dtype=np.float32),
+            np.zeros((1, 2), dtype=np.float32),
+            np.asarray(f, dtype=np.float32).reshape(1, 4),
+            np.zeros((1, 4), dtype=np.float32),
+            np.ones(1, dtype=np.float32),
+        )
+        device.queue.write_buffer(
+            core.rest,
+            0,
+            _rest_state(np.ones(1), np.ones(1), np.zeros(1), growth_f=np.asarray(fg).reshape(1, 4)),
+        )
+        environment.reset()
+        active_agents.set_active_count(1)
+        active_agents.reset_heading(29)
+        active_agents.set_headings(np.array([heading], dtype=np.float32))
+        encoder = device.create_command_encoder()
+        core.encode_morphology(encoder)
+        environment.encode_sense(encoder)
+        active_agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
+        device.queue.submit([encoder.finish()])
+        raw = device.queue.read_buffer(
+            active_agents._agent_state_buffer,
+            PARTICLE_META_BUFFER_OFFSET,
+            active_agents._particle_meta_dtype.itemsize,
+        )
+        return np.frombuffer(raw, dtype=active_agents._particle_meta_dtype, count=1)["color"][0, :3].copy()
+
+    fg = np.array([[1.25, 0.12], [0.04, 0.92]], dtype=np.float64)
+    fe = np.array([[1.11, 0.08], [0.02, 0.90]], dtype=np.float64)
+    heading = 0.31
+    normalized = policy_elastic_strain_input(
+        (fe @ fg)[None], fg[None], np.array([heading]), scale=scale
+    )[0]
+    expected_color = 1.0 / (1.0 + np.exp(-np.sin(normalized)))
+    actual_color = gpu_color(agents, fe @ fg, fg, heading)
+    assert np.allclose(actual_color, expected_color, atol=2e-5), (actual_color, expected_color, normalized)
+
+    theta = -0.72
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    stress_free_color = gpu_color(agents, rotation @ fg, fg, theta)
+    assert np.allclose(stress_free_color, 0.5, atol=2e-5), stress_free_color
+
+    disabled_agents = AgentsGPU(
+        device, core, environment, channels, hidden,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
+        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5, scale, False,
+    )
+    disabled_agents.load_weights(weights)
+    disabled_color = gpu_color(disabled_agents, fe @ fg, fg, heading)
+    assert np.allclose(disabled_color, 0.5, atol=2e-5), disabled_color
+    print("[PASS] GPU elastic inputs are correct when enabled and exactly zero in the temporary ablation")
 
 
 def check_conservative_split(device: wgpu.GPUDevice) -> None:
@@ -619,6 +791,7 @@ def _cycle_gate_case(
     initial_growth: float = 1.0,
     initial_cycle: float = 0.0,
     runtime_cap: int | None = None,
+    commit_lifecycle: bool = True,
 ) -> np.ndarray:
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
@@ -659,7 +832,7 @@ def _cycle_gate_case(
 
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity)
+    agents.encode_step(encoder, environment.parity, commit_lifecycle=commit_lifecycle)
     device.queue.submit([encoder.finish()])
     return _probe(core, 1)[0]
 
@@ -669,6 +842,7 @@ def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
     assert _cycle_gate_case(device, cap=4, enabled=False)[2] == 0.0
     assert _cycle_gate_case(device, cap=1, enabled=True)[2] == 0.0
     assert _cycle_gate_case(device, cap=4, enabled=True, runtime_cap=1)[2] == 0.0
+    assert _cycle_gate_case(device, cap=4, enabled=True, commit_lifecycle=False)[2] == 0.0
 
     # A cycle that began before other particles consumed the remaining
     # slots must be closed at cap without rolling back its accumulated g.
@@ -681,15 +855,17 @@ def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
     )
     assert capped[2] == 0.0, capped
     assert np.isclose(capped[1], 1.4), capped
-    print("[PASS] cycle_start_gates enabled=yes disabled=no static/runtime_cap=no capped_cycle_closed_g_preserved")
+    print("[PASS] cycle_start_gates final_round_only enabled=yes disabled=no static/runtime_cap=no capped_cycle_closed_g_preserved")
 
 
 def main() -> None:
     device = pick_device()
     check_morphology_occupancy(device)
+    check_supersampled_communication_rounds(device)
     check_growth_without_repulsion(device)
     check_compression_slows_without_stalling(device)
     check_cardinal_direction_deposits(device)
+    check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
     check_polarized_division_uses_signed_growth_direction(device)
     check_anisotropic_tensor_split(device)

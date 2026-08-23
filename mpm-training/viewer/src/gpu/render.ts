@@ -33,12 +33,13 @@ import fieldSrc from "./field.wgsl?raw";
 import fieldDiagnosticsSrc from "./fieldDiagnostics.wgsl?raw";
 import renderSrc from "./render.wgsl?raw";
 import { writeFloat32, ceilDiv } from "./gpuUtil";
+import { PARTICLE_META_BUFFER_OFFSET } from "./agents";
 import type { Environment } from "./environment";
 import { DX, GRID_N, INV_DX, PARTICLE_MASS, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
 export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient";
-export type ParticleRenderMode = "dots-white" | "dots-activation" | "dots-activation-translucent" | "directional-arrows";
+export type ParticleRenderMode = "dots-white" | "dots-neural-color" | "dots-activation" | "dots-activation-translucent" | "directional-arrows";
 
 const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "growth" | "gradient">, number> = {
   none: 0,
@@ -86,6 +87,9 @@ export class Renderer {
   private readonly circleParticleBindGroup: GPUBindGroup;
   private readonly activationParticlePipeline: GPURenderPipeline;
   private readonly activationParticleBindGroup: GPUBindGroup;
+  private readonly neuralColorParticlePipeline: GPURenderPipeline;
+  private readonly neuralColorParticleBindGroup: GPUBindGroup;
+  private readonly neuralColorStyleUniform: GPUBuffer;
   private readonly activationAlphaUniform: GPUBuffer;
   private readonly growthAxisPipeline: GPURenderPipeline;
   private readonly growthAxisBindGroup: GPUBindGroup;
@@ -102,6 +106,7 @@ export class Renderer {
   private particleRenderMode: ParticleRenderMode = "dots-white";
   private whiteDotsAlpha = 1.0;
   private activationAlpha = 0.2;
+  private neuralColorAlpha = 1.0;
   private particleRadiusPx = DEFAULT_PARTICLE_RADIUS_PX;
   private growthAxisLengthPx = 24;
   private canvasMinDimPx = 512;
@@ -201,7 +206,7 @@ export class Renderer {
 
   private fieldMode: FieldMode = "none";
 
-  constructor(device: GPUDevice, format: GPUTextureFormat, mpmCore: MpmCore, environment: Environment) {
+  constructor(device: GPUDevice, format: GPUTextureFormat, mpmCore: MpmCore, environment: Environment, particleMetaState: GPUBuffer) {
     this.device = device;
     this.environment = environment;
     const renderModule = device.createShaderModule({ code: renderSrc });
@@ -257,6 +262,33 @@ export class Renderer {
         { binding: 1, resource: { buffer: this.particleRadiusUniform } },
         { binding: 4, resource: { buffer: mpmCore.rest } },
         { binding: 6, resource: { buffer: this.activationAlphaUniform } },
+      ],
+    });
+
+    const neuralColorLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+      ],
+    });
+    this.neuralColorParticlePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [neuralColorLayout] }),
+      vertex: { module: renderModule, entryPoint: "neuralColorParticleVertex" },
+      fragment: { module: renderModule, entryPoint: "neuralColorParticleFragment", targets: [{ format, blend: alphaBlend() }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.neuralColorStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // alpha, saturation boost, contrast around sigmoid-neutral 0.5, padding
+    writeFloat32(device, this.neuralColorStyleUniform, 0, new Float32Array([1.0, 4.0, 1.5, 0.0]));
+    this.neuralColorParticleBindGroup = device.createBindGroup({
+      layout: neuralColorLayout,
+      entries: [
+        { binding: 0, resource: { buffer: mpmCore.positions } },
+        { binding: 1, resource: { buffer: this.particleRadiusUniform } },
+        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
+        { binding: 7, resource: { buffer: this.neuralColorStyleUniform } },
       ],
     });
 
@@ -631,8 +663,12 @@ export class Renderer {
     writeFloat32(this.device, this.particleColorUniform, 0, new Float32Array([1, 1, 1, this.whiteDotsAlpha]));
   }
 
-  /** Total device-pixel length of a full-strength signed growth-polarity
-   * arrow. Signal magnitude scales this length linearly. */
+  setNeuralColorAlpha(alpha: number): void {
+    this.neuralColorAlpha = Math.min(1, Math.max(0, alpha));
+    writeFloat32(this.device, this.neuralColorStyleUniform, 0, new Float32Array([this.neuralColorAlpha]));
+  }
+
+  /** Device-pixel scale of a full-strength signed growth-polarity triangle. */
   setGrowthAxisLengthPx(px: number): void {
     this.growthAxisLengthPx = px;
     this.writeGrowthAxisStyle();
@@ -803,6 +839,10 @@ export class Renderer {
         pass.setPipeline(this.circlePipeline);
         pass.setBindGroup(0, this.circleParticleBindGroup);
         pass.draw(6, activeCount);
+      } else if (this.particleRenderMode === "dots-neural-color") {
+        pass.setPipeline(this.neuralColorParticlePipeline);
+        pass.setBindGroup(0, this.neuralColorParticleBindGroup);
+        pass.draw(6, activeCount);
       } else if (this.particleRenderMode === "dots-activation" || this.particleRenderMode === "dots-activation-translucent") {
         pass.setPipeline(this.activationParticlePipeline);
         pass.setBindGroup(0, this.activationParticleBindGroup);
@@ -810,7 +850,7 @@ export class Renderer {
       } else {
         pass.setPipeline(this.growthAxisPipeline);
         pass.setBindGroup(0, this.growthAxisBindGroup);
-        pass.draw(9, activeCount);
+        pass.draw(3, activeCount);
       }
     }
 
@@ -822,6 +862,7 @@ export class Renderer {
     this.particleRadiusUniform.destroy();
     this.particleColorUniform.destroy();
     this.activationAlphaUniform.destroy();
+    this.neuralColorStyleUniform.destroy();
     this.growthAxisStyleUniform.destroy();
     this.growthAxisColorUniform.destroy();
     this.targetRadiusUniform.destroy();

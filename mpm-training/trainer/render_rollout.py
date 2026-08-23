@@ -135,6 +135,8 @@ def main() -> int:
         1.0,
         meta["spawn_x"],
         meta["spawn_y"],
+        meta.get("elastic_strain_scale", 0.15),
+        meta.get("elastic_strain_inputs_enabled", False),
     )
     agents.load_weights(weights)
 
@@ -148,6 +150,10 @@ def main() -> int:
         spawn_half_width=meta["spawn_half_width"],
         gravity=meta["gravity"],
         seed=meta["seed"],
+        # Checkpoints predating multi-rate communication were trained with
+        # exactly one neural/environment round per mechanical macro step.
+        neural_updates_per_macro=meta.get("neural_updates_per_macro", 1),
+        communication_speed=meta.get("communication_speed", 1.0),
     )
 
     growth_steps = meta.get("growth_steps")

@@ -161,6 +161,7 @@ def main() -> None:
         spawn_half_width=0.0,
         gravity=0.0,
         seed=SEED,
+        neural_updates_per_macro=1,
     )
 
     growth_plane = np.ones(FIELD_N * FIELD_N, dtype=np.float32)

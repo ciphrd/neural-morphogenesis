@@ -21,6 +21,8 @@ from __future__ import annotations
 import numpy as np
 import wgpu
 
+from simulation_settings import ELASTIC_STRAIN_INPUTS_ENABLED, ELASTIC_STRAIN_SCALE
+
 from environment_gpu import EnvironmentGPU, ceil_div
 from mpm_core import MpmCore, REPULSION_FIELD_N
 from shader_template import load_core_shader
@@ -113,10 +115,10 @@ def _spawn_uniform01_batch(seed: int, indices: np.ndarray) -> np.ndarray:
 def weight_layout(channels: int, hidden_dim: int) -> dict[str, int]:
     # core/agents.wgsl's own IN_DIM: value + heading-forward gradient +
     # lateral gradient per channel, with no positional inputs.
-    in_dim = channels * 3 + 3
+    in_dim = channels * 3 + 6
     # Four heading-relative env_write values per channel + ANGULAR_DIM(1)
-    # + ACCEL_DIM(2) + STRAFE_DIM(2).
-    out_dim = channels * 4 + 5
+    # + ACCEL_DIM(2) + STRAFE_DIM(2) + RGB_DIM(3).
+    out_dim = channels * 4 + 8
     fc1w_offset = 0
     fc1b_offset = fc1w_offset + hidden_dim * in_dim
     fc2w_offset = fc1b_offset + hidden_dim
@@ -157,6 +159,8 @@ class AgentsGPU:
         growth_enabled: float,
         spawn_x: float,
         spawn_y: float,
+        elastic_strain_scale: float = ELASTIC_STRAIN_SCALE,
+        elastic_strain_inputs_enabled: bool = ELASTIC_STRAIN_INPUTS_ENABLED,
     ) -> None:
         self.device = device
         self.channels = channels
@@ -172,12 +176,12 @@ class AgentsGPU:
         self._weights_buffer = device.create_buffer(
             size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
         )
-        # 60 bytes — core/agents.wgsl's AgentPhysics is 14 f32 plus one
-        # u32. spawnX/spawnY/maxActiveParticles are written separately.
+        # 64 bytes — core/agents.wgsl's AgentPhysics ends with a u32 growth
+        # cap and f32 elastic-strain normalization.
         # NOT written by set_physics() below; see set_spawn_center()'s own
         # docstring for why those get a separate setter into this same
         # buffer instead.
-        self._physics_uniform = device.create_buffer(size=60, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self._physics_uniform = device.create_buffer(size=64, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_physics(
             max_accel,
             max_strafe,
@@ -194,6 +198,7 @@ class AgentsGPU:
         )
         self.set_spawn_center(spawn_x, spawn_y)
         self.set_max_active_particles(max_active_particles)
+        self.set_elastic_strain_scale(elastic_strain_scale)
 
         # Persistent per-particle state — owned here (not MpmCore, not
         # EnvironmentGPU), zeroed at creation (randomized/reseeded
@@ -209,8 +214,8 @@ class AgentsGPU:
         # — same underlying need, smaller ceiling since this class has no
         # such interactive tool of its own).
         #
-        # rng(u32)+cooldown(f32)+heading(f32)+angularVelocity(f32) — ALL
-        # FOUR packed into ONE 16-bytes-per-particle buffer
+        # rng/cooldown/heading/angularVelocity plus aligned neural RGBA —
+        # packed into ONE 32-bytes-per-particle buffer
         # (core/agents.wgsl's own ParticleMeta struct), not four separate
         # buffers: this shader hit a REAL, confirmed CreateComputePipeline
         # validation error the first time particleF/particleC/particleJp
@@ -226,7 +231,13 @@ class AgentsGPU:
         # here to free the 2 slots particleF/particleJp needed (particleC
         # was dropped instead of freeing a 3rd — see core/agents.wgsl's
         # own comment on why that one's safe to skip).
-        self._particle_meta_dtype = np.dtype([("rng", "<u4"), ("cooldown", "<f4"), ("heading", "<f4"), ("angularVelocity", "<f4")])
+        self._particle_meta_dtype = np.dtype([
+            ("rng", "<u4"),
+            ("cooldown", "<f4"),
+            ("heading", "<f4"),
+            ("angularVelocity", "<f4"),
+            ("color", "<f4", (4,)),
+        ])
         # AgentState packs the growth counter at byte 0 and ParticleMeta at
         # byte 256. Besides satisfying storage-offset alignment for the
         # viewer's render binding, this frees one agent shader binding for C.
@@ -256,12 +267,19 @@ class AgentsGPU:
                     # str(bool) gives "True"/"False", invalid WGSL syntax,
                     # so this can't just be passed through as-is.
                     "CHIRALITY": "true" if chirality else "false",
+                    "ELASTIC_STRAIN_INPUTS_ENABLED": "true" if elastic_strain_inputs_enabled else "false",
                 },
             )
         )
         self._pipeline = device.create_compute_pipeline(layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "agentStep"})
 
-        def bind_group(p: int):
+        self._step_mode_uniforms = [
+            device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
+            device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
+        ]
+        self.set_communication_timestep(1.0)
+
+        def bind_group(p: int, commit_lifecycle: int):
             env_buf = environment.buffers[p]
             return device.create_bind_group(
                 layout=self._pipeline.get_bind_group_layout(0),
@@ -287,10 +305,12 @@ class AgentsGPU:
                     {"binding": 10, "resource": {"buffer": core.F, "offset": 0, "size": core.F.size}},
                     {"binding": 11, "resource": {"buffer": core.rest, "offset": 0, "size": core.rest.size}},
                     {"binding": 12, "resource": core.morphology_texture.create_view()},
+                    {"binding": 13, "resource": {"buffer": self._step_mode_uniforms[commit_lifecycle]}},
                 ],
             )
 
-        self._bind_groups = [bind_group(0), bind_group(1)]
+        self._communication_bind_groups = [bind_group(0, 0), bind_group(1, 0)]
+        self._commit_bind_groups = [bind_group(0, 1), bind_group(1, 1)]
 
     @property
     def max_active_particles(self) -> int:
@@ -373,6 +393,14 @@ class AgentsGPU:
             np.array([1.0 if enabled else 0.0], dtype=np.float32),
         )
 
+    def set_communication_timestep(self, dt: float) -> None:
+        """Set the neural substep clock while retaining two lifecycle modes."""
+        for commit, buffer in enumerate(self._step_mode_uniforms):
+            data = np.zeros(4, dtype=np.uint32)
+            data[0] = commit
+            data.view(np.float32)[1] = max(0.0, float(dt))
+            self.device.queue.write_buffer(buffer, 0, data)
+
     def set_spawn_center(self, spawn_x: float, spawn_y: float) -> None:
         """Writes the legacy AgentPhysics spawn slots at byte offset 48.
 
@@ -388,6 +416,14 @@ class AgentsGPU:
             self._physics_uniform,
             56,
             np.array([max(1, int(max_active_particles))], dtype=np.uint32),
+        )
+
+    def set_elastic_strain_scale(self, scale: float) -> None:
+        """Writes AgentPhysics.elasticStrainScale at byte offset 60."""
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            60,
+            np.array([max(float(scale), 1e-6)], dtype=np.float32),
         )
 
     def set_active_count(self, active_count: int) -> None:
@@ -479,7 +515,7 @@ class AgentsGPU:
         count = (self._agent_state_buffer.size - PARTICLE_META_BUFFER_OFFSET) // self._particle_meta_dtype.itemsize
         # One combined structured array, matching core/agents.wgsl's own
         # ParticleMeta struct exactly (see this class's own __init__
-        # comment for why all four fields are packed into one buffer).
+        # comment for why the state fields are packed into one buffer).
         particle_meta = np.zeros(count, dtype=self._particle_meta_dtype)
         particle_meta["rng"] = _growth_seed(seed, count)
         particle_meta["heading"] = (
@@ -499,7 +535,7 @@ class AgentsGPU:
         Not folded into reset_heading() itself, which stays a general,
         per-slot-independent utility. Written as individual per-index
         strided byte writes (heading is one f32 field inside
-        ParticleMeta's own 16-byte stride, not a standalone tightly-
+        ParticleMeta's own 32-byte stride, not a standalone tightly-
         packed array anymore) rather than one bulk write, to touch ONLY
         the heading field — leaving rng/cooldown/angularVelocity exactly
         as reset_heading() just set them, not overwritten with zeros.
@@ -515,7 +551,7 @@ class AgentsGPU:
                 np.array([h], dtype=np.float32),
             )
 
-    def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int) -> None:
+    def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int, *, commit_lifecycle: bool = True) -> None:
         """Encodes the NN forward pass — reads environment's current
         parity buffer (must match `parity`), writes the policy's growth
         direction into MpmCore's particle-rest buffer, optionally applies
@@ -523,6 +559,7 @@ class AgentsGPU:
         into the environment's deposit scratch. Does not submit."""
         p = encoder.begin_compute_pass()
         p.set_pipeline(self._pipeline)
-        p.set_bind_group(0, self._bind_groups[parity])
+        groups = self._commit_bind_groups if commit_lifecycle else self._communication_bind_groups
+        p.set_bind_group(0, groups[parity])
         p.dispatch_workgroups(self._dispatch)
         p.end()

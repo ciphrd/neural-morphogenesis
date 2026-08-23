@@ -31,13 +31,20 @@ _GRID_N: int = _CORE_CONSTANTS["GRID_N"]
 HIDDEN_DIM = 128
 CHEM_CHANNELS = 8  # last channel is always growth's own split-probability field
 DEPOSIT_SPOTS = 4
+# Neural evaluations performed before each mechanical macro step. These are
+# numerical communication substeps; increasing this improves temporal
+# resolution without multiplying chemical/turning speed.
+NEURAL_UPDATES_PER_MACRO = 4
+# Chemical/orientation time elapsed per mechanical macro step. 1 preserves the
+# original single-round clock; this is independent from evaluation resolution.
+COMMUNICATION_SPEED = 1.0
 ANGULAR_DIM = 1
 ACCEL_DIM = 2
 STRAFE_DIM = 2
 
 # --- Chemical field (environment_gpu.py / core/environment.wgsl) ---
-FIELD_N = 256
-DECAY = 0.5
+FIELD_N = 512
+DECAY = 0.0
 
 # Motion
 MAX_ACCEL = 0.0 # 0.1 # not used rn
@@ -49,6 +56,14 @@ FRICTION = 0.9
 MAX_ANGULAR_ACCEL = 1.4
 ANGULAR_DAMPING = 0.8
 MAX_ANGULAR_VELOCITY = 0.1
+# Heading-relative Hencky strain is divided by this before tanh enters the
+# policy. Approximately 15% logarithmic strain therefore produces a strong,
+# still-unsaturated mechanosensory signal.
+ELASTIC_STRAIN_SCALE = 0.15
+# Temporary ablation: retain the 30-input checkpoint architecture but force
+# volume/axial/shear mechanosensory lanes to zero. Flip to True to restore the
+# implementation without another weight-shape migration.
+ELASTIC_STRAIN_INPUTS_ENABLED = False
 
 # Deposit
 DEPOSIT_RATE = 1.0
@@ -59,7 +74,7 @@ DEPOSIT_SIGMA = 0.4
 MAX_ENV_WRITE = 1.0
 
 # Behavior
-CHIRALITY = True
+CHIRALITY = False
 MPM_ENABLED = True
 MATERIAL_E = 1e4
 MATERIAL_NU = 0.2
@@ -83,9 +98,9 @@ MASS_RAMP_MACRO_STEPS = 1.0
 # equivalence; a nonzero direction produces anisotropic rest growth. See
 # core/g2p.wgsl and core/agents.wgsl's ParticleRest.growthF comment.
 #
-# Approximate number of neural sense/act/chemical-field updates an
-# uncompressed particle receives between entering a cell cycle and doubling
-# its stress-free area. The host derives the shader's per-physics-substep
+# Approximate number of mechanical macro steps an uncompressed particle takes
+# between entering a cell cycle and doubling its stress-free area. The host
+# derives the shader's per-physics-substep
 # exponential rate from this and the run's actual substeps-per-macro, so
 # increasing substeps for numerical stability no longer accelerates growth
 # relative to communication and control. 0 disables growth.

@@ -56,6 +56,7 @@ interface GridCanvasProps {
   particleRadiusPx?: number;
   whiteDotsAlpha?: number;
   activationAlpha?: number;
+  neuralColorAlpha?: number;
   /** Full-strength axis length in device pixels. */
   growthAxisLengthPx?: number;
   /** [-2,2] — negative suppresses background-field contrast, 0 is
@@ -203,6 +204,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     particleRadiusPx,
     whiteDotsAlpha = 1,
     activationAlpha = 0.2,
+    neuralColorAlpha = 1,
     growthAxisLengthPx = 24,
     accent = 0,
     morphologyGradientVisible = true,
@@ -229,6 +231,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const particleRadiusPxRef = useRef(particleRadiusPx);
   const whiteDotsAlphaRef = useRef(whiteDotsAlpha);
   const activationAlphaRef = useRef(activationAlpha);
+  const neuralColorAlphaRef = useRef(neuralColorAlpha);
   const growthAxisLengthPxRef = useRef(growthAxisLengthPx);
   const accentRef = useRef(accent);
   const morphologyGradientVisibleRef = useRef(morphologyGradientVisible);
@@ -351,6 +354,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   particleRadiusPxRef.current = particleRadiusPx;
   whiteDotsAlphaRef.current = whiteDotsAlpha;
   activationAlphaRef.current = activationAlpha;
+  neuralColorAlphaRef.current = neuralColorAlpha;
   growthAxisLengthPxRef.current = growthAxisLengthPx;
   accentRef.current = accent;
   morphologyGradientVisibleRef.current = morphologyGradientVisible;
@@ -433,6 +437,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setParticleRenderMode(particleRenderModeRef.current);
       simulation.setWhiteDotsAlpha(whiteDotsAlphaRef.current);
       simulation.setActivationAlpha(activationAlphaRef.current);
+      simulation.setNeuralColorAlpha(neuralColorAlphaRef.current);
       if (particleRadiusPxRef.current !== undefined) simulation.setPointRadiusPx(particleRadiusPxRef.current);
       simulation.setGrowthAxisLengthPx(growthAxisLengthPxRef.current);
       simulation.setAccent(accentRef.current);
@@ -690,6 +695,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     simulationRef.current?.setActivationAlpha(activationAlpha);
   }, [activationAlpha]);
+
+  useEffect(() => {
+    simulationRef.current?.setNeuralColorAlpha(neuralColorAlpha);
+  }, [neuralColorAlpha]);
 
   useEffect(() => {
     if (particleRadiusPx !== undefined) simulationRef.current?.setPointRadiusPx(particleRadiusPx);

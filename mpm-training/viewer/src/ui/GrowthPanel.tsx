@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthThreshold"
+  "growthDuration" | "growthThreshold" | "neuralUpdatesPerMacro" | "communicationSpeed"
 >
 
 interface GrowthSliderSpec {
@@ -37,9 +37,27 @@ interface GrowthSliderSpec {
 // run happened to be trained with.
 const SPECS: GrowthSliderSpec[] = [
   {
+    key: "neuralUpdatesPerMacro",
+    label: "Neural updates / tick",
+    hint: "Neural evaluations before one MLS-MPM update. Chemical and turning dynamics are timestep-scaled, so this raises temporal resolution rather than raw speed. Lifecycle and division commit only on the final round.",
+    min: 1,
+    max: 16,
+    step: 1,
+    format: (v) => `${Math.round(v)} rounds`,
+  },
+  {
+    key: "communicationSpeed",
+    label: "Communication speed",
+    hint: "Chemical diffusion/deposition and orientation time per mechanical tick. Neural updates control resolution; this controls elapsed communication time.",
+    min: 0,
+    max: 4,
+    step: 0.05,
+    format: (v) => `${v.toFixed(2)}×`,
+  },
+  {
     key: "growthDuration",
     label: "Growth duration",
-    hint: "Approximate neural/chemical updates required to double stress-free area. Larger values give agents more time to coordinate. 0 = growth off.",
+    hint: "Approximate mechanical ticks required to double stress-free area. Larger values give agents more communication rounds before division. 0 = growth off.",
     min: 0,
     max: 160,
     step: 1,
@@ -64,6 +82,7 @@ const SPECS: GrowthSliderSpec[] = [
  *
  * Split into its own section rather than appended to PhysicsPanel's own
  * flat list because these controls behave as a group:
+ * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
  * growthDuration/growthThreshold control the substrate-driven cell cycle and
  * its optional continuous mechanical feedback. Anisotropy is deliberately not
  * exposed here: the policy's per-particle sigmoid output owns it directly.

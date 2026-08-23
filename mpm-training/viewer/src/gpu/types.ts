@@ -1,8 +1,8 @@
 export interface UpdateRuleWeights {
-  fc1w: number[][]; // (HIDDEN_DIM, 3*channels+3) — chemicals plus morphology occupancy/gradient
+  fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6) — chemicals, morphology, elastic Hencky strain
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // (channels*4+5, HIDDEN_DIM) — directional deposits + turn + anisotropy/polarity + direction
-  fc2b: number[]; // (channels*4+5,)
+  fc2w: number[][]; // (channels*4+8, HIDDEN_DIM) — directional deposits + turn + growth controls + direction + RGB
+  fc2b: number[]; // (channels*4+8,)
 }
 
 // Mirrors train_server.py's own GET /settings response, field for field
@@ -40,6 +40,10 @@ export interface RunSettings {
   fieldN: number;
   morphologyBlurSigma?: number;
   morphologyDensityReference?: number;
+  neuralUpdatesPerMacro?: number;
+  communicationSpeed?: number;
+  elasticStrainScale?: number;
+  elasticStrainInputsEnabled?: boolean;
   hiddenDim: number;
   decay: number;
   // Multiplier on this macro step's own accumulated deposits, applied
@@ -191,6 +195,8 @@ export interface PhysicsSettings {
   friction: number;
   massRampMacroSteps: number;
   growthDuration: number;
+  neuralUpdatesPerMacro: number;
+  communicationSpeed: number;
   growthMax: number;
   growthThreshold: number;
   // Internal neutral multiplier retained for settings-object compatibility.
@@ -245,6 +251,8 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     // give.
     massRampMacroSteps: config.massRampMacroSteps ?? 20.0,
     growthDuration: config.growthDuration ?? legacyDuration,
+    neuralUpdatesPerMacro: Math.max(1, Math.round(config.neuralUpdatesPerMacro ?? 1)),
+    communicationSpeed: Math.max(0, config.communicationSpeed ?? 1.0),
     growthMax: config.growthMax ?? 2.0,
     growthThreshold: config.growthThreshold ?? 0.0,
     growthAnisotropy: 1.0,

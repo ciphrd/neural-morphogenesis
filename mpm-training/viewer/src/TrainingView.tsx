@@ -122,6 +122,7 @@ export function TrainingView() {
   const [targetVisible, setTargetVisible] = useState(true)
   const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(1)
   const [activationAlpha, setActivationAlpha] = useState(0.2)
+  const [neuralColorAlpha, setNeuralColorAlpha] = useState(1)
   const [growthAxisLengthPx, setGrowthAxisLengthPx] = useState(28)
   // "Add"/"Move"/"Deform" interaction tools (render/GridCanvas.tsx's own
   // Tool type) — toggled on/off by clicking their own icon button again
@@ -336,11 +337,12 @@ export function TrainingView() {
               }
             >
               <option value="dots-white">Dots (white)</option>
+              <option value="dots-neural-color">Dots (neural RGB)</option>
               <option value="dots-activation">Dots (neurons)</option>
               <option value="dots-activation-translucent">
                 Dots (translucent neurons)
               </option>
-              <option value="directional-arrows">Directional arrows</option>
+              <option value="directional-arrows">Directional triangles</option>
             </select>
           </label>
           {particleRenderMode === "dots-white" && (
@@ -354,6 +356,19 @@ export function TrainingView() {
                 onChange={setWhiteDotsAlpha}
               />
               <span className="slider-value">{whiteDotsAlpha.toFixed(2)}</span>
+            </label>
+          )}
+          {particleRenderMode === "dots-neural-color" && (
+            <label className="slider-row">
+              <span>Neural RGB alpha</span>
+              <Slider
+                min={0}
+                max={1}
+                step={0.01}
+                value={neuralColorAlpha}
+                onChange={setNeuralColorAlpha}
+              />
+              <span className="slider-value">{neuralColorAlpha.toFixed(2)}</span>
             </label>
           )}
           {particleRenderMode === "dots-activation-translucent" && (
@@ -372,7 +387,7 @@ export function TrainingView() {
           {particleRenderMode === "directional-arrows" && (
             <>
               <label className="slider-row">
-                <span>Growth axis length</span>
+                <span>Triangle size</span>
                 <Slider
                   min={8}
                   max={80}
@@ -383,8 +398,8 @@ export function TrainingView() {
                 <span className="slider-value">{growthAxisLengthPx}px</span>
               </label>
               <p className="hint">
-                Cyan arrows point toward +n division polarity; length shows
-                signal strength.
+                X-squashed cyan triangles point toward +n division polarity;
+                size and opacity show signal strength.
               </p>
             </>
           )}
@@ -525,6 +540,7 @@ export function TrainingView() {
             particleRadiusPx={particleRadiusPx}
             whiteDotsAlpha={whiteDotsAlpha}
             activationAlpha={activationAlpha}
+            neuralColorAlpha={neuralColorAlpha}
             growthAxisLengthPx={growthAxisLengthPx}
             tool={tool}
             deformSettings={deformSettings}

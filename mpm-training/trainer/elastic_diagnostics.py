@@ -19,6 +19,44 @@ from mpm_core import PARTICLE_MASS, VOL, MpmCore, lame_params
 PERCENTILES = (50, 90, 95, 99)
 
 
+def policy_elastic_strain_input(
+    deformation: np.ndarray,
+    growth_f: np.ndarray,
+    heading: np.ndarray,
+    *,
+    scale: float,
+) -> np.ndarray:
+    """Reference implementation of agents.wgsl's three mechanosensory inputs.
+
+    Returns tanh-normalized ``[volume, forward-minus-lateral, shear]``
+    components of spatial elastic Hencky strain ``H=0.5 log(Fe Fe.T)`` in
+    each particle's heading frame. This intentionally excludes rigid rotation
+    and stress-free growth.
+    """
+    f = np.asarray(deformation, dtype=np.float64).reshape(-1, 2, 2)
+    fg = np.asarray(growth_f, dtype=np.float64).reshape(-1, 2, 2)
+    angles = np.asarray(heading, dtype=np.float64).reshape(-1)
+    if f.shape != fg.shape or len(f) != len(angles):
+        raise ValueError("deformation, growth_f, and heading counts must match")
+    if scale <= 0 or not np.isfinite(scale):
+        raise ValueError("scale must be finite and positive")
+    fe = f @ np.linalg.inv(fg)
+    b = fe @ np.swapaxes(fe, 1, 2)
+    out = np.empty((len(f), 3), dtype=np.float64)
+    for i, angle in enumerate(angles):
+        eigenvalues, eigenvectors = np.linalg.eigh(b[i])
+        eigenvalues = np.maximum(eigenvalues, 1e-8)
+        h = (eigenvectors * (0.5 * np.log(eigenvalues))) @ eigenvectors.T
+        forward = np.array([np.cos(angle), np.sin(angle)])
+        lateral = np.array([-np.sin(angle), np.cos(angle)])
+        q = np.column_stack([forward, lateral])
+        local = q.T @ h @ q
+        out[i] = np.tanh(
+            np.array([local.trace(), local[0, 0] - local[1, 1], 2.0 * local[0, 1]]) / scale
+        )
+    return out
+
+
 @dataclass(frozen=True)
 class ElasticParticleState:
     elastic_f: np.ndarray

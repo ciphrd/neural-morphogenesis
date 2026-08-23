@@ -70,9 +70,7 @@ export class Environment {
     ];
     this.gradient = device.createBuffer({ size: total * 2 * f32, usage: GPUBufferUsage.STORAGE });
     this.depositScratch = device.createBuffer({ size: total * f32, usage: GPUBufferUsage.STORAGE });
-    // 8 bytes — core/environment.wgsl's own EnvPhysics struct is
-    // {decay, depositRate}, both f32, in that order.
-    this.physicsUniform = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.physicsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setPhysics({ decay: config.decay, depositRate: config.depositRate });
 
     const module = device.createShaderModule({
@@ -123,13 +121,17 @@ export class Environment {
     this.gridDispatch = [ceilDiv(config.width, GRID_WORKGROUP), ceilDiv(config.height, GRID_WORKGROUP), config.channels];
   }
 
-  /** Writes both EnvPhysics fields at once (they share one small uniform
-   * buffer — see core/environment.wgsl's own struct) — safe to call on
+  /** Writes the timestep-scaled EnvPhysics fields together — safe to call on
    * every tick of either the Decay or Deposit rate PhysicsPanel slider,
    * same "plain buffer write, no pipeline recreation" contract every
    * other live-adjustable setter in this project's own gpu/ layer has. */
-  setPhysics(physics: { decay: number; depositRate: number }): void {
-    writeFloat32(this.device, this.physicsUniform, 0, new Float32Array([physics.decay, physics.depositRate]));
+  setPhysics(physics: { decay: number; depositRate: number; diffusionStep?: number }): void {
+    writeFloat32(this.device, this.physicsUniform, 0, new Float32Array([
+      physics.decay,
+      physics.depositRate,
+      physics.diffusionStep ?? 1.0,
+      0.0,
+    ]));
   }
 
   /** Zeroes both grid buffers and resets parity to 0 — call at the start

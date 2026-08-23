@@ -13,7 +13,13 @@ import numpy as np
 import wgpu
 
 from device import pick_device
-from elastic_diagnostics import distribution_summary, measure_core, particle_elastic_state, summarize_elastic_state
+from elastic_diagnostics import (
+    distribution_summary,
+    measure_core,
+    particle_elastic_state,
+    policy_elastic_strain_input,
+    summarize_elastic_state,
+)
 from mpm_core import MpmCore, lame_params
 from shader_template import template_shader
 
@@ -23,6 +29,45 @@ DIRECTIONAL_SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "tensor_growth
 E = 1.0e4
 NU = 0.2
 HARDENING = 3.0
+STRAIN_SCALE = 0.15
+
+
+def check_policy_elastic_strain_inputs() -> None:
+    identity = np.eye(2)
+    theta = 0.61
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    fg = np.array([[1.3, 0.15], [0.05, 0.9]])
+    fe = np.array([[1.12, 0.09], [0.03, 0.91]])
+
+    stress_free = policy_elastic_strain_input(
+        np.stack([identity, rotation, rotation @ fg]),
+        np.stack([identity, identity, fg]),
+        np.array([0.0, theta, theta]),
+        scale=STRAIN_SCALE,
+    )
+    assert np.allclose(stress_free, 0.0, atol=1e-12)
+
+    base = policy_elastic_strain_input(fe[None], identity[None], np.array([0.2]), scale=STRAIN_SCALE)[0]
+    grown = policy_elastic_strain_input((fe @ fg)[None], fg[None], np.array([0.2]), scale=STRAIN_SCALE)[0]
+    assert np.allclose(grown, base, atol=1e-12)
+
+    world_angle = -0.47
+    world_rotation = np.array([
+        [np.cos(world_angle), -np.sin(world_angle)],
+        [np.sin(world_angle), np.cos(world_angle)],
+    ])
+    rotated = policy_elastic_strain_input(
+        (world_rotation @ fe)[None], identity[None], np.array([0.2 + world_angle]), scale=STRAIN_SCALE
+    )[0]
+    assert np.allclose(rotated, base, atol=1e-12)
+
+    reflection = np.diag([1.0, -1.0])
+    mirrored = policy_elastic_strain_input(
+        (reflection @ fe)[None], identity[None], np.array([-0.2]), scale=STRAIN_SCALE
+    )[0]
+    assert np.allclose(mirrored[:2], base[:2], atol=1e-12)
+    assert np.isclose(mirrored[2], -base[2], atol=1e-12)
+    print("[PASS] policy elastic strain: rigid/growth invariant, heading-objective, mirror-correct")
 
 
 def check_analytic_invariants() -> None:
@@ -347,6 +392,7 @@ def check_saved_snapshot() -> None:
 
 
 def main() -> None:
+    check_policy_elastic_strain_inputs()
     check_analytic_invariants()
     check_weighted_summary()
     device = pick_device()

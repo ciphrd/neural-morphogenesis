@@ -28,8 +28,8 @@ Three signals have distinct responsibilities:
    normalized local growth direction. Independent sigmoid outputs select the
    tensor anisotropy and the signed division-placement bias.
 3. **The morphoelastic law supplies the amount of growth.** Once a cell cycle
-   is active, a configured duration determines approximately how many neural
-   and chemical updates it takes to double stress-free area. Elastic compression
+   is active, a configured duration determines approximately how many mechanical
+   macro steps it takes to double stress-free area. Elastic compression
    lengthens this duration continuously, without a hard mechanical cutoff.
 
 The policy therefore does not directly output a scalar growth amount. It
@@ -37,13 +37,19 @@ controls growth indirectly by writing the growth substrate, reacting to all
 substrate values and gradients, changing its heading, and selecting a growth
 direction, anisotropy, and division polarity.
 
-The current eight-channel policy has 27 inputs: 24 chemical value/gradient
-components plus morphology occupancy and its two heading-relative gradient
-components. It has 37 outputs: 32 chemical writes (four per
-channel), one turning output, one growth-anisotropy output, one division-bias
-output, and two growth-direction outputs. Any checkpoint from before morphology
-sensing (including the earlier 24-input architecture) is not shape-compatible
-and must be retrained.
+The current eight-channel policy has 30 inputs: 24 chemical value/gradient
+components, morphology occupancy and its two heading-relative gradient
+components, plus heading-relative elastic Hencky volume, axial, and shear
+strain. It has 40 outputs: 32 chemical writes (four per channel), one
+turning output, one growth-anisotropy output, one division-bias
+output, two growth-direction outputs, and three sigmoid RGB cell-color outputs.
+Any checkpoint from before elastic-strain sensing has a 27-column first layer;
+the current policy requires 30 and must be retrained.
+
+The three elastic lanes are currently retained in the architecture but forced
+to zero by `ELASTIC_STRAIN_INPUTS_ENABLED = False`, as a temporary growth
+ablation. Setting it back to `True` restores mechanosensing without changing
+checkpoint dimensions.
 
 ## One macro step
 
@@ -52,7 +58,13 @@ In simplified pseudocode:
 ```text
 morphology = blur_and_normalize(particle_density)
 
-for each active particle:
+communication_dt = communication_speed / neural_updates_per_macro
+decay_per_round = decay_per_tick ^ communication_dt
+deposit_per_round = deposit_rate * communication_dt
+diffusion_fraction_per_round = min(communication_dt, 1)
+
+repeat neural_updates_per_macro communication rounds:
+  for each active particle:
     inputs = []
 
     for each substrate channel:
@@ -64,11 +76,19 @@ for each active particle:
     inputs += morphology gradient along particle heading
     inputs += morphology gradient perpendicular to heading
 
+    elastic_F = deformation_F * inverse(stress_free_growth_Fg)
+    elastic_H = 0.5 * matrix_log(elastic_F * transpose(elastic_F))
+    elastic_H_local = rotate_tensor_into_heading_frame(elastic_H)
+    inputs += tanh(trace(elastic_H_local) / elastic_strain_scale)
+    inputs += tanh((elastic_H_local.xx - elastic_H_local.yy) / elastic_strain_scale)
+    inputs += tanh((2 * elastic_H_local.xy) / elastic_strain_scale)
+
     outputs = neural_policy(inputs)
 
     for direction in [front, left, back, right]:
         deposit one chemical output per channel at that directional spot
-    update heading from the turning output
+    update angular velocity and heading from the turning output,
+      scaled by communication_dt
 
     raw_growth_direction = tanh(direction_x, direction_y)
     local_growth_direction = normalize_or_zero(raw_growth_direction)
@@ -78,19 +98,21 @@ for each active particle:
     particle.growth_direction = world_growth_direction
     particle.growth_anisotropy = growth_anisotropy
     particle.division_bias = division_bias
+    particle.color = sigmoid(red_output, green_output, blue_output)
 
-    growth_probability = clamp(last_substrate_value, 0, 1)
-    decrement division cooldown
+    if this is the final communication round:
+      growth_probability = clamp(last_substrate_value, 0, 1)
+      decrement division cooldown
 
-    if growth is enabled
+      if growth is enabled
        and population is below the particle cap
        and this particle is not already growing
        and its cooldown is finished
        and random_uniform() < growth_probability:
-        particle.cell_cycle_active = true
+          particle.cell_cycle_active = true
 
-merge deposits into the substrate field
-diffuse/decay the substrate field
+  merge deposits into the substrate field
+  apply fractional diffusion and decay_per_round to the substrate field
 
 propagate any newly divided particle count to the simulation
 
@@ -101,6 +123,12 @@ repeat MLS-MPM physics substeps:
     grid-to-particle transfer
     update position, velocity, deformation, and stress-free growth
 ```
+
+`neural_updates_per_macro` therefore controls temporal resolution, not raw
+communication speed. `communication_speed` controls how much chemical and
+orientation time elapses before one mechanical tick. With speed 1, raising the
+round count lets particles sense and react more frequently without multiplying
+deposition, decay, diffusion, or turning by that round count.
 
 A daughter created during the agent pass participates in that macro step's
 physics. It begins running its own neural policy on the following macro step.

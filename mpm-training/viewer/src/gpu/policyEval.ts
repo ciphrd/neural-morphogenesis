@@ -22,6 +22,7 @@ export interface PolicyOutput {
   anisotropy: number;
   divisionBias: number;
   direction: [number, number];
+  color: [number, number, number];
 }
 
 /** Validates serialized weights at the untyped network boundary. A training
@@ -32,8 +33,8 @@ export function policyWeightsShapeError(
   channels: number,
   hiddenDim: number
 ): string | null {
-  const inDim = channels * 3 + 3;
-  const outDim = channels * 4 + 5;
+  const inDim = channels * 3 + 6;
+  const outDim = channels * 4 + 8;
   const fc1w = weights?.fc1w;
   const fc1b = weights?.fc1b;
   const fc2w = weights?.fc2w;
@@ -55,8 +56,8 @@ export function policyWeightsShapeError(
   const receivedOut = Array.isArray(fc2w) ? fc2w.length : "missing";
   return (
     `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
-    `(chemical sensing plus morphology occupancy/gradient), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
-    "Restart the training backend and retrain checkpoints created with an older policy architecture."
+    `(four directional chemical writes plus growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
+    "The current first layer includes three elastic Hencky-strain inputs; restart the training backend and retrain older checkpoints."
   );
 }
 
@@ -72,12 +73,13 @@ function safeSigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
 }
 
-/** One Dense(hiddenDim) -> sin -> Dense(channels*4+5) forward pass,
+/** One Dense(hiddenDim) -> sin -> Dense(channels*4+8) forward pass,
  * squashed exactly like agents.wgsl's own evalPolicy() — see that
  * function's own comment for the exact math this mirrors, and this
  * file's own module docstring for why CHIRALITY's mirror-averaging is
- * NOT applied here. `input` must be exactly channels*3+3 long
- * ([chemical value/forward/lateral, morphology occupancy/forward/lateral] — see
+ * NOT applied here. `input` must be exactly channels*3+6 long
+ * ([chemical value/forward/lateral, morphology occupancy/forward/lateral,
+ * elastic volume/axial/shear strain] — see
  * agents.wgsl's own IN_DIM). */
 export function evalPolicy(
   input: Float32Array,
@@ -98,7 +100,7 @@ export function evalPolicy(
     hidden[j] = Math.sin(acc);
   }
 
-  const outDim = channels * 4 + 5;
+  const outDim = channels * 4 + 8;
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -121,5 +123,10 @@ export function evalPolicy(
   const direction: [number, number] = magnitude > 1e-6
     ? [rawX / magnitude, rawY / magnitude]
     : [0, 0];
-  return { envWrite, angularAccel, anisotropy, divisionBias, direction };
+  const color: [number, number, number] = [
+    safeSigmoid(outVec[envWriteDim + 5]),
+    safeSigmoid(outVec[envWriteDim + 6]),
+    safeSigmoid(outVec[envWriteDim + 7]),
+  ];
+  return { envWrite, angularAccel, anisotropy, divisionBias, direction, color };
 }

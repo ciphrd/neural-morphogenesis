@@ -70,6 +70,12 @@ struct EnvPhysics {
   // after every agent's contribution has already landed in the same
   // scratch).
   depositRate: f32,
+  // Fraction of one legacy 3x3 blur applied by this communication
+  // substep. 1 preserves the old one-round behavior; 1/N turns N neural
+  // evaluations into numerical supersampling instead of N full-strength
+  // diffusion steps.
+  diffusionStep: f32,
+  _padding: f32,
 }
 @group(0) @binding(4) var<uniform> physics: EnvPhysics;
 
@@ -173,5 +179,7 @@ fn diffuseDecay(@builtin(global_invocation_id) gid: vec3<u32>) {
       acc = acc + gridCurrent[gridIndex(c, ny, nx)] * blurWeight(dy, dx);
     }
   }
-  gridNext[gridIndex(c, y, x)] = acc * physics.decay;
+  let idx = gridIndex(c, y, x);
+  let diffused = mix(gridCurrent[idx], acc, clamp(physics.diffusionStep, 0.0, 1.0));
+  gridNext[idx] = diffused * physics.decay;
 }
