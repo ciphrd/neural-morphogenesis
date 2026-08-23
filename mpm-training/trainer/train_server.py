@@ -53,6 +53,7 @@ from evolve import (
 )
 from mpm_core import MpmCore
 from parallel_workers import build_pool
+from policy_parameters import mutation_scales
 from raster import build_target_distance_field, build_target_raster, training_raster_distance
 from simulation_settings import (
     ANGULAR_DAMPING,
@@ -560,6 +561,7 @@ async def _training_loop_body() -> None:
                         "population": args.population,
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
+                        "mutation_scales": mutation_scales(),
                         "seed": args.seed,
                         "winner_seed": winner_seed,
                         # simulation_settings.py's own values this run

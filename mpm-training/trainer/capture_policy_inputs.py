@@ -38,11 +38,13 @@ from simulation_settings import (
     SPLAT_RADIUS, SPLIT_DISPLACEMENT,
 )
 from training_sim import TrainingRollout
+from policy_parameters import random_flat_policy_weights
 
 META_NAMES = [
     "valid", "position_x", "position_y", "heading", "cooldown",
     "division_hazard", "division_threshold", "cycle_active",
-    "growth_area",
+    "growth_area", "growth_direction_angle", "growth_anisotropy",
+    "division_bias",
 ]
 
 
@@ -57,17 +59,11 @@ def feature_names(channels: int) -> list[str]:
 
 
 def random_policy_weights(layout: dict[str, int], hidden_dim: int, rng: np.random.Generator) -> np.ndarray:
-    """Match nn.Linear/viewport randomization: U(-1/sqrt(fan_in), +...)."""
-    out = np.empty(layout["total_floats"], dtype=np.float32)
-    fc1_end = layout["fc1b_offset"]
-    fc1b_end = layout["fc2w_offset"]
-    fc2w_end = layout["fc2b_offset"]
-    bound1 = 1.0 / np.sqrt(layout["in_dim"])
-    bound2 = 1.0 / np.sqrt(hidden_dim)
-    out[:fc1_end] = rng.uniform(-bound1, bound1, fc1_end)
-    out[fc1_end:fc1b_end] = rng.uniform(-bound1, bound1, fc1b_end - fc1_end)
-    out[fc1b_end:fc2w_end] = rng.uniform(-bound2, bound2, fc2w_end - fc1b_end)
-    out[fc2w_end:] = rng.uniform(-bound2, bound2, len(out) - fc2w_end)
+    """Use the same logical-head initialization as training and the viewer."""
+    channels = (layout["in_dim"] - 6) // 3
+    out = random_flat_policy_weights(channels, hidden_dim, rng)
+    if out.size != layout["total_floats"]:
+        raise ValueError(f"policy initializer produced {out.size} values, expected {layout['total_floats']}")
     return out
 
 

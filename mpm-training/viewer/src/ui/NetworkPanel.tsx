@@ -12,9 +12,8 @@ interface NetworkPanelProps {
    * the first generation loads. */
   config: SimulationConfig | null
   /** maxEnvWrite/maxAngularAccel give their output bars' true domains.
-   * Growth direction is normalized; anisotropy and division bias are
-   * independent [0,1] outputs. maxStrafe only controls the direction's
-   * optional physical acceleration. */
+   * Desired heading/growth vectors are normalized for display; anisotropy
+   * and division bias are independent [0,1] targets. */
   physics: PhysicsSettings | null
 }
 
@@ -545,10 +544,12 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
             <h3>Output — growth direction</h3>
             <div className="nn-group">
               <ActivationBar
-                label="turn"
+                label="derived turn"
                 value={output.angularAccel}
                 domain={maxAngularAccel}
               />
+              <ActivationBar label="heading forward" value={output.headingDirection[0]} domain={1} />
+              <ActivationBar label="heading lateral" value={output.headingDirection[1]} domain={1} />
               <ActivationBar
                 label="direction x"
                 value={output.direction[0]}

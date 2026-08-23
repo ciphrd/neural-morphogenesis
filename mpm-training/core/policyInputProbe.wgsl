@@ -13,7 +13,7 @@ const TRACKED: u32 = __TRACKED__u;
 const ELASTIC_SCALE: f32 = __ELASTIC_SCALE__;
 const ELASTIC_ENABLED: bool = __ELASTIC_ENABLED__;
 const IN_DIM: u32 = CHANNELS * 3u + 6u;
-const META_DIM: u32 = 9u;
+const META_DIM: u32 = 12u;
 const OUT_STRIDE: u32 = META_DIM + 2u * IN_DIM;
 const CHEMICAL_VALUE_INPUT_SCALE: f32 = __CHEMICAL_VALUE_INPUT_SCALE__;
 const CHEMICAL_GRADIENT_INPUT_SCALE: f32 = __CHEMICAL_GRADIENT_INPUT_SCALE__;
@@ -21,7 +21,8 @@ const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__
 
 struct ParticleRest {
   growthF: vec4<f32>, jp: f32, cycleActive: f32,
-  growthDirection: vec2<f32>, growthControls: vec2<f32>,
+  growthAngle: f32, growthAnisotropy: f32,
+  divisionBias: f32, growthFrameHeading: f32,
 }
 struct ParticleMeta {
   rng: u32, cooldown: f32, heading: f32, angularVelocity: f32,
@@ -141,6 +142,9 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
   output[baseOut+3u]=agentState.heading; output[baseOut+4u]=agentState.cooldown;
   output[baseOut+5u]=agentState.divisionHazard; output[baseOut+6u]=agentState.divisionThreshold;
   output[baseOut+7u]=rest.cycleActive; output[baseOut+8u]=growthArea;
+  output[baseOut+9u]=rest.growthAngle;
+  output[baseOut+10u]=rest.growthAnisotropy;
+  output[baseOut+11u]=rest.divisionBias;
 
   let cosH = cos(agentState.heading); let sinH = sin(agentState.heading);
   let forward = vec2<f32>(cosH, sinH); let lateral = vec2<f32>(-sinH, cosH);

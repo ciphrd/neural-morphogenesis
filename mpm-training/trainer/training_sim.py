@@ -52,13 +52,12 @@ self.heading/self.angular_velocity numpy arrays, computing the rotation
 in torch every macro step; there's nothing left for this module to do
 there now).
 
-The two former strafe channels now drive a normalized tensor-growth direction.
-The agent shader rotates that local axis into world space and stores it with
-two independent sigmoid controls: the former acceleration outputs now select
-anisotropy and signed division-placement bias. A zero direction gives exactly
-isotropic growth and symmetric random-axis division regardless of those
-controls. MAX_STRAFE independently controls whether the same direction also
-acts as physical acceleration and is zero by default.
+The two former strafe channels propose a local tensor-growth direction. The
+agent shader smoothly turns a persistent heading-relative growth angle toward
+that target and relaxes persistent anisotropy toward its sigmoid target; a
+separate sigmoid controls signed division placement. MAX_STRAFE independently
+controls whether the reconstructed world direction also acts as physical
+acceleration and is zero by default.
 
 Growth: every rollout starts with the configured initial particle count;
 core/agents.wgsl's own agentStep() may spawn

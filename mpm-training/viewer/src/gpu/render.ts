@@ -150,6 +150,7 @@ export class Renderer {
   // (non-ping-ponging) source buffers can.
   private readonly environment: Environment;
   private readonly substrateTexture: GPUTexture;
+  private readonly substrateChannelStartUniform: GPUBuffer;
   private readonly substrateColorizePipeline: GPUComputePipeline;
   private readonly substrateColorizeBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly substratePresentPipeline: GPURenderPipeline;
@@ -456,6 +457,11 @@ export class Renderer {
       format: "rgba8unorm",
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
+    this.substrateChannelStartUniform = device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.setSubstrateChannelStart(0);
     this.substrateColorizePipeline = device.createComputePipeline({
       layout: "auto",
       compute: { module: fieldModule, entryPoint: "colorizeSubstrate" },
@@ -467,6 +473,7 @@ export class Renderer {
           { binding: 8, resource: { buffer: environment.buffers[p] } },
           { binding: 9, resource: this.substrateTexture.createView() },
           { binding: 13, resource: { buffer: this.accentUniform } },
+          { binding: 21, resource: { buffer: this.substrateChannelStartUniform } },
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];
@@ -597,6 +604,15 @@ export class Renderer {
     if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "growth" && mode !== "gradient") {
       writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode]]));
     }
+  }
+
+  /** Selects the first of the three contiguous chemical channels displayed
+   * as R/G/B. Clamped here as well as in the UI because Renderer is the
+   * buffer-safety boundary for callers and restored preferences. */
+  setSubstrateChannelStart(start: number): void {
+    const maxStart = Math.max(0, this.environment.channels - 3);
+    const clamped = Math.min(maxStart, Math.max(0, Math.floor(start)));
+    writeFloat32(this.device, this.substrateChannelStartUniform, 0, new Uint32Array([clamped]));
   }
 
   /** [-2,2] — see field.wgsl's accent uniform/accentedMagnitude()/
@@ -874,6 +890,7 @@ export class Renderer {
     this.fieldTexture.destroy();
     this.diagnosticsBuffer.destroy();
     this.substrateTexture.destroy();
+    this.substrateChannelStartUniform.destroy();
     this.growthTexture.destroy();
     this.blurredDensityTexture.destroy();
     this.blurSigmaUniform.destroy();

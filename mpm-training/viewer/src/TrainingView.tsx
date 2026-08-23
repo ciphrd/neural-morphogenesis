@@ -15,6 +15,7 @@ import type {
   Tool,
 } from "./render/GridCanvas"
 import { GridCanvas } from "./render/GridCanvas"
+import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
 import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
@@ -96,6 +97,9 @@ export function TrainingView() {
   // View-only rendering options (gpu/render.ts) — not simulation state,
   // so plain component state, never reset by a run/generation change.
   const [fieldMode, setFieldMode] = useState<FieldMode>("none")
+  // First channel in the contiguous substrate RGB window. The renderer maps
+  // start/start+1/start+2 to red/green/blue respectively.
+  const [substrateChannelStart, setSubstrateChannelStart] = useState(0)
   const [morphologyGradientVisible, setMorphologyGradientVisible] = useState(true)
   const [morphologyDensityVisible, setMorphologyDensityVisible] = useState(true)
   // [-2,2] exponential background contrast. Negative suppresses submaximal
@@ -151,6 +155,10 @@ export function TrainingView() {
     selectedGeneration !== null
       ? (configByGeneration.get(selectedGeneration) ?? latest)
       : latest
+  useEffect(() => {
+    const maxStart = Math.max(0, (activeConfig?.channels ?? 3) - 3)
+    setSubstrateChannelStart((start) => Math.min(start, maxStart))
+  }, [activeConfig?.channels])
   // Playback-only randomized policy. The selected generation remains intact;
   // this mirrors the exact weights currently loaded into the GPU and feeds
   // the right-hand inspector until another generation/run is selected.
@@ -506,6 +514,21 @@ export function TrainingView() {
               </p>
             </>
           )}
+          {fieldMode === "substrate" && activeConfig && (
+            <div className="channel-window-control">
+              <div className="channel-window-label">
+                <span>RGB channels</span>
+                <span>
+                  {substrateChannelStart}–{Math.min(activeConfig.channels - 1, substrateChannelStart + 2)}
+                </span>
+              </div>
+              <ChannelWindowSlider
+                channels={activeConfig.channels}
+                value={substrateChannelStart}
+                onChange={setSubstrateChannelStart}
+              />
+            </div>
+          )}
           <label className="checkbox-row">
             <input
               type="checkbox"
@@ -590,6 +613,7 @@ export function TrainingView() {
             particleCap={frontendParticleCap}
             initialParticleCount={frontendInitialParticleCount}
             fieldMode={fieldMode}
+            substrateChannelStart={substrateChannelStart}
             accent={accent}
             morphologyGradientVisible={morphologyGradientVisible}
             morphologyDensityVisible={morphologyDensityVisible}

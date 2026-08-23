@@ -39,6 +39,7 @@ import type { Environment } from "./environment";
 import { MAX_PARTICLES, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { growthSeed, spawnUniform01 } from "./rng";
 import type { UpdateRuleWeights } from "./types";
+import policyParameters from "../../../core/policy_parameters.json";
 import { policyWeightsShapeError } from "./policyEval";
 
 const WORKGROUP = 64;
@@ -83,9 +84,9 @@ function weightLayout(channels: number, hiddenDim: number) {
   // core/agents.wgsl's IN_DIM: value + heading-forward gradient + lateral
   // gradient per channel, with no positional inputs.
   const inDim = channels * 3 + 6;
-  // One centered env_write per channel + ANGULAR_DIM(1) + ACCEL_DIM(2)
+  // One centered env_write per channel + desired heading(2) + ACCEL_DIM(2)
   // + STRAFE_DIM(2) + RGB_DIM(3).
-  const outDim = channels + 8;
+  const outDim = channels + 9;
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -111,16 +112,22 @@ function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim:
   return out;
 }
 
-/** PyTorch's own nn.Linear default init — kaiming_uniform_(a=sqrt(5)),
- * which for a plain Linear works out to uniform(-1/sqrt(fanIn), 1/sqrt(fanIn))
- * for both weight and bias (see torch's own Linear.reset_parameters()) —
- * matches what a FRESH, untrained update_rule.py UpdateRule instance
- * looks like, so the "Randomize weights" button produces the same kind
- * of network training itself starts from, not arbitrary-scale noise. */
-function randomLinear(outDim: number, inDim: number): { w: number[][]; b: number[] } {
-  const bound = 1 / Math.sqrt(inDim);
-  const w = Array.from({ length: outDim }, () => Array.from({ length: inDim }, () => (Math.random() * 2 - 1) * bound));
-  const b = Array.from({ length: outDim }, () => (Math.random() * 2 - 1) * bound);
+function randomSymmetric(bound: number): number {
+  return (Math.random() * 2 - 1) * bound;
+}
+
+function randomHead(
+  outDim: number,
+  inDim: number,
+  config: { weightGain: number; biasCenter: number[]; biasJitter: number },
+): { w: number[][]; b: number[] } {
+  const bound = config.weightGain * Math.sqrt(6 / (inDim + outDim));
+  const w = Array.from({ length: outDim }, () => Array.from({ length: inDim }, () => randomSymmetric(bound)));
+  const centers = config.biasCenter.length === 1
+    ? Array.from({ length: outDim }, () => config.biasCenter[0])
+    : config.biasCenter;
+  if (centers.length !== outDim) throw new Error(`policy head has ${centers.length} bias centers for ${outDim} outputs`);
+  const b = centers.map((center) => center + randomSymmetric(config.biasJitter));
   return { w, b };
 }
 
@@ -130,10 +137,28 @@ function randomLinear(outDim: number, inDim: number): { w: number[][]; b: number
  * Agents.randomizeWeights() below uses for the "Randomize weights"
  * button, just also reachable without an Agents instance to call it on. */
 export function randomWeights(channels: number, hiddenDim: number): UpdateRuleWeights {
-  const { inDim, outDim } = weightLayout(channels, hiddenDim);
-  const fc1 = randomLinear(hiddenDim, inDim);
-  const fc2 = randomLinear(outDim, hiddenDim);
-  return { fc1w: fc1.w, fc1b: fc1.b, fc2w: fc2.w, fc2b: fc2.b };
+  const { inDim } = weightLayout(channels, hiddenDim);
+  const trunk = policyParameters.trunk;
+  const trunkBound = trunk.weightGain * Math.sqrt(6 / (inDim + hiddenDim));
+  const fc1w = Array.from({ length: hiddenDim }, () =>
+    Array.from({ length: inDim }, () => randomSymmetric(trunkBound))
+  );
+  const fc1b = Array.from({ length: hiddenDim }, () => randomSymmetric(trunk.biasJitter));
+  const specs = [
+    [channels, policyParameters.heads.chemical],
+    [2, policyParameters.heads.heading],
+    [1, policyParameters.heads.anisotropy],
+    [1, policyParameters.heads.division],
+    [2, policyParameters.heads.growthDirection],
+    [3, policyParameters.heads.color],
+  ] as const;
+  const initialized = specs.map(([size, config]) => randomHead(size, hiddenDim, config));
+  return {
+    fc1w,
+    fc1b,
+    fc2w: initialized.flatMap((head) => head.w),
+    fc2b: initialized.flatMap((head) => head.b),
+  };
 }
 
 export class Agents {
@@ -242,6 +267,9 @@ export class Agents {
         CHEMICAL_VALUE_INPUT_SCALE: coreConstants.CHEMICAL_VALUE_INPUT_SCALE,
         CHEMICAL_GRADIENT_INPUT_SCALE: coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
         MORPHOLOGY_GRADIENT_INPUT_SCALE: coreConstants.MORPHOLOGY_GRADIENT_INPUT_SCALE,
+        GROWTH_DIRECTION_RESPONSE_RATE: coreConstants.GROWTH_DIRECTION_RESPONSE_RATE,
+        GROWTH_ANISOTROPY_RESPONSE_RATE: coreConstants.GROWTH_ANISOTROPY_RESPONSE_RATE,
+        DIRECTION_CONFIDENCE_SCALE: coreConstants.DIRECTION_CONFIDENCE_SCALE,
         // WGSL wants lowercase `true`/`false` — a raw JS boolean would
         // template-substitute as "true"/"false" too via String(), so
         // this one actually works either way, but spelled out for

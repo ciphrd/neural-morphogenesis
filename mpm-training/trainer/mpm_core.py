@@ -83,8 +83,8 @@ NODE_COUNT = (GRID_N + 1) * (GRID_N + 1)
 WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass — see core/clearGrid.wgsl
-# growthF(4), jp, cycleActive, growthDirection(2), growthControls(2), then
-# two implicit alignment floats — core/agents.wgsl's 48-byte array stride.
+# growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
+# growthFrameHeading, then two implicit alignment floats — 48-byte stride.
 REST_FIELDS = 12
 REST_GROWTH_F = slice(0, 4)
 REST_JP = 4
@@ -718,8 +718,8 @@ class MpmCore:
     def read_rest_state(self) -> np.ndarray:
         """Returns active particles' raw tensor-growth rest-state rows.
 
-        Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,dirX,dirY,
-        anisotropy,divisionBias,padding,padding]``.
+        Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,growthAngle,
+        growthAnisotropy,divisionBias,growthFrameHeading,padding,padding]``.
         This is diagnostic-only: COPY_SRC is present on the buffer, but the
         normal simulation path performs no readback. Keeping the raw layout
         visible here also makes scalar-vs-tensor growth snapshots explicit

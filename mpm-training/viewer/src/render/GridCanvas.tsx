@@ -54,6 +54,8 @@ interface GridCanvasProps {
   // simulation state, so they're plain display props, not part of
   // PhysicsSettings/SimulationConfig.
   fieldMode?: FieldMode;
+  /** First of three contiguous chemical channels mapped to substrate RGB. */
+  substrateChannelStart?: number;
   particleRenderMode?: ParticleRenderMode;
   particleRadiusPx?: number;
   whiteDotsAlpha?: number;
@@ -205,6 +207,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     particleCap,
     initialParticleCount,
     fieldMode = "none",
+    substrateChannelStart = 0,
     particleRenderMode = "dots-white",
     particleRadiusPx,
     whiteDotsAlpha = 1,
@@ -233,6 +236,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const particleCapRef = useRef(particleCap);
   const initialParticleCountRef = useRef(initialParticleCount);
   const fieldModeRef = useRef(fieldMode);
+  const substrateChannelStartRef = useRef(substrateChannelStart);
   const particleRenderModeRef = useRef(particleRenderMode);
   const particleRadiusPxRef = useRef(particleRadiusPx);
   const whiteDotsAlphaRef = useRef(whiteDotsAlpha);
@@ -357,6 +361,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   particleCapRef.current = particleCap;
   initialParticleCountRef.current = initialParticleCount;
   fieldModeRef.current = fieldMode;
+  substrateChannelStartRef.current = substrateChannelStart;
   particleRenderModeRef.current = particleRenderMode;
   particleRadiusPxRef.current = particleRadiusPx;
   whiteDotsAlphaRef.current = whiteDotsAlpha;
@@ -441,6 +446,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       if (targetPoints) simulation.setTargetPoints(targetPoints);
       simulation.setTargetVisible(targetVisible);
       simulation.setFieldMode(fieldModeRef.current);
+      simulation.setSubstrateChannelStart(substrateChannelStartRef.current);
       simulation.setParticleRenderMode(particleRenderModeRef.current);
       simulation.setWhiteDotsAlpha(whiteDotsAlphaRef.current);
       simulation.setActivationAlpha(activationAlphaRef.current);
@@ -699,6 +705,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     simulationRef.current?.setFieldMode(fieldMode);
   }, [fieldMode]);
+
+  useEffect(() => {
+    simulationRef.current?.setSubstrateChannelStart(substrateChannelStart);
+  }, [substrateChannelStart]);
 
   useEffect(() => {
     simulationRef.current?.setParticleRenderMode(particleRenderMode);

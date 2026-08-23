@@ -70,8 +70,8 @@ const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
 const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
-// growthF(4), jp, cycleActive, growthDirection(2), growthControls(2),
-// followed by two implicit alignment floats — shared 48-byte layout.
+// growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
+// growthFrameHeading, followed by two implicit alignment floats — 48 bytes.
 const REST_FIELDS = 12;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own

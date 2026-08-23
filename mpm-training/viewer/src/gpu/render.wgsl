@@ -55,8 +55,10 @@ struct ParticleRest {
   growthF: vec4<f32>,
   jp: f32,
   cycleActive: f32,
-  growthDirection: vec2<f32>,
-  growthControls: vec2<f32>,
+  growthAngle: f32,
+  growthAnisotropy: f32,
+  divisionBias: f32,
+  growthFrameHeading: f32,
 }
 
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
@@ -76,7 +78,8 @@ fn activationParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(in
   out.position = vec4<f32>(center + offset * pointRadius, 0.0, 1.0);
   out.uv = offset;
   let rest = particleRest[instanceIndex];
-  out.activation = rest.growthDirection * rest.growthControls.x;
+  let worldAngle = rest.growthFrameHeading + rest.growthAngle;
+  out.activation = vec2<f32>(cos(worldAngle), sin(worldAngle)) * rest.growthAnisotropy;
   return out;
 }
 
@@ -207,7 +210,8 @@ fn triangleFragment() -> @location(0) vec4<f32> {
 
 // --- directional-growth triangles ------------------------------------------
 //
-// ParticleRest.growthDirection is the world-frame signal consumed by
+// ParticleRest.growthAngle is relative to the cached heading; together they
+// reconstruct the world-frame signal consumed by
 // core/g2p.wgsl and core/agents.wgsl's polarized division. Tensor stretch
 // alone is axial, but division now uses the SIGN: the new daughter and pair
 // center bias toward +n. The glyph is a deliberately X-squashed isosceles
@@ -229,13 +233,9 @@ struct GrowthAxisOut {
 fn growthAxisVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> GrowthAxisOut {
   let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
   let rest = particleRest[instanceIndex];
-  let raw = rest.growthDirection;
-  let rawMagnitude = length(raw);
-  let strength = select(0.0, clamp(rest.growthControls.x, 0.0, 1.0), rawMagnitude > 1e-6);
-  var axis = vec2<f32>(1.0, 0.0);
-  if (rawMagnitude > 1e-6) {
-    axis = raw / rawMagnitude;
-  }
+  let worldAngle = rest.growthFrameHeading + rest.growthAngle;
+  let axis = vec2<f32>(cos(worldAngle), sin(worldAngle));
+  let strength = clamp(rest.growthAnisotropy, 0.0, 1.0);
   let normal = vec2<f32>(-axis.y, axis.x);
 
   let size = growthAxisStyle.x * sqrt(strength);

@@ -24,9 +24,10 @@ Three signals have distinct responsibilities:
 1. **The last substrate channel starts growth.** Its value at a particle is
    clamped to `[0, 1]` and treated as the per-macro-step probability of
    entering a cell cycle.
-2. **Four neural outputs control growth geometry.** Two bounded outputs form a
-   normalized local growth direction. Independent sigmoid outputs select the
-   tensor anisotropy and the signed division-placement bias.
+2. **Neural targets control persistent growth geometry.** Two bounded outputs
+   propose a local growth direction, while a sigmoid proposes anisotropy; the
+   stored angle and anisotropy relax smoothly toward them. Another sigmoid
+   selects signed division-placement bias.
 3. **The morphoelastic law supplies the amount of growth.** Once a cell cycle
    is active, a configured duration determines approximately how many mechanical
    macro steps it takes to double stress-free area. Elastic compression
@@ -40,9 +41,30 @@ direction, anisotropy, and division polarity.
 The current eight-channel policy has 30 inputs: 24 chemical value/gradient
 components, morphology occupancy and its two heading-relative gradient
 components, plus heading-relative elastic Hencky volume, axial, and shear
-strain. It has 40 outputs: 32 chemical writes (four per channel), one
-turning output, one growth-anisotropy output, one division-bias
-output, two growth-direction outputs, and three sigmoid RGB cell-color outputs.
+strain. Its shared 128-unit tanh trunk feeds six logical output heads: eight
+centered chemical writes, a two-component desired heading, growth anisotropy,
+division bias, a two-component desired growth direction, and three sigmoid RGB
+cell-color outputs (17 outputs total). The heads remain concatenated into one
+matrix for GPU inference and checkpoint compatibility, but use head-specific
+initialization and mutation scales from `core/policy_parameters.json`.
+
+The CLI `--mutation-sigma` remains the global evolution step size. Each output
+head multiplies it by a fixed sensitivity scale:
+
+| Parameter bucket | Initial bias prior | Mutation multiplier |
+| --- | --- | ---: |
+| shared trunk | zero | 1.00 |
+| chemical writes | neutral | 0.50 |
+| desired heading | local-forward | 0.20 |
+| growth anisotropy | sigmoid ≈ 0.20 | 0.15 |
+| division bias | sigmoid = 0.50 | 0.25 |
+| growth direction | local-forward | 0.20 |
+| cell color | sigmoid = 0.50 | 0.50 |
+
+Small head-specific bias jitter prevents freshly initialized policies from
+being identical at zero input. Lower mutation multipliers on persistent
+direction and growth controls prevent a single mutation from causing a much
+larger behavioral jump than an equally sized trunk mutation.
 Any checkpoint from before elastic-strain sensing has a 27-column first layer;
 the current policy requires 30 and must be retrained.
 

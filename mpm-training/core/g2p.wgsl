@@ -28,15 +28,17 @@ const DT: f32 = __DT__;
 // core/agents.wgsl's own ParticleRest struct for the full field-by-field
 // docs. THIS SHADER advances `jp` (the plastic clamp below) and `growthF`
 // (the substrate-driven growth law below). `cycleActive` and
-// `growthDirection` are owned by core/agents.wgsl and must be PRESERVED on write — the
+// growth-control state is owned by core/agents.wgsl and must be PRESERVED on write — the
 // element used to be a bare f32 this shader could overwrite wholesale,
 // and it no longer is.
 struct ParticleRest {
   growthF: vec4<f32>,
   jp: f32,
   cycleActive: f32,
-  growthDirection: vec2<f32>,
-  growthControls: vec2<f32>,
+  growthAngle: f32,
+  growthAnisotropy: f32,
+  divisionBias: f32,
+  growthFrameHeading: f32,
 }
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
@@ -308,14 +310,13 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       2.0
     );
     let areaFactor = gNew / g0;
-    let directionMagnitude = length(rest0.growthDirection);
     let signalStrength = clamp(
-      rest0.growthControls.x * material.growthAnisotropy,
+      rest0.growthAnisotropy * material.growthAnisotropy,
       0.0,
       1.0
     );
-    if (directionMagnitude < 1e-6 || signalStrength < 1e-6) {
-      // Exact scalar-model equivalence when the network emits no axis.
+    if (signalStrength < 1e-6) {
+      // Exact scalar-model equivalence while persistent anisotropy is zero.
       FgNew = Fg0 * sqrt(areaFactor);
     } else {
       // The policy direction is expressed in the spatial/world frame.
@@ -323,7 +324,8 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       // Fg's intermediate configuration: rotating the whole body and its
       // heading rotates the result rather than changing its material law.
       let r = polarDecompose(FeTrial).r;
-      let worldDir = rest0.growthDirection / directionMagnitude;
+      let worldAngle = rest0.growthFrameHeading + rest0.growthAngle;
+      let worldDir = vec2<f32>(cos(worldAngle), sin(worldAngle));
       let n = vec2<f32>(
         r.x * worldDir.x + r.z * worldDir.y,
         r.y * worldDir.x + r.w * worldDir.y
@@ -352,5 +354,8 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // cycleActive carried through untouched — owned by core/agents.wgsl (see
   // this file's own ParticleRest comment); this element is shared now,
   // not a bare f32 to overwrite wholesale.
-  particleRest[pi] = ParticleRest(FgNew, JpNew, rest0.cycleActive, rest0.growthDirection, rest0.growthControls);
+  particleRest[pi] = ParticleRest(
+    FgNew, JpNew, rest0.cycleActive, rest0.growthAngle,
+    rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameHeading
+  );
 }

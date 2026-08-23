@@ -1,8 +1,8 @@
 export interface UpdateRuleWeights {
   fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6) — chemicals, morphology, elastic Hencky strain
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // (channels+8, HIDDEN_DIM) — centered deposits + turn + growth controls + direction + RGB
-  fc2b: number[]; // (channels+8,)
+  fc2w: number[][]; // (channels+9, HIDDEN_DIM) — centered deposits + desired heading + growth controls + direction + RGB
+  fc2b: number[]; // (channels+9,)
 }
 
 // Mirrors train_server.py's own GET /settings response, field for field

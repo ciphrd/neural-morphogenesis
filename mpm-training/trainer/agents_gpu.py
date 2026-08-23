@@ -24,8 +24,11 @@ import wgpu
 from simulation_settings import (
     CHEMICAL_GRADIENT_INPUT_SCALE,
     CHEMICAL_VALUE_INPUT_SCALE,
+    DIRECTION_CONFIDENCE_SCALE,
     ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE,
+    GROWTH_ANISOTROPY_RESPONSE_RATE,
+    GROWTH_DIRECTION_RESPONSE_RATE,
     MORPHOLOGY_GRADIENT_INPUT_SCALE,
 )
 
@@ -122,9 +125,9 @@ def weight_layout(channels: int, hidden_dim: int) -> dict[str, int]:
     # core/agents.wgsl's own IN_DIM: value + heading-forward gradient +
     # lateral gradient per channel, with no positional inputs.
     in_dim = channels * 3 + 6
-    # One centered env_write per channel + ANGULAR_DIM(1) + ACCEL_DIM(2)
+    # One centered env_write per channel + heading target(2) + ACCEL_DIM(2)
     # + STRAFE_DIM(2) + RGB_DIM(3).
-    out_dim = channels + 8
+    out_dim = channels + 9
     fc1w_offset = 0
     fc1b_offset = fc1w_offset + hidden_dim * in_dim
     fc2w_offset = fc1b_offset + hidden_dim
@@ -275,6 +278,9 @@ class AgentsGPU:
                     "CHEMICAL_VALUE_INPUT_SCALE": repr(CHEMICAL_VALUE_INPUT_SCALE),
                     "CHEMICAL_GRADIENT_INPUT_SCALE": repr(CHEMICAL_GRADIENT_INPUT_SCALE),
                     "MORPHOLOGY_GRADIENT_INPUT_SCALE": repr(MORPHOLOGY_GRADIENT_INPUT_SCALE),
+                    "GROWTH_DIRECTION_RESPONSE_RATE": repr(GROWTH_DIRECTION_RESPONSE_RATE),
+                    "GROWTH_ANISOTROPY_RESPONSE_RATE": repr(GROWTH_ANISOTROPY_RESPONSE_RATE),
+                    "DIRECTION_CONFIDENCE_SCALE": repr(DIRECTION_CONFIDENCE_SCALE),
                     # WGSL wants lowercase `true`/`false` — Python's own
                     # str(bool) gives "True"/"False", invalid WGSL syntax,
                     # so this can't just be passed through as-is.
@@ -337,15 +343,12 @@ class AgentsGPU:
     def load_weights(self, flat_weights: np.ndarray) -> None:
         """`flat_weights` is a flat (total_floats,) float array already
         laid out fc1w/fc1b/fc2w/fc2b, row-major within each — exactly
-        torch.nn.utils.parameters_to_vector(UpdateRule(...).parameters())'s
-        own output shape: nn.Linear registers `weight` before `bias`,
-        nn.Sequential visits fc1 before fc2, and parameters_to_vector
-        concatenates each parameter tensor's own row-major .view(-1) — the
-        same fc1w/fc1b/fc2w/fc2b order and row-major layout agents.wgsl's
-        own FC1W_OFFSET/FC1B_OFFSET/FC2W_OFFSET/FC2B_OFFSET indexing
-        expects. evolve.py's own get_weights()/mutate() already produce
-        exactly this representation (that's what parameters_to_vector
-        gives them), so this is a straight write_buffer, no restructuring
+        UpdateRule.flat_parameters()'s own output shape. The Python policy
+        has separate semantic output heads, but concatenates their weights
+        and then biases into the same fc2 row order agents.wgsl's
+        FC1W_OFFSET/FC1B_OFFSET/FC2W_OFFSET/FC2B_OFFSET indexing expects.
+        evolve.py's get_weights()/mutate() already produce exactly this
+        representation, so this is a straight write_buffer, no restructuring
         — unlike agents.ts's own flattenWeights(), which has to convert
         *from* UpdateRuleWeights' nested JSON shape (export_weights()'s
         own format), a shape this hot path never produces or needs."""

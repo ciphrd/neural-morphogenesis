@@ -34,11 +34,12 @@ def _rest_state(
     out[:, 4] = jp
     out[:, 5] = cycle
     if growth_direction is not None:
-        out[:, 6:8] = np.asarray(growth_direction, dtype=np.float32)
+        direction = np.asarray(growth_direction, dtype=np.float32)
+        out[:, 6] = np.arctan2(direction[:, 1], direction[:, 0])
     if anisotropy is not None:
-        out[:, 8] = np.asarray(anisotropy, dtype=np.float32)
+        out[:, 7] = np.asarray(anisotropy, dtype=np.float32)
     if division_bias is not None:
-        out[:, 9] = np.asarray(division_bias, dtype=np.float32)
+        out[:, 8] = np.asarray(division_bias, dtype=np.float32)
     return out
 
 
@@ -46,7 +47,7 @@ def _probe(core: MpmCore, count: int) -> np.ndarray:
     """Returns [Je, g, cycleActive] without adding COPY_SRC to hot buffers."""
     shader = core.device.create_shader_module(
         code="""
-        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthDirection: vec2<f32>, growthControls: vec2<f32>, }
+        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, }
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> rest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
@@ -292,8 +293,8 @@ def check_centered_deposits(device: wgpu.GPUDevice) -> None:
     for channel in range(4):
         weights[layout["fc2b_offset"] + channel] = 20.0
     env_write_dim = channels
-    weights[layout["fc2b_offset"] + env_write_dim + 5] = 20.0
-    weights[layout["fc2b_offset"] + env_write_dim + 6] = -20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 6] = 20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 7] = -20.0
     # Blue stays at logit 0 -> sigmoid 0.5.
     agents.load_weights(weights)
 
@@ -372,7 +373,7 @@ def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
     layout = weight_layout(channels, hidden)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     elastic_offset = channels * 3 + 3
-    color_start = channels + 5
+    color_start = channels + 6
     for component in range(3):
         weights[layout["fc1w_offset"] + component * layout["in_dim"] + elastic_offset + component] = 1.0
         weights[layout["fc2w_offset"] + (color_start + component) * hidden + component] = 1.0
@@ -461,7 +462,10 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
     environment.reset()
     agents.set_active_count(1)
     agents.reset_heading(7)
-    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
+    neutral_weights = np.zeros(agents._total_floats, dtype=np.float32)
+    layout = weight_layout(8, 128)
+    neutral_weights[layout["fc2b_offset"] + 8 + 3] = -20.0
+    agents.load_weights(neutral_weights)
 
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
@@ -475,11 +479,13 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
     velocities = core.read_velocities()
     affine = core.read_affine()
     state = _probe(core, count)
+    rest_state = core.read_rest_state()
     assert count == 2
     assert np.allclose(positions.mean(axis=0), [0.5, 0.5], atol=1e-5), positions
     assert np.allclose(state[:, 0], 1.0, atol=1e-5), state
     assert np.isclose(state[:, 1].sum(), 2.0, atol=1e-5), state
     assert np.all(state[:, 2] == 0.0), state
+    assert np.allclose(rest_state[0, 6:8], rest_state[1, 6:8], atol=1e-7), rest_state[:, 6:8]
     offsets = (positions - np.array([0.5, 0.5], dtype=np.float32) + 0.5) % 1.0 - 0.5
     c_matrix = parent_c.reshape(2, 2)
     expected_velocity = parent_velocity + offsets @ c_matrix.T
@@ -487,6 +493,47 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
     assert np.allclose(velocities, expected_velocity, atol=1e-5), (velocities, expected_velocity)
     assert np.allclose(velocities.mean(axis=0), parent_velocity, atol=1e-6), velocities
     print("[PASS] conservative_split count=2 sum_g=2 Fe=identity center_and_apic_preserved")
+
+
+def check_desired_heading_derives_angular_acceleration(device: wgpu.GPUDevice) -> None:
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, 8, 32, 32, 1.0, 1.0)
+    agents = AgentsGPU(
+        device, core, environment, 8, 128,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
+        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
+    )
+    core.load_scene(
+        np.array([[0.5, 0.5]], dtype=np.float32),
+        np.zeros((1, 2), dtype=np.float32),
+        np.array([[1.0, 0.0, 0.0, 1.0]], dtype=np.float32),
+        np.zeros((1, 4), dtype=np.float32),
+        np.ones(1, dtype=np.float32),
+    )
+    environment.reset()
+    agents.set_active_count(1)
+    agents.reset_heading(31)
+    agents.set_headings(np.array([0.0], dtype=np.float32))
+    layout = weight_layout(8, 128)
+    weights = np.zeros(layout["total_floats"], dtype=np.float32)
+    # Desired local heading points left (+lateral, +pi/2 from forward).
+    weights[layout["fc2b_offset"] + 8 + 1] = 20.0
+    agents.load_weights(weights)
+    encoder = device.create_command_encoder()
+    environment.encode_sense(encoder)
+    agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
+    device.queue.submit([encoder.finish()])
+    raw = device.queue.read_buffer(
+        agents._agent_state_buffer,
+        PARTICLE_META_BUFFER_OFFSET,
+        agents._particle_meta_dtype.itemsize,
+    )
+    meta = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)
+    # The proportional controller exceeds the configured 0.1 turn-rate cap,
+    # so one unit communication step lands exactly at that cap.
+    assert np.isclose(meta["angularVelocity"][0], 0.1, atol=2e-6), meta["angularVelocity"][0]
+    assert np.isclose(meta["heading"][0], 0.1, atol=2e-6), meta["heading"][0]
+    print("[PASS] desired heading vector derives bounded angular acceleration and persistent turn state")
 
 
 def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float, polarity_bias: float = 20.0) -> np.ndarray:
@@ -516,11 +563,16 @@ def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float, polarity_b
     agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Former local-forward strafe output. +/-20 saturates tanh at +/-1,
-    # making the expected fully-polarized geometry exact enough to test.
-    weights[layout["fc2b_offset"] + 8 + 2] = polarity_bias
-    weights[layout["fc2b_offset"] + 8 + 3] = signed_bias
+    # Division-bias target plus desired local growth direction.
+    weights[layout["fc2b_offset"] + 8 + 3] = polarity_bias
+    weights[layout["fc2b_offset"] + 8 + 4] = signed_bias
     agents.load_weights(weights)
+    # Let the persistent growth-angle state settle before the division event.
+    for _ in range(16):
+        encoder = device.create_command_encoder()
+        environment.encode_sense(encoder)
+        agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
+        device.queue.submit([encoder.finish()])
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
     agents.encode_step(encoder, environment.parity)
@@ -702,7 +754,7 @@ def check_growth_duration_is_substep_invariant(device: wgpu.GPUDevice) -> None:
     print("[PASS] one controller tick advances the same growth at 1/16/64 physics substeps")
 
 
-def check_strafe_signal_drives_growth_not_motion(device: wgpu.GPUDevice) -> None:
+def check_persistent_growth_targets_drive_state_not_motion(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
     agents = AgentsGPU(
@@ -724,20 +776,21 @@ def check_strafe_signal_drives_growth_not_motion(device: wgpu.GPUDevice) -> None
     agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    weights[layout["fc2b_offset"] + 8 + 1] = 2.0
-    weights[layout["fc2b_offset"] + 8 + 2] = -2.0
-    weights[layout["fc2b_offset"] + 8 + 3] = 1.0
+    weights[layout["fc2b_offset"] + 8 + 2] = 2.0
+    weights[layout["fc2b_offset"] + 8 + 3] = -2.0
+    weights[layout["fc2b_offset"] + 8 + 4] = 1.0
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
     agents.encode_step(encoder, environment.parity)
     device.queue.submit([encoder.finish()])
-    direction = core.read_rest_state()[0, 6:8]
-    controls = core.read_rest_state()[0, 8:10]
+    state = core.read_rest_state()[0]
+    expected_anisotropy = (1 / (1 + np.exp(-2))) * (1 - np.exp(-1))
     assert np.allclose(core.read_velocities(), initial_velocity, atol=1e-7)
-    assert np.allclose(direction, [1.0, 0.0], atol=2e-6), direction
-    assert np.allclose(controls, [1 / (1 + np.exp(-2)), 1 / (1 + np.exp(2))], atol=2e-6), controls
-    print("[PASS] direction is normalized and sigmoid anisotropy/division controls are independent")
+    assert np.isclose(state[6], 0.0, atol=2e-6), state
+    assert np.isclose(state[7], expected_anisotropy, atol=2e-6), state
+    assert np.isclose(state[8], 1 / (1 + np.exp(2)), atol=2e-6), state
+    print("[PASS] desired growth vector and anisotropy target smoothly update persistent state")
 
 
 def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
@@ -958,12 +1011,13 @@ def main() -> None:
     check_centered_deposits(device)
     check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
+    check_desired_heading_derives_angular_acceleration(device)
     check_polarized_division_uses_signed_growth_direction(device)
     check_anisotropic_tensor_split(device)
     check_isotropic_increment_preserves_tensor_shape(device)
     check_directional_increment_and_objectivity(device)
     check_growth_duration_is_substep_invariant(device)
-    check_strafe_signal_drives_growth_not_motion(device)
+    check_persistent_growth_targets_drive_state_not_motion(device)
     check_p2g_fixed_point_headroom(device)
     check_high_strain_elastic_stability(device)
     check_cycle_start_gates(device)

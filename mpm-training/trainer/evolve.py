@@ -94,7 +94,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 from agents_gpu import AgentsGPU
 from alignment import training_alignment_distance
@@ -111,6 +110,7 @@ from simulation_settings import (
     ELASTIC_STRAIN_INPUTS_ENABLED,
     FIELD_N,
     GROWTH_DURATION_MACRO_STEPS,
+    HIDDEN_DIM,
     INITIAL_PARTICLE_COUNT,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
@@ -124,6 +124,7 @@ from simulation_settings import (
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
 )
+from policy_parameters import mutation_scale_vector, mutation_scales
 from targets import TargetShape, available_targets, load_target
 from training_sim import TrainingRollout
 from update_rule import UpdateRule
@@ -160,11 +161,9 @@ CAPTURE_OFFSETS = (0.10, 0.075, 0.05, 0.025, 0.0)
 def get_weights(model: UpdateRule) -> np.ndarray:
     """Also the exact flat layout agents_gpu.AgentsGPU.load_weights()
     expects — see that method's own docstring for why (nn.Linear's own
-    weight-then-bias parameter order + Sequential's own fc1-then-fc2
-    order + parameters_to_vector's own row-major flatten already matches
-    core/agents.wgsl's FC1W_OFFSET/etc. indexing, no restructuring
-    needed)."""
-    return parameters_to_vector(model.parameters()).detach().cpu().numpy()
+    fc1w/fc1b followed by the logical heads concatenated into fc2w/fc2b,
+    matching core/agents.wgsl's FC1W_OFFSET/etc. indexing)."""
+    return model.flat_parameters().detach().cpu().numpy()
 
 
 def set_weights(model: UpdateRule, flat: np.ndarray) -> None:
@@ -172,11 +171,22 @@ def set_weights(model: UpdateRule, flat: np.ndarray) -> None:
     forward pass anymore (see training_sim.py's own module docstring),
     only for export_weights()'s JSON shape at checkpoint time, so there's
     no reason to pay a device transfer here."""
-    vector_to_parameters(torch.from_numpy(flat).float(), model.parameters())
+    model.load_flat_parameters(torch.from_numpy(flat).float())
 
 
 def mutate(weights: np.ndarray, sigma: float, rng: np.random.Generator) -> np.ndarray:
-    return weights + rng.normal(scale=sigma, size=weights.shape)
+    """Gaussian mutation with a global sigma and semantic bucket scales.
+
+    The trunk keeps the CLI sigma. Output heads use smaller multipliers because
+    each row directly controls a bounded behavior and receives 128 hidden
+    contributions; equal elementwise noise there caused disproportionately
+    large behavioral jumps, especially for persistent direction/control state.
+    """
+    scales = mutation_scale_vector(CHEM_CHANNELS, HIDDEN_DIM)
+    if weights.shape != scales.shape:
+        raise ValueError(f"expected {scales.size} policy parameters, got {weights.size}")
+    noise = rng.normal(size=weights.shape).astype(np.float32)
+    return (weights.astype(np.float32, copy=False) + noise * np.float32(sigma) * scales).astype(np.float32)
 
 
 def _score_fitness(snapshots: list[np.ndarray], target: TargetShape) -> float:
@@ -511,6 +521,7 @@ def main() -> None:
                         "population": args.population,
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
+                        "mutation_scales": mutation_scales(),
                         "raster_resolution": args.raster_resolution,
                         "raster_sigma": args.raster_sigma,
                         "outside_weight": args.outside_weight,

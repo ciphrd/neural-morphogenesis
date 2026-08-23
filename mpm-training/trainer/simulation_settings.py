@@ -40,6 +40,9 @@ INITIAL_PARTICLE_COUNT: int = _CORE_CONSTANTS["INITIAL_PARTICLE_COUNT"]
 CHEMICAL_VALUE_INPUT_SCALE: float = _CORE_CONSTANTS["CHEMICAL_VALUE_INPUT_SCALE"]
 CHEMICAL_GRADIENT_INPUT_SCALE: float = _CORE_CONSTANTS["CHEMICAL_GRADIENT_INPUT_SCALE"]
 MORPHOLOGY_GRADIENT_INPUT_SCALE: float = _CORE_CONSTANTS["MORPHOLOGY_GRADIENT_INPUT_SCALE"]
+GROWTH_DIRECTION_RESPONSE_RATE: float = _CORE_CONSTANTS["GROWTH_DIRECTION_RESPONSE_RATE"]
+GROWTH_ANISOTROPY_RESPONSE_RATE: float = _CORE_CONSTANTS["GROWTH_ANISOTROPY_RESPONSE_RATE"]
+DIRECTION_CONFIDENCE_SCALE: float = _CORE_CONSTANTS["DIRECTION_CONFIDENCE_SCALE"]
 # Neural evaluations performed before each mechanical macro step. These are
 # numerical communication substeps; increasing this improves temporal
 # resolution without multiplying chemical/turning speed.
@@ -47,7 +50,9 @@ NEURAL_UPDATES_PER_MACRO = 4
 # Chemical/orientation time elapsed per mechanical macro step. 1 preserves the
 # original single-round clock; this is independent from evaluation resolution.
 COMMUNICATION_SPEED = 1.0
-ANGULAR_DIM = 1
+# Desired local heading vector. The shader derives angular acceleration from
+# its signed angular error instead of accepting acceleration directly.
+ANGULAR_DIM = 2
 ACCEL_DIM = 2
 STRAFE_DIM = 2
 

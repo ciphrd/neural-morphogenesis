@@ -14,10 +14,12 @@
 // combining the two responses.
 
 import type { UpdateRuleWeights } from "./types";
+import coreConstants from "../../../core/constants.json";
 
 export interface PolicyOutput {
   /** One centered chemical write per channel. */
   envWrite: Float32Array;
+  headingDirection: [number, number];
   angularAccel: number;
   anisotropy: number;
   divisionBias: number;
@@ -34,7 +36,7 @@ export function policyWeightsShapeError(
   hiddenDim: number
 ): string | null {
   const inDim = channels * 3 + 6;
-  const outDim = channels + 8;
+  const outDim = channels + 9;
   const fc1w = weights?.fc1w;
   const fc1b = weights?.fc1b;
   const fc2w = weights?.fc2w;
@@ -73,7 +75,7 @@ function safeSigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
 }
 
-/** One Dense(hiddenDim) -> tanh -> Dense(channels+8) forward pass,
+/** One Dense(hiddenDim) -> tanh -> Dense(channels+9) forward pass,
  * squashed exactly like agents.wgsl's own evalPolicy() — see that
  * function's own comment for the exact math this mirrors, and this
  * file's own module docstring for why CHIRALITY's mirror-averaging is
@@ -100,7 +102,7 @@ export function evalPolicy(
     hidden[j] = safeTanh(acc);
   }
 
-  const outDim = channels + 8;
+  const outDim = channels + 9;
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -112,21 +114,29 @@ export function evalPolicy(
   const envWriteDim = channels;
   const envWrite = new Float32Array(envWriteDim);
   for (let k = 0; k < envWriteDim; k++) envWrite[k] = safeTanh(outVec[k]) * maxEnvWrite;
-  const angularAccel = safeTanh(outVec[envWriteDim]) * maxAngularAccel;
-  // The two former acceleration outputs are independent bounded growth
-  // controls; the former strafe pair supplies direction only.
-  const anisotropy = safeSigmoid(outVec[envWriteDim + 1]);
-  const divisionBias = safeSigmoid(outVec[envWriteDim + 2]);
-  const rawX = safeTanh(outVec[envWriteDim + 3]);
-  const rawY = safeTanh(outVec[envWriteDim + 4]);
+  const headingRawX = safeTanh(outVec[envWriteDim]);
+  const headingRawY = safeTanh(outVec[envWriteDim + 1]);
+  const headingMagnitude = Math.hypot(headingRawX, headingRawY);
+  const headingDirection: [number, number] = headingMagnitude > 1e-12
+    ? [headingRawX / headingMagnitude, headingRawY / headingMagnitude]
+    : [0, 0];
+  const headingConfidence = headingMagnitude / (
+    headingMagnitude + coreConstants.DIRECTION_CONFIDENCE_SCALE
+  );
+  const angularAccel = Math.atan2(headingRawY, headingRawX) / Math.PI
+    * maxAngularAccel * headingConfidence;
+  const anisotropy = safeSigmoid(outVec[envWriteDim + 2]);
+  const divisionBias = safeSigmoid(outVec[envWriteDim + 3]);
+  const rawX = safeTanh(outVec[envWriteDim + 4]);
+  const rawY = safeTanh(outVec[envWriteDim + 5]);
   const magnitude = Math.hypot(rawX, rawY);
   const direction: [number, number] = magnitude > 1e-6
     ? [rawX / magnitude, rawY / magnitude]
     : [0, 0];
   const color: [number, number, number] = [
-    safeSigmoid(outVec[envWriteDim + 5]),
     safeSigmoid(outVec[envWriteDim + 6]),
     safeSigmoid(outVec[envWriteDim + 7]),
+    safeSigmoid(outVec[envWriteDim + 8]),
   ];
-  return { envWrite, angularAccel, anisotropy, divisionBias, direction, color };
+  return { envWrite, headingDirection, angularAccel, anisotropy, divisionBias, direction, color };
 }

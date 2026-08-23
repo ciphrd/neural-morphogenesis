@@ -74,8 +74,10 @@ struct ParticleRest {
   growthF: vec4<f32>,
   jp: f32,
   cycleActive: f32,
-  growthDirection: vec2<f32>,
-  growthControls: vec2<f32>,
+  growthAngle: f32,
+  growthAnisotropy: f32,
+  divisionBias: f32,
+  growthFrameHeading: f32,
 }
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read_write> gridAccum: array<atomic<i32>>;

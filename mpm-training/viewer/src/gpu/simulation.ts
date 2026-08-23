@@ -22,8 +22,8 @@
 //   2. agents.encodeStep()            — NN forward pass: reads that same
 //      grid + gradient, writes one centered deposit per channel
 //      env_write values per channel into the deposit scratch and the
-//      normalized former-strafe pair into ParticleRest.growthDirection and
-//      sigmoid anisotropy/division-bias controls into growthControls
+//      desired growth vector into persistent ParticleRest.growthAngle and
+//      relaxes the persistent anisotropy toward its sigmoid target
 //      (optionally also physical acceleration through maxStrafe) —
 //      may also grow activeCount (agents.wgsl's own agentStep()).
 //   3. environment.encodeMergeAndDecay() — folds the deposit into the
@@ -79,6 +79,7 @@ export class GpuSimulation {
   // gets a brand-new Renderer instance; the user's own render-option
   // choices shouldn't reset just because that happened).
   private pendingFieldMode: FieldMode = "none";
+  private pendingSubstrateChannelStart = 0;
   private pendingParticleRenderMode: ParticleRenderMode = "dots-white";
   private pendingWhiteDotsAlpha = 1.0;
   private pendingActivationAlpha = 0.2;
@@ -262,6 +263,7 @@ export class GpuSimulation {
     if (this.pendingTargetPoints) renderer.setTargetPoints(this.pendingTargetPoints);
     renderer.setTargetVisible(this.pendingTargetVisible);
     renderer.setFieldMode(this.pendingFieldMode);
+    renderer.setSubstrateChannelStart(this.pendingSubstrateChannelStart);
     renderer.setParticleRenderMode(this.pendingParticleRenderMode);
     renderer.setWhiteDotsAlpha(this.pendingWhiteDotsAlpha);
     renderer.setActivationAlpha(this.pendingActivationAlpha);
@@ -551,6 +553,11 @@ export class GpuSimulation {
   setFieldMode(mode: FieldMode): void {
     this.pendingFieldMode = mode;
     this.renderer?.setFieldMode(mode);
+  }
+
+  setSubstrateChannelStart(start: number): void {
+    this.pendingSubstrateChannelStart = start;
+    this.renderer?.setSubstrateChannelStart(start);
   }
 
   setParticleRenderMode(mode: ParticleRenderMode): void {

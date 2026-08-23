@@ -1,0 +1,45 @@
+{
+  "trunk": {
+    "weightGain": 1.0,
+    "biasJitter": 0.0,
+    "mutationScale": 1.0
+  },
+  "heads": {
+    "chemical": {
+      "weightGain": 0.5,
+      "biasCenter": [0.0],
+      "biasJitter": 0.05,
+      "mutationScale": 0.5
+    },
+    "heading": {
+      "weightGain": 0.25,
+      "biasCenter": [0.75, 0.0],
+      "biasJitter": 0.1,
+      "mutationScale": 0.2
+    },
+    "anisotropy": {
+      "weightGain": 0.25,
+      "biasCenter": [-1.38629436],
+      "biasJitter": 0.25,
+      "mutationScale": 0.15
+    },
+    "division": {
+      "weightGain": 0.5,
+      "biasCenter": [0.0],
+      "biasJitter": 0.5,
+      "mutationScale": 0.25
+    },
+    "growthDirection": {
+      "weightGain": 0.25,
+      "biasCenter": [0.75, 0.0],
+      "biasJitter": 0.1,
+      "mutationScale": 0.2
+    },
+    "color": {
+      "weightGain": 0.5,
+      "biasCenter": [0.0, 0.0, 0.0],
+      "biasJitter": 0.5,
+      "mutationScale": 0.5
+    }
+  }
+}

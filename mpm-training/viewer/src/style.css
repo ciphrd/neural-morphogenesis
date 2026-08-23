@@ -237,6 +237,84 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.channel-window-control {
+  margin-top: 12px;
+}
+
+.channel-window-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 7px;
+  color: #9a9a9a;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A real range input spans this grid invisibly; the cells and three-channel
+   outline are only its custom paint, so pointer/touch/keyboard behavior stays
+   identical to an ordinary slider. */
+.channel-window-slider {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  height: 28px;
+  align-items: stretch;
+}
+
+.channel-window-cell {
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  border: 1px solid #383838;
+  border-radius: 3px;
+  background: #1b1b1b;
+  color: #777;
+  font-size: 9px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.channel-window-cell.is-selected {
+  color: #ddd;
+  background: #242424;
+}
+
+.channel-window-cell.is-red { box-shadow: inset 0 -3px #f87171; }
+.channel-window-cell.is-green { box-shadow: inset 0 -3px #4ade80; }
+.channel-window-cell.is-blue { box-shadow: inset 0 -3px #60a5fa; }
+
+.channel-window-selection {
+  z-index: 1;
+  grid-row: 1;
+  margin: -3px;
+  border: 2px solid #7dd3fc;
+  border-radius: 7px;
+  box-shadow: 0 0 0 1px #0d0d0d;
+  pointer-events: none;
+}
+
+.channel-window-input {
+  position: absolute;
+  z-index: 2;
+  inset: -5px 0;
+  width: 100%;
+  height: calc(100% + 10px);
+  margin: 0;
+  opacity: 0;
+  cursor: grab;
+}
+
+.channel-window-input:active {
+  cursor: grabbing;
+}
+
+.channel-window-slider:focus-within .channel-window-selection {
+  outline: 2px solid #ffffff;
+  outline-offset: 2px;
+}
+
 .nn-panel .nn-block {
   margin-top: 16px;
 }

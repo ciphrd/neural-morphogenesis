@@ -157,9 +157,12 @@ def particle_elastic_state(
         growth_principal_stretch_max=growth_s_max,
         growth_principal_stretch_min=growth_s_min,
         growth_deviatoric_log_strain=growth_dev_log,
-        growth_direction=rest[:, 6:8],
-        growth_anisotropy=rest[:, 8],
-        division_bias=rest[:, 9],
+        growth_direction=np.column_stack((
+            np.cos(rest[:, 6] + rest[:, 9]),
+            np.sin(rest[:, 6] + rest[:, 9]),
+        )),
+        growth_anisotropy=rest[:, 7],
+        division_bias=rest[:, 8],
         plastic_jacobian=jp,
         cycle_active=rest[:, 5],
     )

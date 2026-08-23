@@ -134,13 +134,17 @@ def main() -> None:
     environment = EnvironmentGPU(device, CHEM_CHANNELS, FIELD_N, FIELD_N, BASELINE_DECAY, DEPOSIT_RATE)
     agents = _build_agents(device, core, environment)
     weights = np.zeros(agents._total_floats, dtype=np.float32)
+    layout = weight_layout(CHEM_CHANNELS, HIDDEN_DIM)
+    env_write_dim = CHEM_CHANNELS
     if args.directional:
-        layout = weight_layout(CHEM_CHANNELS, HIDDEN_DIM)
         # Saturated anisotropy/polarity plus a constant local-forward axis.
-        env_write_dim = CHEM_CHANNELS
-        weights[layout["fc2b_offset"] + env_write_dim + 1] = 20.0
         weights[layout["fc2b_offset"] + env_write_dim + 2] = 20.0
-        weights[layout["fc2b_offset"] + env_write_dim + 3] = 1.0
+        weights[layout["fc2b_offset"] + env_write_dim + 3] = 20.0
+        weights[layout["fc2b_offset"] + env_write_dim + 4] = 1.0
+    else:
+        # A zero anisotropy logit targets 0.5; force the preserved isotropic
+        # baseline's persistent state toward zero explicitly.
+        weights[layout["fc2b_offset"] + env_write_dim + 2] = -20.0
     agents.load_weights(weights)
 
     core.set_material(

@@ -1,4 +1,4 @@
-"""The evolved per-particle policy: Dense(128) -> tanh -> Dense(C+8) —
+"""The evolved policy: Dense(128) -> tanh -> logical output heads (C+9) —
 architecture/shape reference and a CPU-only utility class (random weight
 init via a fresh instance's own initialized parameters, JSON export via
 export_weights()), NOT the live forward pass anymore. That now runs
@@ -27,44 +27,64 @@ pipelines now).
 - Input: value (C) + grad_forward (C) + grad_lateral (C), followed by
   morphology occupancy/forward-gradient/lateral-gradient (3) — the
   *rotated*, local-frame gradient the caller (core/agents.wgsl, or this
-  method's own torch equivalent if called directly) computes, for 3*C+3 total.
+  method's own torch equivalent if called directly) computes, followed by
+  three elastic-strain inputs, for 3*C+6 total.
   There is no absolute or spawn-relative position input. This module itself
   is frame-agnostic; the gradient rotation and robust input normalization are
   entirely the caller's job.
 - Output: env_write (C) — one deposit value per channel underneath the
-  particle — plus angular_accel (1),
-  anisotropy/polarity logits (2), direction (2), and RGB color logits (3),
-  all raw/local-frame. angular_accel
-  nudges the particle's own persistent angular velocity (which in turn
-  nudges its persistent heading — see core/agents.wgsl's own module
-  docstring for why heading is no longer derived from velocity); the two
-  former strafe channels now encode a normalized local growth direction.
+  particle — plus desired heading (2), anisotropy/polarity logits (2),
+  desired growth direction (2), and RGB color logits (3),
+  all raw/local-frame. The desired-heading vector is converted by the shader
+  into angular acceleration from its shortest local angular error; the two
+  former strafe channels encode a desired local growth direction.
   The two former acceleration channels independently control tensor
-  anisotropy and signed division bias through sigmoid. C=8
+  anisotropy and division bias through sigmoid. C=8
   (simulation_settings.CHEM_CHANNELS) and
-  the output width is exactly 16: 8 + 1 + 2 + 2 + 3.
+  the output width is exactly 17: 8 + 2 + 2 + 2 + 3.
 """
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-from simulation_settings import ACCEL_DIM, ANGULAR_DIM, CHEM_CHANNELS, HIDDEN_DIM, STRAFE_DIM
+from simulation_settings import CHEM_CHANNELS, HIDDEN_DIM
+from policy_parameters import policy_heads, trunk_initialization
 
 class UpdateRule(nn.Module):
     def __init__(self, num_channels: int = CHEM_CHANNELS) -> None:
         super().__init__()
         self.num_channels = num_channels
         input_dim = 3 * num_channels + 6
-        output_dim = num_channels + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM + 3
         # Bounded, monotonic, zero-centered hidden response. This controller
         # is evolved, so smooth local behavior under mutation is preferable
         # to the periodic phase wrapping of the earlier sine experiment.
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, HIDDEN_DIM),
-            nn.Tanh(),
-            nn.Linear(HIDDEN_DIM, output_dim),
+        self.input_layer = nn.Linear(input_dim, HIDDEN_DIM)
+        self.activation = nn.Tanh()
+        self.heads = nn.ModuleDict(
+            {head.name: nn.Linear(HIDDEN_DIM, head.size) for head in policy_heads(num_channels)}
         )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """Head-aware initialization shared conceptually with the browser.
+
+        Xavier gains keep vector/control heads conservative, while bias priors
+        start both directions forward, anisotropy near 0.2, and all remaining
+        scalar outputs neutral. Small per-head bias jitter preserves diversity
+        between freshly randomized policies.
+        """
+        trunk_gain, trunk_bias_jitter = trunk_initialization()
+        nn.init.xavier_uniform_(self.input_layer.weight, gain=trunk_gain)
+        nn.init.uniform_(self.input_layer.bias, -trunk_bias_jitter, trunk_bias_jitter)
+        with torch.no_grad():
+            for spec in policy_heads(self.num_channels):
+                layer = self.heads[spec.name]
+                nn.init.xavier_uniform_(layer.weight, gain=spec.weight_gain)
+                center = torch.tensor(spec.bias_center, dtype=layer.bias.dtype, device=layer.bias.device)
+                layer.bias.copy_(center)
+                if spec.bias_jitter > 0.0:
+                    layer.bias.add_(torch.empty_like(layer.bias).uniform_(-spec.bias_jitter, spec.bias_jitter))
 
     def forward(
         self,
@@ -80,28 +100,68 @@ class UpdateRule(nn.Module):
         rotation of the gradients is the caller's job
         (training_sim.py/core/agents.wgsl); this method is frame-agnostic and
         simply concatenates the three channel blocks. Returns
-        (env_write, angular_accel, growth_controls, direction, color), all raw/un-squashed
-        and still in LOCAL frame — squashing (tanh + the MAX_ANGULAR_ACCEL/
-        MAX_ACCEL/MAX_ENV_WRITE scale; controls use sigmoid and direction
-        uses normalized tanh outputs), and rotating direction to world frame are all training_sim.py's/core/agents.wgsl's
+        (env_write, heading_target, growth_controls, direction, color), all raw/un-squashed
+        and still in LOCAL frame — squashing (tanh for vectors and writes;
+        sigmoid for scalar controls), conversion of the heading target to
+        angular acceleration, and rotating growth direction to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
         not spatial deposit geometry), same division of responsibility
-        envnca's own UpdateRule/Simulation split. angular_accel needs no
-        rotation either way — it nudges the particle's own angular
-        velocity directly, there's no "world frame" for a scalar turn
-        rate to be rotated into."""
+        envnca's own UpdateRule/Simulation split."""
         x = torch.cat([value, grad_forward, grad_lateral, morphology, elastic_strain], dim=-1)
-        out = self.net(x)
-        c = self.num_channels
-        d = c
-        # (N, C), one centered write per chemical channel.
-        env_write = out[:, :d]
-        angular_accel = out[:, d : d + ANGULAR_DIM]
-        growth_controls = out[:, d + ANGULAR_DIM : d + ANGULAR_DIM + ACCEL_DIM]
-        direction = out[:, d + ANGULAR_DIM + ACCEL_DIM : d + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM]
-        color_start = d + ANGULAR_DIM + ACCEL_DIM + STRAFE_DIM
-        color = out[:, color_start : color_start + 3]
-        return env_write, angular_accel, growth_controls, direction, color
+        hidden = self.activation(self.input_layer(x))
+        env_write = self.heads["chemical"](hidden)
+        heading_target = self.heads["heading"](hidden)
+        growth_controls = torch.cat(
+            [self.heads["anisotropy"](hidden), self.heads["division"](hidden)], dim=-1
+        )
+        direction = self.heads["growthDirection"](hidden)
+        color = self.heads["color"](hidden)
+        return env_write, heading_target, growth_controls, direction, color
+
+    def concatenated_output_parameters(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return logical heads concatenated in the stable GPU output order."""
+        ordered = [self.heads[spec.name] for spec in policy_heads(self.num_channels)]
+        return torch.cat([layer.weight for layer in ordered]), torch.cat([layer.bias for layer in ordered])
+
+    def flat_parameters(self) -> torch.Tensor:
+        """Canonical fc1w/fc1b/fc2w/fc2b representation used by WebGPU."""
+        output_weight, output_bias = self.concatenated_output_parameters()
+        return torch.cat(
+            [
+                self.input_layer.weight.reshape(-1),
+                self.input_layer.bias,
+                output_weight.reshape(-1),
+                output_bias,
+            ]
+        )
+
+    def load_flat_parameters(self, flat: torch.Tensor) -> None:
+        """Inverse of flat_parameters(), preserving the public checkpoint ABI."""
+        flat = flat.to(dtype=self.input_layer.weight.dtype, device=self.input_layer.weight.device).reshape(-1)
+        input_weight_count = self.input_layer.weight.numel()
+        input_bias_count = self.input_layer.bias.numel()
+        output_weight_count = sum(layer.weight.numel() for layer in self.heads.values())
+        output_bias_count = sum(layer.bias.numel() for layer in self.heads.values())
+        expected = input_weight_count + input_bias_count + output_weight_count + output_bias_count
+        if flat.numel() != expected:
+            raise ValueError(f"expected {expected} policy parameters, got {flat.numel()}")
+
+        cursor = 0
+        with torch.no_grad():
+            self.input_layer.weight.copy_(flat[cursor : cursor + input_weight_count].view_as(self.input_layer.weight))
+            cursor += input_weight_count
+            self.input_layer.bias.copy_(flat[cursor : cursor + input_bias_count])
+            cursor += input_bias_count
+            for spec in policy_heads(self.num_channels):
+                layer = self.heads[spec.name]
+                count = layer.weight.numel()
+                layer.weight.copy_(flat[cursor : cursor + count].view_as(layer.weight))
+                cursor += count
+            for spec in policy_heads(self.num_channels):
+                layer = self.heads[spec.name]
+                count = layer.bias.numel()
+                layer.bias.copy_(flat[cursor : cursor + count])
+                cursor += count
 
     def export_weights(self) -> dict:
         """JSON-ready weights for a from-scratch forward-pass
@@ -111,10 +171,10 @@ class UpdateRule(nn.Module):
         orientation on the receiving end rather than transposing here,
         same convention envnca/update_rule.py's own export_weights()
         documents."""
-        fc1, fc2 = self.net[0], self.net[2]
+        fc2w, fc2b = self.concatenated_output_parameters()
         return {
-            "fc1w": fc1.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels+6)
-            "fc1b": fc1.bias.detach().cpu().tolist(),  # (HIDDEN_DIM,)
-            "fc2w": fc2.weight.detach().cpu().tolist(),  # (num_channels+8, HIDDEN_DIM)
-            "fc2b": fc2.bias.detach().cpu().tolist(),  # (num_channels+8,)
+            "fc1w": self.input_layer.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels+6)
+            "fc1b": self.input_layer.bias.detach().cpu().tolist(),  # (HIDDEN_DIM,)
+            "fc2w": fc2w.detach().cpu().tolist(),  # (num_channels+9, HIDDEN_DIM)
+            "fc2b": fc2b.detach().cpu().tolist(),  # (num_channels+9,)
         }

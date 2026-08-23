@@ -24,7 +24,7 @@ own module docstring.
   here, not an optional extra. It's what keeps particles from overlapping
   when new ones get placed right next to existing ones.
 - `agents.wgsl` — the evolved policy's forward pass
-  (`Dense(128) -> tanh -> Dense(C+8)`), local/heading-frame sensing +
+  (`Dense(128) -> tanh -> concatenated logical heads (C+9)`), local/heading-frame sensing +
   action, the persistent per-particle heading/angularVelocity integrator.
   Not part of the "5 physics passes" above — a training-loop concern, not
   MLS-MPM itself — but shares this directory so both consumers load the
@@ -36,6 +36,9 @@ own module docstring.
   `DT`, `PARTICLE_MASS`, `VOL`, `MAX_PARTICLES`, `FIELD_N`,
   `DEFAULT_SPLAT_RADIUS`, `DEFAULT_REPULSION_STRENGTH`) every consumer
   needs for template substitution and buffer sizing.
+- `policy_parameters.json` — shared logical-head initialization priors,
+  Xavier gains, and mutation-scale buckets used by Python training and browser
+  randomization. The GPU ABI remains one concatenated output matrix.
 
 ## Uniform surface
 

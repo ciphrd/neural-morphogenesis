@@ -1,5 +1,5 @@
 // The evolved per-particle policy, GPU-resident — WGSL port of
-// trainer/update_rule.py's Dense(128) -> tanh -> Dense(CHANNELS+8),
+// trainer/update_rule.py's Dense(128) -> tanh -> Dense(CHANNELS+9),
 // following envnca/frontend/src/gpu/agents.wgsl's own NN-forward-
 // pass approach (weights as one flat buffer, plain loops rather than a
 // matrix type, safeTanh on the OUTPUT layer's own squashing to avoid a
@@ -26,8 +26,8 @@
 //   next step, nothing smooths it) and was a real, confirmed source of
 //   chaotic spin. Heading here is instead this shader's own persistent
 //   per-particle state (the `heading`/`angularVelocity` buffers below),
-//   driven by a second-order angularAccel -> angularVelocity -> heading
-//   integrator with its own damping — symmetric with how translational
+//   driven toward the policy's desired heading by a proportional angular
+//   controller and second-order angularVelocity integrator with damping —
 //   accel -> velocity -> position already works, see agentStep()'s own
 //   comments below for the exact integration.
 // - No repulsion sampling. repulsion.wgsl already gives every particle a
@@ -128,11 +128,9 @@
 // Bound directly to MpmCore's own positions/velocities/activeCount
 // buffers (see simulation.ts/agents_gpu.py).
 //
-// Four independent outputs control growth geometry: the former strafe pair
-// encodes a normalized LOCAL direction, while the two former acceleration
-// channels pass through sigmoid to control tensor anisotropy and signed
-// division placement. agentStep() rotates the direction to world space and
-// stores all three values in ParticleRest. Fg sees an unoriented axis, but
+// The policy proposes a local growth direction and anisotropy target;
+// agentStep() relaxes persistent angle/anisotropy states toward them. A
+// separate sigmoid controls signed division placement. Fg sees an axis, but
 // division uses its sign to place the daughter toward +n. physics.maxStrafe
 // remains an optional scale for also applying the direction as physical
 // acceleration; it is zero by default and does not scale growth geometry.
@@ -157,11 +155,14 @@ const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
 const CHEMICAL_VALUE_INPUT_SCALE: f32 = __CHEMICAL_VALUE_INPUT_SCALE__;
 const CHEMICAL_GRADIENT_INPUT_SCALE: f32 = __CHEMICAL_GRADIENT_INPUT_SCALE__;
 const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__;
+const GROWTH_DIRECTION_RESPONSE_RATE: f32 = __GROWTH_DIRECTION_RESPONSE_RATE__;
+const GROWTH_ANISOTROPY_RESPONSE_RATE: f32 = __GROWTH_ANISOTROPY_RESPONSE_RATE__;
+const DIRECTION_CONFIDENCE_SCALE: f32 = __DIRECTION_CONFIDENCE_SCALE__;
 
 // One independent chemical write per channel, deposited directly beneath
 // the particle rather than at heading-relative cardinal offsets.
 const ENV_WRITE_DIM: u32 = CHANNELS;
-const OUT_DIM: u32 = ENV_WRITE_DIM + 8u; // env_write + turn + growth controls + direction + RGB
+const OUT_DIM: u32 = ENV_WRITE_DIM + 9u; // env_write + heading target + growth controls + direction + RGB
 
 const PI: f32 = 3.14159265358979323846;
 
@@ -330,8 +331,8 @@ struct AgentState {
 // it, a partial update must preserve the fields it doesn't own.
 struct ParticleRest {
   // Full row-major 2x2 growth tensor in F = Fe*Fg. g2p applies either an
-  // isotropic increment (zero direction) or a determinant-preserving
-  // directional increment selected by growthDirection below.
+  // isotropic increment (zero anisotropy) or a determinant-preserving
+  // directional increment selected by growthAngle below.
   growthF: vec4<f32>,
   // Plastic Jacobian — g2p.wgsl's own yield clamp accumulates genuine
   // plastic damage here, and p2g.wgsl's own `e = exp(hardening*(1-jp))`
@@ -343,13 +344,16 @@ struct ParticleRest {
   // Cell-cycle latch. The last substrate channel probabilistically sets
   // this to 1; g2p advances growth until division and both daughters reset it.
   cycleActive: f32,
-  // Normalized world-frame growth axis from the network's former strafe
-  // channels. Zero means that no axis was selected.
-  growthDirection: vec2<f32>,
-  // x: sigmoid anisotropy, y: sigmoid signed-division center bias.
-  // Stored independently so blob-like isotropic/symmetric growth does
-  // not require destroying the direction signal itself.
-  growthControls: vec2<f32>,
+  // Persistent growth polarity, stored as one angle relative to the
+  // particle's heading rather than an instantly-overwritten world vector.
+  growthAngle: f32,
+  // Persistent anisotropy relaxed toward the policy's sigmoid target.
+  growthAnisotropy: f32,
+  // Instantaneous sigmoid strength used when division places a daughter.
+  divisionBias: f32,
+  // Cached heading for the physics passes, which do not bind ParticleMeta.
+  // Together with growthAngle it reconstructs the world growth axis.
+  growthFrameHeading: f32,
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(12) var morphologyTexture: texture_2d<f32>;
@@ -620,20 +624,37 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32
 
 // The bounded subset of the network's own raw output
 // this shader actually consumes — one centered env_write per channel +
-// angularAccel, independent anisotropy/division-bias controls, and the
-// growth-direction signal (optionally also physical acceleration), all
-// still in LOCAL frame.
+// desired heading, anisotropy/division-bias controls, and desired growth
+// direction (optionally also physical acceleration), all in LOCAL frame.
 struct PolicyOutput {
   envWrite: array<f32, ENV_WRITE_DIM>,
-  angularAccel: f32,
-  anisotropy: f32,
+  headingTargetLocal: vec2<f32>,
+  anisotropyTarget: f32,
   divisionBias: f32,
-  strafeLocal: vec2<f32>,
+  growthTargetLocal: vec2<f32>,
   color: vec3<f32>,
 }
 
 fn safeSigmoid(x: f32) -> f32 {
   return 1.0 / (1.0 + exp(-clamp(x, -20.0, 20.0)));
+}
+
+fn wrapAngle(angle: f32) -> f32 {
+  return atan2(sin(angle), cos(angle));
+}
+
+// Continuous confidence: a zero vector has no directional authority, while
+// increasingly decisive vectors approach one without a hard cutoff.
+fn directionConfidence(v: vec2<f32>) -> f32 {
+  let magnitude = length(v);
+  return magnitude / (magnitude + max(DIRECTION_CONFIDENCE_SCALE, 1e-6));
+}
+
+fn directionAngle(v: vec2<f32>) -> f32 {
+  if (dot(v, v) <= 1e-20) {
+    return 0.0;
+  }
+  return atan2(v.y, v.x);
 }
 
 // One full Dense(HIDDEN_DIM) -> tanh -> Dense(OUT_DIM) forward pass,
@@ -667,21 +688,18 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
     out.envWrite[c] = safeTanh(outVec[c]) * physics.maxEnvWrite;
   }
-  // No rotation for angularAccel — it nudges angularVelocity directly,
-  // there's no "world frame" for a scalar turn rate to be rotated into.
-  out.angularAccel = safeTanh(outVec[ENV_WRITE_DIM]) * physics.maxAngularAccel;
-  // Reuse the two retained, formerly-unused acceleration neurons as
-  // independent morphology controls.
-  out.anisotropy = safeSigmoid(outVec[ENV_WRITE_DIM + 1u]);
-  out.divisionBias = safeSigmoid(outVec[ENV_WRITE_DIM + 2u]);
-  // Keep the raw bounded signal independent of maxStrafe. maxStrafe only
-  // controls physical acceleration below; with MAX_STRAFE=0 these two NN
-  // channels can still direct growth without moving particles directly.
-  out.strafeLocal = vec2<f32>(safeTanh(outVec[ENV_WRITE_DIM + 3u]), safeTanh(outVec[ENV_WRITE_DIM + 4u]));
+  out.headingTargetLocal = vec2<f32>(
+    safeTanh(outVec[ENV_WRITE_DIM]), safeTanh(outVec[ENV_WRITE_DIM + 1u])
+  );
+  out.anisotropyTarget = safeSigmoid(outVec[ENV_WRITE_DIM + 2u]);
+  out.divisionBias = safeSigmoid(outVec[ENV_WRITE_DIM + 3u]);
+  out.growthTargetLocal = vec2<f32>(
+    safeTanh(outVec[ENV_WRITE_DIM + 4u]), safeTanh(outVec[ENV_WRITE_DIM + 5u])
+  );
   out.color = vec3<f32>(
-    safeSigmoid(outVec[ENV_WRITE_DIM + 5u]),
     safeSigmoid(outVec[ENV_WRITE_DIM + 6u]),
     safeSigmoid(outVec[ENV_WRITE_DIM + 7u]),
+    safeSigmoid(outVec[ENV_WRITE_DIM + 8u]),
   );
   return out;
 }
@@ -757,9 +775,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // handedness bias the raw network happens to have cancels out, only
   // the genuinely symmetric part of its response survives — see
   // simulation_settings.py's own CHIRALITY for the full reasoning.
-  // angularAccel/strafeLocal's own lateral component flip sign right
-  // back (a mirrored "turn right" is a "turn left"). A centered chemical
-  // write has no handedness, so it is averaged channel-for-channel.
+  // Both desired-direction vectors have their lateral component un-mirrored.
+  // A centered chemical write has no handedness, so it is averaged
+  // channel-for-channel.
   if (CHIRALITY) {
     var mirroredInput = inputVec;
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
@@ -774,12 +792,15 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
       result.envWrite[c] = (result.envWrite[c] + mirrored.envWrite[c]) * 0.5;
     }
-    result.angularAccel = (result.angularAccel - mirrored.angularAccel) * 0.5;
-    result.anisotropy = (result.anisotropy + mirrored.anisotropy) * 0.5;
+    result.headingTargetLocal = vec2<f32>(
+      (result.headingTargetLocal.x + mirrored.headingTargetLocal.x) * 0.5,
+      (result.headingTargetLocal.y - mirrored.headingTargetLocal.y) * 0.5
+    );
+    result.anisotropyTarget = (result.anisotropyTarget + mirrored.anisotropyTarget) * 0.5;
     result.divisionBias = (result.divisionBias + mirrored.divisionBias) * 0.5;
-    result.strafeLocal = vec2<f32>(
-      (result.strafeLocal.x + mirrored.strafeLocal.x) * 0.5,
-      (result.strafeLocal.y - mirrored.strafeLocal.y) * 0.5
+    result.growthTargetLocal = vec2<f32>(
+      (result.growthTargetLocal.x + mirrored.growthTargetLocal.x) * 0.5,
+      (result.growthTargetLocal.y - mirrored.growthTargetLocal.y) * 0.5
     );
     result.color = (result.color + mirrored.color) * 0.5;
   }
@@ -787,21 +808,48 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // One bounded Gaussian write per channel, centered underneath the particle.
   depositGaussian(result.envWrite, fieldPos);
 
-  let angularAccel = result.angularAccel;
-  var directionLocal = vec2<f32>(0.0);
-  let rawDirectionMagnitude = length(result.strafeLocal);
-  if (rawDirectionMagnitude > 1e-6) {
-    directionLocal = result.strafeLocal / rawDirectionMagnitude;
-  }
+  let communicationDt = max(stepMode.communicationDt, 0.0);
 
-  // Local -> world, exact inverse of the sensing rotation above.
-  let strafeWorld = vec2<f32>(directionLocal.x * cosH - directionLocal.y * sinH, directionLocal.x * sinH + directionLocal.y * cosH);
-  // Reuse the otherwise-disabled strafe signal as a normalized tensor
-  // growth axis. Anisotropy and division bias are independent scalars.
-  // Stored every macro step, including the step that starts a cell cycle,
-  // so all following G2P substeps see the current policy decision.
-  particleRest[pi].growthDirection = strafeWorld;
-  particleRest[pi].growthControls = vec2<f32>(result.anisotropy, result.divisionBias);
+  // The NN proposes a LOCAL desired heading vector. Its shortest signed angle
+  // from local-forward becomes a proportional angular acceleration; the
+  // existing angularVelocity state below supplies inertia and damping.
+  let headingConfidence = directionConfidence(result.headingTargetLocal);
+  let desiredHeadingError = directionAngle(result.headingTargetLocal);
+  let angularAccel = clamp(
+    desiredHeadingError / PI * physics.maxAngularAccel * headingConfidence,
+    -physics.maxAngularAccel,
+    physics.maxAngularAccel,
+  );
+
+  // Growth polarity is a separate persistent angle RELATIVE to heading. The
+  // policy supplies a desired local vector; the stored angle follows it by
+  // the shortest arc with an exponential, timestep-invariant response.
+  let growthConfidence = directionConfidence(result.growthTargetLocal);
+  let desiredGrowthAngle = directionAngle(result.growthTargetLocal);
+  // Confidence belongs inside the continuous-time rate so communication
+  // supersampling does not change convergence over the same elapsed time.
+  let growthAngleBlend = 1.0 - exp(
+    -max(GROWTH_DIRECTION_RESPONSE_RATE, 0.0) * growthConfidence * communicationDt
+  );
+  let growthAngleError = wrapAngle(desiredGrowthAngle - particleRest[pi].growthAngle);
+  particleRest[pi].growthAngle = wrapAngle(
+    particleRest[pi].growthAngle + growthAngleError * growthAngleBlend
+  );
+
+  let anisotropyBlend = 1.0 - exp(
+    -max(GROWTH_ANISOTROPY_RESPONSE_RATE, 0.0) * communicationDt
+  );
+  particleRest[pi].growthAnisotropy = clamp(
+    particleRest[pi].growthAnisotropy
+      + (result.anisotropyTarget - particleRest[pi].growthAnisotropy) * anisotropyBlend,
+    0.0,
+    1.0,
+  );
+  particleRest[pi].divisionBias = result.divisionBias;
+  particleRest[pi].growthFrameHeading = headingVal;
+
+  let growthWorldAngle = headingVal + particleRest[pi].growthAngle;
+  let growthDirectionWorld = vec2<f32>(cos(growthWorldAngle), sin(growthWorldAngle));
   agentState.particleMeta[pi].color = vec4<f32>(result.color, 1.0);
 
   if (stepMode.commitLifecycle != 0u) {
@@ -814,7 +862,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // during this macro step's own physics substeps (see
   // training_sim.py's/simulation.ts's own step ordering: agentStep()
   // always runs before those substeps).
-  velocities[pi] = (velocities[pi] + strafeWorld * physics.maxStrafe) * physics.friction;
+  velocities[pi] = (velocities[pi] + growthDirectionWorld * physics.maxStrafe) * physics.friction;
 
   // Grow-then-divide cell cycle. The last substrate channel supplies a
   // bounded per-macro-step growth probability. Convert it to cumulative
@@ -904,13 +952,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       agentState.particleMeta[pi].rng = angleState; // parent's own rng now reflects BOTH draws this step
       let angleDraw = f32(angleState >> 8u) * (1.0 / 16777216.0);
       let spawnAngle = angleDraw * 2.0 * PI;
-      var spawnDir = vec2<f32>(cos(spawnAngle), sin(spawnAngle));
-      let directionMagnitude = length(strafeWorld);
-      var directionStrength = 0.0;
-      if (directionMagnitude > 1e-6) {
-        spawnDir = strafeWorld / directionMagnitude;
-        directionStrength = clamp(particleRest[pi].growthControls.y, 0.0, 1.0);
-      }
+      var spawnDir = growthDirectionWorld;
+      let directionStrength = clamp(particleRest[pi].divisionBias, 0.0, 1.0);
       let halfOffset = spawnDir * (0.5 * physics.splitDisplacement);
       // Smoothly interpolate from the old center-preserving split (s=0)
       // to a fully polarized split (s=1): the parent remains at its old
@@ -961,14 +1004,23 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       particleF[pi] = daughterF;
       particleF[newIndex] = daughterF;
       let parentJp = particleRest[pi].jp;
+      let parentGrowthAngle = particleRest[pi].growthAngle;
+      let parentGrowthAnisotropy = particleRest[pi].growthAnisotropy;
+      let parentDivisionBias = particleRest[pi].divisionBias;
+      let parentGrowthFrameHeading = particleRest[pi].growthFrameHeading;
       let identity = vec4<f32>(1.0, 0.0, 0.0, 1.0);
-      particleRest[pi] = ParticleRest(identity, parentJp, 0.0, vec2<f32>(0.0), vec2<f32>(0.0));
+      particleRest[pi] = ParticleRest(
+        identity, parentJp, 0.0, parentGrowthAngle, parentGrowthAnisotropy,
+        parentDivisionBias, parentGrowthFrameHeading
+      );
       particleRest[newIndex] = ParticleRest(
         identity,
         parentJp,
         0.0,
-        vec2<f32>(0.0),
-        vec2<f32>(0.0),
+        parentGrowthAngle,
+        parentGrowthAnisotropy,
+        parentDivisionBias,
+        parentGrowthFrameHeading,
       );
     } else {
       particleRest[pi].cycleActive = 0.0;
@@ -985,7 +1037,6 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // still visibly too fast a spin (see simulation_settings.py's own
   // comment on the exact bound); this clamp is the real turn-rate
   // ceiling. Matches training_sim.py's own macro_step() exactly.
-  let communicationDt = max(stepMode.communicationDt, 0.0);
   let roundDamping = pow(clamp(physics.angularDamping, 0.000001, 1.0), communicationDt);
   let newAngularVelocity = clamp(
     (agentState.particleMeta[pi].angularVelocity + angularAccel * communicationDt) * roundDamping,
@@ -993,6 +1044,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     physics.maxAngularVelocity,
   );
   agentState.particleMeta[pi].angularVelocity = newAngularVelocity;
-  agentState.particleMeta[pi].heading = headingVal + newAngularVelocity * communicationDt;
+  let newHeading = headingVal + newAngularVelocity * communicationDt;
+  agentState.particleMeta[pi].heading = newHeading;
+  particleRest[pi].growthFrameHeading = newHeading;
 
 }

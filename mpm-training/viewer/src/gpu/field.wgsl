@@ -421,6 +421,7 @@ fn morphologyFragment(in: QuadOut) -> @location(0) vec4<f32> {
 // bind-group-array convention exactly.
 const SUBSTRATE_WIDTH: u32 = __SUBSTRATE_WIDTH__u;
 const SUBSTRATE_HEIGHT: u32 = __SUBSTRATE_HEIGHT__u;
+const SUBSTRATE_CHANNELS: u32 = __CHANNELS__u;
 const SUBSTRATE_MAX: f32 = 2.0;
 
 fn substrateIndex(c: u32, y: u32, x: u32) -> u32 {
@@ -429,6 +430,7 @@ fn substrateIndex(c: u32, y: u32, x: u32) -> u32 {
 
 @group(0) @binding(8) var<storage, read> substrateGrid: array<f32>;
 @group(0) @binding(9) var substrateOutputTex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(21) var<uniform> substrateChannelStart: u32;
 
 @compute @workgroup_size(16, 16)
 fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -436,9 +438,9 @@ fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let y = gid.y;
   if (x >= SUBSTRATE_WIDTH || y >= SUBSTRATE_HEIGHT) { return; }
 
-  let r = substrateGrid[substrateIndex(0u, y, x)];
-  let g = substrateGrid[substrateIndex(1u, y, x)];
-  let b = substrateGrid[substrateIndex(2u, y, x)];
+  let r = substrateGrid[substrateIndex(substrateChannelStart, y, x)];
+  let g = substrateGrid[substrateIndex(min(substrateChannelStart + 1u, SUBSTRATE_CHANNELS - 1u), y, x)];
+  let b = substrateGrid[substrateIndex(min(substrateChannelStart + 2u, SUBSTRATE_CHANNELS - 1u), y, x)];
   let color = vec3<f32>(graypoint(r, SUBSTRATE_MAX), graypoint(g, SUBSTRATE_MAX), graypoint(b, SUBSTRATE_MAX));
 
   textureStore(substrateOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(color, 1.0));
