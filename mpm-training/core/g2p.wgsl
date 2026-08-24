@@ -39,6 +39,8 @@ struct ParticleRest {
   growthAnisotropy: f32,
   divisionBias: f32,
   growthFrameHeading: f32,
+  appearanceScale: f32,
+  weldExpression: f32,
 }
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
@@ -313,6 +315,20 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     inhibitedScale,
     clamp(material.growthCompressionInhibition, 0.0, 1.0),
   );
+  // A newborn's visible disc area follows the exact normalized rest-area
+  // growth curve: exp(rate*t)-1 goes from 0 to 1 over the same interval in
+  // which active morphoelastic growth goes from g=1 to g=2. Applying the
+  // same compressionScale keeps visual emergence synchronized with local
+  // mechanical inhibition. This state is rendering-only; conservative mass
+  // and stress remain fully present immediately after division.
+  var appearanceScaleNew = clamp(rest0.appearanceScale, 0.0, 1.0);
+  if (appearanceScaleNew < 1.0 && material.growthRate > 0.0) {
+    appearanceScaleNew = min(
+      (appearanceScaleNew + 1.0)
+        * exp(material.growthRate * compressionScale * DT) - 1.0,
+      1.0,
+    );
+  }
   if (rest0.cycleActive > 0.5 && material.growthRate > 0.0) {
     gNew = min(
       g0 * exp(material.growthRate * compressionScale * DT),
@@ -365,6 +381,8 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // not a bare f32 to overwrite wholesale.
   particleRest[pi] = ParticleRest(
     FgNew, JpNew, rest0.cycleActive, rest0.growthAngle,
-    rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameHeading
+    rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameHeading,
+    appearanceScaleNew,
+    rest0.weldExpression
   );
 }

@@ -138,6 +138,15 @@ export interface GridCanvasHandle {
    * video — see CanvasRecorder.stop()'s own docstring for exactly how.
    * Resolves once the download has been handed off. */
   stopRecording(): Promise<void>;
+  /** Runs deterministic rollouts under the already-loaded policy, capturing
+   * the rendered final frame of each settings combination as a PNG. */
+  collectSamples(
+    samples: Array<{ physics: PhysicsSettings; filename: string }>,
+    steps: number,
+    restorePhysics: PhysicsSettings,
+    onProgress: (completed: number) => void,
+    signal: AbortSignal,
+  ): Promise<Array<{ filename: string; blob: Blob }>>;
 }
 
 type Status = "loading" | "ready" | "unsupported" | "lost" | "incompatible";
@@ -356,6 +365,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   // docstring for why one instance is reused across repeated
   // start()/stop() cycles rather than recreated each time.
   const recorderRef = useRef<CanvasRecorder | null>(null);
+  const batchRunningRef = useRef(false);
+  const activeStepRef = useRef<Promise<void> | null>(null);
   function getRecorder(): CanvasRecorder {
     if (!recorderRef.current) recorderRef.current = new CanvasRecorder();
     return recorderRef.current;
@@ -399,6 +410,43 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       if (canvasRef.current) getRecorder().start(canvasRef.current);
     },
     stopRecording: () => getRecorder().stop("mpm-training"),
+    collectSamples: async (samples, steps, restorePhysics, onProgress, signal) => {
+      const sim = simulationRef.current;
+      const context = contextRef.current;
+      const canvas = canvasRef.current;
+      const device = deviceRef.current;
+      if (!sim?.ready || !context || !canvas || !device) {
+        throw new Error("The simulation is not ready yet.");
+      }
+      batchRunningRef.current = true;
+      const captures: Array<{ filename: string; blob: Blob }> = [];
+      try {
+        // A normal animation frame may already be suspended in step()'s
+        // particle-count readback. Let it finish before resetting state.
+        await activeStepRef.current;
+        for (const sample of samples) {
+          if (signal.aborted) throw new DOMException("Sample collection cancelled", "AbortError");
+          sim.setPhysics(sample.physics);
+          sim.restartRollout();
+          for (let step = 0; step < steps; step += 1) {
+            if (signal.aborted) throw new DOMException("Sample collection cancelled", "AbortError");
+            await sim.step();
+          }
+          sim.render(context);
+          await device.queue.onSubmittedWorkDone();
+          const blob = await new Promise<Blob>((resolve, reject) => {
+            canvas.toBlob((result) => result ? resolve(result) : reject(new Error("Could not capture the simulation canvas.")), "image/png");
+          });
+          captures.push({ filename: sample.filename, blob });
+          onProgress(captures.length);
+        }
+        return captures;
+      } finally {
+        sim.setPhysics(restorePhysics);
+        sim.restartRollout();
+        batchRunningRef.current = false;
+      }
+    },
   }));
 
   // Acquire device + configure the canvas context once. StrictMode-safe:
@@ -806,11 +854,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     const frame = async () => {
       const sim = simulationRef.current;
       const context = contextRef.current;
-      if (sim?.ready && context) {
+      if (sim?.ready && context && !batchRunningRef.current) {
         if (!pausedRef.current) {
           try {
-            await sim.step();
+            const stepPromise = sim.step();
+            activeStepRef.current = stepPromise;
+            await stepPromise;
+            activeStepRef.current = null;
           } catch (err) {
+            activeStepRef.current = null;
             if (!cancelled) console.error(err);
             return;
           }

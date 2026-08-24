@@ -28,8 +28,43 @@ const QUAD_OFFSETS = array<vec2<f32>, 6>(
 @group(0) @binding(1) var<uniform> pointRadius: f32;
 @group(0) @binding(2) var<uniform> pointColor: vec4<f32>;
 
+struct ParticleRest {
+  growthF: vec4<f32>,
+  jp: f32,
+  cycleActive: f32,
+  growthAngle: f32,
+  growthAnisotropy: f32,
+  divisionBias: f32,
+  growthFrameHeading: f32,
+  appearanceScale: f32,
+  weldExpression: f32,
+}
+
+@group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
+
+// appearanceScale is visible AREA. Radius therefore scales by sqrt(area),
+// making a newborn emerge from a point without making its early disc area
+// grow quadratically faster than the morphoelastic rest area it mirrors.
+fn appearanceRadiusScale(instanceIndex: u32) -> f32 {
+  return sqrt(clamp(particleRest[instanceIndex].appearanceScale, 0.0, 1.0));
+}
+
 @vertex
 fn particleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VOut {
+  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let offset = QUAD_OFFSETS[vertexIndex];
+  var out: VOut;
+  out.position = vec4<f32>(
+    center + offset * pointRadius * appearanceRadiusScale(instanceIndex),
+    0.0, 1.0
+  );
+  out.uv = offset;
+  return out;
+}
+
+// Target points have no particle rest state and remain constant-sized.
+@vertex
+fn targetVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VOut {
   let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
   let offset = QUAD_OFFSETS[vertexIndex];
   var out: VOut;
@@ -51,17 +86,6 @@ fn particleFragment(in: VOut) -> @location(0) vec4<f32> {
 // increases with the independent anisotropy output. This reads ParticleRest
 // directly, exactly like the directional-arrow pass below.
 
-struct ParticleRest {
-  growthF: vec4<f32>,
-  jp: f32,
-  cycleActive: f32,
-  growthAngle: f32,
-  growthAnisotropy: f32,
-  divisionBias: f32,
-  growthFrameHeading: f32,
-}
-
-@group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(6) var<uniform> activationAlpha: f32;
 
 struct ActivationDotOut {
@@ -75,7 +99,10 @@ fn activationParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(in
   let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
   let offset = QUAD_OFFSETS[vertexIndex];
   var out: ActivationDotOut;
-  out.position = vec4<f32>(center + offset * pointRadius, 0.0, 1.0);
+  out.position = vec4<f32>(
+    center + offset * pointRadius * appearanceRadiusScale(instanceIndex),
+    0.0, 1.0
+  );
   out.uv = offset;
   let rest = particleRest[instanceIndex];
   let worldAngle = rest.growthFrameHeading + rest.growthAngle;
@@ -175,7 +202,10 @@ fn neuralColorParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(i
   let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
   let offset = QUAD_OFFSETS[vertexIndex];
   var out: NeuralColorDotOut;
-  out.position = vec4<f32>(center + offset * pointRadius * 1.6, 0.0, 1.0);
+  out.position = vec4<f32>(
+    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex),
+    0.0, 1.0
+  );
   out.uv = offset;
   out.color = particleMeta[instanceIndex].color.rgb;
   return out;
@@ -206,12 +236,27 @@ fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
   let offset = QUAD_OFFSETS[vertexIndex];
   let state = particleMeta[instanceIndex].privateState;
   var out: NeuralColorDotOut;
-  out.position = vec4<f32>(center + offset * pointRadius * 1.6, 0.0, 1.0);
+  out.position = vec4<f32>(
+    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex),
+    0.0, 1.0
+  );
   out.uv = offset;
+  var colorState = vec3<f32>(
+    state[internalStateStyle.channels.x],
+    state[internalStateStyle.channels.y],
+    state[internalStateStyle.channels.z],
+  );
+  // Preserve relative channel strengths instead of letting a large positive
+  // state drive one or more sigmoid-mapped RGB components into saturation.
+  // Values already within the display range retain the previous mapping.
+  let maxComponent = max(colorState.x, max(colorState.y, colorState.z));
+  if (maxComponent > 1.0) {
+    colorState = colorState / vec3<f32>(maxComponent);
+  }
   out.color = vec3<f32>(
-    stateSigmoid(state[internalStateStyle.channels.x]),
-    stateSigmoid(state[internalStateStyle.channels.y]),
-    stateSigmoid(state[internalStateStyle.channels.z]),
+    stateSigmoid(colorState.x),
+    stateSigmoid(colorState.y),
+    stateSigmoid(colorState.z),
   );
   return out;
 }
@@ -238,7 +283,10 @@ fn triangleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_ind
   let s = sin(heading);
   let local = TRI_LOCAL[vertexIndex];
   let rotated = vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
-  return vec4<f32>(center + rotated * pointRadius, 0.0, 1.0);
+  return vec4<f32>(
+    center + rotated * pointRadius * appearanceRadiusScale(instanceIndex),
+    0.0, 1.0
+  );
 }
 
 @fragment
@@ -276,7 +324,7 @@ fn growthAxisVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_i
   let strength = clamp(rest.growthAnisotropy, 0.0, 1.0);
   let normal = vec2<f32>(-axis.y, axis.x);
 
-  let size = growthAxisStyle.x * sqrt(strength);
+  let size = growthAxisStyle.x * sqrt(strength) * appearanceRadiusScale(instanceIndex);
   // Local +X points toward +n. Along-axis extent is deliberately smaller
   // than the perpendicular extent: an X-squashed isosceles triangle.
   var along = 0.0;

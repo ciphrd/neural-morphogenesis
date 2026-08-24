@@ -33,7 +33,7 @@
 // hand below.
 //
 // No native float atomics on storage buffers in core WebGPU, so the P2G
-// scatter-add (momentum-x, momentum-y, mass — accumulated from however
+// scatter-add (momentum-x, momentum-y, mass, neural weld-mass — accumulated from however
 // many particles land near a given grid node) goes through a fixed-point
 // i32 buffer, decoded back to float by gridUpdate.wgsl next.
 
@@ -59,7 +59,8 @@ const SCALE: f32 = 4096.0;
 const CH_MOM_X: u32 = 0u;
 const CH_MOM_Y: u32 = 1u;
 const CH_MASS: u32 = 2u;
-const CHANNELS: u32 = 3u;
+const CH_WELD_MASS: u32 = 3u;
+const CHANNELS: u32 = 4u;
 
 @group(0) @binding(0) var<storage, read> particlePos: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read> particleVel: array<vec2<f32>>;
@@ -78,6 +79,10 @@ struct ParticleRest {
   growthAnisotropy: f32,
   divisionBias: f32,
   growthFrameHeading: f32,
+  appearanceScale: f32,
+  // NN-controlled grid viscosity expression. This occupies the former
+  // alignment lane, preserving ParticleRest's 48-byte ABI.
+  weldExpression: f32,
 }
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read_write> gridAccum: array<atomic<i32>>;
@@ -278,6 +283,10 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
       atomicAdd(&gridAccum[nodeIndex + CH_MOM_X], i32(round(momentum.x * SCALE)));
       atomicAdd(&gridAccum[nodeIndex + CH_MOM_Y], i32(round(momentum.y * SCALE)));
       atomicAdd(&gridAccum[nodeIndex + CH_MASS], i32(round(massContribution * SCALE)));
+      atomicAdd(
+        &gridAccum[nodeIndex + CH_WELD_MASS],
+        i32(round(massContribution * clamp(rest.weldExpression, 0.0, 1.0) * SCALE)),
+      );
     }
   }
 }

@@ -386,6 +386,11 @@ export class GpuSimulation {
       this.config.morphologyBlurSigma ?? 0.01,
       this.config.morphologyDensityReference ?? 1.0
     );
+    this.mpmCore.setTissueTension(
+      physics.tissueSurfaceTension ?? 0.0,
+      physics.tissueSurfaceForceCap ?? 0.05,
+    );
+    this.mpmCore.setGridWeldingStrength(physics.gridWeldingStrength ?? 0.0);
     this.agents.setCommunicationTimestep(communicationDt);
     this.agents.setInternalStateSpeed(physics.internalStateSpeed ?? 1.0);
     this.agents.setInteriorSupportStrength(physics.interiorSupportStrength ?? 0.0);

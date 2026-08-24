@@ -21,10 +21,10 @@ interface PhysicsPanelProps {
 
 // Excludes mpmEnabled — the one boolean field in PhysicsSettings, its own
 // checkbox row below rather than a numeric-range SliderSpec.
-type SliderKey = Exclude<keyof PhysicsSettings, "mpmEnabled">
+export type PhysicsSliderKey = Exclude<keyof PhysicsSettings, "mpmEnabled">
 
-interface SliderSpec {
-  key: SliderKey
+export interface PhysicsSliderSpec {
+  key: PhysicsSliderKey
   label: string
   min: number
   max: number
@@ -51,7 +51,7 @@ function scaledRange(
 // physically bounded, not scaled from the trained value like the others.
 const FRACTION_RANGE = { min: 0, max: 1, step: 0.001 } as const
 
-function specsFor(trained: PhysicsSettings): SliderSpec[] {
+export function physicsSliderSpecsFor(trained: PhysicsSettings): PhysicsSliderSpec[] {
   return [
     {
       key: "gravity",
@@ -226,7 +226,7 @@ export function PhysicsPanel({
   onReset,
 }: PhysicsPanelProps) {
   const [open, setOpen] = useState(false)
-  const specs = specsFor(trained)
+  const specs = physicsSliderSpecsFor(trained)
 
   return (
     <section>

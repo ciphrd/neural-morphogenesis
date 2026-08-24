@@ -1,7 +1,7 @@
 // Browser port of trainer/mpm_core.py's own MpmCore — same buffer
 // layout, bind groups, and pass ordering (clearDensity -> splatDensity
-// -> densityToTexture -> applyRepulsion -> clearGrid -> p2g ->
-// gridUpdate -> g2p), scoped to exactly ../core/'s passes, same as the
+// -> densityToTexture -> applyRepulsion -> applyTissueTension -> clearGrid -> p2g ->
+// gridUpdate -> gridWelding -> g2p), scoped to exactly ../core/'s passes, same as the
 // Python headless wrapper. The WGSL itself isn't re-typed here at all —
 // it's loaded straight out of ../core/*.wgsl via Vite's `?raw` imports,
 // the same single-source-of-truth convention trainer/shader_template.py's
@@ -43,9 +43,11 @@
 import clearGridSrc from "../../../core/clearGrid.wgsl?raw";
 import p2gSrc from "../../../core/p2g.wgsl?raw";
 import gridUpdateSrc from "../../../core/gridUpdate.wgsl?raw";
+import gridWeldingSrc from "../../../core/gridWelding.wgsl?raw";
 import g2pSrc from "../../../core/g2p.wgsl?raw";
 import repulsionSrc from "../../../core/repulsion.wgsl?raw";
 import morphologySrc from "../../../core/morphology.wgsl?raw";
+import tissueTensionSrc from "../../../core/tissueTension.wgsl?raw";
 import coreConstants from "../../../core/constants.json";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
@@ -69,9 +71,9 @@ export const REPULSION_FIELD_N: number = coreConstants.FIELD_N;
 const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
 const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
-const GRID_ACCUM_CHANNELS = 3;
+const GRID_ACCUM_CHANNELS = 4;
 // growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-// growthFrameHeading, followed by two implicit alignment floats — 48 bytes.
+// growthFrameHeading, appearanceScale, weldExpression — 48 bytes.
 const REST_FIELDS = 12;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own
@@ -86,6 +88,7 @@ function packRest(jp: Float32Array): Float32Array {
     packed[i * REST_FIELDS] = 1;
     packed[i * REST_FIELDS + 3] = 1;
     packed[i * REST_FIELDS + 4] = jp[i];
+    packed[i * REST_FIELDS + 10] = 1;
   }
   return packed;
 }
@@ -135,6 +138,7 @@ export class MpmCore {
   // velocity. Neither is written by anything outside MpmCore itself.
   readonly gridAccum: GPUBuffer;
   readonly gridVel: GPUBuffer;
+  private readonly gridVelPreWeld: GPUBuffer;
 
   private readonly gravityUniform: GPUBuffer;
   // Public — fieldDiagnostics.wgsl's own scatterDiagnostics pass needs
@@ -152,6 +156,8 @@ export class MpmCore {
   private readonly splatParamsUniform: GPUBuffer;
   private readonly repulsionParamsUniform: GPUBuffer;
   private readonly morphologyParamsUniform: GPUBuffer;
+  private readonly tissueTensionParamsUniform: GPUBuffer;
+  private readonly gridWeldingParamsUniform: GPUBuffer;
 
   private readonly densityAccum: GPUBuffer;
   // Public — gpu/render.ts's own "Repulsion" background mode samples this
@@ -168,6 +174,8 @@ export class MpmCore {
   private readonly p2gBindGroup: GPUBindGroup;
   private readonly gridUpdatePipeline: GPUComputePipeline;
   private readonly gridUpdateBindGroup: GPUBindGroup;
+  private readonly gridWeldingPipeline: GPUComputePipeline;
+  private readonly gridWeldingBindGroup: GPUBindGroup;
   private readonly g2pPipeline: GPUComputePipeline;
   private readonly g2pBindGroup: GPUBindGroup;
 
@@ -183,6 +191,8 @@ export class MpmCore {
   private readonly morphologyVerticalPipeline: GPUComputePipeline;
   private readonly morphologyHorizontalBindGroup: GPUBindGroup;
   private readonly morphologyVerticalBindGroup: GPUBindGroup;
+  private readonly tissueTensionPipeline: GPUComputePipeline;
+  private readonly tissueTensionBindGroup: GPUBindGroup;
 
   private readonly gridDispatch: number;
   private readonly densityClearDispatch: number;
@@ -205,6 +215,7 @@ export class MpmCore {
     this.rest = device.createBuffer({ size: MAX_PARTICLES * REST_FIELDS * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
 
     this.gridAccum = device.createBuffer({ size: NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage: GPUBufferUsage.STORAGE });
+    this.gridVelPreWeld = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
     this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
 
     this.gravityUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -245,9 +256,31 @@ export class MpmCore {
       layout: this.gridUpdatePipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.gridAccum } },
-        { binding: 1, resource: { buffer: this.gridVel } },
+        { binding: 1, resource: { buffer: this.gridVelPreWeld } },
         { binding: 2, resource: { buffer: this.gravityUniform } },
         { binding: 3, resource: { buffer: this.dampingUniform } },
+      ],
+    });
+
+    this.gridWeldingParamsUniform = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.setGridWeldingStrength(0);
+    const gridWeldingModule = device.createShaderModule({
+      code: templateShader(gridWeldingSrc, { GRID_N, DX, DT }),
+    });
+    this.gridWeldingPipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: gridWeldingModule, entryPoint: "applyGridWelding" },
+    });
+    this.gridWeldingBindGroup = device.createBindGroup({
+      layout: this.gridWeldingPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.gridAccum } },
+        { binding: 1, resource: { buffer: this.gridVelPreWeld } },
+        { binding: 2, resource: { buffer: this.gridVel } },
+        { binding: 3, resource: { buffer: this.gridWeldingParamsUniform } },
       ],
     });
 
@@ -289,6 +322,8 @@ export class MpmCore {
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
     this.morphologyParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.tissueTensionParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.setTissueTension(0, 0.05);
 
     this.splatParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.repulsionParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -355,6 +390,24 @@ export class MpmCore {
         { binding: 0, resource: this.morphologyBlurTexture.createView() },
         { binding: 1, resource: this.morphologyTexture.createView() },
         { binding: 2, resource: { buffer: this.morphologyParamsUniform } },
+      ],
+    });
+
+    const tissueTensionModule = device.createShaderModule({
+      code: templateShader(tissueTensionSrc, { FIELD_N: REPULSION_FIELD_N, DT }),
+    });
+    this.tissueTensionPipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: tissueTensionModule, entryPoint: "applyTissueTension" },
+    });
+    this.tissueTensionBindGroup = device.createBindGroup({
+      layout: this.tissueTensionPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.positions } },
+        { binding: 1, resource: { buffer: this.velocities } },
+        { binding: 2, resource: { buffer: this.activeCountUniform } },
+        { binding: 3, resource: this.morphologyTexture.createView() },
+        { binding: 4, resource: { buffer: this.tissueTensionParamsUniform } },
       ],
     });
   }
@@ -438,7 +491,7 @@ export class MpmCore {
     writeFloat32(this.device, this.velocities, i * 2 * 4, new Float32Array([0, 0]));
     writeFloat32(this.device, this.F, i * 4 * 4, new Float32Array([1, 0, 0, 1]));
     writeFloat32(this.device, this.C, i * 4 * 4, new Float32Array([0, 0, 0, 0]));
-    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0]));
+    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0]));
     this.setActiveCount(this._activeCount + 1);
     return true;
   }
@@ -502,6 +555,19 @@ export class MpmCore {
     writeFloat32(this.device, this.morphologyParamsUniform, 0, new Float32Array([sigmaDomain, densityReference, 0, 0]));
   }
 
+  setTissueTension(strength: number, maxDelta: number): void {
+    writeFloat32(this.device, this.tissueTensionParamsUniform, 0, new Float32Array([
+      Math.max(0, strength), Math.max(0, maxDelta), 0, 0,
+    ]));
+  }
+
+  /** NN-gated velocity diffusion performed between grid update and G2P. */
+  setGridWeldingStrength(strength: number): void {
+    writeFloat32(this.device, this.gridWeldingParamsUniform, 0, new Float32Array([
+      Math.max(0, strength), 0.1, 1.0, 0,
+    ]));
+  }
+
   /** Rebuilds policy occupancy from current positions once per controller tick. */
   encodeMorphology(encoder: GPUCommandEncoder): void {
     const particleDispatch = ceilDiv(this._activeCount, WORKGROUP);
@@ -553,6 +619,12 @@ export class MpmCore {
       pass.end();
 
       pass = encoder.beginComputePass();
+      pass.setPipeline(this.tissueTensionPipeline);
+      pass.setBindGroup(0, this.tissueTensionBindGroup);
+      pass.dispatchWorkgroups(particleDispatch);
+      pass.end();
+
+      pass = encoder.beginComputePass();
       pass.setPipeline(this.clearGridPipeline);
       pass.setBindGroup(0, this.clearGridBindGroup);
       pass.dispatchWorkgroups(this.gridDispatch);
@@ -567,6 +639,12 @@ export class MpmCore {
       pass = encoder.beginComputePass();
       pass.setPipeline(this.gridUpdatePipeline);
       pass.setBindGroup(0, this.gridUpdateBindGroup);
+      pass.dispatchWorkgroups(this.gridDispatch);
+      pass.end();
+
+      pass = encoder.beginComputePass();
+      pass.setPipeline(this.gridWeldingPipeline);
+      pass.setBindGroup(0, this.gridWeldingBindGroup);
       pass.dispatchWorkgroups(this.gridDispatch);
       pass.end();
 
@@ -586,6 +664,7 @@ export class MpmCore {
     this.rest.destroy();
     this.gridAccum.destroy();
     this.gridVel.destroy();
+    this.gridVelPreWeld.destroy();
     this.gravityUniform.destroy();
     this.materialUniform.destroy();
     this.activeCountUniform.destroy();
@@ -593,6 +672,8 @@ export class MpmCore {
     this.splatParamsUniform.destroy();
     this.repulsionParamsUniform.destroy();
     this.morphologyParamsUniform.destroy();
+    this.tissueTensionParamsUniform.destroy();
+    this.gridWeldingParamsUniform.destroy();
     this.densityAccum.destroy();
     this.densityTexture.destroy();
     this.morphologyTexture.destroy();

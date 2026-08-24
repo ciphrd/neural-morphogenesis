@@ -9,6 +9,7 @@ import { fetchRunState } from "./net/runs"
 import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
 import { pickRecordingFormat } from "./render/canvasRecorder"
+import { createZip, downloadBlob } from "./render/zip"
 import type {
   DeformSettings,
   GridCanvasHandle,
@@ -20,6 +21,8 @@ import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { RunPicker } from "./ui/RunPicker"
+import { SampleSweepModal, sweepValues } from "./ui/SampleSweepModal"
+import type { SampleSweepRequest } from "./ui/SampleSweepModal"
 import { Slider } from "./ui/Slider"
 import coreConstants from "../../core/constants.json"
 
@@ -93,6 +96,12 @@ export function TrainingView() {
   // own mid-session the way, say, a rollout-length limit might).
   const [recording, setRecording] = useState(false)
   const gridCanvasRef = useRef<GridCanvasHandle>(null)
+  const [sampleModalOpen, setSampleModalOpen] = useState(false)
+  const [sampleRunning, setSampleRunning] = useState(false)
+  const [sampleCompleted, setSampleCompleted] = useState(0)
+  const [sampleTotal, setSampleTotal] = useState(0)
+  const [sampleError, setSampleError] = useState<string | null>(null)
+  const sampleAbortRef = useRef<AbortController | null>(null)
 
   // View-only rendering options (gpu/render.ts) — not simulation state,
   // so plain component state, never reset by a run/generation change.
@@ -261,6 +270,59 @@ export function TrainingView() {
     } else {
       gridCanvasRef.current?.startRecording()
       setRecording(true)
+    }
+  }
+
+  const handleSampleSweep = async (request: SampleSweepRequest) => {
+    const canvas = gridCanvasRef.current
+    if (!canvas || !physicsValues) return
+    const combinations: Array<Record<string, number>> = []
+    const visit = (axisIndex: number, values: Record<string, number>) => {
+      if (axisIndex === request.axes.length) {
+        combinations.push({ ...values })
+        return
+      }
+      const axis = request.axes[axisIndex]
+      for (const value of sweepValues(axis)) {
+        values[axis.key] = value
+        visit(axisIndex + 1, values)
+      }
+    }
+    visit(0, {})
+
+    const controller = new AbortController()
+    sampleAbortRef.current = controller
+    setSampleRunning(true)
+    setSampleCompleted(0)
+    setSampleTotal(combinations.length)
+    setSampleError(null)
+    const basePhysics = { ...physicsValues }
+    const keyLabel = (key: string) => key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
+    const valueLabel = (value: number) => Number(value.toPrecision(12)).toString()
+    const samples = combinations.map((combination) => ({
+      physics: { ...basePhysics, ...combination },
+      filename: `${request.axes.map((axis) => `${keyLabel(axis.key)}=${valueLabel(combination[axis.key])}`).join(",")}.png`,
+    }))
+
+    try {
+      const captures = await canvas.collectSamples(
+        samples,
+        request.steps,
+        basePhysics,
+        setSampleCompleted,
+        controller.signal,
+      )
+      const zip = await createZip(captures)
+      const generation = activeConfig?.generation ?? "unknown"
+      downloadBlob(zip, `mpm-samples-generation-${generation}.zip`)
+      setSampleModalOpen(false)
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        setSampleError(err instanceof Error ? err.message : String(err))
+      }
+    } finally {
+      sampleAbortRef.current = null
+      setSampleRunning(false)
     }
   }
 
@@ -804,6 +866,18 @@ export function TrainingView() {
             <button
               className="icon-button"
               onClick={() => {
+                setSampleError(null)
+                setSampleModalOpen(true)
+              }}
+              disabled={!activeConfig || !physicsValues || sampleRunning || recording}
+              title="Collect a matrix of parameter-sweep screenshots"
+              aria-label="Collect parameter samples"
+            >
+              ◫
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => {
                 const weights = gridCanvasRef.current?.randomizeWeights()
                 if (weights) setRandomizedWeights(weights)
               }}
@@ -942,6 +1016,19 @@ export function TrainingView() {
 
         <NetworkPanel config={previewConfig} physics={physicsValues} />
       </div>
+      {sampleModalOpen && physicsValues && (
+        <SampleSweepModal
+          current={physicsValues}
+          defaultSteps={activeConfig?.macroSteps ?? 1}
+          running={sampleRunning}
+          completed={sampleCompleted}
+          total={sampleTotal}
+          error={sampleError}
+          onClose={() => setSampleModalOpen(false)}
+          onRun={handleSampleSweep}
+          onCancel={() => sampleAbortRef.current?.abort()}
+        />
+      )}
     </div>
   )
 }

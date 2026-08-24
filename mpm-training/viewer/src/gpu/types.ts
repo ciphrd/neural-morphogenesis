@@ -42,6 +42,12 @@ export interface RunSettings {
   fieldN: number;
   morphologyBlurSigma?: number;
   morphologyDensityReference?: number;
+  /** Boundary-localized inward acceleration; 0 disables cohesion. */
+  tissueSurfaceTension?: number;
+  /** Maximum tissue-tension velocity delta per physics substep. */
+  tissueSurfaceForceCap?: number;
+  /** NN-controlled velocity diffusion performed on the MPM grid. */
+  gridWeldingStrength?: number;
   neuralUpdatesPerMacro?: number;
   communicationSpeed?: number;
   internalStateSpeed?: number;
@@ -74,10 +80,8 @@ export interface RunSettings {
   splitDisplacement: number;
   divisionCooldown: number;
   friction: number;
-  // Macro steps a freshly-split child takes to fade in to full mass —
-  // see core/agents.wgsl's own AgentPhysics.massRampMacroSteps field
-  // comment, and core/p2g.wgsl for the smoothstep shaping. 1 disables
-  // the ramp. Live-tunable via the viewer's own Growth panel.
+  // Legacy ABI/configuration field. Split mass is immediately conservative;
+  // the newborn's visual size instead follows growthDuration.
   massRampMacroSteps: number;
   // Kinematic growth (the multiplicative decomposition F = Fe*Fg) — see
   // core/g2p.wgsl's own Material struct for what each of these does, and
@@ -211,6 +215,9 @@ export interface PhysicsSettings {
   internalStateSpeed: number;
   interiorSupportStrength: number;
   divisionDirectionality: number;
+  tissueSurfaceTension: number;
+  tissueSurfaceForceCap: number;
+  gridWeldingStrength: number;
   growthMax: number;
   growthThreshold: number;
   growthCompressionInhibition: number;
@@ -269,6 +276,9 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     internalStateSpeed: Math.max(0, config.internalStateSpeed ?? 1.0),
     interiorSupportStrength: Math.max(0, Math.min(1, config.interiorSupportStrength ?? 0.0)),
     divisionDirectionality: Math.max(0, Math.min(1, config.divisionDirectionality ?? 1.0)),
+    tissueSurfaceTension: Math.max(0, config.tissueSurfaceTension ?? 0.0),
+    tissueSurfaceForceCap: Math.max(0, config.tissueSurfaceForceCap ?? 0.05),
+    gridWeldingStrength: Math.max(0, config.gridWeldingStrength ?? 0.0),
     growthMax: config.growthMax ?? 2.0,
     growthThreshold: config.growthThreshold ?? 0.0,
     growthCompressionInhibition: Math.max(0, Math.min(1, config.growthCompressionInhibition ?? 1.0)),

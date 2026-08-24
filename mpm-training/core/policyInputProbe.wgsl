@@ -22,7 +22,7 @@ const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__
 struct ParticleRest {
   growthF: vec4<f32>, jp: f32, cycleActive: f32,
   growthAngle: f32, growthAnisotropy: f32,
-  divisionBias: f32, growthFrameHeading: f32,
+  divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, weldExpression: f32,
 }
 struct ParticleMeta {
   rng: u32, cooldown: f32, heading: f32, angularVelocity: f32,

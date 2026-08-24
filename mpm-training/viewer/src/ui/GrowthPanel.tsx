@@ -15,12 +15,12 @@ interface GrowthPanelProps {
   onReset: () => void
 }
 
-type GrowthKey = Extract<
+export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthThreshold" | "growthCompressionInhibition" | "interiorSupportStrength" | "growthAnisotropy" | "divisionDirectionality" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  "growthDuration" | "growthThreshold" | "growthCompressionInhibition" | "interiorSupportStrength" | "growthAnisotropy" | "divisionDirectionality" | "tissueSurfaceTension" | "tissueSurfaceForceCap" | "gridWeldingStrength" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
-interface GrowthSliderSpec {
+export interface GrowthSliderSpec {
   key: GrowthKey
   label: string
   hint: string
@@ -35,7 +35,7 @@ interface GrowthSliderSpec {
 // real semantics (a division factor must exceed 1 and the compression
 // compression reference is an elastic-area ratio), none of which depend on whatever value the
 // run happened to be trained with.
-const SPECS: GrowthSliderSpec[] = [
+export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
     key: "neuralUpdatesPerMacro",
     label: "Neural updates / tick",
@@ -117,6 +117,33 @@ const SPECS: GrowthSliderSpec[] = [
     step: 0.01,
     format: (v) => `${v.toFixed(2)}×`,
   },
+  {
+    key: "gridWeldingStrength",
+    label: "Grid welding",
+    hint: "NN-gated viscosity on the MPM grid. Nearby fronts couple only after sharing grid nodes; 0 is an exact no-op. Chemical channel 0 controls local expression.",
+    min: 0,
+    max: 2000,
+    step: 10,
+    format: (v) => v.toFixed(0),
+  },
+  {
+    key: "tissueSurfaceTension",
+    label: "Tissue surface tension",
+    hint: "Pulls exposed cells inward along the blurred morphology gradient. Dense interior cells are gated out. 0 disables the mechanical prior.",
+    min: 0,
+    max: 1000,
+    step: 0.1,
+    format: (v) => v.toFixed(1),
+  },
+  {
+    key: "tissueSurfaceForceCap",
+    label: "Surface-force cap",
+    hint: "Maximum velocity change contributed by tissue tension in one MPM substep. Lower this if large tension values become unstable.",
+    min: 0,
+    max: 1,
+    step: 0.001,
+    format: (v) => v.toFixed(3),
+  },
 ]
 
 /** Collapsible "Growth" section (default closed), sibling to
@@ -131,7 +158,9 @@ const SPECS: GrowthSliderSpec[] = [
  * growthDuration/growthThreshold/growthCompressionInhibition control the
  * substrate-driven cell cycle and its optional continuous mechanical feedback;
  * interiorSupportStrength biases admission toward locally supported cells;
- * growthAnisotropy and divisionDirectionality cap directional authority.
+ * growthAnisotropy and divisionDirectionality cap directional authority;
+ * tissueSurfaceTension adds boundary cohesion with an independent safety cap;
+ * gridWeldingStrength adds NN-gated viscosity entirely on the MPM grid.
  * Same live-uniform-write path as every
  * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
  * any of these never disturbs the rollout in flight and never affects
@@ -170,7 +199,7 @@ export function GrowthPanel({
       </div>
       {open && (
         <div className="physics-panel-body">
-          {SPECS.map((spec) => (
+          {GROWTH_SLIDER_SPECS.map((spec) => (
             <label key={spec.key} className="slider-row" title={spec.hint}>
               <span>{spec.label}</span>
               <Slider

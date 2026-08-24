@@ -50,6 +50,7 @@ from simulation_settings import (
     GROWTH_COMPRESSION_INHIBITION,
     GROWTH_ANISOTROPY_AUTHORITY,
     GROWTH_THRESHOLD,
+    GRID_WELDING_STRENGTH,
     INITIAL_PARTICLE_COUNT,
     INTERNAL_STATE_SPEED,
     INTERIOR_SUPPORT_STRENGTH,
@@ -65,6 +66,8 @@ from simulation_settings import (
     MORPHOLOGY_BLUR_SIGMA,
     MORPHOLOGY_DENSITY_REFERENCE,
     SPLIT_DISPLACEMENT,
+    TISSUE_SURFACE_FORCE_CAP,
+    TISSUE_SURFACE_TENSION,
 )
 from targets import load_target
 from training_sim import TrainingRollout
@@ -84,6 +87,13 @@ def main() -> int:
     core.set_morphology(
         meta.get("morphology_blur_sigma", MORPHOLOGY_BLUR_SIGMA),
         meta.get("morphology_density_reference", MORPHOLOGY_DENSITY_REFERENCE),
+    )
+    core.set_tissue_tension(
+        meta.get("tissue_surface_tension", TISSUE_SURFACE_TENSION),
+        meta.get("tissue_surface_force_cap", TISSUE_SURFACE_FORCE_CAP),
+    )
+    core.set_grid_welding_strength(
+        meta.get("grid_welding_strength", GRID_WELDING_STRENGTH)
     )
     material_kwargs = {
         "growth_max": meta.get("growth_max", GROWTH_MAX),

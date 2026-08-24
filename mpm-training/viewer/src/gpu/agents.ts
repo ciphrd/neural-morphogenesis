@@ -312,9 +312,9 @@ export class Agents {
         { binding: 5, resource: { buffer: environment.depositScratch } },
         { binding: 6, resource: { buffer: this.physicsUniform } },
         { binding: 7, resource: { buffer: this.agentStateBuffer } },
+        { binding: 11, resource: { buffer: mpmCore.rest } },
       ],
     });
-
     this.stepModeUniforms = [0, 1].map((commit) => {
       const buffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(buffer, 0, new Uint32Array([commit]));

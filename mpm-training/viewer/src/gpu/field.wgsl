@@ -1,7 +1,7 @@
 // Field-visualize background — WGSL port of mls-mpm/src/gpu/field.wgsl's
 // own colorizeField compute pass + full-screen-quad present. Originally
 // scoped to just "density"/"speed" (the two modes computable from
-// ../core/'s own 3-channel gridAccum — see this file's own git history);
+// ../core/'s own gridAccum — see this file's own git history);
 // "deformation"/"pressure"/"shear" now read a SEPARATE diagnostics
 // buffer this project's own fieldDiagnostics.wgsl scatters (see that
 // file's own module docstring for why those three live outside
@@ -281,7 +281,7 @@ fn colorizeField(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var color = BG;
   if (mode == MODE_DENSITY) {
-    let mass = f32(atomicLoad(&gridAccum[idx * 3u + CH_MASS])) / SCALE;
+    let mass = f32(atomicLoad(&gridAccum[idx * 4u + CH_MASS])) / SCALE;
     color = scalarColor(mass / DENSITY_MAX);
   } else if (mode == MODE_SPEED) {
     let speed = length(gridVel[idx]);

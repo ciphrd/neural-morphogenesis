@@ -5,7 +5,7 @@ const SCALE: f32 = 4096.0;
 const CH_MOM_X: u32 = 0u;
 const CH_MOM_Y: u32 = 1u;
 const CH_MASS: u32 = 2u;
-const CHANNELS: u32 = 3u;
+const CHANNELS: u32 = 4u;
 @group(0) @binding(0) var<storage, read_write> gridAccum: array<atomic<i32>>;
 @group(0) @binding(1) var<storage, read_write> gridVel: array<vec2<f32>>;
 @group(0) @binding(2) var<uniform> gravity: f32;

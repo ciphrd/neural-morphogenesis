@@ -180,6 +180,7 @@ propagate any newly divided particle count to the simulation
 repeat MLS-MPM physics substeps:
     splat the particle density field
     apply bounded short-range repulsion
+    apply boundary-gated tissue surface tension
     particle-to-grid transfer, including elastic stress
     update grid velocities
     grid-to-particle transfer
@@ -362,6 +363,60 @@ at division. The daughters also inherit the plastic state, APIC affine field,
 heading, angular velocity, and centered momentum. Both receive a division
 cooldown and independent random-number state.
 
+Visually, the existing daughter remains full-sized while the newly created
+daughter emerges from zero size. Its visible area follows the same exponential
+curve and compression slowdown as stress-free volume growth, reaching full
+size after one `growth_duration`. The renderer applies the square root of that
+area fraction to particle radius. This appearance ramp does not alter physical
+mass, deformation, stress, or the conservative split described above. Seeded
+and manually placed particles start at full size. A cell's transient chemical
+substrate deposit is multiplied by the same area fraction, so its communication
+strength rises in step with its visible size. Its persistent internal chemical
+state is not scaled.
+
+
+## Blob-forming tissue surface tension
+
+The blurred morphology occupancy is also a mechanical field. During every
+physics substep, each particle samples its occupancy and central-difference
+gradient. The inward velocity increment is
+
+```text
+boundary_gate = 4 * occupancy * (1 - occupancy)
+inward = gradient / max(length(gradient), 1)
+delta_v = inward * tissue_surface_tension * boundary_gate * dt
+delta_v = clamp_magnitude(delta_v, tissue_surface_force_cap)
+```
+
+The gate vanishes in empty and dense regions and peaks at the tissue boundary.
+Soft gradient normalization prevents tiny symmetric-field errors from becoming
+full-strength forces. The Growth panel exposes both controls; tension `0`
+preserves the original mechanics, while the cap independently bounds one
+substep's impulse.
+
+## NN-gated grid welding
+
+The first contact-welding experiment stays entirely inside the MLS-MPM
+transfer. After each brain update, chemical channel 0 is mapped to a bounded
+per-cell welding expression. Neutral or negative channel values produce an
+exact zero through a smooth threshold, so the NN must actively express the
+behavior. This scalar occupies the previously unused alignment lane in the
+existing 48-byte particle rest record; no policy or particle-buffer ABI grows.
+
+During P2G, cells scatter mass-weighted welding expression alongside momentum
+and mass. After the ordinary grid velocity update, a separate grid pass
+exchanges momentum between occupied neighboring nodes. Each edge uses the
+minimum activation of its two endpoints and a harmonic mass, making its two
+momentum changes equal and opposite. G2P then samples this welded velocity.
+There are no particle pairs, neighbor lists, or persistent world bonds.
+
+The Growth panel's **Grid welding** slider controls the diffusion rate; `0` is
+an exact velocity copy. This stage can suppress relative motion, sliding, and
+elastic rebound while two fronts share MPM support. It is intentionally only
+the first stage: because viscosity has no tensile memory, permanent junction
+remodeling may still require the later plastic-relaxation experiment discussed
+for this feature.
+
 ## What determines the final morphology
 
 The visible organism is an emergent result of:
@@ -374,6 +429,8 @@ The visible organism is an emergent result of:
 - **plasticity:** which sufficiently large elastic deformations become
   permanent;
 - **repulsion:** bounded local separation of overlapping particles;
+- **surface tension:** boundary-localized cohesion that favors compact tissue;
+- **grid welding:** NN-gated continuum viscosity when tissue fronts contact;
 - **damping and friction:** removal of kinetic energy after growth events.
 
 There is no global rest-shape mesh. Each particle owns a local `Fg`, while

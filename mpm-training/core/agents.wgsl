@@ -363,6 +363,15 @@ struct ParticleRest {
   // Cached heading for the physics passes, which do not bind ParticleMeta.
   // Together with growthAngle it reconstructs the world growth axis.
   growthFrameHeading: f32,
+  // Rendering-only newborn area fraction. Seeded cells start at 1; mitosis
+  // leaves the parent full-sized and starts the new daughter at 0. g2p grows
+  // this with the same curve and compression response as rest area. It fills
+  // the struct's former alignment lane, so the 48-byte ABI is unchanged.
+  appearanceScale: f32,
+  // Scalar expression consumed only through the MPM grid. The policy controls
+  // it indirectly through persistent chemical channel 0; smoothstep gives
+  // neutral chemistry an exact off state while preserving checkpoint shape.
+  weldExpression: f32,
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(12) var morphologyTexture: texture_2d<f32>;
@@ -610,7 +619,11 @@ fn wrapDepositIndex(i: i32, size: u32) -> i32 {
 // stacking up), not just its spread — a real, visible behavior change
 // worth knowing while testing this slider, not merely a smoother-
 // looking version of the old, mass-conserving 4-corner deposit.
-fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32>) {
+fn depositGaussian(
+  envWrite: array<f32, ENV_WRITE_DIM>,
+  centerFieldPos: vec2<f32>,
+  contributionScale: f32,
+) {
   let baseI = i32(floor(centerFieldPos.x));
   let baseJ = i32(floor(centerFieldPos.y));
 
@@ -638,7 +651,7 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32
       let wx = u32(wrapDepositIndex(ti, FIELD_WIDTH));
       let wy = u32(wrapDepositIndex(tj, FIELD_HEIGHT));
       for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-        let scaled = envWrite[c] * weight * DEPOSIT_SCALE;
+        let scaled = envWrite[c] * weight * contributionScale * DEPOSIT_SCALE;
         atomicAdd(&depositScratch[fieldIndex(c, wy, wx)], i32(round(scaled)));
       }
     }
@@ -656,7 +669,11 @@ fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
     levels[c] = agentState.particleMeta[pi].chemicalState[c];
   }
-  depositGaussian(levels, fieldPos);
+  // A daughter should not communicate as a full-area cell while its visible
+  // area is still emerging. Scale only this transient projection: its owned
+  // chemical state remains intact and reaches full strength with its disc.
+  let contributionScale = clamp(particleRest[pi].appearanceScale, 0.0, 1.0);
+  depositGaussian(levels, fieldPos, contributionScale);
 }
 
 // The bounded subset of the network's own raw output
@@ -857,6 +874,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       1.0,
     );
   }
+  particleRest[pi].weldExpression = smoothstep(
+    0.5, 0.7, safeSigmoid(agentState.particleMeta[pi].chemicalState[0u])
+  );
 
   if (STATEFUL) {
     for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
@@ -1083,10 +1103,11 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       let parentGrowthAnisotropy = particleRest[pi].growthAnisotropy;
       let parentDivisionBias = particleRest[pi].divisionBias;
       let parentGrowthFrameHeading = particleRest[pi].growthFrameHeading;
+      let parentWeldExpression = particleRest[pi].weldExpression;
       let identity = vec4<f32>(1.0, 0.0, 0.0, 1.0);
       particleRest[pi] = ParticleRest(
         identity, parentJp, 0.0, parentGrowthAngle, parentGrowthAnisotropy,
-        parentDivisionBias, parentGrowthFrameHeading
+        parentDivisionBias, parentGrowthFrameHeading, 1.0, parentWeldExpression
       );
       particleRest[newIndex] = ParticleRest(
         identity,
@@ -1096,6 +1117,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
         parentGrowthAnisotropy,
         parentDivisionBias,
         parentGrowthFrameHeading,
+        0.0,
+        parentWeldExpression,
       );
     } else {
       particleRest[pi].cycleActive = 0.0;

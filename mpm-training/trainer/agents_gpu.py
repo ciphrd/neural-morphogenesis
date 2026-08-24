@@ -351,6 +351,7 @@ class AgentsGPU:
                 {"binding": 5, "resource": {"buffer": environment.deposit_scratch, "offset": 0, "size": environment.deposit_scratch.size}},
                 {"binding": 6, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
                 {"binding": 7, "resource": {"buffer": self._agent_state_buffer, "offset": 0, "size": self._agent_state_buffer.size}},
+                {"binding": 11, "resource": {"buffer": core.rest, "offset": 0, "size": core.rest.size}},
             ],
         )
 

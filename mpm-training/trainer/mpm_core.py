@@ -9,7 +9,7 @@ diagnostic channels — see ../core/README.md).
 
 Repulsion (clearDensity/splatDensity/densityToTexture/applyRepulsion,
 all from core/repulsion.wgsl) runs FIRST each substep, before
-clearGrid/p2g/gridUpdate/g2p — applyRepulsion nudges particleVel from
+clearGrid/p2g/gridUpdate/gridWelding/g2p — applyRepulsion nudges particleVel from
 THIS substep's own freshly-built density field, at each particle's own
 exact position, so the push reaches the grid through the very same
 substep's own P2G->gridUpdate->G2P transfer immediately rather than
@@ -41,6 +41,9 @@ from simulation_settings import (
     GROWTH_MAX,
     GROWTH_COMPRESSION_INHIBITION,
     GROWTH_THRESHOLD,
+    GRID_WELDING_DENSITY_REFERENCE,
+    GRID_WELDING_MAX_BLEND,
+    GRID_WELDING_STRENGTH,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
@@ -51,6 +54,8 @@ from simulation_settings import (
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
     SUBSTEPS_PER_DAMPING_FRAME,
+    TISSUE_SURFACE_FORCE_CAP,
+    TISSUE_SURFACE_TENSION,
 )
 
 CORE_DIR = Path(__file__).parent.parent / "core"
@@ -84,13 +89,14 @@ def growth_rate_for_duration(duration_macro_steps: float, substeps_per_macro: in
 NODE_COUNT = (GRID_N + 1) * (GRID_N + 1)
 WORKGROUP = 64
 FIELD_WORKGROUP = 16
-GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass — see core/clearGrid.wgsl
+GRID_ACCUM_CHANNELS = 4  # mom_x, mom_y, mass, weld_mass
 # growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-# growthFrameHeading, then two implicit alignment floats — 48-byte stride.
+# growthFrameHeading, appearanceScale, weldExpression — 48 bytes.
 REST_FIELDS = 12
 REST_GROWTH_F = slice(0, 4)
 REST_JP = 4
 REST_CYCLE_ACTIVE = 5
+REST_APPEARANCE_SCALE = 10
 
 
 def _pack_rest(jp: np.ndarray) -> np.ndarray:
@@ -108,6 +114,7 @@ def _pack_rest(jp: np.ndarray) -> np.ndarray:
     packed[:, 0] = 1.0
     packed[:, 3] = 1.0
     packed[:, REST_JP] = jp
+    packed[:, REST_APPEARANCE_SCALE] = 1.0
     return packed
 
 SNOW_YIELD_LOW = 1.0 - 2.5e-2
@@ -148,7 +155,7 @@ class MpmCore:
     """Owns every GPU resource for the core MLS-MPM simulation and the
     one step(substeps) entry point — runs `substeps` full advance()
     iterations (clearDensity -> splatDensity -> densityToTexture ->
-    applyRepulsion -> clearGrid -> p2g -> gridUpdate -> g2p) in a single
+    applyRepulsion -> applyTissueTension -> clearGrid -> p2g -> gridUpdate -> gridWelding -> g2p) in a single
     submitted command buffer, each pass its own begin/end compute pass
     (WebGPU gives no cross-dispatch visibility guarantee *within* one
     pass, only across pass boundaries — same reasoning mpm.ts's own class
@@ -188,6 +195,8 @@ class MpmCore:
             size=NODE_COUNT * GRID_ACCUM_CHANNELS * f32,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
         )
+        self.grid_vel_pre_weld = device.create_buffer(size=NODE_COUNT * 2 * f32, usage=wgpu.BufferUsage.STORAGE)
+        # Public/final grid velocity: grid welding writes this and G2P reads it.
         self.grid_vel = device.create_buffer(size=NODE_COUNT * 2 * f32, usage=wgpu.BufferUsage.STORAGE)
 
         # Purely a GPU-sync barrier for step()'s own chunking — see
@@ -255,9 +264,30 @@ class MpmCore:
             layout=self.grid_update_pipeline.get_bind_group_layout(0),
             entries=[
                 {"binding": 0, "resource": {"buffer": self.grid_accum, "offset": 0, "size": self.grid_accum.size}},
-                {"binding": 1, "resource": {"buffer": self.grid_vel, "offset": 0, "size": self.grid_vel.size}},
+                {"binding": 1, "resource": {"buffer": self.grid_vel_pre_weld, "offset": 0, "size": self.grid_vel_pre_weld.size}},
                 {"binding": 2, "resource": {"buffer": self.gravity_uniform, "offset": 0, "size": self.gravity_uniform.size}},
                 {"binding": 3, "resource": {"buffer": self.damping_uniform, "offset": 0, "size": self.damping_uniform.size}},
+            ],
+        )
+
+        self.grid_welding_params_uniform = device.create_buffer(
+            size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+        )
+        self.set_grid_welding_strength(GRID_WELDING_STRENGTH)
+        grid_welding_module = device.create_shader_module(
+            code=load_core_shader("gridWelding.wgsl", {"GRID_N": GRID_N, "DX": DX, "DT": DT})
+        )
+        self.grid_welding_pipeline = device.create_compute_pipeline(
+            layout=wgpu.AutoLayoutMode.auto,
+            compute={"module": grid_welding_module, "entry_point": "applyGridWelding"},
+        )
+        self.grid_welding_bind_group = device.create_bind_group(
+            layout=self.grid_welding_pipeline.get_bind_group_layout(0),
+            entries=[
+                {"binding": 0, "resource": {"buffer": self.grid_accum}},
+                {"binding": 1, "resource": {"buffer": self.grid_vel_pre_weld}},
+                {"binding": 2, "resource": {"buffer": self.grid_vel}},
+                {"binding": 3, "resource": {"buffer": self.grid_welding_params_uniform}},
             ],
         )
 
@@ -302,6 +332,10 @@ class MpmCore:
             size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
         )
         self.set_morphology(MORPHOLOGY_BLUR_SIGMA, MORPHOLOGY_DENSITY_REFERENCE)
+        self.tissue_tension_params_uniform = device.create_buffer(
+            size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+        )
+        self.set_tissue_tension(TISSUE_SURFACE_TENSION, TISSUE_SURFACE_FORCE_CAP)
 
         self.splat_params_uniform = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_splat_radius(SPLAT_RADIUS)
@@ -388,6 +422,24 @@ class MpmCore:
                 {"binding": 0, "resource": self.morphology_blur_texture.create_view()},
                 {"binding": 1, "resource": self.morphology_texture.create_view()},
                 {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": 16}},
+            ],
+        )
+
+        tissue_tension_module = device.create_shader_module(
+            code=load_core_shader("tissueTension.wgsl", {"FIELD_N": REPULSION_FIELD_N, "DT": DT})
+        )
+        self.tissue_tension_pipeline = device.create_compute_pipeline(
+            layout=wgpu.AutoLayoutMode.auto,
+            compute={"module": tissue_tension_module, "entry_point": "applyTissueTension"},
+        )
+        self.tissue_tension_bind_group = device.create_bind_group(
+            layout=self.tissue_tension_pipeline.get_bind_group_layout(0),
+            entries=[
+                {"binding": 0, "resource": {"buffer": self.positions, "offset": 0, "size": self.positions.size}},
+                {"binding": 1, "resource": {"buffer": self.velocities, "offset": 0, "size": self.velocities.size}},
+                {"binding": 2, "resource": {"buffer": self.active_count_uniform, "offset": 0, "size": self.active_count_uniform.size}},
+                {"binding": 3, "resource": self.morphology_texture.create_view()},
+                {"binding": 4, "resource": {"buffer": self.tissue_tension_params_uniform, "offset": 0, "size": 16}},
             ],
         )
 
@@ -582,6 +634,30 @@ class MpmCore:
             np.array([strength, max_delta, 0.0, 0.0], dtype=np.float32),
         )
 
+    def set_tissue_tension(self, strength: float, max_delta: float) -> None:
+        """Set boundary cohesion and its per-substep velocity-delta cap."""
+        self.device.queue.write_buffer(
+            self.tissue_tension_params_uniform,
+            0,
+            np.array([max(0.0, strength), max(0.0, max_delta), 0.0, 0.0], dtype=np.float32),
+        )
+
+    def set_grid_welding_strength(self, strength: float) -> None:
+        """Set NN-gated MPM-grid viscosity; zero copies grid velocity unchanged."""
+        self.device.queue.write_buffer(
+            self.grid_welding_params_uniform,
+            0,
+            np.array(
+                [
+                    max(0.0, float(strength)),
+                    GRID_WELDING_MAX_BLEND,
+                    GRID_WELDING_DENSITY_REFERENCE,
+                    0.0,
+                ],
+                dtype=np.float32,
+            ),
+        )
+
     # Max substeps encoded into a single command encoder before an
     # intermediate submit() — a real, load-bearing limit discovered by
     # testing, not a guess: wgpu-native's Metal backend apparently opens
@@ -589,7 +665,7 @@ class MpmCore:
     # than deferring everything to encoder.finish(), and those accumulate
     # as "outstanding" (not yet retired by the GPU) rather than being
     # freed at each submit() — a single step(3000) call (3000 substeps *
-    # 8 passes/substep = 24,000 passes in one encoder) hit "refusing to
+    # 10 passes/substep = 30,000 passes in one encoder) hit "refusing to
     # create new command buffer; 4097 outstanding command buffers exceeds
     # the limit of 4096" and killed the device; chunking into smaller
     # encoders alone was NOT enough to fix it either — the count is
@@ -599,7 +675,7 @@ class MpmCore:
     # that catch-up. Both confirmed live, not hypothetical. This is a
     # genuine difference from the browser sandbox's own Dawn/tint
     # backend, which doesn't hit this at the substep counts mls-mpm's own
-    # step() calls per rendered frame. 128 substeps/chunk (1024 passes)
+    # step() calls per rendered frame. 128 substeps/chunk (1152 passes)
     # is a comfortable margin under the observed ~4096 ceiling, chosen to
     # stay correct regardless of exactly where that limit sits on a given
     # machine/wgpu-native version, not tuned to the edge. (A batched-
@@ -612,8 +688,8 @@ class MpmCore:
     def step(self, substeps: int) -> None:
         """Runs `substeps` full advance() iterations — same pass ordering
         as mpm.ts's own step(): clearDensity -> splatDensity ->
-        densityToTexture -> applyRepulsion -> clearGrid -> p2g ->
-        gridUpdate -> g2p, each its own begin/end compute pass. Repulsion
+        densityToTexture -> applyRepulsion -> applyTissueTension -> clearGrid -> p2g ->
+        gridUpdate -> gridWelding -> g2p, each its own begin/end compute pass. Repulsion
         runs FIRST (not after g2p) so applyRepulsion's own velocity nudge
         — computed from THIS substep's own freshly-built density field,
         at each particle's own exact position — reaches the grid through
@@ -664,6 +740,12 @@ class MpmCore:
                 p.end()
 
                 p = encoder.begin_compute_pass()
+                p.set_pipeline(self.tissue_tension_pipeline)
+                p.set_bind_group(0, self.tissue_tension_bind_group)
+                p.dispatch_workgroups(particle_dispatch)
+                p.end()
+
+                p = encoder.begin_compute_pass()
                 p.set_pipeline(self.clear_grid_pipeline)
                 p.set_bind_group(0, self.clear_grid_bind_group)
                 p.dispatch_workgroups(self.grid_dispatch)
@@ -678,6 +760,12 @@ class MpmCore:
                 p = encoder.begin_compute_pass()
                 p.set_pipeline(self.grid_update_pipeline)
                 p.set_bind_group(0, self.grid_update_bind_group)
+                p.dispatch_workgroups(self.grid_dispatch)
+                p.end()
+
+                p = encoder.begin_compute_pass()
+                p.set_pipeline(self.grid_welding_pipeline)
+                p.set_bind_group(0, self.grid_welding_bind_group)
                 p.dispatch_workgroups(self.grid_dispatch)
                 p.end()
 
@@ -723,7 +811,8 @@ class MpmCore:
         """Returns active particles' raw tensor-growth rest-state rows.
 
         Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,growthAngle,
-        growthAnisotropy,divisionBias,growthFrameHeading,padding,padding]``.
+        growthAnisotropy,divisionBias,growthFrameHeading,appearanceScale,
+        weldExpression]``.
         This is diagnostic-only: COPY_SRC is present on the buffer, but the
         normal simulation path performs no readback. Keeping the raw layout
         visible here also makes scalar-vs-tensor growth snapshots explicit

@@ -110,6 +110,7 @@ from simulation_settings import (
     ELASTIC_STRAIN_INPUTS_ENABLED,
     FIELD_N,
     GROWTH_DURATION_MACRO_STEPS,
+    GRID_WELDING_STRENGTH,
     GROWTH_COMPRESSION_INHIBITION,
     GROWTH_ANISOTROPY_AUTHORITY,
     INITIAL_PARTICLE_COUNT,
@@ -127,6 +128,8 @@ from simulation_settings import (
     POLICY_ARCHITECTURE,
     REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
+    TISSUE_SURFACE_FORCE_CAP,
+    TISSUE_SURFACE_TENSION,
     SPLAT_RADIUS,
 )
 from policy_parameters import (
@@ -581,6 +584,9 @@ def main() -> None:
                         "growth_anisotropy_authority": GROWTH_ANISOTROPY_AUTHORITY,
                         "morphology_blur_sigma": MORPHOLOGY_BLUR_SIGMA,
                         "morphology_density_reference": MORPHOLOGY_DENSITY_REFERENCE,
+                        "tissue_surface_tension": TISSUE_SURFACE_TENSION,
+                        "tissue_surface_force_cap": TISSUE_SURFACE_FORCE_CAP,
+                        "grid_welding_strength": GRID_WELDING_STRENGTH,
                         "neural_updates_per_macro": NEURAL_UPDATES_PER_MACRO,
                         "communication_speed": COMMUNICATION_SPEED,
                         "internal_state_speed": INTERNAL_STATE_SPEED,

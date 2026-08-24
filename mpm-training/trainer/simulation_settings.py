@@ -54,6 +54,11 @@ INTERIOR_SUPPORT_STRENGTH = 0.0
 # Playback/training defaults grant the policy full directional authority.
 # The viewer exposes both as [0,1] live controls for morphology experiments.
 DIVISION_DIRECTIONALITY = 1.0
+# NN-controlled velocity diffusion performed entirely on the MPM grid.
+# Cells publish the signal through chemical channel 0; zero is an exact no-op.
+GRID_WELDING_STRENGTH = 0.0
+GRID_WELDING_MAX_BLEND = 0.1
+GRID_WELDING_DENSITY_REFERENCE = 1.0
 # Neural evaluations performed before each mechanical macro step. These are
 # numerical communication substeps; increasing this improves temporal
 # resolution without multiplying chemical/turning speed.
@@ -171,3 +176,9 @@ MORPHOLOGY_DENSITY_REFERENCE = 1.0
 # theoretical "moves exactly one grid cell in one substep" bound for
 # velocity) — comfortable margin below that bound, not tuned to the edge.
 REPULSION_MAX_DELTA = 40.0
+
+# Boundary-localized cohesion sampled from the blurred morphology occupancy.
+# Zero strength preserves historical mechanics; the cap uses the same safe
+# per-substep velocity scale as repulsion for live experimentation.
+TISSUE_SURFACE_TENSION = 0.0
+TISSUE_SURFACE_FORCE_CAP = 0.05

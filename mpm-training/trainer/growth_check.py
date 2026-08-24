@@ -10,7 +10,7 @@ import wgpu
 from agents_gpu import PARTICLE_META_BUFFER_OFFSET, AgentsGPU, weight_layout
 from device import pick_device
 from environment_gpu import EnvironmentGPU
-from mpm_core import DT, MpmCore
+from mpm_core import DT, MpmCore, ceil_div
 from policy_parameters import STATEFUL_ARCHITECTURE
 from training_sim import TrainingRollout
 
@@ -23,6 +23,7 @@ def _rest_state(
     growth_direction: np.ndarray | None = None,
     anisotropy: np.ndarray | None = None,
     division_bias: np.ndarray | None = None,
+    appearance_scale: np.ndarray | None = None,
 ) -> np.ndarray:
     count = len(jp)
     out = np.zeros((count, 12), dtype=np.float32)
@@ -41,6 +42,7 @@ def _rest_state(
         out[:, 7] = np.asarray(anisotropy, dtype=np.float32)
     if division_bias is not None:
         out[:, 8] = np.asarray(division_bias, dtype=np.float32)
+    out[:, 10] = 1.0 if appearance_scale is None else np.asarray(appearance_scale, dtype=np.float32)
     return out
 
 
@@ -48,7 +50,7 @@ def _probe(core: MpmCore, count: int) -> np.ndarray:
     """Returns [Je, g, cycleActive] without adding COPY_SRC to hot buffers."""
     shader = core.device.create_shader_module(
         code="""
-        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, }
+        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, weldExpression: f32, }
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> rest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
@@ -126,6 +128,92 @@ def check_morphology_occupancy(device: wgpu.GPUDevice) -> None:
     weaker = core.read_morphology()
     assert float(weaker.max()) < float(occupancy.max())
     print(f"[PASS] morphology_occupancy bounded=yes blurred=yes reference_response=yes peak={occupancy.max():.6f}")
+
+
+def check_tissue_surface_tension(device: wgpu.GPUDevice) -> None:
+    positions = np.array(
+        [[0.48, 0.5], [0.49, 0.5], [0.50, 0.5], [0.51, 0.5], [0.52, 0.5]],
+        dtype=np.float32,
+    )
+
+    def run(strength: float, cap: float) -> np.ndarray:
+        core = MpmCore(device)
+        count = len(positions)
+        core.load_scene(
+            positions,
+            np.zeros((count, 2), dtype=np.float32),
+            np.repeat(np.eye(2, dtype=np.float32).reshape(1, 4), count, axis=0),
+            np.zeros((count, 4), dtype=np.float32),
+            np.ones(count, dtype=np.float32),
+        )
+        core.set_morphology(0.02, 1.0)
+        core.set_tissue_tension(strength, cap)
+        encoder = device.create_command_encoder()
+        core.encode_morphology(encoder)
+        tension_pass = encoder.begin_compute_pass()
+        tension_pass.set_pipeline(core.tissue_tension_pipeline)
+        tension_pass.set_bind_group(0, core.tissue_tension_bind_group)
+        tension_pass.dispatch_workgroups(ceil_div(count, 64))
+        tension_pass.end()
+        device.queue.submit([encoder.finish()])
+        return core.read_velocities()
+
+    disabled = run(0.0, 0.005)
+    capped = run(50.0, 0.0005)
+    assert np.allclose(disabled, 0.0, atol=1e-8), disabled
+    assert capped[0, 0] > 0.0 and capped[-1, 0] < 0.0, capped
+    assert np.max(np.linalg.norm(capped, axis=1)) <= 0.000501, capped
+    assert np.linalg.norm(capped[2]) < 0.15 * np.linalg.norm(capped[0]), capped
+    assert np.max(np.abs(capped[[0, -1], 1])) < 1e-5, capped
+    print("[PASS] tissue surface tension pulls boundary inward, gates symmetric interior, and obeys force cap")
+
+
+def check_grid_native_welding(device: wgpu.GPUDevice) -> None:
+    """Grid viscosity couples colliding fronts only when cells express it."""
+    positions = np.array(
+        [[0.492, 0.498], [0.492, 0.502], [0.508, 0.498], [0.508, 0.502]],
+        dtype=np.float32,
+    )
+    initial_velocities = np.array(
+        [[0.2, 0.0], [0.2, 0.0], [-0.2, 0.0], [-0.2, 0.0]],
+        dtype=np.float32,
+    )
+
+    def run(strength: float, expression: float) -> np.ndarray:
+        core = MpmCore(device)
+        core.load_scene(
+            positions,
+            initial_velocities,
+            np.repeat(np.eye(2, dtype=np.float32).reshape(1, 4), 4, axis=0),
+            np.zeros((4, 4), dtype=np.float32),
+            np.ones(4, dtype=np.float32),
+        )
+        rest = _rest_state(np.ones(4), np.ones(4), np.zeros(4))
+        rest[:, 11] = expression
+        device.queue.write_buffer(core.rest, 0, rest)
+        core.set_gravity(0.0)
+        core.set_damping(0.0, 1)
+        core.set_material(0.0, 0.2, 0.0, 1.0, growth_rate=0.0)
+        core.set_repulsion_strength(0.0, 0.0)
+        core.set_tissue_tension(0.0, 0.0)
+        core.set_grid_welding_strength(strength)
+        core.step(1)
+        return core.read_velocities()
+
+    disabled = run(0.0, 1.0)
+    unexpressed = run(10000.0, 0.0)
+    welded = run(10000.0, 1.0)
+    np.testing.assert_allclose(unexpressed, disabled, atol=1e-7)
+    relative_disabled = float(disabled[:2, 0].mean() - disabled[2:, 0].mean())
+    relative_welded = float(welded[:2, 0].mean() - welded[2:, 0].mean())
+    assert relative_welded < relative_disabled * 0.95, (
+        relative_disabled, relative_welded, disabled, welded
+    )
+    np.testing.assert_allclose(welded.sum(axis=0), disabled.sum(axis=0), atol=2e-5)
+    print(
+        f"[PASS] grid welding is NN-gated, reduces front-relative velocity "
+        f"{relative_disabled:.6f}->{relative_welded:.6f}, and conserves momentum"
+    )
 
 
 def check_single_cell_rollout_seed(device: wgpu.GPUDevice) -> None:
@@ -216,7 +304,12 @@ def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
     once = field_sum(1)
     four = field_sum(4)
     assert np.isclose(once, four, atol=2e-6), (once, four)
-    print(f"[PASS] supersampled_communication cell_state1={once:.3f} cell_state4={four:.3f}")
+    weld_expression = float(core.read_rest_state()[0, 11])
+    assert weld_expression > 0.5, weld_expression
+    print(
+        f"[PASS] supersampled_communication cell_state1={once:.3f} "
+        f"cell_state4={four:.3f} grid_weld={weld_expression:.3f}"
+    )
 
 
 def check_growth_without_repulsion(device: wgpu.GPUDevice) -> None:
@@ -352,6 +445,29 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
         assert scratch[channel, max_y, max_x] > 0
     assert not np.any(scratch[4:]), "one output channel leaked into another"
 
+    # The transient substrate contribution follows newborn visible area while
+    # the cell-owned chemical state remains unchanged. Fixed-point rounding can
+    # differ by one unit between scaling before and after quantization.
+    device.queue.write_buffer(
+        core.rest,
+        0,
+        _rest_state(np.ones(1), np.ones(1), np.ones(1), appearance_scale=np.array([0.25])),
+    )
+    encoder = device.create_command_encoder()
+    environment.encode_clear(encoder)
+    agents.encode_splat_chemical_state(encoder)
+    compute = encoder.begin_compute_pass()
+    compute.set_pipeline(pipeline)
+    compute.set_bind_group(0, bind_group)
+    compute.dispatch_workgroups((count + 63) // 64)
+    compute.end()
+    device.queue.submit([encoder.finish()])
+    quarter_scratch = np.frombuffer(
+        device.queue.read_buffer(readback), np.int32
+    ).reshape(channels, height, width)
+    assert np.max(np.abs(quarter_scratch[:4] - np.rint(scratch[:4] * 0.25))) <= 1
+    assert not np.any(quarter_scratch[4:])
+
     meta = np.frombuffer(
         device.queue.read_buffer(
             agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
@@ -373,7 +489,7 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     device.queue.submit([encoder.finish()])
     cleared = np.frombuffer(device.queue.read_buffer(readback), np.int32)
     assert not np.any(cleared), "transient field retained a prior round's splat"
-    print("[PASS] cell chemical deltas persist locally; transient Gaussian field rebuild discards old splats")
+    print("[PASS] cell chemical state persists locally; transient splats scale with newborn area and discard old writes")
 
     meta_raw = device.queue.read_buffer(
         agents._agent_state_buffer,
@@ -516,6 +632,23 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
     assert np.isclose(state[:, 1].sum(), 2.0, atol=1e-5), state
     assert np.all(state[:, 2] == 0.0), state
     assert np.allclose(rest_state[0, 6:8], rest_state[1, 6:8], atol=1e-7), rest_state[:, 6:8]
+    assert np.isclose(rest_state[0, 10], 1.0)
+    assert np.isclose(rest_state[1, 10], 0.0)
+
+    # Visual disc area uses the same normalized exponential curve as rest
+    # growth: over one of eight macro steps it advances from 0 to 2^(1/8)-1.
+    core.set_material(
+        0.0, 0.2, 3.0, 0.0,
+        growth_duration_macro_steps=8.0,
+        substeps_per_macro=4,
+        growth_threshold=0.0,
+        growth_compression_inhibition=0.0,
+    )
+    core.step(4)
+    ramped_rest = core.read_rest_state()
+    assert np.isclose(ramped_rest[0, 10], 1.0)
+    assert np.isclose(ramped_rest[1, 10], 2.0 ** (1.0 / 8.0) - 1.0, atol=2e-6), ramped_rest[:, 10]
+    print("[PASS] conservative_split preserves physics and ramps newborn visual area with growth duration")
     offsets = (positions - np.array([0.5, 0.5], dtype=np.float32) + 0.5) % 1.0 - 0.5
     c_matrix = parent_c.reshape(2, 2)
     expected_velocity = parent_velocity + offsets @ c_matrix.T
@@ -523,6 +656,8 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
     assert np.allclose(velocities, expected_velocity, atol=1e-5), (velocities, expected_velocity)
     assert np.allclose(velocities.mean(axis=0), parent_velocity, atol=1e-6), velocities
     print("[PASS] conservative_split count=2 sum_g=2 Fe=identity center_and_apic_preserved")
+
+
 
 
 def check_desired_heading_derives_angular_acceleration(device: wgpu.GPUDevice) -> None:
@@ -847,7 +982,7 @@ def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
         np.ones(count, dtype=np.float32),
     )
     core.step(1)
-    accum = np.frombuffer(device.queue.read_buffer(core.grid_accum), np.int32).reshape(-1, 3)
+    accum = np.frombuffer(device.queue.read_buffer(core.grid_accum), np.int32).reshape(-1, 4)
     scale = 4096.0
     mass = float(accum[:, 2].astype(np.int64).sum() / scale)
     momentum_x = float(accum[:, 0].astype(np.int64).sum() / scale)
@@ -1179,6 +1314,8 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
 def main() -> None:
     device = pick_device()
     check_morphology_occupancy(device)
+    check_tissue_surface_tension(device)
+    check_grid_native_welding(device)
     check_single_cell_rollout_seed(device)
     check_supersampled_communication_rounds(device)
     check_growth_without_repulsion(device)

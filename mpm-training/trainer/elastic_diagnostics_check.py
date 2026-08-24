@@ -141,7 +141,7 @@ def _gpu_constitutive_probe(
         const MU0: f32 = {mu0};
         const LAMBDA0: f32 = {lambda0};
         const HARDENING: f32 = {HARDENING};
-        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, }}
+        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, weldExpression: f32, }}
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> particleRest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> output: array<vec4<f32>>;
@@ -319,7 +319,8 @@ def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
         entries=[
             {"binding": 0, "resource": {"buffer": device.create_buffer(size=8, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 1, "resource": {"buffer": device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM)}},
-            {"binding": 3, "resource": {"buffer": device.create_buffer(size=80, usage=wgpu.BufferUsage.STORAGE)}},
+            {"binding": 3, "resource": {"buffer": device.create_buffer(size=112, usage=wgpu.BufferUsage.STORAGE)}},
+            {"binding": 4, "resource": {"buffer": device.create_buffer(size=48, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 8, "resource": {"buffer": device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM)}},
         ],
     )

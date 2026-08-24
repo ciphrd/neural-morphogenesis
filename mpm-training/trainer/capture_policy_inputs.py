@@ -30,6 +30,7 @@ from simulation_settings import (
     DEPOSIT_SIGMA, DIVISION_COOLDOWN, DIVISION_DIRECTIONALITY, ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE, FIELD_N, FRICTION, GROWTH_DURATION_MACRO_STEPS,
     GROWTH_ANISOTROPY_AUTHORITY, GROWTH_COMPRESSION_INHIBITION, GROWTH_MAX, GROWTH_THRESHOLD, INITIAL_PARTICLE_COUNT,
+    GRID_WELDING_STRENGTH,
     INTERIOR_SUPPORT_STRENGTH,
     INTERNAL_STATE_SPEED,
     MATERIAL_E, MATERIAL_ELASTICITY, MATERIAL_HARDENING, MATERIAL_NU,
@@ -38,6 +39,7 @@ from simulation_settings import (
     MORPHOLOGY_GRADIENT_INPUT_SCALE,
     NEURAL_UPDATES_PER_MACRO, REPULSION_MAX_DELTA, REPULSION_STRENGTH,
     SPLAT_RADIUS, SPLIT_DISPLACEMENT,
+    TISSUE_SURFACE_FORCE_CAP, TISSUE_SURFACE_TENSION,
 )
 from training_sim import TrainingRollout
 from policy_parameters import (
@@ -327,6 +329,13 @@ def main() -> int:
     device = pick_device()
     core = MpmCore(device)
     core.set_morphology(meta.get("morphology_blur_sigma", MORPHOLOGY_BLUR_SIGMA), meta.get("morphology_density_reference", MORPHOLOGY_DENSITY_REFERENCE))
+    core.set_tissue_tension(
+        meta.get("tissue_surface_tension", TISSUE_SURFACE_TENSION),
+        meta.get("tissue_surface_force_cap", TISSUE_SURFACE_FORCE_CAP),
+    )
+    core.set_grid_welding_strength(
+        meta.get("grid_welding_strength", GRID_WELDING_STRENGTH)
+    )
     substeps = int(meta.get("substeps_per_macro", 1))
     core.set_material(
         meta.get("material_e", MATERIAL_E), meta.get("material_nu", MATERIAL_NU),

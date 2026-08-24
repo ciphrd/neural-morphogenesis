@@ -81,6 +81,7 @@ export class Renderer {
   // --- particles/target (render.wgsl) ---
   private readonly pointLayout: GPUBindGroupLayout;
   private readonly circlePipeline: GPURenderPipeline;
+  private readonly particleCirclePipeline: GPURenderPipeline;
 
   private readonly particleRadiusUniform: GPUBuffer;
   private readonly particleColorUniform: GPUBuffer;
@@ -228,6 +229,21 @@ export class Renderer {
 
     this.circlePipeline = device.createRenderPipeline({
       layout: pointLayoutPipeline,
+      vertex: { module: renderModule, entryPoint: "targetVertex" },
+      fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format, blend: alphaBlend() }] },
+      primitive: { topology: "triangle-list" },
+    });
+
+    const particlePointLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+      ],
+    });
+    this.particleCirclePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [particlePointLayout] }),
       vertex: { module: renderModule, entryPoint: "particleVertex" },
       fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
@@ -237,11 +253,12 @@ export class Renderer {
     this.particleColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     writeFloat32(device, this.particleColorUniform, 0, new Float32Array(PARTICLE_COLOR));
     this.circleParticleBindGroup = device.createBindGroup({
-      layout: this.pointLayout,
+      layout: particlePointLayout,
       entries: [
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: this.particleRadiusUniform } },
         { binding: 2, resource: { buffer: this.particleColorUniform } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
       ],
     });
     const activationLayout = device.createBindGroupLayout({
@@ -275,6 +292,7 @@ export class Renderer {
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
         { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       ],
     });
@@ -293,6 +311,7 @@ export class Renderer {
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: this.particleRadiusUniform } },
         { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
         { binding: 7, resource: { buffer: this.neuralColorStyleUniform } },
       ],
     });
@@ -302,6 +321,7 @@ export class Renderer {
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
         { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 8, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       ],
     });
@@ -323,6 +343,7 @@ export class Renderer {
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: this.particleRadiusUniform } },
         { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
         { binding: 8, resource: { buffer: this.internalStateStyleUniform } },
       ],
     });
@@ -896,7 +917,7 @@ export class Renderer {
 
     if (activeCount > 0) {
       if (this.particleRenderMode === "dots-white") {
-        pass.setPipeline(this.circlePipeline);
+        pass.setPipeline(this.particleCirclePipeline);
         pass.setBindGroup(0, this.circleParticleBindGroup);
         pass.draw(6, activeCount);
       } else if (this.particleRenderMode === "dots-neural-color") {
