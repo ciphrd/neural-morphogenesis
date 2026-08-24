@@ -37,7 +37,9 @@ from simulation_settings import (
     DAMPING_LOSS_FRACTION,
     DEFAULT_SUBSTEPS_PER_MACRO,
     GROWTH_DURATION_MACRO_STEPS,
+    GROWTH_ANISOTROPY_AUTHORITY,
     GROWTH_MAX,
+    GROWTH_COMPRESSION_INHIBITION,
     GROWTH_THRESHOLD,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
@@ -196,7 +198,7 @@ class MpmCore:
         self.gravity_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_gravity(0.0)  # not a "simulation setting" — gravity is CLI-configurable (evolve.py's --gravity)
 
-        # Material: nine floats plus uniform-struct padding = 48 bytes —
+        # Material: ten floats plus uniform-struct padding = 48 bytes —
         # must match p2g.wgsl's/g2p.wgsl's identical Material struct
         # declarations exactly. p2g reads the first five, g2p reads
         # yieldLow/yieldHigh plus the growth params; one shared
@@ -209,6 +211,7 @@ class MpmCore:
             MATERIAL_ELASTICITY,
             growth_max=GROWTH_MAX,
             growth_threshold=GROWTH_THRESHOLD,
+            growth_compression_inhibition=GROWTH_COMPRESSION_INHIBITION,
             growth_duration_macro_steps=GROWTH_DURATION_MACRO_STEPS,
             substeps_per_macro=DEFAULT_SUBSTEPS_PER_MACRO,
         )
@@ -523,7 +526,8 @@ class MpmCore:
         growth_rate: float | None = None,
         growth_max: float = GROWTH_MAX,
         growth_threshold: float = GROWTH_THRESHOLD,
-        growth_anisotropy: float = 1.0,
+        growth_anisotropy: float = GROWTH_ANISOTROPY_AUTHORITY,
+        growth_compression_inhibition: float = GROWTH_COMPRESSION_INHIBITION,
         growth_duration_macro_steps: float = GROWTH_DURATION_MACRO_STEPS,
         substeps_per_macro: int = DEFAULT_SUBSTEPS_PER_MACRO,
     ) -> None:
@@ -555,7 +559,7 @@ class MpmCore:
                     growth_max,
                     growth_threshold,
                     growth_anisotropy,
-                    0.0,
+                    growth_compression_inhibition,
                     0.0,
                     0.0,
                 ],

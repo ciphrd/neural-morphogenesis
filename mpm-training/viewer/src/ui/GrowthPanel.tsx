@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthThreshold" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  "growthDuration" | "growthThreshold" | "growthCompressionInhibition" | "interiorSupportStrength" | "growthAnisotropy" | "divisionDirectionality" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 interface GrowthSliderSpec {
@@ -81,6 +81,42 @@ const SPECS: GrowthSliderSpec[] = [
     step: 0.001,
     format: (v) => v.toFixed(3),
   },
+  {
+    key: "growthCompressionInhibition",
+    label: "Compression inhibition",
+    hint: "How strongly compression slows active growth. 1× preserves the original Je/reference response; 0 removes compression inhibition so interior cells grow at full rate.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => `${v.toFixed(2)}×`,
+  },
+  {
+    key: "interiorSupportStrength",
+    label: "Interior support",
+    hint: "Biases cycle admission toward locally dense morphology. 0× uses chemistry alone; 1× multiplies growth probability by local occupancy, suppressing exposed cells relative to interior cells.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => `${v.toFixed(2)}×`,
+  },
+  {
+    key: "growthAnisotropy",
+    label: "Growth anisotropy",
+    hint: "Caps policy-directed rest-growth elongation. 1× grants full policy authority; 0 makes mechanical growth isotropic.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => `${v.toFixed(2)}×`,
+  },
+  {
+    key: "divisionDirectionality",
+    label: "Division directionality",
+    hint: "Caps one-sided daughter placement. 1× grants full policy authority; 0 keeps every split center-preserving and symmetric.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => `${v.toFixed(2)}×`,
+  },
 ]
 
 /** Collapsible "Growth" section (default closed), sibling to
@@ -92,9 +128,10 @@ const SPECS: GrowthSliderSpec[] = [
  * Split into its own section rather than appended to PhysicsPanel's own
  * flat list because these controls behave as a group:
  * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
- * growthDuration/growthThreshold control the substrate-driven cell cycle and
- * its optional continuous mechanical feedback. Anisotropy is deliberately not
- * exposed here: the policy's per-particle sigmoid output owns it directly.
+ * growthDuration/growthThreshold/growthCompressionInhibition control the
+ * substrate-driven cell cycle and its optional continuous mechanical feedback;
+ * interiorSupportStrength biases admission toward locally supported cells;
+ * growthAnisotropy and divisionDirectionality cap directional authority.
  * Same live-uniform-write path as every
  * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
  * any of these never disturbs the rollout in flight and never affects

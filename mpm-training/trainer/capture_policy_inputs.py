@@ -27,9 +27,10 @@ from simulation_settings import (
     ANGULAR_DAMPING, CHEM_CHANNELS, CHIRALITY, COMMUNICATION_SPEED,
     CHEMICAL_GRADIENT_INPUT_SCALE, CHEMICAL_VALUE_INPUT_SCALE,
     DAMPING_LOSS_FRACTION, DECAY, DEPOSIT_DISTANCE, DEPOSIT_RATE,
-    DEPOSIT_SIGMA, DIVISION_COOLDOWN, ELASTIC_STRAIN_INPUTS_ENABLED,
+    DEPOSIT_SIGMA, DIVISION_COOLDOWN, DIVISION_DIRECTIONALITY, ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE, FIELD_N, FRICTION, GROWTH_DURATION_MACRO_STEPS,
-    GROWTH_MAX, GROWTH_THRESHOLD, INITIAL_PARTICLE_COUNT,
+    GROWTH_ANISOTROPY_AUTHORITY, GROWTH_COMPRESSION_INHIBITION, GROWTH_MAX, GROWTH_THRESHOLD, INITIAL_PARTICLE_COUNT,
+    INTERIOR_SUPPORT_STRENGTH,
     INTERNAL_STATE_SPEED,
     MATERIAL_E, MATERIAL_ELASTICITY, MATERIAL_HARDENING, MATERIAL_NU,
     MAX_ACCEL, MAX_ANGULAR_ACCEL, MAX_ANGULAR_VELOCITY, MAX_ENV_WRITE,
@@ -333,6 +334,12 @@ def main() -> int:
         elasticity=meta.get("material_elasticity", MATERIAL_ELASTICITY),
         growth_duration_macro_steps=meta.get("growth_duration_macro_steps", GROWTH_DURATION_MACRO_STEPS),
         growth_max=meta.get("growth_max", GROWTH_MAX), growth_threshold=meta.get("growth_threshold", GROWTH_THRESHOLD),
+        growth_compression_inhibition=meta.get(
+            "growth_compression_inhibition", GROWTH_COMPRESSION_INHIBITION
+        ),
+        growth_anisotropy=meta.get(
+            "growth_anisotropy_authority", GROWTH_ANISOTROPY_AUTHORITY
+        ),
         substeps_per_macro=substeps,
     )
     core.set_damping(meta.get("damping_loss_fraction", meta.get("damping", DAMPING_LOSS_FRACTION)), substeps)
@@ -355,6 +362,8 @@ def main() -> int:
         meta.get("elastic_strain_inputs_enabled", ELASTIC_STRAIN_INPUTS_ENABLED),
         policy_architecture=architecture,
         internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
+        interior_support_strength=meta.get("interior_support_strength", INTERIOR_SUPPORT_STRENGTH),
+        division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
     )
     def restart_rollout() -> TrainingRollout:
         return TrainingRollout(

@@ -463,6 +463,7 @@ export class MpmCore {
     growthMax: number,
     growthThreshold: number,
     growthAnisotropy: number,
+    growthCompressionInhibition: number,
     substepsPerMacro: number
   ): void {
     const [mu0, lambda0] = lameParams(e, nu);
@@ -480,7 +481,7 @@ export class MpmCore {
       new Float32Array([
         mu0, lambda0, hardening, yieldLow,
         yieldHigh, growthRate, growthMax, growthThreshold,
-        growthAnisotropy, 0, 0, 0,
+        growthAnisotropy, growthCompressionInhibition, 0, 0,
       ])
     );
   }

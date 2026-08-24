@@ -372,7 +372,16 @@ struct StepMode {
   // Host sets this to communicationSpeed / neuralUpdatesPerMacro.
   communicationDt: f32,
   stateUpdateSpeed: f32,
-  _padding: f32,
+  // Strength of morphology-occupancy support in cycle admission. 0 leaves
+  // chemical growth probability unchanged; 1 multiplies it by local bounded
+  // occupancy so embedded cells are favored over exposed cells.
+  interiorSupportStrength: f32,
+  // Global cap on the policy's polarized daughter placement. 0 restores
+  // center-preserving symmetric division; 1 grants full policy authority.
+  divisionDirectionality: f32,
+  _padding0: f32,
+  _padding1: f32,
+  _padding2: f32,
 }
 @group(0) @binding(13) var<uniform> stepMode: StepMode;
 
@@ -775,9 +784,10 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     inputVec[2u * CHANNELS + c] = normalizeChemicalGradient(-gx * sinH + gy * cosH);
   }
   let morphologyPos = fract(pos) * f32(MORPHOLOGY_FIELD_N);
+  let morphologyOccupancy = clamp(sampleMorphology(morphologyPos), 0.0, 1.0);
   let morphologyGx = 0.5 * (sampleMorphology(morphologyPos + vec2<f32>(1.0, 0.0)) - sampleMorphology(morphologyPos - vec2<f32>(1.0, 0.0)));
   let morphologyGy = 0.5 * (sampleMorphology(morphologyPos + vec2<f32>(0.0, 1.0)) - sampleMorphology(morphologyPos - vec2<f32>(0.0, 1.0)));
-  inputVec[3u * CHANNELS] = clamp(2.0 * sampleMorphology(morphologyPos) - 1.0, -1.0, 1.0);
+  inputVec[3u * CHANNELS] = 2.0 * morphologyOccupancy - 1.0;
   inputVec[3u * CHANNELS + 1u] = normalizeMorphologyGradient(morphologyGx * cosH + morphologyGy * sinH);
   inputVec[3u * CHANNELS + 2u] = normalizeMorphologyGradient(-morphologyGx * sinH + morphologyGy * cosH);
   let forward = vec2<f32>(cosH, sinH);
@@ -925,7 +935,12 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // replaced by two baseline daughters.
   // Lifecycle semantics remain in raw substrate units. Input normalization is
   // exclusively a neural-sensing transform and must not accelerate division.
-  let splitProb = clamp(rawGrowthSignal, 0.0, 1.0);
+  let interiorSupport = mix(
+    1.0,
+    morphologyOccupancy,
+    clamp(stepMode.interiorSupportStrength, 0.0, 1.0),
+  );
+  let splitProb = clamp(rawGrowthSignal, 0.0, 1.0) * interiorSupport;
   // Division cooldown — counted down every step regardless of whether
   // the division clock would otherwise cross (so it's a clean
   // macro-step countdown, independent of the stochastic threshold),
@@ -1006,7 +1021,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       let angleDraw = f32(angleState >> 8u) * (1.0 / 16777216.0);
       let spawnAngle = angleDraw * 2.0 * PI;
       var spawnDir = growthDirectionWorld;
-      let directionStrength = clamp(particleRest[pi].divisionBias, 0.0, 1.0);
+      let directionStrength = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
+        * clamp(stepMode.divisionDirectionality, 0.0, 1.0);
       let halfOffset = spawnDir * (0.5 * physics.splitDisplacement);
       // Smoothly interpolate from the old center-preserving split (s=0)
       // to a fully polarized split (s=1): the parent remains at its old

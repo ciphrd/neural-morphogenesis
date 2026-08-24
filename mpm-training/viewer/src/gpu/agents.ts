@@ -316,10 +316,12 @@ export class Agents {
     });
 
     this.stepModeUniforms = [0, 1].map((commit) => {
-      const buffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const buffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(buffer, 0, new Uint32Array([commit]));
       writeFloat32(device, buffer, 4, new Float32Array([1.0]));
       writeFloat32(device, buffer, 8, new Float32Array([1.0]));
+      writeFloat32(device, buffer, 12, new Float32Array([0.0]));
+      writeFloat32(device, buffer, 16, new Float32Array([1.0]));
       return buffer;
     }) as [GPUBuffer, GPUBuffer];
 
@@ -439,6 +441,23 @@ export class Agents {
     const value = new Float32Array([Math.max(0, speed)]);
     for (const buffer of this.stepModeUniforms) {
       writeFloat32(this.device, buffer, 8, value);
+    }
+  }
+
+  /** Occupancy support for cycle admission: 0 = chemistry only, 1 = fully
+   * multiplied by local morphology occupancy. */
+  setInteriorSupportStrength(strength: number): void {
+    const value = new Float32Array([Math.max(0, Math.min(1, strength))]);
+    for (const buffer of this.stepModeUniforms) {
+      writeFloat32(this.device, buffer, 12, value);
+    }
+  }
+
+  /** Caps polarized daughter placement: 0 = symmetric, 1 = full policy. */
+  setDivisionDirectionality(strength: number): void {
+    const value = new Float32Array([Math.max(0, Math.min(1, strength))]);
+    for (const buffer of this.stepModeUniforms) {
+      writeFloat32(this.device, buffer, 16, value);
     }
   }
 

@@ -164,7 +164,8 @@ repeat neural_updates_per_macro communication rounds:
     particle.color = sigmoid(red_output, green_output, blue_output)
 
     if this is the final communication round:
-      growth_probability = clamp(last_substrate_value, 0, 1)
+      interior_support = mix(1, morphology_occupancy, interior_support_strength)
+      growth_probability = clamp(last_substrate_value, 0, 1) * interior_support
       decrement division cooldown
 
       if growth is enabled
@@ -195,9 +196,12 @@ A daughter created during the agent pass participates in that macro step's
 physics. It begins running its own neural policy on the following macro step.
 
 Growth admission uses a persistent stochastic clock rather than discarding a
-new Bernoulli draw every macro step. For the bounded final-channel signal `p`:
+new Bernoulli draw every macro step. Before updating it, the bounded final-channel
+signal is optionally weighted by local morphology occupancy:
 
 ```text
+support = mix(1, morphology_occupancy, interior_support_strength)
+p = clamp(last_chemical, 0, 1) * support
 division_hazard += -log(1 - p)
 threshold = exponential_random(mean=1)  # drawn once per prospective cycle
 
@@ -209,7 +213,10 @@ if division_hazard >= threshold:
 
 Thus zero signal never advances the clock, weak or intermittent signal retains
 its accumulated contribution, and saturated signal preserves immediate
-admission. Parent and daughter clocks reset independently after division.
+admission when interior support is disabled. The viewer's Growth panel exposes
+`interior_support_strength`: `0` preserves chemistry-only admission, while `1`
+fully weights admission by local occupancy. Parent and daughter clocks reset
+independently after division.
 
 ## Morphoelastic deformation model
 
@@ -241,7 +248,8 @@ Je = determinant(Fe)   # elastic area multiplier
 For a particle in an active cell cycle:
 
 ```text
-compression_scale = clamp(Je / compression_reference, 0, 1)
+inhibited_scale = clamp(Je / compression_reference, 0, 1)
+compression_scale = mix(1, inhibited_scale, compression_inhibition)
 log_area_per_substep = ln(2) / (growth_duration * substeps_per_macro)
 
 new_g = min(
@@ -252,6 +260,10 @@ new_g = min(
 area_factor = new_g / g
 strength = neural_growth_anisotropy * global_anisotropy
 ```
+
+`compression_inhibition` is live-adjustable in the viewer's Growth panel:
+`1` preserves the original slowdown, while `0` lets compressed interior cells
+grow at the full configured rate.
 
 `growth_duration` is measured in macro/controller updates, not physics time.
 Consequently, changing `substeps_per_macro` for numerical stability does not
@@ -305,7 +317,7 @@ distance `d`:
 
 ```text
 q = world_growth_direction
-bias = division_bias
+bias = division_bias * division_directionality
 
 if length(q) is nonzero:
     n = normalize(q)
@@ -325,6 +337,11 @@ symmetric along that axis. With full bias, the parent remains at the old
 position and the daughter is placed one split distance along `+n`. Intermediate
 values smoothly interpolate between those cases. Positions wrap around the
 toroidal simulation domain.
+
+The viewer's Growth panel exposes `division_directionality` from 0 to 1 as a
+playback-only cap: 0 forces center-preserving symmetric splits even when the
+policy requests full bias, while 1 preserves the policy's complete placement
+authority.
 
 Division conserves mass and rest area:
 

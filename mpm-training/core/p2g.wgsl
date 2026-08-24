@@ -112,6 +112,7 @@ struct Material {
   growthMax: f32,
   growthThreshold: f32,
   growthAnisotropy: f32,
+  growthCompressionInhibition: f32,
 }
 @group(0) @binding(6) var<uniform> material: Material;
 

@@ -237,26 +237,34 @@ def check_growth_without_repulsion(device: wgpu.GPUDevice) -> None:
     print(f"[PASS] growth_without_repulsion separation={separation:.6f}")
 
 
-def check_compression_slows_without_stalling(device: wgpu.GPUDevice) -> None:
+def check_compression_inhibition_strength(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     core.set_gravity(0.0)
     core.set_repulsion_strength(0.0, 40.0)
     # E=0 isolates the feedback law: the deliberately compressed F cannot
     # elastically rebound above the reference before g2p evaluates Je.
-    core.set_material(0.0, 0.2, 3.0, 0.2, 50.0, 2.0, 0.85)
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        np.array([[np.sqrt(0.5), 0, 0, np.sqrt(0.5)]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
-    core.step(1)
-    growth = float(_probe(core, 1)[0, 1])
-    assert growth > 1.0, growth
-    assert growth < np.exp(50.0 * DT), growth
-    print(f"[PASS] compressed_growth_continues g={growth:.6f}")
+    def grow_once(inhibition: float) -> float:
+        core.set_material(
+            0.0, 0.2, 3.0, 0.2, 50.0, 2.0, 0.85,
+            growth_compression_inhibition=inhibition,
+        )
+        core.load_scene(
+            np.array([[0.5, 0.5]], dtype=np.float32),
+            np.zeros((1, 2), dtype=np.float32),
+            np.array([[np.sqrt(0.5), 0, 0, np.sqrt(0.5)]], dtype=np.float32),
+            np.zeros((1, 4), dtype=np.float32),
+            np.ones(1, dtype=np.float32),
+        )
+        device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
+        core.step(1)
+        return float(_probe(core, 1)[0, 1])
+
+    inhibited = grow_once(1.0)
+    uninhibited = grow_once(0.0)
+    expected_full_rate = np.exp(50.0 * DT)
+    assert 1.0 < inhibited < uninhibited, (inhibited, uninhibited)
+    assert np.isclose(uninhibited, expected_full_rate, atol=2e-6), (uninhibited, expected_full_rate)
+    print(f"[PASS] compression_inhibition strength1={inhibited:.6f} strength0={uninhibited:.6f}")
 
 
 def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
@@ -558,7 +566,12 @@ def check_desired_heading_derives_angular_acceleration(device: wgpu.GPUDevice) -
     print("[PASS] desired heading vector derives bounded angular acceleration and persistent turn state")
 
 
-def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float, polarity_bias: float = 20.0) -> np.ndarray:
+def _polarized_split_case(
+    device: wgpu.GPUDevice,
+    signed_bias: float,
+    polarity_bias: float = 20.0,
+    directionality: float = 1.0,
+) -> np.ndarray:
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
     agents = AgentsGPU(
@@ -581,6 +594,7 @@ def _polarized_split_case(device: wgpu.GPUDevice, signed_bias: float, polarity_b
     core.set_active_count(1)
     environment.reset()
     agents.set_active_count(1)
+    agents.set_division_directionality(directionality)
     agents.reset_heading(19)
     agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(8, 128)
@@ -609,13 +623,15 @@ def check_polarized_division_uses_signed_growth_direction(device: wgpu.GPUDevice
     positive = _polarized_split_case(device, 20.0)
     negative = _polarized_split_case(device, -20.0)
     unbiased = _polarized_split_case(device, 20.0, -20.0)
+    globally_symmetric = _polarized_split_case(device, 20.0, directionality=0.0)
     expected_positive = np.array([[0.5, 0.5], [0.51, 0.5]], dtype=np.float32)
     expected_negative = np.array([[0.5, 0.5], [0.49, 0.5]], dtype=np.float32)
     assert np.allclose(positive, expected_positive, atol=2e-6), positive
     assert np.allclose(negative, expected_negative, atol=2e-6), negative
     assert np.allclose(unbiased, [[0.495, 0.5], [0.505, 0.5]], atol=2e-6), unbiased
+    assert np.allclose(globally_symmetric, [[0.495, 0.5], [0.505, 0.5]], atol=2e-6), globally_symmetric
     assert positive[:, 0].mean() > 0.5 and negative[:, 0].mean() < 0.5
-    print("[PASS] signed growth direction places child and shifts division center toward +n")
+    print("[PASS] signed growth direction places child; global directionality can restore symmetric division")
 
 
 def check_anisotropic_tensor_split(device: wgpu.GPUDevice) -> None:
@@ -954,6 +970,69 @@ def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
     print("[PASS] cycle_start_gates final_round_only enabled=yes disabled=no static/runtime_cap=no capped_cycle_closed_g_preserved")
 
 
+def check_interior_support_admission(device: wgpu.GPUDevice) -> None:
+    """The live strength blends chemistry-only and occupancy-weighted hazard."""
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, 8, 256, 256, 1.0, 1.0)
+    agents = AgentsGPU(
+        device, core, environment, 8, 128,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, True, 2.0,
+        4, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
+    )
+    core.load_scene(
+        np.array([[0.5, 0.5]], dtype=np.float32),
+        np.zeros((1, 2), dtype=np.float32),
+        np.array([[1, 0, 0, 1]], dtype=np.float32),
+        np.zeros((1, 4), dtype=np.float32),
+        np.ones(1, dtype=np.float32),
+    )
+    agents.set_active_count(1)
+    agents.reset_heading(41)
+    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
+
+    def reset_clock() -> None:
+        raw = device.queue.read_buffer(
+            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
+            agents._particle_meta_dtype.itemsize,
+        )
+        meta = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1).copy()
+        meta["divisionHazard"][0] = 0.0
+        meta["divisionThreshold"][0] = 10.0
+        meta["chemicalState"][0, 7] = 0.2
+        device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
+
+    def hazard_once(strength: float) -> float:
+        reset_clock()
+        agents.set_interior_support_strength(strength)
+        encoder = device.create_command_encoder()
+        core.encode_morphology(encoder)
+        environment.encode_clear(encoder)
+        agents.encode_splat_chemical_state(encoder)
+        environment.encode_sense(encoder)
+        agents.encode_step(encoder, environment.parity, commit_lifecycle=True)
+        device.queue.submit([encoder.finish()])
+        raw = device.queue.read_buffer(
+            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
+            agents._particle_meta_dtype.itemsize,
+        )
+        return float(np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)["divisionHazard"][0])
+
+    unsupported = hazard_once(0.0)
+    supported = hazard_once(1.0)
+    morphology = core.read_morphology()
+    occupancy = float(morphology[morphology.shape[0] // 2, morphology.shape[1] // 2])
+    represented_signal = round(0.2 * 4096.0) / 4096.0
+    expected_unsupported = -np.log(1.0 - represented_signal)
+    expected_supported = -np.log(1.0 - represented_signal * occupancy)
+    assert np.isclose(unsupported, expected_unsupported, atol=2e-6), (unsupported, expected_unsupported)
+    assert np.isclose(supported, expected_supported, atol=2e-6), (supported, expected_supported, occupancy)
+    assert 0.0 < supported < unsupported, (supported, unsupported)
+    print(
+        f"[PASS] interior_support occupancy={occupancy:.6f} "
+        f"strength0_hazard={unsupported:.6f} strength1_hazard={supported:.6f}"
+    )
+
+
 def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
     """Weak growth drive accumulates, survives zero-signal gaps, then admits."""
     core = MpmCore(device)
@@ -1103,7 +1182,7 @@ def main() -> None:
     check_single_cell_rollout_seed(device)
     check_supersampled_communication_rounds(device)
     check_growth_without_repulsion(device)
-    check_compression_slows_without_stalling(device)
+    check_compression_inhibition_strength(device)
     check_transient_cell_chemical_splats(device)
     check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
@@ -1117,6 +1196,7 @@ def main() -> None:
     check_p2g_fixed_point_headroom(device)
     check_high_strain_elastic_stability(device)
     check_cycle_start_gates(device)
+    check_interior_support_admission(device)
     check_persistent_division_hazard(device)
     check_stateful_private_memory(device)
 

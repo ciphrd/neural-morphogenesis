@@ -72,6 +72,10 @@ struct Material {
   // Global multiplier on the policy's per-particle anisotropy. The trainer
   // uses 1; the viewer exposes [0,1] as a live blob-vs-tendril bias.
   growthAnisotropy: f32,
+  // Strength of compression-dependent growth inhibition. 1 preserves the
+  // original Je/reference slowdown; 0 gives every active cycle its full
+  // configured growth rate regardless of compression.
+  growthCompressionInhibition: f32,
 }
 @group(0) @binding(7) var<uniform> material: Material;
 
@@ -300,10 +304,15 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // growth rate, so a cycle cannot become permanently latched merely by
   // crossing a threshold. The max(..., 0) guard prevents an inverted F
   // from turning growth into exponential shrinkage.
-  var compressionScale = 1.0;
+  var inhibitedScale = 1.0;
   if (material.growthThreshold > 0.0) {
-    compressionScale = clamp(max(je, 0.0) / material.growthThreshold, 0.0, 1.0);
+    inhibitedScale = clamp(max(je, 0.0) / material.growthThreshold, 0.0, 1.0);
   }
+  let compressionScale = mix(
+    1.0,
+    inhibitedScale,
+    clamp(material.growthCompressionInhibition, 0.0, 1.0),
+  );
   if (rest0.cycleActive > 0.5 && material.growthRate > 0.0) {
     gNew = min(
       g0 * exp(material.growthRate * compressionScale * DT),

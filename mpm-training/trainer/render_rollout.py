@@ -42,13 +42,17 @@ from simulation_settings import (
     DEPOSIT_RATE,
     DEPOSIT_SIGMA,
     DIVISION_COOLDOWN,
+    DIVISION_DIRECTIONALITY,
     FIELD_N,
     FRICTION,
     GROWTH_MAX,
     GROWTH_DURATION_MACRO_STEPS,
+    GROWTH_COMPRESSION_INHIBITION,
+    GROWTH_ANISOTROPY_AUTHORITY,
     GROWTH_THRESHOLD,
     INITIAL_PARTICLE_COUNT,
     INTERNAL_STATE_SPEED,
+    INTERIOR_SUPPORT_STRENGTH,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
@@ -84,6 +88,12 @@ def main() -> int:
     material_kwargs = {
         "growth_max": meta.get("growth_max", GROWTH_MAX),
         "growth_threshold": meta.get("growth_threshold", GROWTH_THRESHOLD),
+        "growth_compression_inhibition": meta.get(
+            "growth_compression_inhibition", GROWTH_COMPRESSION_INHIBITION
+        ),
+        "growth_anisotropy": meta.get(
+            "growth_anisotropy_authority", GROWTH_ANISOTROPY_AUTHORITY
+        ),
     }
     if "growth_rate" in meta and "growth_duration_macro_steps" not in meta:
         # Preserve exact playback of checkpoints created before growth was
@@ -143,6 +153,8 @@ def main() -> int:
         meta.get("elastic_strain_inputs_enabled", False),
         policy_architecture=architecture,
         internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
+        interior_support_strength=meta.get("interior_support_strength", INTERIOR_SUPPORT_STRENGTH),
+        division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
     )
     agents.load_weights(weights)
 

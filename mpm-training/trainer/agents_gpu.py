@@ -25,11 +25,13 @@ from simulation_settings import (
     CHEMICAL_GRADIENT_INPUT_SCALE,
     CHEMICAL_VALUE_INPUT_SCALE,
     DIRECTION_CONFIDENCE_SCALE,
+    DIVISION_DIRECTIONALITY,
     ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE,
     GROWTH_ANISOTROPY_RESPONSE_RATE,
     GROWTH_DIRECTION_RESPONSE_RATE,
     INTERNAL_STATE_SPEED,
+    INTERIOR_SUPPORT_STRENGTH,
     MORPHOLOGY_GRADIENT_INPUT_SCALE,
 )
 
@@ -184,12 +186,16 @@ class AgentsGPU:
         elastic_strain_inputs_enabled: bool = ELASTIC_STRAIN_INPUTS_ENABLED,
         policy_architecture: str = STATELESS_ARCHITECTURE,
         internal_state_speed: float = INTERNAL_STATE_SPEED,
+        interior_support_strength: float = INTERIOR_SUPPORT_STRENGTH,
+        division_directionality: float = DIVISION_DIRECTIONALITY,
     ) -> None:
         self.device = device
         self.channels = channels
         self.hidden_dim = hidden_dim
         self.policy_architecture = normalize_architecture(policy_architecture)
         self._internal_state_speed = max(0.0, float(internal_state_speed))
+        self._interior_support_strength = max(0.0, min(1.0, float(interior_support_strength)))
+        self._division_directionality = max(0.0, min(1.0, float(division_directionality)))
         self._max_active_particles = max_active_particles
         # Public rollout geometry setting: TrainingRollout uses the same
         # displacement configured on this agent instance for its coordinated
@@ -349,8 +355,8 @@ class AgentsGPU:
         )
 
         self._step_mode_uniforms = [
-            device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
-            device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
+            device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
+            device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
         ]
         self.set_communication_timestep(1.0)
 
@@ -467,10 +473,12 @@ class AgentsGPU:
     def set_communication_timestep(self, dt: float) -> None:
         """Set the neural substep clock while retaining two lifecycle modes."""
         for commit, buffer in enumerate(self._step_mode_uniforms):
-            data = np.zeros(4, dtype=np.uint32)
+            data = np.zeros(8, dtype=np.uint32)
             data[0] = commit
             data.view(np.float32)[1] = max(0.0, float(dt))
             data.view(np.float32)[2] = self._internal_state_speed
+            data.view(np.float32)[3] = self._interior_support_strength
+            data.view(np.float32)[4] = self._division_directionality
             self.device.queue.write_buffer(buffer, 0, data)
 
     def set_internal_state_speed(self, speed: float) -> None:
@@ -479,6 +487,22 @@ class AgentsGPU:
         for buffer in self._step_mode_uniforms:
             self.device.queue.write_buffer(
                 buffer, 8, np.array([self._internal_state_speed], dtype=np.float32)
+            )
+
+    def set_interior_support_strength(self, strength: float) -> None:
+        """Blend occupancy support into cycle-start probability; 0 disables."""
+        self._interior_support_strength = max(0.0, min(1.0, float(strength)))
+        for buffer in self._step_mode_uniforms:
+            self.device.queue.write_buffer(
+                buffer, 12, np.array([self._interior_support_strength], dtype=np.float32)
+            )
+
+    def set_division_directionality(self, strength: float) -> None:
+        """Cap policy-polarized daughter placement; 0 is symmetric."""
+        self._division_directionality = max(0.0, min(1.0, float(strength)))
+        for buffer in self._step_mode_uniforms:
+            self.device.queue.write_buffer(
+                buffer, 16, np.array([self._division_directionality], dtype=np.float32)
             )
 
     def set_spawn_center(self, spawn_x: float, spawn_y: float) -> None:

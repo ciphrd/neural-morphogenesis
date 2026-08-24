@@ -45,6 +45,10 @@ export interface RunSettings {
   neuralUpdatesPerMacro?: number;
   communicationSpeed?: number;
   internalStateSpeed?: number;
+  /** Occupancy weighting for cycle admission: 0 off, 1 full support. */
+  interiorSupportStrength?: number;
+  /** Cap on policy-polarized daughter placement: 0 symmetric, 1 full. */
+  divisionDirectionality?: number;
   elasticStrainScale?: number;
   elasticStrainInputsEnabled?: boolean;
   hiddenDim: number;
@@ -85,6 +89,10 @@ export interface RunSettings {
   growthRate?: number;
   growthMax: number;
   growthThreshold: number;
+  /** 0 removes compression slowdown; 1 preserves the original response. */
+  growthCompressionInhibition?: number;
+  /** Cap on policy-directed rest-growth anisotropy. */
+  growthAnisotropy?: number;
   // Debug/testing toggle — off skips MpmCore's own physics substeps
   // entirely each macro step (gpu/simulation.ts's own step(), see that
   // method's own comment for exactly what stays running regardless:
@@ -201,11 +209,12 @@ export interface PhysicsSettings {
   neuralUpdatesPerMacro: number;
   communicationSpeed: number;
   internalStateSpeed: number;
+  interiorSupportStrength: number;
+  divisionDirectionality: number;
   growthMax: number;
   growthThreshold: number;
-  // Internal neutral multiplier retained for settings-object compatibility.
-  // Playback pins the material uniform to 1 so the neural per-particle
-  // anisotropy output remains the sole controller.
+  growthCompressionInhibition: number;
+  // Global cap on the neural per-particle anisotropy output.
   growthAnisotropy: number;
   splatRadius: number;
   repulsionStrength: number;
@@ -258,9 +267,12 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     neuralUpdatesPerMacro: Math.max(1, Math.round(config.neuralUpdatesPerMacro ?? 1)),
     communicationSpeed: Math.max(0, config.communicationSpeed ?? 1.0),
     internalStateSpeed: Math.max(0, config.internalStateSpeed ?? 1.0),
+    interiorSupportStrength: Math.max(0, Math.min(1, config.interiorSupportStrength ?? 0.0)),
+    divisionDirectionality: Math.max(0, Math.min(1, config.divisionDirectionality ?? 1.0)),
     growthMax: config.growthMax ?? 2.0,
     growthThreshold: config.growthThreshold ?? 0.0,
-    growthAnisotropy: 1.0,
+    growthCompressionInhibition: Math.max(0, Math.min(1, config.growthCompressionInhibition ?? 1.0)),
+    growthAnisotropy: Math.max(0, Math.min(1, config.growthAnisotropy ?? 1.0)),
     splatRadius: config.splatRadius,
     repulsionStrength: config.repulsionStrength,
     // Falls back to 40.0 (trainer/simulation_settings.py's own

@@ -368,10 +368,8 @@ export class GpuSimulation {
       physics.growthDuration,
       physics.growthMax ?? 2.0,
       physics.growthThreshold ?? 0.0,
-      // The NN's per-particle sigmoid output is the sole anisotropy
-      // controller in playback. MpmCore retains this lower-level global
-      // multiplier for diagnostics, fixed at the neutral value here.
-      1.0,
+      physics.growthAnisotropy ?? 1.0,
+      physics.growthCompressionInhibition ?? 1.0,
       this.config.substepsPerMacro
     );
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
@@ -390,6 +388,8 @@ export class GpuSimulation {
     );
     this.agents.setCommunicationTimestep(communicationDt);
     this.agents.setInternalStateSpeed(physics.internalStateSpeed ?? 1.0);
+    this.agents.setInteriorSupportStrength(physics.interiorSupportStrength ?? 0.0);
+    this.agents.setDivisionDirectionality(physics.divisionDirectionality ?? 1.0);
     this.agents.setPhysics({
       maxAccel: physics.maxAccel,
       maxStrafe: physics.maxStrafe,

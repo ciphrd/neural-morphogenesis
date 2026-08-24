@@ -48,6 +48,12 @@ DIRECTION_CONFIDENCE_SCALE: float = _CORE_CONSTANTS["DIRECTION_CONFIDENCE_SCALE"
 # launching its two controlled experiment subprocesses.
 POLICY_ARCHITECTURE: str = _CORE_CONSTANTS["POLICY_ARCHITECTURE"]
 INTERNAL_STATE_SPEED: float = _CORE_CONSTANTS["INTERNAL_STATE_SPEED"]
+# Strength of occupancy-weighted cycle admission. 0 preserves the historical
+# chemistry-only admission rule; the viewer exposes [0,1] for live testing.
+INTERIOR_SUPPORT_STRENGTH = 0.0
+# Playback/training defaults grant the policy full directional authority.
+# The viewer exposes both as [0,1] live controls for morphology experiments.
+DIVISION_DIRECTIONALITY = 1.0
 # Neural evaluations performed before each mechanical macro step. These are
 # numerical communication substeps; increasing this improves temporal
 # resolution without multiplying chemical/turning speed.
@@ -130,6 +136,11 @@ GROWTH_MAX = 2.0
 # elastic volume Je, growth is slowed by Je/reference; it is never
 # switched off at a threshold. 0 disables inhibition.
 GROWTH_THRESHOLD = 0.85
+# Blend between uninhibited growth (0) and the Je/reference slowdown above
+# (1). Kept at 1 for training compatibility; the viewer exposes it live for
+# testing whether interior growth produces fuller, less arborescent bodies.
+GROWTH_COMPRESSION_INHIBITION = 1.0
+GROWTH_ANISOTROPY_AUTHORITY = 1.0
 
 # CLI default shared with MpmCore's construction-time material initialization.
 # Individual runs still override it through --substeps-per-macro.
