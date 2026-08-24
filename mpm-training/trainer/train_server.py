@@ -136,6 +136,8 @@ def _setup() -> None:
 
     if not 1 <= args.elites <= args.population:
         raise SystemExit("--elites must be between 1 and --population")
+    if args.seeds_per_candidate < 1:
+        raise SystemExit("--seeds-per-candidate must be at least 1")
     if not 1 <= args.initial_particles <= args.particles:
         raise SystemExit("--initial-particles must be between 1 and --particles")
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
@@ -457,6 +459,7 @@ async def _training_loop_body() -> None:
         "repulsionStrength": REPULSION_STRENGTH,
         "repulsionMaxDelta": REPULSION_MAX_DELTA,
         "population": args.population,
+        "seedsPerCandidate": args.seeds_per_candidate,
         "elites": args.elites,
         "mutationSigma": args.mutation_sigma,
         "rasterResolution": args.raster_resolution,
@@ -470,6 +473,8 @@ async def _training_loop_body() -> None:
 
     best_fitness = float("inf")
     best_weights = population[0]
+    best_winner_seed = args.seed
+    best_evaluation_seeds: list[int] = []
 
     for generation in range(args.generations):
         # Off the event loop thread — run_generation blocks for the whole
@@ -477,12 +482,16 @@ async def _training_loop_body() -> None:
         # see parallel_workers.py's own module docstring), and doing that
         # directly on the event loop thread would stall websocket message
         # flushing for as long as it takes.
-        population, fitnesses, winner_seed = await asyncio.to_thread(run_generation, population, args, rng, pool)
+        population, fitnesses, winner_seed, evaluation_seeds = await asyncio.to_thread(
+            run_generation, population, args, rng, pool
+        )
 
         winner_weights = population[0]
         if fitnesses[0] < best_fitness:
             best_fitness = fitnesses[0]
             best_weights = winner_weights.copy()
+            best_winner_seed = winner_seed
+            best_evaluation_seeds = list(evaluation_seeds)
 
         # Also off the event loop thread — re-runs the winner's rollout
         # once more (see _save_generation_images()'s own docstring) plus
@@ -513,6 +522,10 @@ async def _training_loop_body() -> None:
             # the whole training invocation was started with — that one
             # lives in `settings` instead (runSeed), fixed for the run.
             "seed": winner_seed,
+            # Shared by every candidate in this generation. The batch rotates
+            # on the next generation; `seed` above is the winning candidate's
+            # worst member, used for the single-rollout browser replay.
+            "evaluationSeeds": evaluation_seeds,
             "weights": update_rule.export_weights(),
             # Everything else a replay needs (particles/channels/decay/
             # target/population/...) is fixed for the whole run and lives
@@ -563,13 +576,17 @@ async def _training_loop_body() -> None:
                         "channels": CHEM_CHANNELS,
                         "field_n": FIELD_N,
                         "population": args.population,
+                        "seeds_per_candidate": args.seeds_per_candidate,
+                        # These identify the evaluation that selected
+                        # best_weights; the current generation may be newer.
+                        "evaluation_seeds": best_evaluation_seeds,
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
                         "policy_architecture": args.policy_architecture,
                         "hidden_dim": policy_hidden,
                         "mutation_scales": mutation_scales(args.policy_architecture),
                         "seed": args.seed,
-                        "winner_seed": winner_seed,
+                        "winner_seed": best_winner_seed,
                         # simulation_settings.py's own values this run
                         # actually simulated under — see evolve.py's own
                         # checkpoint metadata for why these ride along

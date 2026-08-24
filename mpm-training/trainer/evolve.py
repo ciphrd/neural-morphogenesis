@@ -325,8 +325,18 @@ def run_generation(
     args: argparse.Namespace,
     rng: np.random.Generator,
     pool: ProcessPoolExecutor,
-) -> tuple[list[np.ndarray], list[float], int]:
-    """Evaluates every candidate — one rollout each, fanned out across
+) -> tuple[list[np.ndarray], list[float], int, list[int]]:
+    """Evaluates every candidate on the same rotating seed batch.
+
+    A fresh batch is drawn from the run RNG once per generation, then every
+    candidate is evaluated on every seed in that batch. Candidate fitness is
+    the arithmetic mean across its rollouts. Sharing seeds within a generation
+    removes seed luck from pairwise selection; rotating the batch between
+    generations prevents elites from specializing to one fixed starting
+    trajectory. ``--seeds-per-candidate=1`` preserves the old rollout cost
+    while still making that generation's single seed common to all candidates.
+
+    Rollouts are fanned out across
     `pool`'s worker processes (see parallel_workers.py's own module
     docstring for why: a single process evaluating candidates
     sequentially, or even several MpmCore instances batched within one
@@ -334,11 +344,12 @@ def run_generation(
     own module docstring) — then sorts best-first and refills back up to
     `args.population` via elitism + Gaussian mutation of a randomly-
     chosen elite — plain (mu, lambda) ES, no memetic refinement. Returns
-    (next_population, fitnesses, winner_seed) — `fitnesses` are for the
+    (next_population, fitnesses, winner_seed, evaluation_seeds) — `fitnesses` are for the
     population just evaluated, sorted ascending (lower raster distance is
     better — see raster.py); `next_population[0]` is this generation's
-    winning weights, carried over unmutated; `winner_seed` is the seed
-    that produced `fitnesses[0]` — needed by callers (train_server.py)
+    winning weights, carried over unmutated; `winner_seed` is the winning
+    candidate's worst-scoring seed from the shared batch — needed by callers
+    (train_server.py)
     that want to reproduce this generation's *actual* winning rollout,
     not just its weights, for a debug render (via rollout(), a single,
     non-pooled replay — see that function's own docstring).
@@ -347,13 +358,28 @@ def run_generation(
     globals once, at pool creation (parallel_workers.build_pool()'s own
     initializer), since it never changes generation to generation and
     re-sending it with every task would be pure waste."""
-    seeds = rng.integers(0, 2**31 - 1, size=len(population))
-    fitnesses = list(pool.map(worker_rollout, population, (int(s) for s in seeds)))
+    seeds_per_candidate = max(1, int(getattr(args, "seeds_per_candidate", 1)))
+    evaluation_seeds = [
+        int(seed) for seed in rng.integers(0, 2**31 - 1, size=seeds_per_candidate)
+    ]
+    task_weights = [weights for weights in population for _ in evaluation_seeds]
+    task_seeds = evaluation_seeds * len(population)
+    rollout_fitnesses = np.asarray(
+        list(pool.map(worker_rollout, task_weights, task_seeds)), dtype=np.float64
+    ).reshape(len(population), seeds_per_candidate)
+    fitnesses = np.mean(rollout_fitnesses, axis=1)
+    # Replaying the hardest seed is more informative than choosing an
+    # arbitrary or lucky member of the batch. np.argmax is stable and picks
+    # the first seed when several scores tie.
+    representative_seeds = [
+        evaluation_seeds[int(np.argmax(candidate_scores))]
+        for candidate_scores in rollout_fitnesses
+    ]
 
-    order = np.argsort(fitnesses)
+    order = np.argsort(fitnesses, kind="stable")
     population = [population[i] for i in order]
-    fitnesses = [fitnesses[i] for i in order]
-    seeds = [int(seeds[i]) for i in order]
+    fitnesses = [float(fitnesses[i]) for i in order]
+    representative_seeds = [representative_seeds[i] for i in order]
 
     elites = population[: args.elites]
     next_population = list(elites)
@@ -361,7 +387,7 @@ def run_generation(
         parent = elites[rng.integers(len(elites))]
         next_population.append(mutate(parent, args.mutation_sigma, rng, args.policy_architecture))
 
-    return next_population, fitnesses, seeds[0]
+    return next_population, fitnesses, representative_seeds[0], evaluation_seeds
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -384,6 +410,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--target", default="circle", choices=available_targets(), help="target shape name (a .json file in ./targets/)"
     )
     parser.add_argument("--population", type=int, default=16, help="number of candidate weight-sets per generation")
+    parser.add_argument(
+        "--seeds-per-candidate",
+        type=int,
+        default=1,
+        help=(
+            "shared rollout seeds used to evaluate every candidate each generation; "
+            "the batch rotates between generations and candidate fitness is its mean "
+            "across the batch (default: 1, preserving the previous rollout cost)"
+        ),
+    )
     parser.add_argument("--elites", type=int, default=3, help="top performers carried into the next generation unmutated")
     parser.add_argument("--generations", type=int, default=50)
     parser.add_argument(
@@ -464,6 +500,8 @@ def main() -> None:
 
     if not 1 <= args.elites <= args.population:
         raise SystemExit("--elites must be between 1 and --population")
+    if args.seeds_per_candidate < 1:
+        raise SystemExit("--seeds-per-candidate must be at least 1")
     if not 1 <= args.initial_particles <= args.particles:
         raise SystemExit("--initial-particles must be between 1 and --particles")
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
@@ -503,13 +541,15 @@ def main() -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_fitness = float("inf")
     best_weights = population[0]
+    best_evaluation_seeds: list[int] = []
 
     for generation in range(args.generations):
-        population, fitnesses, _ = run_generation(population, args, rng, pool)
+        population, fitnesses, _, evaluation_seeds = run_generation(population, args, rng, pool)
 
         if fitnesses[0] < best_fitness:
             best_fitness = fitnesses[0]
             best_weights = population[0].copy()
+            best_evaluation_seeds = list(evaluation_seeds)
 
         finite = [f for f in fitnesses if np.isfinite(f)]
         print(
@@ -547,6 +587,10 @@ def main() -> None:
                         "channels": CHEM_CHANNELS,
                         "field_n": FIELD_N,
                         "population": args.population,
+                        "seeds_per_candidate": args.seeds_per_candidate,
+                        # These belong to best_weights, which may come from an
+                        # earlier generation than the checkpoint write.
+                        "evaluation_seeds": best_evaluation_seeds,
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
                         "policy_architecture": args.policy_architecture,

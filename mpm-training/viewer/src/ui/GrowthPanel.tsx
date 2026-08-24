@@ -48,7 +48,7 @@ const SPECS: GrowthSliderSpec[] = [
   {
     key: "communicationSpeed",
     label: "Communication speed",
-    hint: "Chemical diffusion/deposition and orientation time per mechanical tick. Neural updates control resolution; this controls elapsed communication time.",
+    hint: "Cell-chemical updates and orientation time per mechanical tick. Neural updates control resolution; this controls elapsed communication time.",
     min: 0,
     max: 4,
     step: 0.05,

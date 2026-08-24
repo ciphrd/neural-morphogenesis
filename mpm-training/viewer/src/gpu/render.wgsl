@@ -142,7 +142,7 @@ struct ParticleMeta {
   divisionHazard: f32,
   divisionThreshold: f32,
   privateState: array<f32, 8>,
-  _padding: vec2<f32>,
+  chemicalState: array<f32, 8>,
 }
 @group(0) @binding(3) var<storage, read> particleMeta: array<ParticleMeta>;
 // x: alpha, y: saturation amplification, z: contrast around sigmoid neutral.

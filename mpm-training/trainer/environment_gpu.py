@@ -41,8 +41,9 @@ class EnvironmentGPU:
         self.channels = channels
         self.width = width
         self.height = height
-        self.base_decay = float(decay)
-        self.base_deposit_rate = float(deposit_rate)
+        # Retained in the constructor for checkpoint/config compatibility;
+        # transient fields have neither environmental decay nor deposit rate.
+        _ = decay, deposit_rate
 
         total = width * height * channels
         f32 = 4
@@ -53,8 +54,6 @@ class EnvironmentGPU:
         ]
         self.gradient = device.create_buffer(size=total * 2 * f32, usage=wgpu.BufferUsage.STORAGE)
         self.deposit_scratch = device.create_buffer(size=total * f32, usage=wgpu.BufferUsage.STORAGE)
-        self._physics_uniform = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
-        self.set_physics(decay, deposit_rate)
 
         module = device.create_shader_module(code=load_core_shader("environment.wgsl", {"CHANNELS": channels, "WIDTH": width, "HEIGHT": height}))
 
@@ -65,15 +64,19 @@ class EnvironmentGPU:
             layout=self._clear_scratch_pipeline.get_bind_group_layout(0),
             entries=[{"binding": 2, "resource": {"buffer": self.deposit_scratch, "offset": 0, "size": self.deposit_scratch.size}}],
         )
+        self._materialize_splat_pipeline = device.create_compute_pipeline(
+            layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "materializeSplat"}
+        )
+        self._materialize_splat_bind_group = device.create_bind_group(
+            layout=self._materialize_splat_pipeline.get_bind_group_layout(0),
+            entries=[
+                {"binding": 0, "resource": {"buffer": self.buffers[0], "offset": 0, "size": self.buffers[0].size}},
+                {"binding": 2, "resource": {"buffer": self.deposit_scratch, "offset": 0, "size": self.deposit_scratch.size}},
+            ],
+        )
 
         self._compute_gradient_pipeline = device.create_compute_pipeline(
             layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "computeGradient"}
-        )
-        self._merge_deposit_pipeline = device.create_compute_pipeline(
-            layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "mergeDeposit"}
-        )
-        self._diffuse_decay_pipeline = device.create_compute_pipeline(
-            layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "diffuseDecay"}
         )
 
         self._compute_gradient_bind_groups = [
@@ -82,28 +85,6 @@ class EnvironmentGPU:
                 entries=[
                     {"binding": 0, "resource": {"buffer": self.buffers[p], "offset": 0, "size": self.buffers[p].size}},
                     {"binding": 1, "resource": {"buffer": self.gradient, "offset": 0, "size": self.gradient.size}},
-                ],
-            )
-            for p in (0, 1)
-        ]
-        self._merge_deposit_bind_groups = [
-            device.create_bind_group(
-                layout=self._merge_deposit_pipeline.get_bind_group_layout(0),
-                entries=[
-                    {"binding": 0, "resource": {"buffer": self.buffers[p], "offset": 0, "size": self.buffers[p].size}},
-                    {"binding": 2, "resource": {"buffer": self.deposit_scratch, "offset": 0, "size": self.deposit_scratch.size}},
-                    {"binding": 4, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
-                ],
-            )
-            for p in (0, 1)
-        ]
-        self._diffuse_decay_bind_groups = [
-            device.create_bind_group(
-                layout=self._diffuse_decay_pipeline.get_bind_group_layout(0),
-                entries=[
-                    {"binding": 0, "resource": {"buffer": self.buffers[p], "offset": 0, "size": self.buffers[p].size}},
-                    {"binding": 3, "resource": {"buffer": self.buffers[1 - p], "offset": 0, "size": self.buffers[1 - p].size}},
-                    {"binding": 4, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
                 ],
             )
             for p in (0, 1)
@@ -118,25 +99,9 @@ class EnvironmentGPU:
     def parity(self) -> int:
         return self._parity
 
-    def set_physics(self, decay: float, deposit_rate: float, diffusion_step: float = 1.0) -> None:
-        """Writes the timestep-scaled EnvPhysics fields together — safe
-        to call any time, a plain buffer write, no pipeline recreation."""
-        self.device.queue.write_buffer(
-            self._physics_uniform,
-            0,
-            np.array([decay, deposit_rate, diffusion_step, 0.0], dtype=np.float32),
-        )
-
     def set_communication_timestep(self, rounds: int, speed: float) -> float:
-        """Scale one macro-step's field dynamics across communication rounds.
-
-        Returns the per-round dt so the agent heading integrator can use the
-        exact same clock. At rounds=1, speed=1 this is the legacy field update.
-        """
-        dt = max(0.0, float(speed)) / max(1, int(rounds))
-        decay = max(0.0, min(1.0, self.base_decay)) ** dt
-        self.set_physics(decay, self.base_deposit_rate * dt, min(dt, 1.0))
-        return dt
+        """Return the per-round brain/cell-state integration timestep."""
+        return max(0.0, float(speed)) / max(1, int(rounds))
 
     def reset(self) -> None:
         """Zeroes both grid buffers and resets parity to 0 — call at the
@@ -150,59 +115,24 @@ class EnvironmentGPU:
         self.device.queue.write_buffer(self.buffers[1], 0, zeros)
         self._parity = 0
 
-    def encode_sense(self, encoder: wgpu.GPUCommandEncoder) -> None:
-        """Sense: clearScratch + computeGradient over the current grid.
-        Call once per macro step, before the NN forward pass reads it.
-        Encodes into `encoder`, does not submit."""
+    def encode_clear(self, encoder: wgpu.GPUCommandEncoder) -> None:
+        """Remove every splat from the previous communication round."""
         p = encoder.begin_compute_pass()
         p.set_pipeline(self._clear_scratch_pipeline)
         p.set_bind_group(0, self._clear_scratch_bind_group)
         p.dispatch_workgroups(self._clear_dispatch)
         p.end()
 
+    def encode_sense(self, encoder: wgpu.GPUCommandEncoder) -> None:
+        """Materialize current cell splats and compute their shared gradient."""
         p = encoder.begin_compute_pass()
-        p.set_pipeline(self._compute_gradient_pipeline)
-        p.set_bind_group(0, self._compute_gradient_bind_groups[self._parity])
-        p.dispatch_workgroups(*self._grid_dispatch)
-        p.end()
-
-    def encode_merge_and_decay(self, encoder: wgpu.GPUCommandEncoder) -> None:
-        """Diffuse+decay the CURRENT grid (as left by the previous macro
-        step, before this step's own deposit touches anything) into the
-        other buffer, then merge the NN forward pass's fresh deposit
-        directly on top of that already-decayed result — deliberately
-        decay-THEN-deposit, not deposit-then-decay (this used to run in
-        the opposite order, decaying a step's own brand-new deposit
-        before it was ever sensed by anyone, so a deposit's own value
-        never actually reached its own full depositRate*value magnitude
-        at any sensed step — see this method's own git history/PR
-        discussion for the exact math). Flips parity at the end, same as
-        before. Call once per macro step, after the NN forward pass has
-        written into deposit_scratch. Encodes into `encoder`, does not
-        submit.
-
-        Both passes' own WGSL bodies (core/environment.wgsl's own
-        mergeDeposit()/diffuseDecay()) are UNCHANGED — mergeDeposit's own
-        binding 0 doesn't know or care which physical buffer it's bound
-        to, it just adds scratch onto whatever's there. The entire
-        reordering lives here: diffuseDecay dispatches FIRST now (reading
-        buffers[self._parity], the pre-deposit "current" grid, writing
-        the decayed+blurred result into buffers[1-self._parity]), then
-        mergeDeposit dispatches SECOND, using
-        self._merge_deposit_bind_groups[1-self._parity] — NOT
-        self._parity — so its own binding 0 targets that same
-        just-decayed buffer (what diffuseDecay just wrote), adding this
-        step's own deposit on top of it, undecayed."""
-        p = encoder.begin_compute_pass()
-        p.set_pipeline(self._diffuse_decay_pipeline)
-        p.set_bind_group(0, self._diffuse_decay_bind_groups[self._parity])
-        p.dispatch_workgroups(*self._grid_dispatch)
-        p.end()
-
-        p = encoder.begin_compute_pass()
-        p.set_pipeline(self._merge_deposit_pipeline)
-        p.set_bind_group(0, self._merge_deposit_bind_groups[1 - self._parity])
+        p.set_pipeline(self._materialize_splat_pipeline)
+        p.set_bind_group(0, self._materialize_splat_bind_group)
         p.dispatch_workgroups(self._clear_dispatch)
         p.end()
 
-        self._parity = 1 - self._parity
+        p = encoder.begin_compute_pass()
+        p.set_pipeline(self._compute_gradient_pipeline)
+        p.set_bind_group(0, self._compute_gradient_bind_groups[0])
+        p.dispatch_workgroups(*self._grid_dispatch)
+        p.end()

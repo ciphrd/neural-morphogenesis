@@ -3,8 +3,9 @@
 This project evolves particle-based organisms toward arbitrary target shapes.
 Particles are simulated as an elastic material with MLS-MPM, carry a small
 neural policy, sense the values and gradients of multiple chemical substrate
-channels, and write back into those channels at four heading-relative
-positions (front, left, back, and right).
+channels, and preserve the underlying chemical levels inside the cells.
+Before each brain invocation, cells publish those levels as transient,
+centered Gaussian splats; the resulting world field is rebuilt from scratch.
 
 Growth uses a conservative morphoelastic **grow-then-divide** model. It does
 not insert overlapping particles and rely on repulsion to create space.
@@ -34,7 +35,7 @@ Three signals have distinct responsibilities:
    lengthens this duration continuously, without a hard mechanical cutoff.
 
 The policy therefore does not directly output a scalar growth amount. It
-controls growth indirectly by writing the growth substrate, reacting to all
+controls growth indirectly by changing its cell-owned growth chemical, reacting to all
 substrate values and gradients, changing its heading, and selecting a growth
 direction, anisotropy, and division polarity.
 
@@ -42,7 +43,7 @@ The current eight-channel policy has 30 inputs: 24 chemical value/gradient
 components, morphology occupancy and its two heading-relative gradient
 components, plus heading-relative elastic Hencky volume, axial, and shear
 strain. Its shared 128-unit tanh trunk feeds six logical output heads: eight
-centered chemical writes, a two-component desired heading, growth anisotropy,
+cell-chemical deltas, a two-component desired heading, growth anisotropy,
 division bias, a two-component desired growth direction, and three sigmoid RGB
 cell-color outputs (17 outputs total). The heads remain concatenated into one
 matrix for GPU inference and checkpoint compatibility, but use head-specific
@@ -54,7 +55,7 @@ head multiplies it by a fixed sensitivity scale:
 | Parameter bucket | Initial bias prior | Mutation multiplier |
 | --- | --- | ---: |
 | shared trunk | zero | 1.00 |
-| chemical writes | neutral | 0.50 |
+| chemical deltas | neutral | 0.50 |
 | desired heading | local-forward | 0.20 |
 | growth anisotropy | sigmoid ≈ 0.20 | 0.15 |
 | division bias | sigmoid = 0.50 | 0.25 |
@@ -119,11 +120,13 @@ In simplified pseudocode:
 morphology = blur_and_normalize(particle_density)
 
 communication_dt = communication_speed / neural_updates_per_macro
-decay_per_round = decay_per_tick ^ communication_dt
-deposit_per_round = deposit_rate * communication_dt
-diffusion_fraction_per_round = min(communication_dt, 1)
 
 repeat neural_updates_per_macro communication rounds:
+  clear the transient substrate
+  for each active particle:
+    gaussian-splat particle.chemical_state into every substrate channel
+  compute substrate gradients
+
   for each active particle:
     inputs = []
 
@@ -145,7 +148,8 @@ repeat neural_updates_per_macro communication rounds:
 
     outputs = neural_policy(inputs)
 
-    deposit one chemical output per channel underneath the particle
+    particle.chemical_state += chemical_delta * communication_dt
+    clamp particle.chemical_state to [-1, 1]
     update angular velocity and heading from the turning output,
       scaled by communication_dt
 
@@ -170,9 +174,6 @@ repeat neural_updates_per_macro communication rounds:
        and division_hazard crosses its persistent random threshold:
           particle.cell_cycle_active = true
 
-  merge deposits into the substrate field
-  apply fractional diffusion and decay_per_round to the substrate field
-
 propagate any newly divided particle count to the simulation
 
 repeat MLS-MPM physics substeps:
@@ -188,7 +189,7 @@ repeat MLS-MPM physics substeps:
 communication speed. `communication_speed` controls how much chemical and
 orientation time elapses before one mechanical tick. With speed 1, raising the
 round count lets particles sense and react more frequently without multiplying
-deposition, decay, diffusion, or turning by that round count.
+cell-state integration or turning by that round count.
 
 A daughter created during the agent pass participates in that macro step's
 physics. It begins running its own neural policy on the following macro step.

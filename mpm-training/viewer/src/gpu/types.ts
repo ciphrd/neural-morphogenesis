@@ -49,13 +49,9 @@ export interface RunSettings {
   elasticStrainInputsEnabled?: boolean;
   hiddenDim: number;
   policyArchitecture?: PolicyArchitecture;
+  /** Legacy run metadata; transient substrates do not decay. */
   decay: number;
-  // Multiplier on this macro step's own accumulated deposits, applied
-  // right before they're folded into the field (core/environment.wgsl's
-  // own EnvPhysics/mergeDeposit — see that file's own comment for why
-  // this is a different knob from maxEnvWrite below, which caps each
-  // agent's own per-channel write magnitude before scatter rather than
-  // scaling the whole step's already-accumulated total).
+  /** Legacy run metadata; cell-state splats are not rate-scaled. */
   depositRate: number;
   maxAccel: number;
   maxStrafe: number;
@@ -134,6 +130,8 @@ export interface RunSettings {
   repulsionMaxDelta: number;
   target: string;
   population: number;
+  /** Shared rollout-seed batch size used for candidate evaluation. */
+  seedsPerCandidate?: number;
   elites: number;
   mutationSigma: number;
   runSeed: number;
@@ -155,6 +153,8 @@ export interface GenerationRecord {
   worst: number;
   allTimeBest: number;
   seed: number;
+  /** Seeds shared by every candidate during this generation's evaluation. */
+  evaluationSeeds?: number[];
   weights: UpdateRuleWeights;
 }
 

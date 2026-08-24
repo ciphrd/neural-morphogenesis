@@ -17,7 +17,7 @@ import type { PolicyArchitecture, UpdateRuleWeights } from "./types";
 import coreConstants from "../../../core/constants.json";
 
 export interface PolicyOutput {
-  /** One centered chemical write per channel. */
+  /** One cell-owned chemical-state delta per channel. */
   envWrite: Float32Array;
   headingDirection: [number, number];
   angularAccel: number;
@@ -62,7 +62,7 @@ export function policyWeightsShapeError(
   const receivedOut = Array.isArray(fc2w) ? fc2w.length : "missing";
   return (
     `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
-    `(one centered chemical write per channel plus growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
+    `(one chemical-state delta per channel plus growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
     "The current first layer includes three elastic Hencky-strain inputs; restart the training backend and retrain older checkpoints."
   );
 }

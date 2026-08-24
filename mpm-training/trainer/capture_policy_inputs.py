@@ -84,6 +84,7 @@ class PolicyInputProbe:
         elastic_enabled: bool,
     ) -> None:
         self.device = device
+        self.agents = agents
         self.tracked = tracked
         self.input_dim = policy_input_dim(environment.channels, agents.policy_architecture)
         self.stride = len(META_NAMES) + 2 * self.input_dim
@@ -148,6 +149,8 @@ class PolicyInputProbe:
         # Rebuild exactly the fields/input gradients agents.wgsl would sample
         # on the next controller evaluation at the current particle state.
         core.encode_morphology(encoder)
+        environment.encode_clear(encoder)
+        self.agents.encode_splat_chemical_state(encoder)
         environment.encode_sense(encoder)
         p = encoder.begin_compute_pass()
         p.set_pipeline(self.pipeline)

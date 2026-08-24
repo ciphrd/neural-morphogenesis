@@ -240,7 +240,7 @@ class AgentsGPU:
         # such interactive tool of its own).
         #
         # rng/cooldown/heading/angularVelocity plus aligned neural RGBA —
-        # packed into ONE 80-bytes-per-particle buffer
+        # packed into one aligned per-particle buffer (112 bytes at C=8)
         # (core/agents.wgsl's own ParticleMeta struct), not four separate
         # buffers: this shader hit a REAL, confirmed CreateComputePipeline
         # validation error the first time particleF/particleC/particleJp
@@ -256,6 +256,7 @@ class AgentsGPU:
         # here to free the 2 slots particleF/particleJp needed (particleC
         # was dropped instead of freeing a 3rd — see core/agents.wgsl's
         # own comment on why that one's safe to skip).
+        chemical_padding_floats = (-(72 + channels * 4)) % 16 // 4
         self._particle_meta_dtype = np.dtype([
             ("rng", "<u4"),
             ("cooldown", "<f4"),
@@ -265,7 +266,8 @@ class AgentsGPU:
             ("divisionHazard", "<f4"),
             ("divisionThreshold", "<f4"),
             ("privateState", "<f4", (PRIVATE_STATE_DIM,)),
-            ("_padding", "<f4", (2,)),
+            ("chemicalState", "<f4", (channels,)),
+            ("_padding", "<f4", (chemical_padding_floats,)),
         ])
         # AgentState packs the growth counter at byte 0 and ParticleMeta at
         # byte 256. Besides satisfying storage-offset alignment for the
@@ -332,6 +334,19 @@ class AgentsGPU:
             )
         )
         self._pipeline = device.create_compute_pipeline(layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "agentStep"})
+        self._splat_pipeline = device.create_compute_pipeline(
+            layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "splatChemicalState"}
+        )
+        self._splat_bind_group = device.create_bind_group(
+            layout=self._splat_pipeline.get_bind_group_layout(0),
+            entries=[
+                {"binding": 1, "resource": {"buffer": core.positions, "offset": 0, "size": core.positions.size}},
+                {"binding": 2, "resource": {"buffer": core.active_count_uniform, "offset": 0, "size": core.active_count_uniform.size}},
+                {"binding": 5, "resource": {"buffer": environment.deposit_scratch, "offset": 0, "size": environment.deposit_scratch.size}},
+                {"binding": 6, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
+                {"binding": 7, "resource": {"buffer": self._agent_state_buffer, "offset": 0, "size": self._agent_state_buffer.size}},
+            ],
+        )
 
         self._step_mode_uniforms = [
             device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
@@ -349,7 +364,6 @@ class AgentsGPU:
                     {"binding": 2, "resource": {"buffer": core.active_count_uniform, "offset": 0, "size": core.active_count_uniform.size}},
                     {"binding": 3, "resource": {"buffer": env_buf, "offset": 0, "size": env_buf.size}},
                     {"binding": 4, "resource": {"buffer": environment.gradient, "offset": 0, "size": environment.gradient.size}},
-                    {"binding": 5, "resource": {"buffer": environment.deposit_scratch, "offset": 0, "size": environment.deposit_scratch.size}},
                     {"binding": 6, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
                     {"binding": 7, "resource": {"buffer": self._agent_state_buffer, "offset": 0, "size": self._agent_state_buffer.size}},
                     {"binding": 8, "resource": {"buffer": core.C, "offset": 0, "size": core.C.size}},
@@ -601,7 +615,7 @@ class AgentsGPU:
         Not folded into reset_heading() itself, which stays a general,
         per-slot-independent utility. Written as individual per-index
         strided byte writes (heading is one f32 field inside
-        ParticleMeta's own 80-byte stride, not a standalone tightly-
+        ParticleMeta's own aligned stride, not a standalone tightly-
         packed array anymore) rather than one bulk write, to touch ONLY
         the heading field — leaving rng/cooldown/angularVelocity exactly
         as reset_heading() just set them, not overwritten with zeros.
@@ -621,11 +635,19 @@ class AgentsGPU:
         """Encodes the NN forward pass — reads environment's current
         parity buffer (must match `parity`), writes the policy's growth
         direction into MpmCore's particle-rest buffer, optionally applies
-        that signal to velocity through maxStrafe, and writes env_write
-        into the environment's deposit scratch. Does not submit."""
+        that signal to velocity through maxStrafe, and integrates chemical
+        deltas into cell-owned state. Does not submit."""
         p = encoder.begin_compute_pass()
         p.set_pipeline(self._pipeline)
         groups = self._commit_bind_groups if commit_lifecycle else self._communication_bind_groups
         p.set_bind_group(0, groups[parity])
+        p.dispatch_workgroups(self._dispatch)
+        p.end()
+
+    def encode_splat_chemical_state(self, encoder: wgpu.GPUCommandEncoder) -> None:
+        """Publish persistent cell chemistry into the cleared transient field."""
+        p = encoder.begin_compute_pass()
+        p.set_pipeline(self._splat_pipeline)
+        p.set_bind_group(0, self._splat_bind_group)
         p.dispatch_workgroups(self._dispatch)
         p.end()

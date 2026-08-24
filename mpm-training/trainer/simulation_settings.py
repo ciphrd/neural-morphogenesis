@@ -88,7 +88,7 @@ DEPOSIT_RATE = 1.0
 # Retained in the AgentPhysics/settings ABI for checkpoint compatibility.
 # Single deposits are always centered underneath the particle.
 DEPOSIT_DISTANCE = 0.0
-DEPOSIT_SIGMA = 0.4
+DEPOSIT_SIGMA = 0.324
 MAX_ENV_WRITE = 1.0
 
 # Behavior

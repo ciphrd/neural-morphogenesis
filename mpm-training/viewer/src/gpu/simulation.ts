@@ -16,18 +16,16 @@
 // has from training_sim.py's own macro_step(), not a design choice.
 //
 // Per macro step, in order:
-//   1. environment.encodeSense()      — clearScratch + computeGradient,
-//      over whichever grid buffer is currently "current" (last step's
-//      diffuse+decay output).
-//   2. agents.encodeStep()            — NN forward pass: reads that same
-//      grid + gradient, writes one centered deposit per channel
-//      env_write values per channel into the deposit scratch and the
+//   1. environment.encodeClear() + agents.encodeSplatChemicalState() —
+//      rebuild a transient substrate from persistent per-cell chemistry.
+//   2. environment.encodeSense()      — materialize splats and compute the
+//      shared gradient.
+//   3. agents.encodeStep()            — NN forward pass: reads that field,
+//      applies each chemical output as a delta to cell-owned state, and writes the
 //      desired growth vector into persistent ParticleRest.growthAngle and
 //      relaxes the persistent anisotropy toward its sigmoid target
 //      (optionally also physical acceleration through maxStrafe) —
 //      may also grow activeCount (agents.wgsl's own agentStep()).
-//   3. environment.encodeMergeAndDecay() — folds the deposit into the
-//      current grid, blurs+decays into the other buffer, flips parity.
 //   4. agents.encodeReadGrownCount()/readGrownCount() — copies growth's
 //      own atomic counter out and awaits it (submit happens between
 //      encode and await, see step()'s own body), propagating any change
@@ -390,16 +388,6 @@ export class GpuSimulation {
       this.config.morphologyBlurSigma ?? 0.01,
       this.config.morphologyDensityReference ?? 1.0
     );
-    // ?? 1.0 (= unchanged) guards a call to this with a raw SimulationConfig
-    // from a train_server.py process still running pre-depositRate code
-    // (loadGeneration()/rebuild() both pass `config` straight through here,
-    // bypassing types.ts's own physicsSettingsFromConfig() guard).
-    const macroDecay = Math.max(0, Math.min(1, physics.decay));
-    this.environment.setPhysics({
-      decay: Math.pow(macroDecay, communicationDt),
-      depositRate: (physics.depositRate ?? 1.0) * communicationDt,
-      diffusionStep: Math.min(communicationDt, 1.0),
-    });
     this.agents.setCommunicationTimestep(communicationDt);
     this.agents.setInternalStateSpeed(physics.internalStateSpeed ?? 1.0);
     this.agents.setPhysics({
@@ -494,13 +482,14 @@ export class GpuSimulation {
     const encoder = this.device.createCommandEncoder();
     this.mpmCore.encodeMorphology(encoder);
     for (let communicationRound = 0; communicationRound < this.neuralUpdatesPerMacro; communicationRound++) {
+      this.environment.encodeClear(encoder);
+      this.agents.encodeSplatChemicalState(encoder);
       this.environment.encodeSense(encoder);
       this.agents.encodeStep(
         encoder,
         this.environment.parity,
         communicationRound === this.neuralUpdatesPerMacro - 1
       );
-      this.environment.encodeMergeAndDecay(encoder);
     }
     this.agents.encodeReadGrownCount(encoder);
     this.device.queue.submit([encoder.finish()]);

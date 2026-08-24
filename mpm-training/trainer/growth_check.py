@@ -201,26 +201,22 @@ def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
         encoder = device.create_command_encoder()
         core.encode_morphology(encoder)
         for communication_round in range(rounds):
+            environment.encode_clear(encoder)
+            agents.encode_splat_chemical_state(encoder)
             environment.encode_sense(encoder)
             agents.encode_step(encoder, environment.parity, commit_lifecycle=communication_round == rounds - 1)
-            environment.encode_merge_and_decay(encoder)
-        copy_pass = encoder.begin_compute_pass()
-        copy_pass.set_pipeline(copy_pipeline)
-        copy_pass.set_bind_group(0, copy_groups[environment.parity])
-        copy_pass.dispatch_workgroups((environment.buffers[0].size // 4 + 63) // 64)
-        copy_pass.end()
         device.queue.submit([encoder.finish()])
-        values = np.frombuffer(device.queue.read_buffer(readback), np.float32)
-        return float(values.sum())
+        raw = device.queue.read_buffer(
+            agents._agent_state_buffer,
+            PARTICLE_META_BUFFER_OFFSET,
+            agents._particle_meta_dtype.itemsize,
+        )
+        return float(np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)["chemicalState"].sum())
 
     once = field_sum(1)
     four = field_sum(4)
-    # Deposits are now integrated through the interval rather than all
-    # arriving at its endpoint, so exact equality is neither expected nor
-    # desirable. The important regression guard is that four evaluations no
-    # longer inject four full rounds of signal (the former ratio was ~1.88).
-    assert once * 0.6 < four < once * 1.2, (once, four)
-    print(f"[PASS] supersampled_communication scaled_signal sum1={once:.3f} sum4={four:.3f}")
+    assert np.isclose(once, four, atol=2e-6), (once, four)
+    print(f"[PASS] supersampled_communication cell_state1={once:.3f} cell_state4={four:.3f}")
 
 
 def check_growth_without_repulsion(device: wgpu.GPUDevice) -> None:
@@ -263,8 +259,8 @@ def check_compression_slows_without_stalling(device: wgpu.GPUDevice) -> None:
     print(f"[PASS] compressed_growth_continues g={growth:.6f}")
 
 
-def check_centered_deposits(device: wgpu.GPUDevice) -> None:
-    """Every chemical output is deposited underneath the particle."""
+def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
+    """Cell deltas persist locally; rebuilt Gaussian fields do not persist."""
     channels = 8
     width = height = 32
     core = MpmCore(device)
@@ -289,8 +285,8 @@ def check_centered_deposits(device: wgpu.GPUDevice) -> None:
     agents.set_headings(np.array([0.0], dtype=np.float32))
     layout = weight_layout(channels, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Give the first four channels saturated writes. All must peak at the
-    # particle texel, independent of heading.
+    # Give the first four channels saturated deltas. On the following round
+    # their cell-owned levels must splat at the particle, independent of heading.
     for channel in range(4):
         weights[layout["fc2b_offset"] + channel] = 20.0
     env_write_dim = channels
@@ -327,8 +323,12 @@ def check_centered_deposits(device: wgpu.GPUDevice) -> None:
     )
 
     encoder = device.create_command_encoder()
+    environment.encode_clear(encoder)
+    agents.encode_splat_chemical_state(encoder)
     environment.encode_sense(encoder)
     agents.encode_step(encoder, environment.parity)
+    environment.encode_clear(encoder)
+    agents.encode_splat_chemical_state(encoder)
     compute = encoder.begin_compute_pass()
     compute.set_pipeline(pipeline)
     compute.set_bind_group(0, bind_group)
@@ -343,7 +343,29 @@ def check_centered_deposits(device: wgpu.GPUDevice) -> None:
         assert (max_x, max_y) == target, (channel, (max_x, max_y), target)
         assert scratch[channel, max_y, max_x] > 0
     assert not np.any(scratch[4:]), "one output channel leaked into another"
-    print("[PASS] independent channel writes land underneath the particle")
+
+    meta = np.frombuffer(
+        device.queue.read_buffer(
+            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
+            agents._particle_meta_dtype.itemsize,
+        ),
+        dtype=agents._particle_meta_dtype, count=1,
+    ).copy()
+    np.testing.assert_allclose(meta["chemicalState"][0, :4], 1.0, atol=1e-7)
+    meta["chemicalState"][:] = 0.0
+    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
+    encoder = device.create_command_encoder()
+    environment.encode_clear(encoder)
+    agents.encode_splat_chemical_state(encoder)
+    compute = encoder.begin_compute_pass()
+    compute.set_pipeline(pipeline)
+    compute.set_bind_group(0, bind_group)
+    compute.dispatch_workgroups((count + 63) // 64)
+    compute.end()
+    device.queue.submit([encoder.finish()])
+    cleared = np.frombuffer(device.queue.read_buffer(readback), np.int32)
+    assert not np.any(cleared), "transient field retained a prior round's splat"
+    print("[PASS] cell chemical deltas persist locally; transient Gaussian field rebuild discards old splats")
 
     meta_raw = device.queue.read_buffer(
         agents._agent_state_buffer,
@@ -471,7 +493,6 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
     agents.encode_step(encoder, environment.parity)
-    environment.encode_merge_and_decay(encoder)
     device.queue.submit([encoder.finish()])
     count = agents.read_grown_count()
     core.set_active_count(count)
@@ -887,22 +908,25 @@ def _cycle_gate_case(
     )
     core.set_active_count(1)
     environment.reset()
-    # The final substrate channel drives cycle-start hazard. Saturated signal
-    # preserves the former immediate-admission behavior when both gates pass.
-    plane = 256 * 256
-    device.queue.write_buffer(
-        environment.buffers[0],
-        7 * plane * 4,
-        np.ones(plane, dtype=np.float32),
-    )
     agents.set_active_count(1)
     agents.reset_heading(19)
+    meta = np.frombuffer(
+        device.queue.read_buffer(
+            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
+            agents._particle_meta_dtype.itemsize,
+        ),
+        dtype=agents._particle_meta_dtype, count=1,
+    ).copy()
+    meta["chemicalState"][0, 7] = 1.0
+    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
     agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
     agents.set_growth_enabled(enabled)
     if runtime_cap is not None:
         agents.set_max_active_particles(runtime_cap)
 
     encoder = device.create_command_encoder()
+    environment.encode_clear(encoder)
+    agents.encode_splat_chemical_state(encoder)
     environment.encode_sense(encoder)
     agents.encode_step(encoder, environment.parity, commit_lifecycle=commit_lifecycle)
     device.queue.submit([encoder.finish()])
@@ -957,15 +981,14 @@ def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
         dtype=agents._particle_meta_dtype, count=1,
     ).copy()
     meta["divisionThreshold"][0] = 10.0
+    meta["chemicalState"][0, 7] = 0.2
     device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
-
-    plane = 256 * 256
-    signal = np.full(plane, 0.2, dtype=np.float32)
-    device.queue.write_buffer(environment.buffers[0], 7 * plane * 4, signal)
 
     def advance(rounds: int) -> None:
         encoder = device.create_command_encoder()
         for _ in range(rounds):
+            environment.encode_clear(encoder)
+            agents.encode_splat_chemical_state(encoder)
             environment.encode_sense(encoder)
             agents.encode_step(encoder, environment.parity, commit_lifecycle=True)
         device.queue.submit([encoder.finish()])
@@ -979,18 +1002,20 @@ def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
 
     advance(3)
     accumulated = read_meta()
-    expected = 3.0 * -np.log(0.8)
+    represented_signal = round(0.2 * 4096.0) / 4096.0
+    expected = 3.0 * -np.log(1.0 - represented_signal)
     assert np.isclose(accumulated["divisionHazard"][0], expected, atol=2e-6), accumulated
     assert _probe(core, 1)[0, 2] == 0.0
 
-    device.queue.write_buffer(environment.buffers[0], 7 * plane * 4, np.zeros(plane, dtype=np.float32))
+    accumulated["chemicalState"][0, 7] = 0.0
+    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, accumulated.tobytes())
     advance(2)
     paused = read_meta()
     assert np.isclose(paused["divisionHazard"][0], expected, atol=2e-6), paused
 
     paused["divisionThreshold"][0] = expected + 0.1
+    paused["chemicalState"][0, 7] = 0.2
     device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, paused.tobytes())
-    device.queue.write_buffer(environment.buffers[0], 7 * plane * 4, signal)
     advance(1)
     admitted = read_meta()
     assert _probe(core, 1)[0, 2] == 1.0
@@ -1079,7 +1104,7 @@ def main() -> None:
     check_supersampled_communication_rounds(device)
     check_growth_without_repulsion(device)
     check_compression_slows_without_stalling(device)
-    check_centered_deposits(device)
+    check_transient_cell_chemical_splats(device)
     check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
     check_desired_heading_derives_angular_acceleration(device)

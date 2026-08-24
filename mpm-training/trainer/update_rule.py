@@ -32,8 +32,8 @@ pipelines now).
   There is no absolute or spawn-relative position input. This module itself
   is frame-agnostic; the gradient rotation and robust input normalization are
   entirely the caller's job.
-- Output: env_write (C) — one deposit value per channel underneath the
-  particle — plus desired heading (2), anisotropy/polarity logits (2),
+- Output: env_write (C) — retained ABI name for one bounded delta to the
+  particle's cell-owned chemical state per channel — plus desired heading (2), anisotropy/polarity logits (2),
   and desired growth direction (2). Stateless-128 ends with RGB logits (3);
   stateful-64 instead ends with private-state residuals (8) and gates (8),
   all raw/local-frame. The desired-heading vector is converted by the shader
@@ -116,7 +116,7 @@ class UpdateRule(nn.Module):
         sigmoid for scalar controls), conversion of the heading target to
         angular acceleration, and rotating growth direction to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
-        not spatial deposit geometry), same division of responsibility
+        not transient spatial splat geometry), same division of responsibility
         envnca's own UpdateRule/Simulation split."""
         inputs = [value, grad_forward, grad_lateral, morphology, elastic_strain]
         if self.architecture != STATELESS_ARCHITECTURE:

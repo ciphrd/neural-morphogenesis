@@ -436,7 +436,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       <div className="nn-block">
         <h3>Input</h3>
         <p className="hint">
-          Background: this channel's own centered deposit output, swept across the pad (its own value + every other
+          Background: this channel's own cell-state delta output, swept across the pad (its own value + every other
           channel held as set). Contrast is exaggerated independently per pad
           by stretching its observed min/max across Viridis. This shows
           response shape, not absolute output strength.
@@ -532,7 +532,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       {output && (
         <>
           <div className="nn-block">
-            <h3>Output — env write</h3>
+            <h3>Output — chemical Δ</h3>
             <div className="nn-group">
               <span className="nn-group-label">Under particle</span>
               {Array.from({ length: channels }, (_, c) => (

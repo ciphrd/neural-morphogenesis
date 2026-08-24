@@ -44,7 +44,7 @@ before trusting it end to end.
   `server.fs.allow`), one source of truth for the physics on both the
   Python and browser sides.
 - `src/gpu/environment.ts` + `environment.wgsl` — GPU-resident chemical
-  field (bilinear sense/deposit, Sobel gradient, blur+decay), a WGSL
+  field (cell-state Gaussian splat, bilinear sense, Sobel gradient), a WGSL
   port of `../trainer/environment.py`, **bounded** (clamped), not
   toroidal — MpmCore's domain has real walls.
 - `src/gpu/agents.ts` + `agents.wgsl` — the evolved policy's forward
@@ -53,7 +53,7 @@ before trusting it end to end.
   repulsion sampling (MPM's own `core/repulsion.wgsl` already covers
   that) — see that file's own module docstring.
 - `src/gpu/simulation.ts` — `GpuSimulation`, the per-macro-step
-  orchestration: sense -> NN forward -> deposit/decay -> physics
+  orchestration: clear/splat -> sense -> NN/cell-state update -> physics
   substeps, one command encoder/submit per macro step, fully
   GPU-resident (no host readback at all, unlike the Python trainer's own
   `training_sim.py`, which has to sync every macro step).

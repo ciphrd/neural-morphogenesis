@@ -44,12 +44,11 @@
 //   work) in exchange for ruling out an arbitrary, physically
 //   unmotivated left/right turning bias by construction.
 //
-// Deposit — one independently-controlled write per channel at the
-// particle position. The Gaussian radius is live-tunable. See
-// depositGaussian() and agentStep() for the bounded scatter geometry.
-// sensing (value/grad_forward/grad_lateral) is unchanged, still sampled
-// once, at the agent's own position, still via the old bilinear
-// corners()/sampleValue()/sampleGrad() (only the deposit SIDE changed).
+// Communication — each cell owns persistent chemicalState. A separate
+// splatChemicalState pass projects every cell's OLD state as a live-tunable
+// Gaussian before any brain runs. agentStep senses the resulting values and
+// gradients, then interprets the chemical output head as a bounded local state
+// delta. No post-brain value is written to persistent environmental state.
 //
 // Growth — each particle may spawn a copy of itself after completing its
 // tensor-growth cycle. The signed network growth vector polarizes division:
@@ -161,8 +160,8 @@ const GROWTH_DIRECTION_RESPONSE_RATE: f32 = __GROWTH_DIRECTION_RESPONSE_RATE__;
 const GROWTH_ANISOTROPY_RESPONSE_RATE: f32 = __GROWTH_ANISOTROPY_RESPONSE_RATE__;
 const DIRECTION_CONFIDENCE_SCALE: f32 = __DIRECTION_CONFIDENCE_SCALE__;
 
-// One independent chemical write per channel, deposited directly beneath
-// the particle rather than at heading-relative cardinal offsets.
+// One chemical-state delta per channel. The legacy name is retained in the
+// checkpoint/output ABI.
 const ENV_WRITE_DIM: u32 = CHANNELS;
 const OUT_DIM: u32 = __OUT_DIM__u;
 
@@ -286,6 +285,11 @@ struct ParticleMeta {
   // Eight private neural-memory channels. Stateless policies leave these at
   // zero. Stateful policies sense them and apply gated residual updates.
   privateState: array<f32, PRIVATE_STATE_DIM>,
+  // Persistent chemical levels owned by this cell. Before every policy
+  // invocation splatChemicalState() projects these values into the transient
+  // substrate; agentStep() then applies the chemical head as a local delta.
+  // The environment itself never preserves or receives a post-policy write.
+  chemicalState: array<f32, CHANNELS>,
 }
 // Pack growth's counter and particle metadata into one allocation. The
 // explicit 252-byte pad puts particleMeta at byte 256, allowing the render
@@ -573,7 +577,7 @@ fn wrapDepositIndex(i: i32, size: u32) -> i32 {
   return ((i % n) + n) % n;
 }
 
-// Scatter-adds one particle's per-channel env_write values as a bounded
+// Scatter-adds one particle's per-channel chemical levels as a bounded
 // Gaussian splat around `centerFieldPos` — replaces this shader's old
 // 4-corner bilinear
 // scatter (sensing still uses that: corners()/sampleValue()/
@@ -613,7 +617,11 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32
     for (var dj: i32 = -kernelRadius; dj <= kernelRadius; dj = dj + 1) {
       let ti = baseI + di;
       let tj = baseJ + dj;
-      let texelCenter = vec2<f32>(f32(ti) + 0.5, f32(tj) + 0.5);
+      // Field samples use integer grid coordinates (corners() floors the
+      // continuous field position), so the Gaussian is centered on that same
+      // lattice. A cell exactly on a grid coordinate therefore senses its own
+      // stored level at full strength instead of an unintended half-texel loss.
+      let texelCenter = vec2<f32>(f32(ti), f32(tj));
       let delta = centerFieldPos - texelCenter;
       let d2 = dot(delta, delta);
       let weight = exp(-d2 / (2.0 * sigma2));
@@ -628,8 +636,22 @@ fn depositGaussian(envWrite: array<f32, ENV_WRITE_DIM>, centerFieldPos: vec2<f32
   }
 }
 
+// Rebuild contribution pass, deliberately separate from agentStep so every
+// cell publishes its OLD state before any cell's brain can update it.
+@compute @workgroup_size(64)
+fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pi = gid.x;
+  if (pi >= activeCount) { return; }
+  let fieldPos = fract(positions[pi]) * vec2<f32>(f32(FIELD_WIDTH), f32(FIELD_HEIGHT));
+  var levels: array<f32, ENV_WRITE_DIM>;
+  for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+    levels[c] = agentState.particleMeta[pi].chemicalState[c];
+  }
+  depositGaussian(levels, fieldPos);
+}
+
 // The bounded subset of the network's own raw output
-// this shader actually consumes — one centered env_write per channel +
+// this shader actually consumes — one chemical-state delta per channel +
 // desired heading, anisotropy/division-bias controls, and desired growth
 // direction (optionally also physical acceleration), all in LOCAL frame.
 struct PolicyOutput {
@@ -781,7 +803,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the genuinely symmetric part of its response survives — see
   // simulation_settings.py's own CHIRALITY for the full reasoning.
   // Both desired-direction vectors have their lateral component un-mirrored.
-  // A centered chemical write has no handedness, so it is averaged
+  // A scalar chemical-state delta has no handedness, so it is averaged
   // channel-for-channel.
   if (CHIRALITY) {
     var mirroredInput = inputVec;
@@ -814,10 +836,17 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  // One bounded Gaussian write per channel, centered underneath the particle.
-  depositGaussian(result.envWrite, fieldPos);
-
   let communicationDt = max(stepMode.communicationDt, 0.0);
+
+  // The former environment-write head is now a delta to cell-owned chemical
+  // state. Clamp keeps persistent, non-decaying chemistry numerically bounded.
+  for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+    agentState.particleMeta[pi].chemicalState[c] = clamp(
+      agentState.particleMeta[pi].chemicalState[c] + result.envWrite[c] * communicationDt,
+      -1.0,
+      1.0,
+    );
+  }
 
   if (STATEFUL) {
     for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
@@ -999,6 +1028,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       agentState.particleMeta[newIndex].divisionThreshold = 0.0;
       for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
         agentState.particleMeta[newIndex].privateState[s] = agentState.particleMeta[pi].privateState[s];
+      }
+      for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+        agentState.particleMeta[newIndex].chemicalState[c] = agentState.particleMeta[pi].chemicalState[c];
       }
       // Reseeded from the parent's own latest post-advance state (both
       // draws, `angleState`) mixed with the new slot index, not copied

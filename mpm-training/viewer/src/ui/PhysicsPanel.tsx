@@ -47,7 +47,7 @@ function scaledRange(
   return { min: 0, max, step: max / 200 }
 }
 
-// [0,1]-bounded fraction sliders (decay, damping) share the same shape —
+// [0,1]-bounded fraction sliders share the same shape —
 // physically bounded, not scaled from the trained value like the others.
 const FRACTION_RANGE = { min: 0, max: 1, step: 0.001 } as const
 
@@ -95,20 +95,6 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
       min: 0,
       max: 1,
       step: 0.01,
-      format: (v) => v.toFixed(2),
-    },
-    {
-      key: "decay",
-      label: "Decay",
-      ...FRACTION_RANGE,
-      format: (v) => v.toFixed(3),
-    },
-    {
-      key: "depositRate",
-      label: "Deposit rate",
-      min: 0,
-      max: 10.0,
-      step: 0.0001,
       format: (v) => v.toFixed(2),
     },
     {
@@ -206,18 +192,14 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
 
 /** Collapsible "Physics" section (default closed) exposing every
  * live-adjustable simulation setting as a slider — gravity, damping, MPM
- * material (E/nu/hardening/elasticity), the chemical field's decay/
- * depositRate/maxAccel/maxEnvWrite (depositRate is a multiplier applied
- * to a whole macro step's own accumulated deposits right before they're
- * folded into the field — core/environment.wgsl's own EnvPhysics/
- * mergeDeposit — distinct from maxEnvWrite, which caps each agent's own
- * per-channel write magnitude before scatter), strafe's own maxAccel/maxStrafe/friction (strafe
+ * material (E/nu/hardening/elasticity), cell-chemical delta magnitude,
+ * strafe's own maxAccel/maxStrafe/friction (strafe
  * drives MpmCore's own velocity directly — an acceleration, damped by
  * friction — see agents.wgsl's own module docstring for the full
  * history), the heading integrator's maxAngularAccel/angularDamping/
- * maxAngularVelocity, and depositSigma (the centered write's Gaussian splat radius — see
+ * maxAngularVelocity, and depositSigma (the cell-state Gaussian splat radius — see
  * agents.wgsl's own depositGaussian() for the exact kernel this drives,
- * replacing that shader's old flat 4-corner bilinear deposit scatter),
+ * replacing that shader's old flat 4-corner bilinear scatter),
  * growth's own splitDisplacement (daughter separation; the signed growth
  * vector biases the new daughter and pair center toward +n) and
  * divisionCooldown (macro steps a particle refuses
@@ -229,7 +211,7 @@ function specsFor(trained: PhysicsSettings): SliderSpec[] {
  * same as channels/fieldN/hiddenDim), repulsion's splatRadius/strength,
  * and mpmEnabled (a checkbox, not a slider — off skips MpmCore's own
  * physics substeps entirely each macro step, a debug/testing aid to
- * isolate sensing/deposit/growth/chirality from elastic material
+ * isolate sensing/communication/growth/chirality from elastic material
  * response/gravity/repulsion — see types.ts's own
  * RunSettings.mpmEnabled docstring for the full reasoning).
  * See gpu/simulation.ts's applyPhysics() for why moving any of these

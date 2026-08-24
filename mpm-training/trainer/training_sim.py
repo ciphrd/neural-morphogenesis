@@ -5,9 +5,9 @@ adapted to a real physics substrate instead of a bare point-agent grid.
 
 Fully GPU-resident, matching ../viewer/src/gpu/simulation.ts's own
 "GPU-resident is the whole point" design for every data-related buffer
-(positions, velocities, F/C/ParticleRest, the chemical field, weights): each macro
-step is one command encoder (environment.encode_sense -> agents.encode_step
--> environment.encode_merge_and_decay), one submit, immediately followed
+(positions, velocities, F/C/ParticleRest, the transient chemical field, weights): each macro
+step rebuilds the field from cell-owned chemistry before every agents.encode_step,
+then submits once, immediately followed
 by core.step(substeps_per_macro)'s own physics submission — see
 macro_step()'s own comment for why that's two submits, not one. The ONE
 exception is activeCount itself, now that growth exists (see this
@@ -237,13 +237,14 @@ class TrainingRollout:
         encoder = core.device.create_command_encoder()
         core.encode_morphology(encoder)
         for communication_round in range(self.neural_updates_per_macro):
+            self.environment.encode_clear(encoder)
+            self.agents.encode_splat_chemical_state(encoder)
             self.environment.encode_sense(encoder)
             self.agents.encode_step(
                 encoder,
                 self.environment.parity,
                 commit_lifecycle=communication_round == self.neural_updates_per_macro - 1,
             )
-            self.environment.encode_merge_and_decay(encoder)
         core.device.queue.submit([encoder.finish()])
 
         # Growth's own readback — see this module's own module docstring

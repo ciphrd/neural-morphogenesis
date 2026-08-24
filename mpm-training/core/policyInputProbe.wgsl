@@ -27,7 +27,7 @@ struct ParticleRest {
 struct ParticleMeta {
   rng: u32, cooldown: f32, heading: f32, angularVelocity: f32,
   color: vec4<f32>, divisionHazard: f32, divisionThreshold: f32,
-  privateState: array<f32, 8>, _padding: vec2<f32>,
+  privateState: array<f32, 8>, chemicalState: array<f32, CHANNELS>,
 }
 struct Corners {
   x0: u32, x1: u32, y0: u32, y1: u32,

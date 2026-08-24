@@ -50,7 +50,7 @@ const WORKGROUP = 64;
 // angularVelocity are only ever left at their zero-initialized default
 // by the TS side (see resetHeading()'s own comment), never written at a
 // specific offset the way rng/heading are.
-const PARTICLE_META_STRIDE = 80;
+const particleMetaStride = (channels: number) => Math.ceil((72 + channels * 4) / 16) * 16;
 const PARTICLE_META_OFFSET_RNG = 0;
 const PARTICLE_META_OFFSET_HEADING = 8;
 // AgentState places its runtime ParticleMeta array after one atomic u32 and
@@ -178,6 +178,9 @@ export class Agents {
   private readonly agentStateBuffer: GPUBuffer;
   private readonly grownCountStaging: GPUBuffer;
   private readonly pipeline: GPUComputePipeline;
+  private readonly splatPipeline: GPUComputePipeline;
+  private readonly splatBindGroup: GPUBindGroup;
+  private readonly particleMetaStride: number;
   private readonly communicationBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly commitBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly stepModeUniforms: [GPUBuffer, GPUBuffer];
@@ -191,6 +194,7 @@ export class Agents {
     this.channels = config.channels;
     this.hiddenDim = config.hiddenDim;
     this.policyArchitecture = config.policyArchitecture ?? "stateless-128";
+    this.particleMetaStride = particleMetaStride(config.channels);
 
     const layout = weightLayout(config.channels, config.hiddenDim, this.policyArchitecture);
     const { totalFloats } = layout;
@@ -235,8 +239,8 @@ export class Agents {
     // writing past the end of it for every newly-added particle.
     //
     // rng(u32)+cooldown(f32)+heading(f32)+angularVelocity(f32) — ALL FOUR
-    // packed into ONE 80-bytes-per-particle buffer (core/agents.wgsl's
-    // own ParticleMeta struct), not four separate buffers: this shader
+    // packed into one aligned per-particle buffer (112 bytes at C=8,
+    // matching core/agents.wgsl's ParticleMeta), not four separate buffers: this shader
     // hit a REAL, confirmed CreateComputePipeline validation error the
     // first time mpmCore.F/C/Jp tried to add 3 more bindings on top of
     // heading/angularVelocity/growthState each having their own — see
@@ -249,7 +253,7 @@ export class Agents {
     // One allocation holds the growth counter at byte 0 and ParticleMeta
     // records from byte 256. Packing them frees a shader binding for C.
     this.agentStateBuffer = device.createBuffer({
-      size: PARTICLE_META_BUFFER_OFFSET + MAX_PARTICLES * PARTICLE_META_STRIDE,
+      size: PARTICLE_META_BUFFER_OFFSET + MAX_PARTICLES * this.particleMetaStride,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     // A separate, MAP_READ-capable buffer agentStateBuffer itself can't
@@ -299,6 +303,17 @@ export class Agents {
       }),
     });
     this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "agentStep" } });
+    this.splatPipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "splatChemicalState" } });
+    this.splatBindGroup = device.createBindGroup({
+      layout: this.splatPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 1, resource: { buffer: mpmCore.positions } },
+        { binding: 2, resource: { buffer: mpmCore.activeCountUniform } },
+        { binding: 5, resource: { buffer: environment.depositScratch } },
+        { binding: 6, resource: { buffer: this.physicsUniform } },
+        { binding: 7, resource: { buffer: this.agentStateBuffer } },
+      ],
+    });
 
     this.stepModeUniforms = [0, 1].map((commit) => {
       const buffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -317,7 +332,6 @@ export class Agents {
           { binding: 2, resource: { buffer: mpmCore.activeCountUniform } },
           { binding: 3, resource: { buffer: environment.buffers[p] } },
           { binding: 4, resource: { buffer: environment.gradient } },
-          { binding: 5, resource: { buffer: environment.depositScratch } },
           { binding: 6, resource: { buffer: this.physicsUniform } },
           { binding: 7, resource: { buffer: this.agentStateBuffer } },
           { binding: 8, resource: { buffer: mpmCore.C } },
@@ -529,7 +543,7 @@ export class Agents {
    * mulberry32 stream" trick this used to need (see rng.ts's own
    * spawnUniform01()/growthSeed() comments). */
   resetHeading(seed: number): void {
-    const count = (this.agentStateBuffer.size - PARTICLE_META_BUFFER_OFFSET) / PARTICLE_META_STRIDE;
+    const count = (this.agentStateBuffer.size - PARTICLE_META_BUFFER_OFFSET) / this.particleMetaStride;
     // One combined DataView write, matching core/agents.wgsl's own
     // ParticleMeta struct exactly (four scalar fields, vec4 color, then the
     // division hazard/threshold pair
@@ -537,10 +551,10 @@ export class Agents {
     // why the state is packed into one buffer). cooldown/angularVelocity/color
     // are left at 0 (ArrayBuffer's own zero-initialized default) — "not
     // on cooldown," "no spin."
-    const buf = new ArrayBuffer(count * PARTICLE_META_STRIDE);
+    const buf = new ArrayBuffer(count * this.particleMetaStride);
     const view = new DataView(buf);
     for (let i = 0; i < count; i++) {
-      const base = i * PARTICLE_META_STRIDE;
+      const base = i * this.particleMetaStride;
       view.setUint32(base + PARTICLE_META_OFFSET_RNG, growthSeed(seed, i), true);
       view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, (spawnUniform01(seed, 5 + i) * 2 - 1) * Math.PI, true);
     }
@@ -558,13 +572,13 @@ export class Agents {
    * reproducibility gap for callers of this to inherit), not folded into
    * resetHeading() itself, which stays a general, per-slot-independent
    * utility. Individual per-index strided writes (heading is one f32
-   * field inside ParticleMeta's own 80-byte stride now, not a
+   * field inside ParticleMeta's own aligned stride now, not a
    * standalone tightly-packed array) so this touches ONLY the heading
    * field, leaving rng/cooldown/angularVelocity exactly as
    * resetHeading() just set them. */
   setHeadings(headings: Float32Array): void {
     headings.forEach((h, i) => {
-      writeFloat32(this.device, this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET + i * PARTICLE_META_STRIDE + PARTICLE_META_OFFSET_HEADING, new Float32Array([h]));
+      writeFloat32(this.device, this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET + i * this.particleMetaStride + PARTICLE_META_OFFSET_HEADING, new Float32Array([h]));
     });
   }
 
@@ -572,11 +586,21 @@ export class Agents {
    * parity buffer (must match `parity`, see simulation.ts), writes the
    * policy's growth direction into MpmCore's particle-rest buffer,
    * optionally applies it to velocity through maxStrafe, and writes
-   * env_write into the environment's deposit scratch. Does not submit. */
+   * chemical deltas into cell-owned state. Does not submit. */
   encodeStep(encoder: GPUCommandEncoder, parity: number, commitLifecycle = true): void {
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, (commitLifecycle ? this.commitBindGroups : this.communicationBindGroups)[parity]);
+    pass.dispatchWorkgroups(this.dispatch);
+    pass.end();
+  }
+
+  /** Publishes each cell's persistent chemical state into the cleared,
+   * transient substrate before any brain in this round runs. */
+  encodeSplatChemicalState(encoder: GPUCommandEncoder): void {
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.splatPipeline);
+    pass.setBindGroup(0, this.splatBindGroup);
     pass.dispatchWorkgroups(this.dispatch);
     pass.end();
   }
