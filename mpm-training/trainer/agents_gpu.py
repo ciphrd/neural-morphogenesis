@@ -29,12 +29,21 @@ from simulation_settings import (
     ELASTIC_STRAIN_SCALE,
     GROWTH_ANISOTROPY_RESPONSE_RATE,
     GROWTH_DIRECTION_RESPONSE_RATE,
+    INTERNAL_STATE_SPEED,
     MORPHOLOGY_GRADIENT_INPUT_SCALE,
 )
 
 from environment_gpu import EnvironmentGPU, ceil_div
 from mpm_core import MpmCore, REPULSION_FIELD_N
 from shader_template import load_core_shader
+from policy_parameters import (
+    PRIVATE_STATE_DIM,
+    STATEFUL_ARCHITECTURE,
+    STATELESS_ARCHITECTURE,
+    normalize_architecture,
+    policy_heads,
+    policy_input_dim,
+)
 
 WORKGROUP = 64
 PARTICLE_META_BUFFER_OFFSET = 256
@@ -121,13 +130,16 @@ def _spawn_uniform01_batch(seed: int, indices: np.ndarray) -> np.ndarray:
     return (hashed >> np.uint32(8)).astype(np.float64) / 16777216.0
 
 
-def weight_layout(channels: int, hidden_dim: int) -> dict[str, int]:
+def weight_layout(
+    channels: int, hidden_dim: int, architecture: str = STATELESS_ARCHITECTURE
+) -> dict[str, int]:
     # core/agents.wgsl's own IN_DIM: value + heading-forward gradient +
     # lateral gradient per channel, with no positional inputs.
-    in_dim = channels * 3 + 6
+    architecture = normalize_architecture(architecture)
+    in_dim = policy_input_dim(channels, architecture)
     # One centered env_write per channel + heading target(2) + ACCEL_DIM(2)
     # + STRAFE_DIM(2) + RGB_DIM(3).
-    out_dim = channels + 9
+    out_dim = sum(head.size for head in policy_heads(channels, architecture))
     fc1w_offset = 0
     fc1b_offset = fc1w_offset + hidden_dim * in_dim
     fc2w_offset = fc1b_offset + hidden_dim
@@ -170,17 +182,21 @@ class AgentsGPU:
         spawn_y: float,
         elastic_strain_scale: float = ELASTIC_STRAIN_SCALE,
         elastic_strain_inputs_enabled: bool = ELASTIC_STRAIN_INPUTS_ENABLED,
+        policy_architecture: str = STATELESS_ARCHITECTURE,
+        internal_state_speed: float = INTERNAL_STATE_SPEED,
     ) -> None:
         self.device = device
         self.channels = channels
         self.hidden_dim = hidden_dim
+        self.policy_architecture = normalize_architecture(policy_architecture)
+        self._internal_state_speed = max(0.0, float(internal_state_speed))
         self._max_active_particles = max_active_particles
         # Public rollout geometry setting: TrainingRollout uses the same
         # displacement configured on this agent instance for its coordinated
         # two-particle seed, keeping diagnostic/replay overrides consistent.
         self.split_displacement = float(split_displacement)
 
-        layout = weight_layout(channels, hidden_dim)
+        layout = weight_layout(channels, hidden_dim, self.policy_architecture)
         self._total_floats = layout["total_floats"]
         self._weights_buffer = device.create_buffer(
             size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
@@ -224,7 +240,7 @@ class AgentsGPU:
         # such interactive tool of its own).
         #
         # rng/cooldown/heading/angularVelocity plus aligned neural RGBA —
-        # packed into ONE 48-bytes-per-particle buffer
+        # packed into ONE 80-bytes-per-particle buffer
         # (core/agents.wgsl's own ParticleMeta struct), not four separate
         # buffers: this shader hit a REAL, confirmed CreateComputePipeline
         # validation error the first time particleF/particleC/particleJp
@@ -248,6 +264,7 @@ class AgentsGPU:
             ("color", "<f4", (4,)),
             ("divisionHazard", "<f4"),
             ("divisionThreshold", "<f4"),
+            ("privateState", "<f4", (PRIVATE_STATE_DIM,)),
             ("_padding", "<f4", (2,)),
         ])
         # AgentState packs the growth counter at byte 0 and ParticleMeta at
@@ -272,6 +289,8 @@ class AgentsGPU:
                 {
                     "CHANNELS": channels,
                     "HIDDEN_DIM": hidden_dim,
+                    "IN_DIM": layout["in_dim"],
+                    "OUT_DIM": layout["out_dim"],
                     "FIELD_WIDTH": environment.width,
                     "FIELD_HEIGHT": environment.height,
                     "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
@@ -285,6 +304,29 @@ class AgentsGPU:
                     # str(bool) gives "True"/"False", invalid WGSL syntax,
                     # so this can't just be passed through as-is.
                     "CHIRALITY": "true" if chirality else "false",
+                    "STATEFUL": "true" if self.policy_architecture == STATEFUL_ARCHITECTURE else "false",
+                    "PRIVATE_STATE_INPUTS": (
+                        "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
+                        "    inputVec[3u * CHANNELS + 6u + s] = tanh(agentState.particleMeta[pi].privateState[s]);\n"
+                        "  }"
+                        if self.policy_architecture == STATEFUL_ARCHITECTURE else ""
+                    ),
+                    "POLICY_TAIL_DECODE": (
+                        "out.color = vec3<f32>(0.5);\n"
+                        "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
+                        "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 6u + s]);\n"
+                        "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 6u + PRIVATE_STATE_DIM + s]);\n"
+                        "  }"
+                        if self.policy_architecture == STATEFUL_ARCHITECTURE else
+                        "out.color = vec3<f32>(\n"
+                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 6u]),\n"
+                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 7u]),\n"
+                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 8u])\n"
+                        "  );\n"
+                        "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
+                        "    out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0;\n"
+                        "  }"
+                    ),
                     "ELASTIC_STRAIN_INPUTS_ENABLED": "true" if elastic_strain_inputs_enabled else "false",
                 },
             )
@@ -414,7 +456,16 @@ class AgentsGPU:
             data = np.zeros(4, dtype=np.uint32)
             data[0] = commit
             data.view(np.float32)[1] = max(0.0, float(dt))
+            data.view(np.float32)[2] = self._internal_state_speed
             self.device.queue.write_buffer(buffer, 0, data)
+
+    def set_internal_state_speed(self, speed: float) -> None:
+        """Scale only gated private-state residuals; 1 preserves baseline."""
+        self._internal_state_speed = max(0.0, float(speed))
+        for buffer in self._step_mode_uniforms:
+            self.device.queue.write_buffer(
+                buffer, 8, np.array([self._internal_state_speed], dtype=np.float32)
+            )
 
     def set_spawn_center(self, spawn_x: float, spawn_y: float) -> None:
         """Writes the legacy AgentPhysics spawn slots at byte offset 48.
@@ -550,7 +601,7 @@ class AgentsGPU:
         Not folded into reset_heading() itself, which stays a general,
         per-slot-independent utility. Written as individual per-index
         strided byte writes (heading is one f32 field inside
-        ParticleMeta's own 48-byte stride, not a standalone tightly-
+        ParticleMeta's own 80-byte stride, not a standalone tightly-
         packed array anymore) rather than one bulk write, to touch ONLY
         the heading field — leaving rng/cooldown/angularVelocity exactly
         as reset_heading() just set them, not overwritten with zeros.

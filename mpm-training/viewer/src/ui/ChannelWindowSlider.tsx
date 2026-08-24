@@ -2,6 +2,7 @@ interface ChannelWindowSliderProps {
   channels: number
   value: number
   onChange: (value: number) => void
+  channelKind?: string
 }
 
 const RGB_WINDOW_SIZE = 3
@@ -13,6 +14,7 @@ export function ChannelWindowSlider({
   channels,
   value,
   onChange,
+  channelKind = "substrate",
 }: ChannelWindowSliderProps) {
   const channelCount = Math.max(1, Math.floor(channels))
   const windowSize = Math.min(RGB_WINDOW_SIZE, channelCount)
@@ -50,7 +52,7 @@ export function ChannelWindowSlider({
         max={maxStart}
         step={1}
         value={start}
-        aria-label="First substrate channel displayed as RGB"
+        aria-label={`First ${channelKind} channel displayed as RGB`}
         aria-valuetext={`Channels ${start} through ${start + windowSize - 1}`}
         onChange={(event) => onChange(Number(event.currentTarget.value))}
       />

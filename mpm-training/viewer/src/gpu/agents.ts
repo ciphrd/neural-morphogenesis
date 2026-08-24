@@ -38,7 +38,7 @@ import { ceilDiv, writeFloat32 } from "./gpuUtil";
 import type { Environment } from "./environment";
 import { MAX_PARTICLES, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { growthSeed, spawnUniform01 } from "./rng";
-import type { UpdateRuleWeights } from "./types";
+import type { PolicyArchitecture, UpdateRuleWeights } from "./types";
 import policyParameters from "../../../core/policy_parameters.json";
 import { policyWeightsShapeError } from "./policyEval";
 
@@ -50,7 +50,7 @@ const WORKGROUP = 64;
 // angularVelocity are only ever left at their zero-initialized default
 // by the TS side (see resetHeading()'s own comment), never written at a
 // specific offset the way rng/heading are.
-const PARTICLE_META_STRIDE = 48;
+const PARTICLE_META_STRIDE = 80;
 const PARTICLE_META_OFFSET_RNG = 0;
 const PARTICLE_META_OFFSET_HEADING = 8;
 // AgentState places its runtime ParticleMeta array after one atomic u32 and
@@ -60,6 +60,7 @@ export const PARTICLE_META_BUFFER_OFFSET = 256;
 export interface AgentsConfig {
   channels: number;
   hiddenDim: number;
+  policyArchitecture?: PolicyArchitecture;
   maxAccel: number;
   maxStrafe: number;
   maxEnvWrite: number;
@@ -80,13 +81,14 @@ export interface AgentsConfig {
   elasticStrainInputsEnabled: boolean;
 }
 
-function weightLayout(channels: number, hiddenDim: number) {
+function weightLayout(channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128") {
   // core/agents.wgsl's IN_DIM: value + heading-forward gradient + lateral
   // gradient per channel, with no positional inputs.
-  const inDim = channels * 3 + 6;
+  const stateful = architecture === "stateful-64";
+  const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
   // One centered env_write per channel + desired heading(2) + ACCEL_DIM(2)
   // + STRAFE_DIM(2) + RGB_DIM(3).
-  const outDim = channels + 9;
+  const outDim = channels + (stateful ? 22 : 9);
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -99,9 +101,9 @@ function weightLayout(channels: number, hiddenDim: number) {
  * UpdateRule.export_weights()'s exact shape) into one Float32Array in
  * the fc1w/fc1b/fc2w/fc2b order agents.wgsl's own FC1W_OFFSET/etc.
  * consts expect. */
-function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim: number): Float32Array {
-  const { totalFloats } = weightLayout(channels, hiddenDim);
-  const shapeError = policyWeightsShapeError(weights, channels, hiddenDim);
+function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim: number, architecture: PolicyArchitecture): Float32Array {
+  const { totalFloats } = weightLayout(channels, hiddenDim, architecture);
+  const shapeError = policyWeightsShapeError(weights, channels, hiddenDim, architecture);
   if (shapeError) throw new Error(shapeError);
   const out = new Float32Array(totalFloats);
   let i = 0;
@@ -136,22 +138,26 @@ function randomHead(
  * evaluated — see that hook's own comment) — the exact same generator
  * Agents.randomizeWeights() below uses for the "Randomize weights"
  * button, just also reachable without an Agents instance to call it on. */
-export function randomWeights(channels: number, hiddenDim: number): UpdateRuleWeights {
-  const { inDim } = weightLayout(channels, hiddenDim);
+export function randomWeights(
+  channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128"
+): UpdateRuleWeights {
+  const { inDim } = weightLayout(channels, hiddenDim, architecture);
   const trunk = policyParameters.trunk;
   const trunkBound = trunk.weightGain * Math.sqrt(6 / (inDim + hiddenDim));
   const fc1w = Array.from({ length: hiddenDim }, () =>
     Array.from({ length: inDim }, () => randomSymmetric(trunkBound))
   );
   const fc1b = Array.from({ length: hiddenDim }, () => randomSymmetric(trunk.biasJitter));
-  const specs = [
+  const common = [
     [channels, policyParameters.heads.chemical],
     [2, policyParameters.heads.heading],
     [1, policyParameters.heads.anisotropy],
     [1, policyParameters.heads.division],
     [2, policyParameters.heads.growthDirection],
-    [3, policyParameters.heads.color],
   ] as const;
+  const specs = architecture === "stateful-64"
+    ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const]
+    : [...common, [3, policyParameters.heads.color] as const];
   const initialized = specs.map(([size, config]) => randomHead(size, hiddenDim, config));
   return {
     fc1w,
@@ -165,6 +171,7 @@ export class Agents {
   private readonly device: GPUDevice;
   private readonly channels: number;
   private readonly hiddenDim: number;
+  private readonly policyArchitecture: PolicyArchitecture;
 
   private readonly weightsBuffer: GPUBuffer;
   private readonly physicsUniform: GPUBuffer;
@@ -183,8 +190,10 @@ export class Agents {
     this.device = device;
     this.channels = config.channels;
     this.hiddenDim = config.hiddenDim;
+    this.policyArchitecture = config.policyArchitecture ?? "stateless-128";
 
-    const { totalFloats } = weightLayout(config.channels, config.hiddenDim);
+    const layout = weightLayout(config.channels, config.hiddenDim, this.policyArchitecture);
+    const { totalFloats } = layout;
     this.weightsBuffer = device.createBuffer({ size: totalFloats * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     // 64 bytes — core/agents.wgsl's AgentPhysics ends with the growth cap
     // and elastic-strain normalization scalar.
@@ -226,7 +235,7 @@ export class Agents {
     // writing past the end of it for every newly-added particle.
     //
     // rng(u32)+cooldown(f32)+heading(f32)+angularVelocity(f32) — ALL FOUR
-    // packed into ONE 48-bytes-per-particle buffer (core/agents.wgsl's
+    // packed into ONE 80-bytes-per-particle buffer (core/agents.wgsl's
     // own ParticleMeta struct), not four separate buffers: this shader
     // hit a REAL, confirmed CreateComputePipeline validation error the
     // first time mpmCore.F/C/Jp tried to add 3 more bindings on top of
@@ -261,6 +270,8 @@ export class Agents {
       code: templateShader(agentsSrc, {
         CHANNELS: config.channels,
         HIDDEN_DIM: config.hiddenDim,
+        IN_DIM: layout.inDim,
+        OUT_DIM: layout.outDim,
         FIELD_WIDTH: environment.width,
         FIELD_HEIGHT: environment.height,
         MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
@@ -277,6 +288,13 @@ export class Agents {
         // gotcha (Python's str(bool) gives "True"/"False", invalid
         // WGSL, so that side needs the explicit conversion).
         CHIRALITY: config.chirality ? "true" : "false",
+        STATEFUL: this.policyArchitecture === "stateful-64" ? "true" : "false",
+        PRIVATE_STATE_INPUTS: this.policyArchitecture === "stateful-64"
+          ? "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { inputVec[3u * CHANNELS + 6u + s] = tanh(agentState.particleMeta[pi].privateState[s]); }"
+          : "",
+        POLICY_TAIL_DECODE: this.policyArchitecture === "stateful-64"
+          ? "out.color = vec3<f32>(0.5); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 6u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 6u + PRIVATE_STATE_DIM + s]); }"
+          : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 6u]), safeSigmoid(outVec[ENV_WRITE_DIM + 7u]), safeSigmoid(outVec[ENV_WRITE_DIM + 8u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
         ELASTIC_STRAIN_INPUTS_ENABLED: config.elasticStrainInputsEnabled ? "true" : "false",
       }),
     });
@@ -286,6 +304,7 @@ export class Agents {
       const buffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(buffer, 0, new Uint32Array([commit]));
       writeFloat32(device, buffer, 4, new Float32Array([1.0]));
+      writeFloat32(device, buffer, 8, new Float32Array([1.0]));
       return buffer;
     }) as [GPUBuffer, GPUBuffer];
 
@@ -332,7 +351,7 @@ export class Agents {
   }
 
   loadWeights(weights: UpdateRuleWeights): void {
-    writeFloat32(this.device, this.weightsBuffer, 0, flattenWeights(weights, this.channels, this.hiddenDim));
+    writeFloat32(this.device, this.weightsBuffer, 0, flattenWeights(weights, this.channels, this.hiddenDim, this.policyArchitecture));
   }
 
   /** Overwrites the weights buffer with a fresh random init (see
@@ -342,7 +361,7 @@ export class Agents {
    * particles already grown under the old weights don't retroactively
    * un-grow just because the policy driving them changed. */
   randomizeWeights(): UpdateRuleWeights {
-    const weights = randomWeights(this.channels, this.hiddenDim);
+    const weights = randomWeights(this.channels, this.hiddenDim, this.policyArchitecture);
     this.loadWeights(weights);
     return weights;
   }
@@ -398,6 +417,14 @@ export class Agents {
     const value = new Float32Array([Math.max(0, dt)]);
     for (const buffer of this.stepModeUniforms) {
       writeFloat32(this.device, buffer, 4, value);
+    }
+  }
+
+  /** Multiplier for private-state residual integration only; 1 is baseline. */
+  setInternalStateSpeed(speed: number): void {
+    const value = new Float32Array([Math.max(0, speed)]);
+    for (const buffer of this.stepModeUniforms) {
+      writeFloat32(this.device, buffer, 8, value);
     }
   }
 
@@ -531,7 +558,7 @@ export class Agents {
    * reproducibility gap for callers of this to inherit), not folded into
    * resetHeading() itself, which stays a general, per-slot-independent
    * utility. Individual per-index strided writes (heading is one f32
-   * field inside ParticleMeta's own 48-byte stride now, not a
+   * field inside ParticleMeta's own 80-byte stride now, not a
    * standalone tightly-packed array) so this touches ONLY the heading
    * field, leaving rng/cooldown/angularVelocity exactly as
    * resetHeading() just set them. */

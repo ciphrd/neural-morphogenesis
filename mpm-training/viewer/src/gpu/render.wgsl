@@ -141,10 +141,26 @@ struct ParticleMeta {
   color: vec4<f32>,
   divisionHazard: f32,
   divisionThreshold: f32,
+  privateState: array<f32, 8>,
+  _padding: vec2<f32>,
 }
 @group(0) @binding(3) var<storage, read> particleMeta: array<ParticleMeta>;
 // x: alpha, y: saturation amplification, z: contrast around sigmoid neutral.
 @group(0) @binding(7) var<uniform> neuralColorStyle: vec4<f32>;
+struct InternalStateStyle {
+  channels: vec4<u32>,
+  alpha: f32,
+  // Scalars deliberately keep this uniform at 32 bytes. A vec3 here would
+  // align to the next 16-byte boundary and inflate the required binding to 48.
+  _padding0: f32,
+  _padding1: f32,
+  _padding2: f32,
+}
+@group(0) @binding(8) var<uniform> internalStateStyle: InternalStateStyle;
+
+fn stateSigmoid(x: f32) -> f32 {
+  return 1.0 / (1.0 + exp(-clamp(x, -20.0, 20.0)));
+}
 
 // --- neural RGB dots --------------------------------------------------------
 
@@ -182,6 +198,28 @@ fn neuralColorParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> 
     vec3<f32>(1.0),
   );
   return vec4<f32>(boosted, neuralColorStyle.x);
+}
+
+@vertex
+fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
+  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let offset = QUAD_OFFSETS[vertexIndex];
+  let state = particleMeta[instanceIndex].privateState;
+  var out: NeuralColorDotOut;
+  out.position = vec4<f32>(center + offset * pointRadius * 1.6, 0.0, 1.0);
+  out.uv = offset;
+  out.color = vec3<f32>(
+    stateSigmoid(state[internalStateStyle.channels.x]),
+    stateSigmoid(state[internalStateStyle.channels.y]),
+    stateSigmoid(state[internalStateStyle.channels.z]),
+  );
+  return out;
+}
+
+@fragment
+fn internalStateParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
+  if (dot(in.uv, in.uv) > 1.0) { discard; }
+  return vec4<f32>(in.color, internalStateStyle.alpha);
 }
 
 // Local-space wedge pointing along +X, rotated by each particle's own

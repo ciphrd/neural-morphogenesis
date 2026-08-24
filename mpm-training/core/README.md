@@ -24,7 +24,8 @@ own module docstring.
   here, not an optional extra. It's what keeps particles from overlapping
   when new ones get placed right next to existing ones.
 - `agents.wgsl` — the evolved policy's forward pass
-  (`Dense(128) -> tanh -> concatenated logical heads (C+9)`), local/heading-frame sensing +
+  (specialized as stateless `Dense(128)` or eight-state `Dense(64)`, followed
+  by concatenated logical heads), local/heading-frame sensing +
   action, the persistent per-particle heading/angularVelocity integrator.
   Not part of the "5 physics passes" above — a training-loop concern, not
   MLS-MPM itself — but shares this directory so both consumers load the

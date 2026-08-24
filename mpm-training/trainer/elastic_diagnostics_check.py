@@ -292,13 +292,16 @@ def check_viewer_diagnostic_shader(device: wgpu.GPUDevice) -> None:
 def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
     source = (Path(__file__).parent.parent / "viewer" / "src" / "gpu" / "render.wgsl").read_text()
     module = device.create_shader_module(code=source)
+    internal_pipeline = None
     for vertex, fragment in (
         ("particleVertex", "particleFragment"),
         ("activationParticleVertex", "activationParticleFragment"),
+        ("neuralColorParticleVertex", "neuralColorParticleFragment"),
+        ("internalStateParticleVertex", "internalStateParticleFragment"),
         ("triangleVertex", "triangleFragment"),
         ("growthAxisVertex", "growthAxisFragment"),
     ):
-        device.create_render_pipeline(
+        pipeline = device.create_render_pipeline(
             layout=wgpu.AutoLayoutMode.auto,
             vertex={"module": module, "entry_point": vertex},
             primitive={"topology": wgpu.PrimitiveTopology.triangle_list},
@@ -308,7 +311,19 @@ def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
                 "targets": [{"format": wgpu.TextureFormat.bgra8unorm}],
             },
         )
-    print("[PASS] viewer white-dot, activation-dot, heading, and signed growth-axis render pipelines compile")
+        if vertex == "internalStateParticleVertex":
+            internal_pipeline = pipeline
+    assert internal_pipeline is not None
+    device.create_bind_group(
+        layout=internal_pipeline.get_bind_group_layout(0),
+        entries=[
+            {"binding": 0, "resource": {"buffer": device.create_buffer(size=8, usage=wgpu.BufferUsage.STORAGE)}},
+            {"binding": 1, "resource": {"buffer": device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM)}},
+            {"binding": 3, "resource": {"buffer": device.create_buffer(size=80, usage=wgpu.BufferUsage.STORAGE)}},
+            {"binding": 8, "resource": {"buffer": device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM)}},
+        ],
+    )
+    print("[PASS] viewer white, activation, neural RGB, internal-state, heading, and growth-axis pipelines compile")
 
 
 def check_viewer_morphology_visualization_shader(device: wgpu.GPUDevice) -> None:

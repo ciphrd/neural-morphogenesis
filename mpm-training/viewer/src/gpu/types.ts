@@ -1,9 +1,10 @@
 export interface UpdateRuleWeights {
-  fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6) — chemicals, morphology, elastic Hencky strain
+  fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6 [+ 8 private state])
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // (channels+9, HIDDEN_DIM) — centered deposits + desired heading + growth controls + direction + RGB
-  fc2b: number[]; // (channels+9,)
+  fc2w: number[][]; // stateless: channels+9; stateful: channels+22
+  fc2b: number[];
 }
+export type PolicyArchitecture = "stateless-128" | "stateful-64";
 
 // Mirrors train_server.py's own GET /settings response, field for field
 // (camelCase on the wire, same JSON keys) — every simulation/search
@@ -43,9 +44,11 @@ export interface RunSettings {
   morphologyDensityReference?: number;
   neuralUpdatesPerMacro?: number;
   communicationSpeed?: number;
+  internalStateSpeed?: number;
   elasticStrainScale?: number;
   elasticStrainInputsEnabled?: boolean;
   hiddenDim: number;
+  policyArchitecture?: PolicyArchitecture;
   decay: number;
   // Multiplier on this macro step's own accumulated deposits, applied
   // right before they're folded into the field (core/environment.wgsl's
@@ -197,6 +200,7 @@ export interface PhysicsSettings {
   growthDuration: number;
   neuralUpdatesPerMacro: number;
   communicationSpeed: number;
+  internalStateSpeed: number;
   growthMax: number;
   growthThreshold: number;
   // Internal neutral multiplier retained for settings-object compatibility.
@@ -253,6 +257,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     growthDuration: config.growthDuration ?? legacyDuration,
     neuralUpdatesPerMacro: Math.max(1, Math.round(config.neuralUpdatesPerMacro ?? 1)),
     communicationSpeed: Math.max(0, config.communicationSpeed ?? 1.0),
+    internalStateSpeed: Math.max(0, config.internalStateSpeed ?? 1.0),
     growthMax: config.growthMax ?? 2.0,
     growthThreshold: config.growthThreshold ?? 0.0,
     growthAnisotropy: 1.0,

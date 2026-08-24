@@ -129,6 +129,8 @@ export function TrainingView() {
   const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(1)
   const [activationAlpha, setActivationAlpha] = useState(0.2)
   const [neuralColorAlpha, setNeuralColorAlpha] = useState(1)
+  const [internalStateAlpha, setInternalStateAlpha] = useState(1)
+  const [internalStateChannelStart, setInternalStateChannelStart] = useState(0)
   const [growthAxisLengthPx, setGrowthAxisLengthPx] = useState(28)
   // "Add"/"Move"/"Deform" interaction tools (render/GridCanvas.tsx's own
   // Tool type) — toggled on/off by clicking their own icon button again
@@ -404,6 +406,7 @@ export function TrainingView() {
             >
               <option value="dots-white">Dots (white)</option>
               <option value="dots-neural-color">Dots (neural RGB)</option>
+              <option value="dots-internal-state">Internal state</option>
               <option value="dots-activation">Dots (neurons)</option>
               <option value="dots-activation-translucent">
                 Dots (translucent neurons)
@@ -436,6 +439,36 @@ export function TrainingView() {
               />
               <span className="slider-value">{neuralColorAlpha.toFixed(2)}</span>
             </label>
+          )}
+          {particleRenderMode === "dots-internal-state" && (
+            <>
+              <label className="slider-row">
+                <span>Internal state alpha</span>
+                <Slider
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={internalStateAlpha}
+                  onChange={setInternalStateAlpha}
+                />
+                <span className="slider-value">{internalStateAlpha.toFixed(2)}</span>
+              </label>
+              <div className="channel-window-control">
+                <div className="channel-window-label">
+                  <span>Channels</span>
+                  <span>{internalStateChannelStart}–{internalStateChannelStart + 2}</span>
+                </div>
+                <ChannelWindowSlider
+                  channels={8}
+                  value={internalStateChannelStart}
+                  onChange={setInternalStateChannelStart}
+                  channelKind="private state"
+                />
+              </div>
+              {activeConfig?.policyArchitecture !== "stateful-64" && (
+                <p className="hint">The stateless architecture keeps these channels at zero.</p>
+              )}
+            </>
           )}
           {particleRenderMode === "dots-activation-translucent" && (
             <label className="slider-row">
@@ -624,6 +657,8 @@ export function TrainingView() {
             whiteDotsAlpha={whiteDotsAlpha}
             activationAlpha={activationAlpha}
             neuralColorAlpha={neuralColorAlpha}
+            internalStateAlpha={internalStateAlpha}
+            internalStateChannelStart={internalStateChannelStart}
             growthAxisLengthPx={growthAxisLengthPx}
             tool={tool}
             deformSettings={deformSettings}

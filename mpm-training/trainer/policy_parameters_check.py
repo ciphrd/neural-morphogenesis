@@ -4,7 +4,13 @@ from __future__ import annotations
 import numpy as np
 
 from evolve import get_weights, mutate, set_weights
-from policy_parameters import mutation_scale_vector, policy_heads, random_flat_policy_weights
+from policy_parameters import (
+    STATEFUL_ARCHITECTURE,
+    mutation_scale_vector,
+    policy_heads,
+    policy_hidden_dim,
+    random_flat_policy_weights,
+)
 from simulation_settings import CHEM_CHANNELS, HIDDEN_DIM
 from update_rule import UpdateRule
 
@@ -42,6 +48,22 @@ def main() -> None:
     expected_scales = {1.0, *(head.mutation_scale for head in policy_heads(CHEM_CHANNELS))}
     assert set(np.unique(scales).tolist()) == set(np.asarray(list(expected_scales), dtype=np.float32).tolist())
     print("[PASS] mutation applies the global sigma through exact trunk/head scale buckets")
+
+    stateful_hidden = policy_hidden_dim(STATEFUL_ARCHITECTURE)
+    stateful = UpdateRule(CHEM_CHANNELS, STATEFUL_ARCHITECTURE)
+    stateful_flat = get_weights(stateful)
+    stateful_random = random_flat_policy_weights(
+        CHEM_CHANNELS, stateful_hidden, np.random.default_rng(31), STATEFUL_ARCHITECTURE
+    )
+    assert stateful_flat.size == stateful_random.size == 4446
+    assert [head.name for head in policy_heads(CHEM_CHANNELS, STATEFUL_ARCHITECTURE)][-2:] == [
+        "stateDelta", "stateGate"
+    ]
+    stateful_mutated = mutate(
+        stateful_flat, sigma, np.random.default_rng(32), STATEFUL_ARCHITECTURE
+    )
+    assert stateful_mutated.shape == stateful_flat.shape
+    print("[PASS] stateful-64 has 38 inputs, 30 outputs, 4446 parameters, and state-head mutation buckets")
 
 
 if __name__ == "__main__":

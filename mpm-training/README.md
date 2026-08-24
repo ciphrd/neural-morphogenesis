@@ -60,11 +60,48 @@ head multiplies it by a fixed sensitivity scale:
 | division bias | sigmoid = 0.50 | 0.25 |
 | growth direction | local-forward | 0.20 |
 | cell color | sigmoid = 0.50 | 0.50 |
+| private-state residual (`stateful-64`) | neutral | 0.20 |
+| private-state gate (`stateful-64`) | sigmoid ≈ 0.12 | 0.15 |
 
 Small head-specific bias jitter prevents freshly initialized policies from
 being identical at zero input. Lower mutation multipliers on persistent
 direction and growth controls prevent a single mutation from causing a much
 larger behavioral jump than an equally sized trunk mutation.
+
+## Policy architecture comparison
+
+Training supports two explicit variants selected by `POLICY_ARCHITECTURE` in
+`core/constants.json`:
+
+| Variant | Inputs | Hidden width | Outputs | Parameters at C=8 |
+| --- | ---: | ---: | ---: | ---: |
+| `stateless-128` | 30 | 128 | 17 | 6,161 |
+| `stateful-64` | 38 | 64 | 30 | 4,446 |
+
+The stateful controller adds eight private values to every particle. Each
+communication round senses `tanh(state)` and emits eight residual candidates
+and eight sigmoid gates. The update is `state += gate * tanh(delta) * dt`,
+clamped to `[-4,4]`. A daughter inherits the updated state of its parent, while
+a rollout reset zeros every state channel. Particle RGB is no longer an output
+head in this variant: it is `sigmoid(state[0:3])`, making neural color a visible
+projection of memory dynamics.
+
+Structural chirality has deliberately not been added to these channels yet.
+Under the existing optional mirror-average pass they are treated as ordinary
+reflection-invariant scalars; no channel is assigned even/odd parity or paired
+with another state channel.
+
+Run a controlled paired experiment with identical evolution arguments and
+seed using:
+
+```bash
+cd trainer
+.venv/bin/python compare_policy_architectures.py --output comparisons/puddle -- \
+  --target puddle --generations 50 --population 16 --workers 4
+```
+
+This writes isolated checkpoints and logs for both variants, plus
+`summary.json` and a directly viewable `report.html`.
 Any checkpoint from before elastic-strain sensing has a 27-column first layer;
 the current policy requires 30 and must be retrained.
 

@@ -11,6 +11,7 @@ from agents_gpu import PARTICLE_META_BUFFER_OFFSET, AgentsGPU, weight_layout
 from device import pick_device
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, MpmCore
+from policy_parameters import STATEFUL_ARCHITECTURE
 from training_sim import TrainingRollout
 
 
@@ -1001,6 +1002,76 @@ def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
     )
 
 
+def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0)
+    agents = AgentsGPU(
+        device, core, environment, 1, 64,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
+        4, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
+        policy_architecture=STATEFUL_ARCHITECTURE,
+    )
+    core.load_scene(
+        np.array([[0.5, 0.5]], dtype=np.float32),
+        np.zeros((1, 2), dtype=np.float32),
+        np.array([[1, 0, 0, 1]], dtype=np.float32),
+        np.zeros((1, 4), dtype=np.float32),
+        np.ones(1, dtype=np.float32),
+    )
+    agents.set_active_count(1)
+    agents.set_growth_enabled(False)
+    agents.reset_heading(31)
+    layout = weight_layout(1, 64, STATEFUL_ARCHITECTURE)
+    weights = np.zeros(layout["total_floats"], dtype=np.float32)
+    # Common outputs occupy C+6 rows. Drive private channel 0 positively and
+    # open its corresponding gate; all other private channels remain still.
+    weights[layout["fc2b_offset"] + 7] = 1.0
+    weights[layout["fc2b_offset"] + 15] = 20.0
+    agents.load_weights(weights)
+    agents.set_communication_timestep(0.25)
+
+    encoder = device.create_command_encoder()
+    core.encode_morphology(encoder)
+    environment.encode_sense(encoder)
+    agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
+    device.queue.submit([encoder.finish()])
+    raw = device.queue.read_buffer(
+        agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, agents._particle_meta_dtype.itemsize
+    )
+    meta = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)[0]
+    expected_state = np.tanh(1.0) * 0.25
+    assert np.isclose(meta["privateState"][0], expected_state, atol=2e-6), meta
+    assert np.allclose(meta["privateState"][1:], 0.0, atol=1e-7), meta
+    expected_red = 1.0 / (1.0 + np.exp(-expected_state))
+    assert np.isclose(meta["color"][0], expected_red, atol=2e-6), meta
+    assert np.allclose(meta["color"][1:3], 0.5, atol=1e-7), meta
+    agents.set_internal_state_speed(0.0)
+    encoder = device.create_command_encoder()
+    environment.encode_sense(encoder)
+    agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
+    device.queue.submit([encoder.finish()])
+    frozen_raw = device.queue.read_buffer(
+        agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, agents._particle_meta_dtype.itemsize
+    )
+    frozen = np.frombuffer(frozen_raw, dtype=agents._particle_meta_dtype, count=1)[0]
+    np.testing.assert_allclose(frozen["privateState"], meta["privateState"], atol=1e-7)
+    agents.set_internal_state_speed(1.0)
+    root2 = np.float32(np.sqrt(2.0))
+    device.queue.write_buffer(core.F, 0, np.array([[root2, 0, 0, root2]], dtype=np.float32))
+    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.array([2.0]), np.ones(1)))
+    encoder = device.create_command_encoder()
+    environment.encode_sense(encoder)
+    agents.encode_step(encoder, environment.parity, commit_lifecycle=True)
+    device.queue.submit([encoder.finish()])
+    assert agents.read_grown_count() == 2
+    raw = device.queue.read_buffer(
+        agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, 2 * agents._particle_meta_dtype.itemsize
+    )
+    daughters = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=2)
+    np.testing.assert_allclose(daughters[0]["privateState"], daughters[1]["privateState"], atol=1e-7)
+    print("[PASS] stateful policy applies speed-scaled gated memory, freezes at 0x, derives RGB, and inherits state at division")
+
+
 def main() -> None:
     device = pick_device()
     check_morphology_occupancy(device)
@@ -1022,6 +1093,7 @@ def main() -> None:
     check_high_strain_elastic_stability(device)
     check_cycle_start_gates(device)
     check_persistent_division_hazard(device)
+    check_stateful_private_memory(device)
 
 
 if __name__ == "__main__":

@@ -43,6 +43,11 @@ MORPHOLOGY_GRADIENT_INPUT_SCALE: float = _CORE_CONSTANTS["MORPHOLOGY_GRADIENT_IN
 GROWTH_DIRECTION_RESPONSE_RATE: float = _CORE_CONSTANTS["GROWTH_DIRECTION_RESPONSE_RATE"]
 GROWTH_ANISOTROPY_RESPONSE_RATE: float = _CORE_CONSTANTS["GROWTH_ANISOTROPY_RESPONSE_RATE"]
 DIRECTION_CONFIDENCE_SCALE: float = _CORE_CONSTANTS["DIRECTION_CONFIDENCE_SCALE"]
+# Normal training architecture selection. This is broadcast with the run's
+# settings; the paired comparison utility overrides it internally only while
+# launching its two controlled experiment subprocesses.
+POLICY_ARCHITECTURE: str = _CORE_CONSTANTS["POLICY_ARCHITECTURE"]
+INTERNAL_STATE_SPEED: float = _CORE_CONSTANTS["INTERNAL_STATE_SPEED"]
 # Neural evaluations performed before each mechanical macro step. These are
 # numerical communication substeps; increasing this improves temporal
 # resolution without multiplying chemical/turning speed.
@@ -92,7 +97,7 @@ MPM_ENABLED = True
 MATERIAL_E = 1e4
 MATERIAL_NU = 0.2
 MATERIAL_HARDENING = 3.0
-MATERIAL_ELASTICITY = 0.2
+MATERIAL_ELASTICITY = 0.5
 
 # Growth
 SPLIT_DISPLACEMENT = 0.0027

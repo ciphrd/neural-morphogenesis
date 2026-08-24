@@ -110,8 +110,8 @@ from simulation_settings import (
     ELASTIC_STRAIN_INPUTS_ENABLED,
     FIELD_N,
     GROWTH_DURATION_MACRO_STEPS,
-    HIDDEN_DIM,
     INITIAL_PARTICLE_COUNT,
+    INTERNAL_STATE_SPEED,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
@@ -120,11 +120,18 @@ from simulation_settings import (
     MORPHOLOGY_BLUR_SIGMA,
     MORPHOLOGY_DENSITY_REFERENCE,
     NEURAL_UPDATES_PER_MACRO,
+    POLICY_ARCHITECTURE,
     REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
 )
-from policy_parameters import mutation_scale_vector, mutation_scales
+from policy_parameters import (
+    POLICY_ARCHITECTURES,
+    STATELESS_ARCHITECTURE,
+    mutation_scale_vector,
+    mutation_scales,
+    policy_hidden_dim,
+)
 from targets import TargetShape, available_targets, load_target
 from training_sim import TrainingRollout
 from update_rule import UpdateRule
@@ -174,7 +181,12 @@ def set_weights(model: UpdateRule, flat: np.ndarray) -> None:
     model.load_flat_parameters(torch.from_numpy(flat).float())
 
 
-def mutate(weights: np.ndarray, sigma: float, rng: np.random.Generator) -> np.ndarray:
+def mutate(
+    weights: np.ndarray,
+    sigma: float,
+    rng: np.random.Generator,
+    architecture: str = STATELESS_ARCHITECTURE,
+) -> np.ndarray:
     """Gaussian mutation with a global sigma and semantic bucket scales.
 
     The trunk keeps the CLI sigma. Output heads use smaller multipliers because
@@ -182,7 +194,7 @@ def mutate(weights: np.ndarray, sigma: float, rng: np.random.Generator) -> np.nd
     contributions; equal elementwise noise there caused disproportionately
     large behavioral jumps, especially for persistent direction/control state.
     """
-    scales = mutation_scale_vector(CHEM_CHANNELS, HIDDEN_DIM)
+    scales = mutation_scale_vector(CHEM_CHANNELS, policy_hidden_dim(architecture), architecture)
     if weights.shape != scales.shape:
         raise ValueError(f"expected {scales.size} policy parameters, got {weights.size}")
     noise = rng.normal(size=weights.shape).astype(np.float32)
@@ -347,13 +359,27 @@ def run_generation(
     next_population = list(elites)
     while len(next_population) < args.population:
         parent = elites[rng.integers(len(elites))]
-        next_population.append(mutate(parent, args.mutation_sigma, rng))
+        next_population.append(mutate(parent, args.mutation_sigma, rng, args.policy_architecture))
 
     return next_population, fitnesses, seeds[0]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    # Normal selection lives in core/constants.json. This hidden override is
+    # exclusively for compare_policy_architectures.py, which must launch both
+    # variants without rewriting project configuration between subprocesses.
+    parser.set_defaults(policy_architecture=POLICY_ARCHITECTURE)
+    parser.add_argument(
+        "--_comparison-policy-architecture",
+        dest="policy_architecture",
+        choices=POLICY_ARCHITECTURES,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--checkpoint-dir", type=Path, default=CHECKPOINTS_DIR,
+        help="checkpoint destination (useful for paired architecture comparisons)",
+    )
     parser.add_argument(
         "--target", default="circle", choices=available_targets(), help="target shape name (a .json file in ./targets/)"
     )
@@ -469,11 +495,12 @@ def main() -> None:
     # see training_sim.py's own module docstring for why.
     num_workers = args.workers if args.workers is not None else min(os.cpu_count() or 4, args.population)
     pool = build_pool(num_workers, args.particles, target, target_raster, target_distance_field, args)
-    update_rule = UpdateRule(CHEM_CHANNELS)
+    update_rule = UpdateRule(CHEM_CHANNELS, args.policy_architecture)
 
-    population = [get_weights(UpdateRule(CHEM_CHANNELS)) for _ in range(args.population)]
+    population = [get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture)) for _ in range(args.population)]
 
-    CHECKPOINTS_DIR.mkdir(exist_ok=True)
+    checkpoint_dir = args.checkpoint_dir
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     best_fitness = float("inf")
     best_weights = population[0]
 
@@ -492,9 +519,9 @@ def main() -> None:
 
         if (generation + 1) % args.checkpoint_every == 0 or generation == args.generations - 1:
             set_weights(update_rule, best_weights)
-            np.save(CHECKPOINTS_DIR / "best.npy", best_weights)
-            (CHECKPOINTS_DIR / "best_weights.json").write_text(json.dumps(update_rule.export_weights()))
-            (CHECKPOINTS_DIR / "best_meta.json").write_text(
+            np.save(checkpoint_dir / "best.npy", best_weights)
+            (checkpoint_dir / "best_weights.json").write_text(json.dumps(update_rule.export_weights()))
+            (checkpoint_dir / "best_meta.json").write_text(
                 json.dumps(
                     {
                         "generation": generation,
@@ -510,6 +537,7 @@ def main() -> None:
                         "morphology_density_reference": MORPHOLOGY_DENSITY_REFERENCE,
                         "neural_updates_per_macro": NEURAL_UPDATES_PER_MACRO,
                         "communication_speed": COMMUNICATION_SPEED,
+                        "internal_state_speed": INTERNAL_STATE_SPEED,
                         "elastic_strain_scale": ELASTIC_STRAIN_SCALE,
                         "elastic_strain_inputs_enabled": ELASTIC_STRAIN_INPUTS_ENABLED,
                         "gravity": args.gravity,
@@ -521,7 +549,9 @@ def main() -> None:
                         "population": args.population,
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
-                        "mutation_scales": mutation_scales(),
+                        "policy_architecture": args.policy_architecture,
+                        "hidden_dim": policy_hidden_dim(args.policy_architecture),
+                        "mutation_scales": mutation_scales(args.policy_architecture),
                         "raster_resolution": args.raster_resolution,
                         "raster_sigma": args.raster_sigma,
                         "outside_weight": args.outside_weight,
@@ -548,7 +578,7 @@ def main() -> None:
             )
 
     pool.shutdown()
-    print(f"done. best fitness: {best_fitness:.4f}. weights saved to {CHECKPOINTS_DIR / 'best.npy'}")
+    print(f"done. best fitness: {best_fitness:.4f}. weights saved to {checkpoint_dir / 'best.npy'}")
 
 
 if __name__ == "__main__":

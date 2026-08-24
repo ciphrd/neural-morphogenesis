@@ -12,7 +12,7 @@ const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
 const TRACKED: u32 = __TRACKED__u;
 const ELASTIC_SCALE: f32 = __ELASTIC_SCALE__;
 const ELASTIC_ENABLED: bool = __ELASTIC_ENABLED__;
-const IN_DIM: u32 = CHANNELS * 3u + 6u;
+const IN_DIM: u32 = __IN_DIM__u;
 const META_DIM: u32 = 12u;
 const OUT_STRIDE: u32 = META_DIM + 2u * IN_DIM;
 const CHEMICAL_VALUE_INPUT_SCALE: f32 = __CHEMICAL_VALUE_INPUT_SCALE__;
@@ -27,6 +27,7 @@ struct ParticleRest {
 struct ParticleMeta {
   rng: u32, cooldown: f32, heading: f32, angularVelocity: f32,
   color: vec4<f32>, divisionHazard: f32, divisionThreshold: f32,
+  privateState: array<f32, 8>, _padding: vec2<f32>,
 }
 struct Corners {
   x0: u32, x1: u32, y0: u32, y1: u32,
@@ -183,4 +184,5 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
   output[inputBase+3u*CHANNELS+3u] = elastic.x;
   output[inputBase+3u*CHANNELS+4u] = elastic.y;
   output[inputBase+3u*CHANNELS+5u] = elastic.z;
+  __PRIVATE_STATE_PROBE__
 }

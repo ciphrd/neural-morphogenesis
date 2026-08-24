@@ -13,7 +13,7 @@
 // enforces chirality by evaluating the mirrored lateral gradient and
 // combining the two responses.
 
-import type { UpdateRuleWeights } from "./types";
+import type { PolicyArchitecture, UpdateRuleWeights } from "./types";
 import coreConstants from "../../../core/constants.json";
 
 export interface PolicyOutput {
@@ -25,6 +25,8 @@ export interface PolicyOutput {
   divisionBias: number;
   direction: [number, number];
   color: [number, number, number];
+  stateDelta: Float32Array;
+  stateGate: Float32Array;
 }
 
 /** Validates serialized weights at the untyped network boundary. A training
@@ -33,10 +35,12 @@ export interface PolicyOutput {
 export function policyWeightsShapeError(
   weights: UpdateRuleWeights,
   channels: number,
-  hiddenDim: number
+  hiddenDim: number,
+  architecture: PolicyArchitecture = "stateless-128",
 ): string | null {
-  const inDim = channels * 3 + 6;
-  const outDim = channels + 9;
+  const stateful = architecture === "stateful-64";
+  const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
+  const outDim = channels + (stateful ? 22 : 9);
   const fc1w = weights?.fc1w;
   const fc1b = weights?.fc1b;
   const fc2w = weights?.fc2w;
@@ -90,19 +94,21 @@ export function evalPolicy(
   hiddenDim: number,
   maxEnvWrite: number,
   maxAngularAccel: number,
-  _maxStrafe: number
+  _maxStrafe: number,
+  architecture: PolicyArchitecture = "stateless-128",
 ): PolicyOutput {
-  const shapeError = policyWeightsShapeError(weights, channels, hiddenDim);
+  const shapeError = policyWeightsShapeError(weights, channels, hiddenDim, architecture);
   if (shapeError) throw new Error(shapeError);
   const hidden = new Float32Array(hiddenDim);
   for (let j = 0; j < hiddenDim; j++) {
     let acc = weights.fc1b[j];
     const row = weights.fc1w[j];
-    for (let i = 0; i < input.length; i++) acc += input[i] * row[i];
+    for (let i = 0; i < row.length; i++) acc += (input[i] ?? 0) * row[i];
     hidden[j] = safeTanh(acc);
   }
 
-  const outDim = channels + 9;
+  const stateful = architecture === "stateful-64";
+  const outDim = channels + (stateful ? 22 : 9);
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -133,10 +139,23 @@ export function evalPolicy(
   const direction: [number, number] = magnitude > 1e-6
     ? [rawX / magnitude, rawY / magnitude]
     : [0, 0];
-  const color: [number, number, number] = [
-    safeSigmoid(outVec[envWriteDim + 6]),
-    safeSigmoid(outVec[envWriteDim + 7]),
-    safeSigmoid(outVec[envWriteDim + 8]),
-  ];
-  return { envWrite, headingDirection, angularAccel, anisotropy, divisionBias, direction, color };
+  const stateDelta = new Float32Array(8);
+  const stateGate = new Float32Array(8);
+  let color: [number, number, number];
+  if (stateful) {
+    for (let i = 0; i < 8; i++) {
+      stateDelta[i] = safeTanh(outVec[envWriteDim + 6 + i]);
+      stateGate[i] = safeSigmoid(outVec[envWriteDim + 14 + i]);
+    }
+    // The inspector evaluates a zero private state. Live RGB is derived after
+    // applying the residual update to each particle's actual persistent state.
+    color = [0.5, 0.5, 0.5];
+  } else {
+    color = [
+      safeSigmoid(outVec[envWriteDim + 6]),
+      safeSigmoid(outVec[envWriteDim + 7]),
+      safeSigmoid(outVec[envWriteDim + 8]),
+    ];
+  }
+  return { envWrite, headingDirection, angularAccel, anisotropy, divisionBias, direction, color, stateDelta, stateGate };
 }

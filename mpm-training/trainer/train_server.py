@@ -53,7 +53,7 @@ from evolve import (
 )
 from mpm_core import MpmCore
 from parallel_workers import build_pool
-from policy_parameters import mutation_scales
+from policy_parameters import mutation_scales, policy_hidden_dim
 from raster import build_target_distance_field, build_target_raster, training_raster_distance
 from simulation_settings import (
     ANGULAR_DAMPING,
@@ -73,7 +73,7 @@ from simulation_settings import (
     GROWTH_DURATION_MACRO_STEPS,
     GROWTH_MAX,
     GROWTH_THRESHOLD,
-    HIDDEN_DIM,
+    INTERNAL_STATE_SPEED,
     MASS_RAMP_MACRO_STEPS,
     MORPHOLOGY_BLUR_SIGMA,
     MORPHOLOGY_DENSITY_REFERENCE,
@@ -339,6 +339,7 @@ async def _training_loop_body() -> None:
 
     rng = np.random.default_rng(args.seed)
     torch.manual_seed(args.seed)
+    policy_hidden = policy_hidden_dim(args.policy_architecture)
 
     # One MpmCore/AgentsGPU/EnvironmentGPU (wgpu pipeline compilation is
     # real, avoidable overhead — see evolve.py's own module docstring),
@@ -357,7 +358,7 @@ async def _training_loop_body() -> None:
         core,
         environment,
         CHEM_CHANNELS,
-        HIDDEN_DIM,
+        policy_hidden,
         MAX_ACCEL,
         MAX_STRAFE,
         MAX_ENV_WRITE,
@@ -374,6 +375,7 @@ async def _training_loop_body() -> None:
         1.0,
         args.spawn_x,
         args.spawn_y,
+        policy_architecture=args.policy_architecture,
     )
     num_workers = args.workers if args.workers is not None else min(os.cpu_count() or 4, args.population)
     # log_device=False — _setup() already logged the "[device] adapter:
@@ -381,8 +383,8 @@ async def _training_loop_body() -> None:
     # see build_pool()'s own docstring for why it would otherwise repeat
     # that exact line a second time.
     pool = build_pool(num_workers, args.particles, target, target_raster, target_distance_field, args, log_device=False)
-    update_rule = UpdateRule(CHEM_CHANNELS)
-    population = [get_weights(UpdateRule(CHEM_CHANNELS)) for _ in range(args.population)]
+    update_rule = UpdateRule(CHEM_CHANNELS, args.policy_architecture)
+    population = [get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture)) for _ in range(args.population)]
 
     CHECKPOINTS_DIR.mkdir(exist_ok=True)
     _archive_previous_run()
@@ -415,9 +417,11 @@ async def _training_loop_body() -> None:
         "morphologyDensityReference": MORPHOLOGY_DENSITY_REFERENCE,
         "neuralUpdatesPerMacro": NEURAL_UPDATES_PER_MACRO,
         "communicationSpeed": COMMUNICATION_SPEED,
+        "internalStateSpeed": INTERNAL_STATE_SPEED,
         "elasticStrainScale": ELASTIC_STRAIN_SCALE,
         "elasticStrainInputsEnabled": ELASTIC_STRAIN_INPUTS_ENABLED,
-        "hiddenDim": HIDDEN_DIM,
+        "hiddenDim": policy_hidden,
+        "policyArchitecture": args.policy_architecture,
         "decay": DECAY,
         "depositRate": DEPOSIT_RATE,
         "maxAccel": MAX_ACCEL,
@@ -561,7 +565,9 @@ async def _training_loop_body() -> None:
                         "population": args.population,
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
-                        "mutation_scales": mutation_scales(),
+                        "policy_architecture": args.policy_architecture,
+                        "hidden_dim": policy_hidden,
+                        "mutation_scales": mutation_scales(args.policy_architecture),
                         "seed": args.seed,
                         "winner_seed": winner_seed,
                         # simulation_settings.py's own values this run
@@ -587,6 +593,7 @@ async def _training_loop_body() -> None:
                         "morphology_density_reference": MORPHOLOGY_DENSITY_REFERENCE,
                         "neural_updates_per_macro": NEURAL_UPDATES_PER_MACRO,
                         "communication_speed": COMMUNICATION_SPEED,
+                        "internal_state_speed": INTERNAL_STATE_SPEED,
                         "elastic_strain_scale": ELASTIC_STRAIN_SCALE,
                         "elastic_strain_inputs_enabled": ELASTIC_STRAIN_INPUTS_ENABLED,
                         "growth_max": GROWTH_MAX,

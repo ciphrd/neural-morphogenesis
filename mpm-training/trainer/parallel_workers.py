@@ -50,7 +50,6 @@ from simulation_settings import (
     DIVISION_COOLDOWN,
     FIELD_N,
     FRICTION,
-    HIDDEN_DIM,
     MAX_ACCEL,
     MAX_ANGULAR_ACCEL,
     MAX_ANGULAR_VELOCITY,
@@ -58,6 +57,7 @@ from simulation_settings import (
     MAX_STRAFE,
     SPLIT_DISPLACEMENT,
 )
+from policy_parameters import policy_hidden_dim
 from targets import TargetShape
 
 # Worker-local globals — set once per process by _worker_init(), read by
@@ -101,7 +101,7 @@ def _worker_init(
         _core,
         _environment,
         CHEM_CHANNELS,
-        HIDDEN_DIM,
+        policy_hidden_dim(args.policy_architecture),
         MAX_ACCEL,
         MAX_STRAFE,
         MAX_ENV_WRITE,
@@ -118,6 +118,7 @@ def _worker_init(
         1.0,
         args.spawn_x,
         args.spawn_y,
+        policy_architecture=args.policy_architecture,
     )
     _target = target
     _target_raster = target_raster

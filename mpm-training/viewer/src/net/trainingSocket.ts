@@ -49,7 +49,7 @@ function placeholderRecord(settings: RunSettings): GenerationRecord {
     worst: NaN,
     allTimeBest: NaN,
     seed: 0,
-    weights: randomWeights(settings.channels, settings.hiddenDim),
+    weights: randomWeights(settings.channels, settings.hiddenDim, settings.policyArchitecture ?? "stateless-128"),
   };
 }
 

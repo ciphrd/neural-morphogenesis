@@ -29,7 +29,8 @@ from simulation_settings import (
     DAMPING_LOSS_FRACTION, DECAY, DEPOSIT_DISTANCE, DEPOSIT_RATE,
     DEPOSIT_SIGMA, DIVISION_COOLDOWN, ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE, FIELD_N, FRICTION, GROWTH_DURATION_MACRO_STEPS,
-    GROWTH_MAX, GROWTH_THRESHOLD, HIDDEN_DIM, INITIAL_PARTICLE_COUNT,
+    GROWTH_MAX, GROWTH_THRESHOLD, INITIAL_PARTICLE_COUNT,
+    INTERNAL_STATE_SPEED,
     MATERIAL_E, MATERIAL_ELASTICITY, MATERIAL_HARDENING, MATERIAL_NU,
     MAX_ACCEL, MAX_ANGULAR_ACCEL, MAX_ANGULAR_VELOCITY, MAX_ENV_WRITE,
     MAX_STRAFE, MORPHOLOGY_BLUR_SIGMA, MORPHOLOGY_DENSITY_REFERENCE,
@@ -38,7 +39,10 @@ from simulation_settings import (
     SPLAT_RADIUS, SPLIT_DISPLACEMENT,
 )
 from training_sim import TrainingRollout
-from policy_parameters import random_flat_policy_weights
+from policy_parameters import (
+    STATEFUL_ARCHITECTURE, STATELESS_ARCHITECTURE,
+    policy_hidden_dim, policy_input_dim, random_flat_policy_weights,
+)
 
 META_NAMES = [
     "valid", "position_x", "position_y", "heading", "cooldown",
@@ -48,20 +52,26 @@ META_NAMES = [
 ]
 
 
-def feature_names(channels: int) -> list[str]:
-    return (
+def feature_names(channels: int, architecture: str = STATELESS_ARCHITECTURE) -> list[str]:
+    names = (
         [f"chemical_value_{c}" for c in range(channels)]
         + [f"chemical_gradient_forward_{c}" for c in range(channels)]
         + [f"chemical_gradient_lateral_{c}" for c in range(channels)]
         + ["morphology_occupancy", "morphology_gradient_forward", "morphology_gradient_lateral"]
         + ["elastic_volume", "elastic_axial", "elastic_shear"]
     )
+    if architecture == STATEFUL_ARCHITECTURE:
+        names += [f"private_state_{i}" for i in range(8)]
+    return names
 
 
-def random_policy_weights(layout: dict[str, int], hidden_dim: int, rng: np.random.Generator) -> np.ndarray:
+def random_policy_weights(
+    layout: dict[str, int], hidden_dim: int, rng: np.random.Generator,
+    architecture: str = STATELESS_ARCHITECTURE,
+) -> np.ndarray:
     """Use the same logical-head initialization as training and the viewer."""
     channels = (layout["in_dim"] - 6) // 3
-    out = random_flat_policy_weights(channels, hidden_dim, rng)
+    out = random_flat_policy_weights(channels, hidden_dim, rng, architecture)
     if out.size != layout["total_floats"]:
         raise ValueError(f"policy initializer produced {out.size} values, expected {layout['total_floats']}")
     return out
@@ -75,7 +85,7 @@ class PolicyInputProbe:
     ) -> None:
         self.device = device
         self.tracked = tracked
-        self.input_dim = environment.channels * 3 + 6
+        self.input_dim = policy_input_dim(environment.channels, agents.policy_architecture)
         self.stride = len(META_NAMES) + 2 * self.input_dim
         self.indices = device.create_buffer(
             size=max(tracked, 1) * 4,
@@ -94,6 +104,11 @@ class PolicyInputProbe:
                 "FIELD_HEIGHT": environment.height,
                 "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
                 "TRACKED": tracked,
+                "IN_DIM": self.input_dim,
+                "PRIVATE_STATE_PROBE": (
+                    "for (var s=0u; s<8u; s=s+1u) { output[rawBase+3u*CHANNELS+6u+s]=agentState.privateState[s]; output[inputBase+3u*CHANNELS+6u+s]=tanh(agentState.privateState[s]); }"
+                    if agents.policy_architecture == STATEFUL_ARCHITECTURE else ""
+                ),
                 "ELASTIC_SCALE": repr(float(elastic_scale)),
                 "ELASTIC_ENABLED": "true" if elastic_enabled else "false",
                 "CHEMICAL_VALUE_INPUT_SCALE": repr(CHEMICAL_VALUE_INPUT_SCALE),
@@ -286,8 +301,9 @@ def main() -> int:
     meta = json.loads(args.meta.read_text())
     weights = np.load(args.weights).astype(np.float32)
     channels = int(meta.get("channels", CHEM_CHANNELS))
-    hidden = int(meta.get("hidden_dim", HIDDEN_DIM))
-    layout = weight_layout(channels, hidden)
+    architecture = meta.get("policy_architecture", STATELESS_ARCHITECTURE)
+    hidden = int(meta.get("hidden_dim", policy_hidden_dim(architecture)))
+    layout = weight_layout(channels, hidden, architecture)
     expected = layout["total_floats"]
     if len(weights) != expected:
         raise SystemExit(f"incompatible weights: checkpoint has {len(weights)} floats, current {channels}×{hidden} policy expects {expected}")
@@ -334,6 +350,8 @@ def main() -> int:
         meta.get("spawn_x", 0.5), meta.get("spawn_y", 0.5),
         meta.get("elastic_strain_scale", ELASTIC_STRAIN_SCALE),
         meta.get("elastic_strain_inputs_enabled", ELASTIC_STRAIN_INPUTS_ENABLED),
+        policy_architecture=architecture,
+        internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
     )
     def restart_rollout() -> TrainingRollout:
         return TrainingRollout(
@@ -369,7 +387,7 @@ def main() -> int:
         attempt = 0
         while True:
             attempt += 1
-            candidate = random_policy_weights(layout, hidden, policy_rng)
+            candidate = random_policy_weights(layout, hidden, policy_rng, architecture)
             agents.load_weights(candidate)
             search_sim = restart_rollout()
             initial_count = core.active_count
@@ -415,7 +433,7 @@ def main() -> int:
         meta.get("elastic_strain_scale", ELASTIC_STRAIN_SCALE),
         meta.get("elastic_strain_inputs_enabled", ELASTIC_STRAIN_INPUTS_ENABLED),
     )
-    names = feature_names(channels)
+    names = feature_names(channels, architecture)
     particles = [{"slot": i, "spawn_step": None, "samples": []} for i in range(args.tracked)]
     all_values: list[list[float]] = []
     all_raw_values: list[list[float]] = []
@@ -458,7 +476,7 @@ def main() -> int:
             print(f"[measure] step {step}/{steps}: active={core.active_count}")
 
     report = {
-        "version": 1, "channels": channels, "feature_names": names,
+        "version": 1, "channels": channels, "policy_architecture": architecture, "feature_names": names,
         "metadata_names": META_NAMES[1:], "particles": particles, "population": population,
         "summary": percentile_summary(all_values, names),
         "raw_summary": percentile_summary(all_raw_values, names), "samples": sampled_times,
@@ -468,6 +486,7 @@ def main() -> int:
             "morphology_occupancy": "clamp(2*x-1,-1,1)",
             "morphology_gradient_scale": MORPHOLOGY_GRADIENT_INPUT_SCALE,
             "elastic": "already normalized; unchanged",
+            "private_state": "tanh(state), state clamped to [-4,4]" if architecture == STATEFUL_ARCHITECTURE else "not present",
         },
         "search": {
             "enabled": args.search_for_split, "attempt": search_attempt,

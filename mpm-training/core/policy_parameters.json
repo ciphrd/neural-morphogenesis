@@ -40,6 +40,18 @@
       "biasCenter": [0.0, 0.0, 0.0],
       "biasJitter": 0.5,
       "mutationScale": 0.5
+    },
+    "stateDelta": {
+      "weightGain": 0.25,
+      "biasCenter": [0.0],
+      "biasJitter": 0.1,
+      "mutationScale": 0.2
+    },
+    "stateGate": {
+      "weightGain": 0.25,
+      "biasCenter": [-2.0],
+      "biasJitter": 0.25,
+      "mutationScale": 0.15
     }
   }
 }

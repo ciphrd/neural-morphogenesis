@@ -84,6 +84,8 @@ export class GpuSimulation {
   private pendingWhiteDotsAlpha = 1.0;
   private pendingActivationAlpha = 0.2;
   private pendingNeuralColorAlpha = 1.0;
+  private pendingInternalStateAlpha = 1.0;
+  private pendingInternalStateChannelStart = 0;
   private pendingPointRadiusPx: number | null = null;
   private pendingGrowthAxisLengthPx = 24;
   // 0 = identity — see gpu/render.ts's own setAccent()/field.wgsl's own
@@ -190,6 +192,7 @@ export class GpuSimulation {
       config.channels,
       config.fieldN,
       config.hiddenDim,
+      config.policyArchitecture ?? "stateless-128",
       config.chirality,
       config.elasticStrainScale ?? 0.15,
       config.elasticStrainInputsEnabled ?? false,
@@ -231,6 +234,7 @@ export class GpuSimulation {
     const agents = new Agents(this.device, mpmCore, environment, {
       channels: config.channels,
       hiddenDim: config.hiddenDim,
+      policyArchitecture: config.policyArchitecture ?? "stateless-128",
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
       maxEnvWrite: config.maxEnvWrite,
@@ -268,6 +272,8 @@ export class GpuSimulation {
     renderer.setWhiteDotsAlpha(this.pendingWhiteDotsAlpha);
     renderer.setActivationAlpha(this.pendingActivationAlpha);
     renderer.setNeuralColorAlpha(this.pendingNeuralColorAlpha);
+    renderer.setInternalStateAlpha(this.pendingInternalStateAlpha);
+    renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart);
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
     renderer.setGrowthAxisLengthPx(this.pendingGrowthAxisLengthPx);
     renderer.setAccent(this.pendingAccent);
@@ -395,6 +401,7 @@ export class GpuSimulation {
       diffusionStep: Math.min(communicationDt, 1.0),
     });
     this.agents.setCommunicationTimestep(communicationDt);
+    this.agents.setInternalStateSpeed(physics.internalStateSpeed ?? 1.0);
     this.agents.setPhysics({
       maxAccel: physics.maxAccel,
       maxStrafe: physics.maxStrafe,
@@ -578,6 +585,16 @@ export class GpuSimulation {
   setNeuralColorAlpha(alpha: number): void {
     this.pendingNeuralColorAlpha = alpha;
     this.renderer?.setNeuralColorAlpha(alpha);
+  }
+
+  setInternalStateAlpha(alpha: number): void {
+    this.pendingInternalStateAlpha = alpha;
+    this.renderer?.setInternalStateAlpha(alpha);
+  }
+
+  setInternalStateChannelStart(start: number): void {
+    this.pendingInternalStateChannelStart = start;
+    this.renderer?.setInternalStateChannelStart(start);
   }
 
   setGrowthAxisLengthPx(px: number): void {

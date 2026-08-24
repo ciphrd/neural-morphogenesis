@@ -1,5 +1,5 @@
 // The evolved per-particle policy, GPU-resident — WGSL port of
-// trainer/update_rule.py's Dense(128) -> tanh -> Dense(CHANNELS+9),
+// trainer/update_rule.py's stateless-128/stateful-64 dense policy variants,
 // following envnca/frontend/src/gpu/agents.wgsl's own NN-forward-
 // pass approach (weights as one flat buffer, plain loops rather than a
 // matrix type, safeTanh on the OUTPUT layer's own squashing to avoid a
@@ -143,14 +143,16 @@
 // runs per agent, not a physics knob PhysicsPanel-style live tuning
 // makes sense for.
 const CHIRALITY: bool = __CHIRALITY__;
+const STATEFUL: bool = __STATEFUL__;
 const ELASTIC_STRAIN_INPUTS_ENABLED: bool = __ELASTIC_STRAIN_INPUTS_ENABLED__;
+const PRIVATE_STATE_DIM: u32 = 8u;
 
 const CHANNELS: u32 = __CHANNELS__u;
 const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
 // Per chemical channel: value, heading-forward gradient, lateral gradient;
 // followed by morphology occupancy/forward/lateral gradient and three
 // heading-relative elastic Hencky-strain components.
-const IN_DIM: u32 = CHANNELS * 3u + 6u;
+const IN_DIM: u32 = __IN_DIM__u;
 const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
 const CHEMICAL_VALUE_INPUT_SCALE: f32 = __CHEMICAL_VALUE_INPUT_SCALE__;
 const CHEMICAL_GRADIENT_INPUT_SCALE: f32 = __CHEMICAL_GRADIENT_INPUT_SCALE__;
@@ -162,7 +164,7 @@ const DIRECTION_CONFIDENCE_SCALE: f32 = __DIRECTION_CONFIDENCE_SCALE__;
 // One independent chemical write per channel, deposited directly beneath
 // the particle rather than at heading-relative cardinal offsets.
 const ENV_WRITE_DIM: u32 = CHANNELS;
-const OUT_DIM: u32 = ENV_WRITE_DIM + 9u; // env_write + heading target + growth controls + direction + RGB
+const OUT_DIM: u32 = __OUT_DIM__u;
 
 const PI: f32 = 3.14159265358979323846;
 
@@ -281,6 +283,9 @@ struct ParticleMeta {
   // discarded when the signal later changes or temporarily vanishes.
   divisionHazard: f32,
   divisionThreshold: f32,
+  // Eight private neural-memory channels. Stateless policies leave these at
+  // zero. Stateful policies sense them and apply gated residual updates.
+  privateState: array<f32, PRIVATE_STATE_DIM>,
 }
 // Pack growth's counter and particle metadata into one allocation. The
 // explicit 252-byte pad puts particleMeta at byte 256, allowing the render
@@ -362,7 +367,8 @@ struct StepMode {
   // Chemical/orientation time represented by this neural evaluation.
   // Host sets this to communicationSpeed / neuralUpdatesPerMacro.
   communicationDt: f32,
-  _padding: vec2<f32>,
+  stateUpdateSpeed: f32,
+  _padding: f32,
 }
 @group(0) @binding(13) var<uniform> stepMode: StepMode;
 
@@ -633,6 +639,8 @@ struct PolicyOutput {
   divisionBias: f32,
   growthTargetLocal: vec2<f32>,
   color: vec3<f32>,
+  stateDelta: array<f32, PRIVATE_STATE_DIM>,
+  stateGate: array<f32, PRIVATE_STATE_DIM>,
 }
 
 fn safeSigmoid(x: f32) -> f32 {
@@ -696,11 +704,7 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
   out.growthTargetLocal = vec2<f32>(
     safeTanh(outVec[ENV_WRITE_DIM + 4u]), safeTanh(outVec[ENV_WRITE_DIM + 5u])
   );
-  out.color = vec3<f32>(
-    safeSigmoid(outVec[ENV_WRITE_DIM + 6u]),
-    safeSigmoid(outVec[ENV_WRITE_DIM + 7u]),
-    safeSigmoid(outVec[ENV_WRITE_DIM + 8u]),
-  );
+  __POLICY_TAIL_DECODE__
   return out;
 }
 
@@ -765,6 +769,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   inputVec[3u * CHANNELS + 3u] = elasticInput.x;
   inputVec[3u * CHANNELS + 4u] = elasticInput.y;
   inputVec[3u * CHANNELS + 5u] = elasticInput.z;
+  __PRIVATE_STATE_INPUTS__
   var result = evalPolicy(inputVec);
 
   // CHIRALITY: a second pass on the mirror-reflected input (lateral —
@@ -803,12 +808,31 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       (result.growthTargetLocal.y - mirrored.growthTargetLocal.y) * 0.5
     );
     result.color = (result.color + mirrored.color) * 0.5;
+    for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
+      result.stateDelta[s] = (result.stateDelta[s] + mirrored.stateDelta[s]) * 0.5;
+      result.stateGate[s] = (result.stateGate[s] + mirrored.stateGate[s]) * 0.5;
+    }
   }
 
   // One bounded Gaussian write per channel, centered underneath the particle.
   depositGaussian(result.envWrite, fieldPos);
 
   let communicationDt = max(stepMode.communicationDt, 0.0);
+
+  if (STATEFUL) {
+    for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
+      let residual = result.stateGate[s] * result.stateDelta[s]
+        * communicationDt * max(stepMode.stateUpdateSpeed, 0.0);
+      agentState.particleMeta[pi].privateState[s] = clamp(
+        agentState.particleMeta[pi].privateState[s] + residual, -4.0, 4.0
+      );
+    }
+    result.color = vec3<f32>(
+      safeSigmoid(agentState.particleMeta[pi].privateState[0u]),
+      safeSigmoid(agentState.particleMeta[pi].privateState[1u]),
+      safeSigmoid(agentState.particleMeta[pi].privateState[2u]),
+    );
+  }
 
   // The NN proposes a LOCAL desired heading vector. Its shortest signed angle
   // from local-forward becomes a proportional angular acceleration; the
@@ -973,6 +997,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       agentState.particleMeta[newIndex].color = agentState.particleMeta[pi].color;
       agentState.particleMeta[newIndex].divisionHazard = 0.0;
       agentState.particleMeta[newIndex].divisionThreshold = 0.0;
+      for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
+        agentState.particleMeta[newIndex].privateState[s] = agentState.particleMeta[pi].privateState[s];
+      }
       // Reseeded from the parent's own latest post-advance state (both
       // draws, `angleState`) mixed with the new slot index, not copied
       // outright — two particles sharing an identical RNG state would

@@ -61,6 +61,9 @@ interface GridCanvasProps {
   whiteDotsAlpha?: number;
   activationAlpha?: number;
   neuralColorAlpha?: number;
+  internalStateAlpha?: number;
+  /** First of three contiguous private-state channels mapped to cell RGB. */
+  internalStateChannelStart?: number;
   /** Full-strength axis length in device pixels. */
   growthAxisLengthPx?: number;
   /** [-2,2] — negative suppresses background-field contrast, 0 is
@@ -213,6 +216,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     whiteDotsAlpha = 1,
     activationAlpha = 0.2,
     neuralColorAlpha = 1,
+    internalStateAlpha = 1,
+    internalStateChannelStart = 0,
     growthAxisLengthPx = 24,
     accent = 0,
     morphologyGradientVisible = true,
@@ -242,6 +247,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const whiteDotsAlphaRef = useRef(whiteDotsAlpha);
   const activationAlphaRef = useRef(activationAlpha);
   const neuralColorAlphaRef = useRef(neuralColorAlpha);
+  const internalStateAlphaRef = useRef(internalStateAlpha);
+  const internalStateChannelStartRef = useRef(internalStateChannelStart);
   const growthAxisLengthPxRef = useRef(growthAxisLengthPx);
   const accentRef = useRef(accent);
   const morphologyGradientVisibleRef = useRef(morphologyGradientVisible);
@@ -367,6 +374,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   whiteDotsAlphaRef.current = whiteDotsAlpha;
   activationAlphaRef.current = activationAlpha;
   neuralColorAlphaRef.current = neuralColorAlpha;
+  internalStateAlphaRef.current = internalStateAlpha;
+  internalStateChannelStartRef.current = internalStateChannelStart;
   growthAxisLengthPxRef.current = growthAxisLengthPx;
   accentRef.current = accent;
   morphologyGradientVisibleRef.current = morphologyGradientVisible;
@@ -451,6 +460,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setWhiteDotsAlpha(whiteDotsAlphaRef.current);
       simulation.setActivationAlpha(activationAlphaRef.current);
       simulation.setNeuralColorAlpha(neuralColorAlphaRef.current);
+      simulation.setInternalStateAlpha(internalStateAlphaRef.current);
+      simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
       if (particleRadiusPxRef.current !== undefined) simulation.setPointRadiusPx(particleRadiusPxRef.current);
       simulation.setGrowthAxisLengthPx(growthAxisLengthPxRef.current);
       simulation.setAccent(accentRef.current);
@@ -460,7 +471,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulationRef.current = simulation;
       const initialConfig = configRef.current;
       const initialWeightsError = initialConfig
-        ? policyWeightsShapeError(initialConfig.weights, initialConfig.channels, initialConfig.hiddenDim)
+        ? policyWeightsShapeError(initialConfig.weights, initialConfig.channels, initialConfig.hiddenDim, initialConfig.policyArchitecture)
         : null;
       if (initialConfig && !initialWeightsError) simulation.loadGeneration(initialConfig);
       if (particleCapRef.current !== undefined) simulation.setParticleCap(particleCapRef.current);
@@ -677,7 +688,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     const simulation = simulationRef.current;
     if (!config || !simulation) return;
-    const weightsError = policyWeightsShapeError(config.weights, config.channels, config.hiddenDim);
+    const weightsError = policyWeightsShapeError(config.weights, config.channels, config.hiddenDim, config.policyArchitecture);
     if (weightsError) {
       setStatus("incompatible");
       setStatusMessage(weightsError);
@@ -725,6 +736,14 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     simulationRef.current?.setNeuralColorAlpha(neuralColorAlpha);
   }, [neuralColorAlpha]);
+
+  useEffect(() => {
+    simulationRef.current?.setInternalStateAlpha(internalStateAlpha);
+  }, [internalStateAlpha]);
+
+  useEffect(() => {
+    simulationRef.current?.setInternalStateChannelStart(internalStateChannelStart);
+  }, [internalStateChannelStart]);
 
   useEffect(() => {
     if (particleRadiusPx !== undefined) simulationRef.current?.setPointRadiusPx(particleRadiusPx);

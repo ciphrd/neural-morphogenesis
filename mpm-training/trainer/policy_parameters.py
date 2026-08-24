@@ -14,6 +14,10 @@ import numpy as np
 
 
 _CONFIG = json.loads((Path(__file__).parent.parent / "core" / "policy_parameters.json").read_text())
+STATELESS_ARCHITECTURE = "stateless-128"
+STATEFUL_ARCHITECTURE = "stateful-64"
+POLICY_ARCHITECTURES = (STATELESS_ARCHITECTURE, STATEFUL_ARCHITECTURE)
+PRIVATE_STATE_DIM = 8
 
 
 @dataclass(frozen=True)
@@ -26,15 +30,34 @@ class PolicyHead:
     mutation_scale: float
 
 
-def policy_heads(num_channels: int) -> tuple[PolicyHead, ...]:
-    sizes = {
+def normalize_architecture(architecture: str | None) -> str:
+    architecture = architecture or STATELESS_ARCHITECTURE
+    if architecture not in POLICY_ARCHITECTURES:
+        raise ValueError(f"unknown policy architecture {architecture!r}; expected one of {POLICY_ARCHITECTURES}")
+    return architecture
+
+
+def policy_hidden_dim(architecture: str) -> int:
+    return 64 if normalize_architecture(architecture) == STATEFUL_ARCHITECTURE else 128
+
+
+def policy_input_dim(num_channels: int, architecture: str) -> int:
+    return 3 * num_channels + 6 + (PRIVATE_STATE_DIM if normalize_architecture(architecture) == STATEFUL_ARCHITECTURE else 0)
+
+
+def policy_heads(num_channels: int, architecture: str = STATELESS_ARCHITECTURE) -> tuple[PolicyHead, ...]:
+    architecture = normalize_architecture(architecture)
+    sizes: dict[str, int] = {
         "chemical": num_channels,
         "heading": 2,
         "anisotropy": 1,
         "division": 1,
         "growthDirection": 2,
-        "color": 3,
     }
+    if architecture == STATEFUL_ARCHITECTURE:
+        sizes.update({"stateDelta": PRIVATE_STATE_DIM, "stateGate": PRIVATE_STATE_DIM})
+    else:
+        sizes["color"] = 3
     heads: list[PolicyHead] = []
     for name, size in sizes.items():
         raw = _CONFIG["heads"][name]
@@ -69,9 +92,14 @@ def random_flat_policy_weights(
     num_channels: int,
     hidden_dim: int,
     rng: np.random.Generator,
+    architecture: str = STATELESS_ARCHITECTURE,
 ) -> np.ndarray:
     """Create the canonical fc1w/fc1b/fc2w/fc2b flat GPU layout."""
-    input_dim = 3 * num_channels + 6
+    architecture = normalize_architecture(architecture)
+    expected_hidden = policy_hidden_dim(architecture)
+    if hidden_dim != expected_hidden:
+        raise ValueError(f"{architecture} requires hidden_dim={expected_hidden}, got {hidden_dim}")
+    input_dim = policy_input_dim(num_channels, architecture)
     trunk_gain, trunk_bias_jitter = trunk_initialization()
     trunk_bound = _xavier_bound(input_dim, hidden_dim, trunk_gain)
     fc1w = rng.uniform(-trunk_bound, trunk_bound, (hidden_dim, input_dim))
@@ -79,7 +107,7 @@ def random_flat_policy_weights(
 
     head_weights: list[np.ndarray] = []
     head_biases: list[np.ndarray] = []
-    for head in policy_heads(num_channels):
+    for head in policy_heads(num_channels, architecture):
         bound = _xavier_bound(hidden_dim, head.size, head.weight_gain)
         head_weights.append(rng.uniform(-bound, bound, (head.size, hidden_dim)))
         center = np.asarray(head.bias_center, dtype=np.float64)
@@ -91,23 +119,26 @@ def random_flat_policy_weights(
     ).astype(np.float32)
 
 
-def mutation_scale_vector(num_channels: int, hidden_dim: int) -> np.ndarray:
+def mutation_scale_vector(
+    num_channels: int, hidden_dim: int, architecture: str = STATELESS_ARCHITECTURE
+) -> np.ndarray:
     """Per-parameter multiplier for the CLI's global mutation sigma."""
-    input_dim = 3 * num_channels + 6
+    architecture = normalize_architecture(architecture)
+    input_dim = policy_input_dim(num_channels, architecture)
     trunk_scale = float(_CONFIG["trunk"]["mutationScale"])
     chunks: list[np.ndarray] = [
         np.full(hidden_dim * input_dim, trunk_scale),
         np.full(hidden_dim, trunk_scale),
     ]
-    heads = policy_heads(num_channels)
+    heads = policy_heads(num_channels, architecture)
     chunks.extend(np.full(head.size * hidden_dim, head.mutation_scale) for head in heads)
     chunks.extend(np.full(head.size, head.mutation_scale) for head in heads)
     return np.concatenate(chunks).astype(np.float32)
 
 
-def mutation_scales() -> dict[str, float]:
+def mutation_scales(architecture: str = STATELESS_ARCHITECTURE) -> dict[str, float]:
     """Human/metadata-friendly summary of the fixed scale buckets."""
     return {
         "trunk": float(_CONFIG["trunk"]["mutationScale"]),
-        **{head.name: head.mutation_scale for head in policy_heads(1)},
+        **{head.name: head.mutation_scale for head in policy_heads(1, architecture)},
     }

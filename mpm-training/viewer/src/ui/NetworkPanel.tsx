@@ -1,7 +1,7 @@
 import type { PointerEvent as ReactPointerEvent } from "react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { evalPolicy, policyWeightsShapeError } from "../gpu/policyEval"
-import type { PhysicsSettings, SimulationConfig, UpdateRuleWeights } from "../gpu/types"
+import type { PhysicsSettings, PolicyArchitecture, SimulationConfig, UpdateRuleWeights } from "../gpu/types"
 import { Slider } from "./Slider"
 
 interface NetworkPanelProps {
@@ -291,7 +291,8 @@ function buildChannelHeatmaps(
   manualChannelCount: number,
   maxEnvWrite: number,
   maxAngularAccel: number,
-  maxStrafe: number
+  maxStrafe: number,
+  architecture: PolicyArchitecture,
 ): Float32Array[] {
   const res = VECTOR_PAD_HEATMAP_RESOLUTION
   return Array.from({ length: manualChannelCount }, (_, c) => {
@@ -306,7 +307,7 @@ function buildChannelHeatmaps(
         const dx = res > 1 ? -DOMAIN + (2 * DOMAIN * gx) / (res - 1) : 0
         input[channels + c] = dx
         input[2 * channels + c] = dy
-        const result = evalPolicy(input, weights, channels, hiddenDim, maxEnvWrite, maxAngularAccel, maxStrafe)
+        const result = evalPolicy(input, weights, channels, hiddenDim, maxEnvWrite, maxAngularAccel, maxStrafe, architecture)
         grid[gy * res + gx] = result.envWrite[c]
       }
     }
@@ -327,12 +328,13 @@ function buildChannelHeatmaps(
 export function NetworkPanel({ config, physics }: NetworkPanelProps) {
   const channels = config?.channels ?? 0
   const hiddenDim = config?.hiddenDim ?? 0
+  const architecture = config?.policyArchitecture ?? "stateless-128"
   const maxEnvWrite = physics?.maxEnvWrite ?? 1
   const maxAngularAccel = physics?.maxAngularAccel ?? 1
   const maxStrafe = physics?.maxStrafe ?? 1
   const elasticInputsEnabled = config?.elasticStrainInputsEnabled ?? false
   const weightsError = config?.weights
-    ? policyWeightsShapeError(config.weights, channels, hiddenDim)
+    ? policyWeightsShapeError(config.weights, channels, hiddenDim, architecture)
     : null
 
   const [manual, setManual] = useState<ManualChannelInput[]>(
@@ -359,7 +361,8 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       hiddenDim,
       maxEnvWrite,
       maxAngularAccel,
-      maxStrafe
+      maxStrafe,
+      architecture
     )
   }, [
     config?.weights,
@@ -372,6 +375,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     maxEnvWrite,
     maxAngularAccel,
     maxStrafe,
+    architecture,
     weightsError,
   ])
 
@@ -389,7 +393,8 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       manualChannelCount,
       maxEnvWrite,
       maxAngularAccel,
-      maxStrafe
+      maxStrafe,
+      architecture
     )
   }, [
     config?.weights,
@@ -403,6 +408,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     maxEnvWrite,
     maxAngularAccel,
     maxStrafe,
+    architecture,
     weightsError,
   ])
 
@@ -573,8 +579,23 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
             </div>
           </div>
 
+          {architecture === "stateful-64" && (
+            <div className="nn-block">
+              <h3>Output — private-state update</h3>
+              <p className="hint">Candidate residuals and gates at zero private state.</p>
+              <div className="nn-group">
+                {Array.from(output.stateDelta, (value, i) => (
+                  <ActivationBar key={`state-delta-${i}`} label={`Δs${i}`} value={value} domain={1} />
+                ))}
+                {Array.from(output.stateGate, (value, i) => (
+                  <ActivationBar key={`state-gate-${i}`} label={`gate ${i}`} value={value} domain={1} />
+                ))}
+              </div>
+            </div>
+          )}
+
           <div className="nn-block">
-            <h3>Output — cell color</h3>
+            <h3>{architecture === "stateful-64" ? "Derived color — zero private state" : "Output — cell color"}</h3>
             <div
               aria-label="Current neural RGB color"
               style={{

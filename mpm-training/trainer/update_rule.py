@@ -1,4 +1,4 @@
-"""The evolved policy: Dense(128) -> tanh -> logical output heads (C+9) —
+"""The evolved stateless-128/stateful-64 policies with logical output heads —
 architecture/shape reference and a CPU-only utility class (random weight
 init via a fresh instance's own initialized parameters, JSON export via
 export_weights()), NOT the live forward pass anymore. That now runs
@@ -34,35 +34,44 @@ pipelines now).
   entirely the caller's job.
 - Output: env_write (C) — one deposit value per channel underneath the
   particle — plus desired heading (2), anisotropy/polarity logits (2),
-  desired growth direction (2), and RGB color logits (3),
+  and desired growth direction (2). Stateless-128 ends with RGB logits (3);
+  stateful-64 instead ends with private-state residuals (8) and gates (8),
   all raw/local-frame. The desired-heading vector is converted by the shader
   into angular acceleration from its shortest local angular error; the two
   former strafe channels encode a desired local growth direction.
   The two former acceleration channels independently control tensor
   anisotropy and division bias through sigmoid. C=8
-  (simulation_settings.CHEM_CHANNELS) and
-  the output width is exactly 17: 8 + 2 + 2 + 2 + 3.
+  (simulation_settings.CHEM_CHANNELS), giving widths 17 and 30 respectively.
 """
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
 
-from simulation_settings import CHEM_CHANNELS, HIDDEN_DIM
-from policy_parameters import policy_heads, trunk_initialization
+from simulation_settings import CHEM_CHANNELS
+from policy_parameters import (
+    STATELESS_ARCHITECTURE,
+    normalize_architecture,
+    policy_heads,
+    policy_hidden_dim,
+    policy_input_dim,
+    trunk_initialization,
+)
 
 class UpdateRule(nn.Module):
-    def __init__(self, num_channels: int = CHEM_CHANNELS) -> None:
+    def __init__(self, num_channels: int = CHEM_CHANNELS, architecture: str = STATELESS_ARCHITECTURE) -> None:
         super().__init__()
         self.num_channels = num_channels
-        input_dim = 3 * num_channels + 6
+        self.architecture = normalize_architecture(architecture)
+        self.hidden_dim = policy_hidden_dim(self.architecture)
+        input_dim = policy_input_dim(num_channels, self.architecture)
         # Bounded, monotonic, zero-centered hidden response. This controller
         # is evolved, so smooth local behavior under mutation is preferable
         # to the periodic phase wrapping of the earlier sine experiment.
-        self.input_layer = nn.Linear(input_dim, HIDDEN_DIM)
+        self.input_layer = nn.Linear(input_dim, self.hidden_dim)
         self.activation = nn.Tanh()
         self.heads = nn.ModuleDict(
-            {head.name: nn.Linear(HIDDEN_DIM, head.size) for head in policy_heads(num_channels)}
+            {head.name: nn.Linear(self.hidden_dim, head.size) for head in policy_heads(num_channels, self.architecture)}
         )
         self.reset_parameters()
 
@@ -78,7 +87,7 @@ class UpdateRule(nn.Module):
         nn.init.xavier_uniform_(self.input_layer.weight, gain=trunk_gain)
         nn.init.uniform_(self.input_layer.bias, -trunk_bias_jitter, trunk_bias_jitter)
         with torch.no_grad():
-            for spec in policy_heads(self.num_channels):
+            for spec in policy_heads(self.num_channels, self.architecture):
                 layer = self.heads[spec.name]
                 nn.init.xavier_uniform_(layer.weight, gain=spec.weight_gain)
                 center = torch.tensor(spec.bias_center, dtype=layer.bias.dtype, device=layer.bias.device)
@@ -93,6 +102,7 @@ class UpdateRule(nn.Module):
         grad_lateral: torch.Tensor,
         morphology: torch.Tensor,
         elastic_strain: torch.Tensor,
+        private_state: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Chemical tensors are (N, C); morphology is (N, 3) containing
         occupancy, forward gradient, and lateral gradient; elastic_strain is
@@ -100,14 +110,20 @@ class UpdateRule(nn.Module):
         rotation of the gradients is the caller's job
         (training_sim.py/core/agents.wgsl); this method is frame-agnostic and
         simply concatenates the three channel blocks. Returns
-        (env_write, heading_target, growth_controls, direction, color), all raw/un-squashed
+        (env_write, heading_target, growth_controls, direction, tail), all raw/un-squashed;
+        tail is RGB for stateless-128 or concatenated state residual/gate for stateful-64
         and still in LOCAL frame — squashing (tanh for vectors and writes;
         sigmoid for scalar controls), conversion of the heading target to
         angular acceleration, and rotating growth direction to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
         not spatial deposit geometry), same division of responsibility
         envnca's own UpdateRule/Simulation split."""
-        x = torch.cat([value, grad_forward, grad_lateral, morphology, elastic_strain], dim=-1)
+        inputs = [value, grad_forward, grad_lateral, morphology, elastic_strain]
+        if self.architecture != STATELESS_ARCHITECTURE:
+            if private_state is None:
+                raise ValueError("stateful policy requires private_state")
+            inputs.append(private_state)
+        x = torch.cat(inputs, dim=-1)
         hidden = self.activation(self.input_layer(x))
         env_write = self.heads["chemical"](hidden)
         heading_target = self.heads["heading"](hidden)
@@ -115,12 +131,16 @@ class UpdateRule(nn.Module):
             [self.heads["anisotropy"](hidden), self.heads["division"](hidden)], dim=-1
         )
         direction = self.heads["growthDirection"](hidden)
-        color = self.heads["color"](hidden)
-        return env_write, heading_target, growth_controls, direction, color
+        tail = (
+            self.heads["color"](hidden)
+            if self.architecture == STATELESS_ARCHITECTURE
+            else torch.cat([self.heads["stateDelta"](hidden), self.heads["stateGate"](hidden)], dim=-1)
+        )
+        return env_write, heading_target, growth_controls, direction, tail
 
     def concatenated_output_parameters(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return logical heads concatenated in the stable GPU output order."""
-        ordered = [self.heads[spec.name] for spec in policy_heads(self.num_channels)]
+        ordered = [self.heads[spec.name] for spec in policy_heads(self.num_channels, self.architecture)]
         return torch.cat([layer.weight for layer in ordered]), torch.cat([layer.bias for layer in ordered])
 
     def flat_parameters(self) -> torch.Tensor:
@@ -152,12 +172,12 @@ class UpdateRule(nn.Module):
             cursor += input_weight_count
             self.input_layer.bias.copy_(flat[cursor : cursor + input_bias_count])
             cursor += input_bias_count
-            for spec in policy_heads(self.num_channels):
+            for spec in policy_heads(self.num_channels, self.architecture):
                 layer = self.heads[spec.name]
                 count = layer.weight.numel()
                 layer.weight.copy_(flat[cursor : cursor + count].view_as(layer.weight))
                 cursor += count
-            for spec in policy_heads(self.num_channels):
+            for spec in policy_heads(self.num_channels, self.architecture):
                 layer = self.heads[spec.name]
                 count = layer.bias.numel()
                 layer.bias.copy_(flat[cursor : cursor + count])
@@ -175,6 +195,6 @@ class UpdateRule(nn.Module):
         return {
             "fc1w": self.input_layer.weight.detach().cpu().tolist(),  # (HIDDEN_DIM, 3*num_channels+6)
             "fc1b": self.input_layer.bias.detach().cpu().tolist(),  # (HIDDEN_DIM,)
-            "fc2w": fc2w.detach().cpu().tolist(),  # (num_channels+9, HIDDEN_DIM)
-            "fc2b": fc2b.detach().cpu().tolist(),  # (num_channels+9,)
+            "fc2w": fc2w.detach().cpu().tolist(),  # (architecture output width, hidden_dim)
+            "fc2b": fc2b.detach().cpu().tolist(),  # (architecture output width,)
         }

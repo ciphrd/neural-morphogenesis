@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthThreshold" | "neuralUpdatesPerMacro" | "communicationSpeed"
+  "growthDuration" | "growthThreshold" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 interface GrowthSliderSpec {
@@ -49,6 +49,15 @@ const SPECS: GrowthSliderSpec[] = [
     key: "communicationSpeed",
     label: "Communication speed",
     hint: "Chemical diffusion/deposition and orientation time per mechanical tick. Neural updates control resolution; this controls elapsed communication time.",
+    min: 0,
+    max: 4,
+    step: 0.05,
+    format: (v) => `${v.toFixed(2)}×`,
+  },
+  {
+    key: "internalStateSpeed",
+    label: "Internal state speed",
+    hint: "Multiplier for gated private-state updates only. 1× preserves the default dynamics; 0 freezes internal state.",
     min: 0,
     max: 4,
     step: 0.05,

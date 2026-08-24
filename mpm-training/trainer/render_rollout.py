@@ -44,11 +44,11 @@ from simulation_settings import (
     DIVISION_COOLDOWN,
     FIELD_N,
     FRICTION,
-    HIDDEN_DIM,
     GROWTH_MAX,
     GROWTH_DURATION_MACRO_STEPS,
     GROWTH_THRESHOLD,
     INITIAL_PARTICLE_COUNT,
+    INTERNAL_STATE_SPEED,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
@@ -64,6 +64,7 @@ from simulation_settings import (
 )
 from targets import load_target
 from training_sim import TrainingRollout
+from policy_parameters import STATELESS_ARCHITECTURE, policy_hidden_dim
 
 
 def main() -> int:
@@ -102,13 +103,15 @@ def main() -> int:
     )
     core.set_damping(DAMPING_LOSS_FRACTION, meta["substeps_per_macro"])
 
+    architecture = meta.get("policy_architecture", STATELESS_ARCHITECTURE)
+    hidden_dim = int(meta.get("hidden_dim", policy_hidden_dim(architecture)))
     environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, meta.get("deposit_rate", DEPOSIT_RATE))
     agents = AgentsGPU(
         wgpu_device,
         core,
         environment,
         CHEM_CHANNELS,
-        HIDDEN_DIM,
+        hidden_dim,
         MAX_ACCEL,
         MAX_STRAFE,
         MAX_ENV_WRITE,
@@ -138,6 +141,8 @@ def main() -> int:
         meta["spawn_y"],
         meta.get("elastic_strain_scale", 0.15),
         meta.get("elastic_strain_inputs_enabled", False),
+        policy_architecture=architecture,
+        internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
     )
     agents.load_weights(weights)
 
