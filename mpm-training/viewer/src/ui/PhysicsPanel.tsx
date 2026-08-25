@@ -1,5 +1,4 @@
 import { useState } from "react"
-import coreConstants from "../../../core/constants.json"
 import type { PhysicsSettings } from "../gpu/types"
 import { Slider } from "./Slider"
 

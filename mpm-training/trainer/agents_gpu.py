@@ -22,6 +22,7 @@ import numpy as np
 import wgpu
 
 from simulation_settings import (
+    BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEMICAL_GRADIENT_INPUT_SCALE,
     CHEMICAL_VALUE_INPUT_SCALE,
     DIRECTION_CONFIDENCE_SCALE,
@@ -228,8 +229,9 @@ class AgentsGPU:
         self._weights_buffer = device.create_buffer(
             size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
         )
-        # 80 bytes — the original 64-byte layout plus one density-resolved
-        # chemical-gradient scale and uniform-struct alignment padding.
+        # 80 bytes — the original 64-byte layout plus density-resolved
+        # chemical-gradient state and the live boundary-tangent cutoff. The
+        # cutoff occupies what was the final uniform-alignment padding word.
         # NOT written by set_physics() below; see set_spawn_center()'s own
         # docstring for why those get a separate setter into this same
         # buffer instead.
@@ -254,6 +256,7 @@ class AgentsGPU:
         self.set_chemical_gradient_input_scale(CHEMICAL_GRADIENT_INPUT_SCALE)
         self.set_chemical_projection_weight(1.0)
         self.set_rollout_seed(0)
+        self.set_boundary_tangent_min_gradient(BOUNDARY_TANGENT_MIN_GRADIENT)
 
         # Persistent per-particle state — owned here (not MpmCore, not
         # EnvironmentGPU), zeroed at creation (randomized/reseeded
@@ -591,6 +594,14 @@ class AgentsGPU:
             self._physics_uniform,
             72,
             np.array([int(seed) & 0xFFFFFFFF], dtype=np.uint32),
+        )
+
+    def set_boundary_tangent_min_gradient(self, threshold: float) -> None:
+        """Write the flat-interior cutoff at AgentPhysics byte offset 76."""
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            76,
+            np.array([max(0.0, float(threshold))], dtype=np.float32),
         )
 
     def set_active_count(self, active_count: int) -> None:

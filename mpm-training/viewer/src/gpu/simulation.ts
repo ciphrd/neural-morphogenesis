@@ -268,6 +268,8 @@ export class GpuSimulation {
       elasticStrainInputsEnabled: config.elasticStrainInputsEnabled ?? false,
       chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
       chemicalProjectionWeight: config.chemicalProjectionWeight ?? 1.0,
+      boundaryTangentMinGradient: config.boundaryTangentMinGradient
+        ?? coreConstants.BOUNDARY_TANGENT_MIN_GRADIENT,
     });
     agents.loadWeights(config.weights);
 
@@ -409,6 +411,7 @@ export class GpuSimulation {
     this.agents.setDivisionDirectionality(physics.divisionDirectionality ?? 1.0);
     this.agents.setChemicalGradientInputScale(physics.chemicalGradientInputScale);
     this.agents.setChemicalProjectionWeight(physics.chemicalProjectionWeight);
+    this.agents.setBoundaryTangentMinGradient(physics.boundaryTangentMinGradient);
     this.agents.setPhysics({
       maxAccel: physics.maxAccel,
       maxStrafe: physics.maxStrafe,

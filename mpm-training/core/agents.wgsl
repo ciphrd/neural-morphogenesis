@@ -159,11 +159,6 @@ const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__
 const GROWTH_DIRECTION_RESPONSE_RATE: f32 = __GROWTH_DIRECTION_RESPONSE_RATE__;
 const GROWTH_ANISOTROPY_RESPONSE_RATE: f32 = __GROWTH_ANISOTROPY_RESPONSE_RATE__;
 const DIRECTION_CONFIDENCE_SCALE: f32 = __DIRECTION_CONFIDENCE_SCALE__;
-// Below this magnitude the morphology field is effectively flat and its
-// tangent is dominated by floating-point noise. Typical measured boundary
-// gradients are around 1e-2, so this only rejects genuinely undefined cases.
-const BOUNDARY_TANGENT_MIN_GRADIENT: f32 = 1e-6;
-
 // One chemical-state delta per channel. The legacy name is retained in the
 // checkpoint/output ABI.
 const ENV_WRITE_DIM: u32 = CHANNELS;
@@ -261,6 +256,9 @@ struct AgentPhysics {
   // Seed for a fixed world-space lifecycle random field. Nearby numerical
   // samples share thresholds regardless of particle slot or density.
   rolloutSeed: u32,
+  // Below this morphology-gradient magnitude, the boundary tangent is treated
+  // as undefined and division falls back to the network growth direction.
+  boundaryTangentMinGradient: f32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -1053,7 +1051,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       let directionStrength = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
         * clamp(stepMode.divisionDirectionality, 0.0, 1.0);
       var centerShift = spawnDir * (0.5 * physics.splitDisplacement) * directionStrength;
-      if (morphologyGradientMagnitude > BOUNDARY_TANGENT_MIN_GRADIENT) {
+      if (morphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
         // The gradient is the boundary normal. Rotating it by +90 degrees
         // gives either representative of the tangent axis; because daughter
         // placement is symmetric, the sign of that representative is

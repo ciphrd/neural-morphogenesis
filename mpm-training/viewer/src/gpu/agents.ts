@@ -83,6 +83,7 @@ export interface AgentsConfig {
   elasticStrainInputsEnabled: boolean;
   chemicalGradientInputScale?: number;
   chemicalProjectionWeight?: number;
+  boundaryTangentMinGradient?: number;
 }
 
 function weightLayout(channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128") {
@@ -221,7 +222,8 @@ export class Agents {
     const { totalFloats } = layout;
     this.weightsBuffer = device.createBuffer({ size: totalFloats * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     // 80 bytes — original layout plus density-resolved chemical-gradient
-    // normalization and uniform-struct alignment padding.
+    // normalization and the live boundary-tangent cutoff. The cutoff occupies
+    // what was previously the uniform struct's final alignment-padding word.
     // The final spawnX/spawnY/maxActiveParticles fields are
     // NOT written by setPhysics() below; see setSpawnCenter()'s own
     // docstring for why those get a separate setter into this same
@@ -247,6 +249,9 @@ export class Agents {
     this.setChemicalGradientInputScale(config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE);
     this.setChemicalProjectionWeight(config.chemicalProjectionWeight ?? 1.0);
     this.setRolloutSeed(0);
+    this.setBoundaryTangentMinGradient(
+      config.boundaryTangentMinGradient ?? coreConstants.BOUNDARY_TANGENT_MIN_GRADIENT,
+    );
 
     // Persistent per-particle state — owned here (not MpmCore, not
     // Environment), zeroed at creation and whenever resetHeading() is
@@ -508,6 +513,16 @@ export class Agents {
   /** Common spatial-random-field seed at AgentPhysics byte offset 72. */
   setRolloutSeed(seed: number): void {
     this.device.queue.writeBuffer(this.physicsUniform, 72, new Uint32Array([seed >>> 0]));
+  }
+
+  /** Flat-interior morphology-gradient cutoff at AgentPhysics byte offset 76. */
+  setBoundaryTangentMinGradient(threshold: number): void {
+    writeFloat32(
+      this.device,
+      this.physicsUniform,
+      76,
+      new Float32Array([Math.max(0, threshold)]),
+    );
   }
 
   /** Updates this class's own agentStep() dispatch size AND growth's own

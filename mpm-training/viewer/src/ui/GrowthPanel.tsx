@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthAnisotropy" | "divisionDirectionality" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  "growthDuration" | "growthAnisotropy" | "divisionDirectionality" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 export interface GrowthSliderSpec {
@@ -89,6 +89,15 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
     step: 0.01,
     format: (v) => `${v.toFixed(2)}×`,
   },
+  {
+    key: "boundaryTangentMinGradient",
+    label: "Tangent flat-gradient threshold",
+    hint: "Morphology-gradient magnitudes at or below this value are treated as flat interiors and fall back to the neural division direction. 0 uses the tangent for every nonzero gradient.",
+    min: 0,
+    max: 0.05,
+    step: 0.000001,
+    format: (v) => v.toExponential(2),
+  },
 ]
 
 /** Collapsible "Growth" section (default closed), sibling to
@@ -101,7 +110,9 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
  * flat list because these controls behave as a group:
  * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
  * growthDuration controls the substrate-driven cell cycle;
- * growthAnisotropy and divisionDirectionality cap directional authority.
+ * growthAnisotropy and divisionDirectionality cap directional authority;
+ * boundaryTangentMinGradient controls where the hardcoded tangent rule yields
+ * back to neural division orientation.
  * Same live-uniform-write path as every
  * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
  * any of these never disturbs the rollout in flight and never affects

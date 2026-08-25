@@ -60,6 +60,7 @@ from policy_parameters import mutation_scales, policy_hidden_dim
 from raster import build_target_distance_field, build_target_raster, training_raster_distance
 from simulation_settings import (
     ANGULAR_DAMPING,
+    BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEM_CHANNELS,
     CHEMICAL_GRADIENT_INPUT_SCALE,
     CHIRALITY,
@@ -439,6 +440,7 @@ async def _training_loop_body() -> None:
         "fieldN": FIELD_N,
         "morphologyBlurSigma": MORPHOLOGY_BLUR_SIGMA,
         "morphologyDensityReference": MORPHOLOGY_DENSITY_REFERENCE,
+        "boundaryTangentMinGradient": BOUNDARY_TANGENT_MIN_GRADIENT,
         "neuralUpdatesPerMacro": NEURAL_UPDATES_PER_MACRO,
         "communicationSpeed": COMMUNICATION_SPEED,
         "internalStateSpeed": INTERNAL_STATE_SPEED,

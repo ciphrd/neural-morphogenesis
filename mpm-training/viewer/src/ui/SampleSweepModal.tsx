@@ -19,6 +19,7 @@ export interface SweepAxis {
 export interface SampleSweepRequest {
   axes: SweepAxis[]
   steps: number
+  includeJson: boolean
 }
 
 interface Props {
@@ -95,6 +96,7 @@ export function SampleSweepModal({
   }
   const [axes, setAxes] = useState<AxisDraft[]>(() => [makeDraft(firstSpec.key)])
   const [steps, setSteps] = useState(String(defaultSteps))
+  const [includeJson, setIncludeJson] = useState(false)
 
   const parsedAxes = axes.map((axis): SweepAxis => {
     const spec = specs.find((candidate) => candidate.key === axis.key)!
@@ -194,6 +196,15 @@ export function SampleSweepModal({
           <span>Simulation steps</span>
           <input className="number-input" type="number" min={1} step={1} value={steps} disabled={running} onChange={(event) => setSteps(event.currentTarget.value)} />
         </label>
+        <label className="checkbox-row sample-json-row">
+          <input
+            type="checkbox"
+            checked={includeJson}
+            disabled={running}
+            onChange={(event) => setIncludeJson(event.currentTarget.checked)}
+          />
+          Include JSON outputs
+        </label>
 
         <div className="sample-summary">
           {duplicateKeys
@@ -215,7 +226,7 @@ export function SampleSweepModal({
           <button
             className="playback-button sample-run-button"
             disabled={!valid || running}
-            onClick={() => onRun({ axes: parsedAxes, steps: parsedSteps })}
+            onClick={() => onRun({ axes: parsedAxes, steps: parsedSteps, includeJson })}
           >
             Run & download ZIP
           </button>

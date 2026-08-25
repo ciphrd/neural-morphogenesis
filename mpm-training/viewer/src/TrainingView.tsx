@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import coreConstants from "../../core/constants.json"
-import densityModel from "../../core/density.json"
 import { FitnessChart } from "./charts/FitnessChart"
 import { randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
@@ -23,6 +22,7 @@ import { fetchRunState } from "./net/runs"
 import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
 import { pickRecordingFormat } from "./render/canvasRecorder"
+import { createSampleAtlas } from "./render/sampleAtlas"
 import type {
   DeformSettings,
   GridCanvasHandle,
@@ -156,7 +156,6 @@ export function TrainingView() {
   const [boundaryGradientScale, setBoundaryGradientScale] = useState(0.01)
   const [particleRadiusPx, setParticleRadiusPx] = useState(4)
   const [frontendParticleCap, setFrontendParticleCap] = useState(2)
-  const [frontendParticleCapInput, setFrontendParticleCapInput] = useState("2")
   const [frontendInitialParticleCount, setFrontendInitialParticleCount] =
     useState(1)
   const [
@@ -198,29 +197,48 @@ export function TrainingView() {
       : latest
   const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
     useState<ChemicalCommunicationArchitecture | null>(null)
+  const [chiralityOverride, setChiralityOverride] = useState<boolean | null>(
+    null
+  )
   const [particleDensityOverride, setParticleDensityOverride] = useState<
     number | null
   >(null)
   useEffect(() => {
     setChemicalArchitectureOverride(null)
+    setChiralityOverride(null)
     setParticleDensityOverride(null)
   }, [viewingRunId, activeConfig?.generation])
   const effectiveParticleDensity =
     particleDensityOverride ?? activeConfig?.particleDensityMultiplier ?? 1
+  const effectiveChirality =
+    chiralityOverride ?? activeConfig?.chirality ?? true
   const playbackConfig = useMemo(
-    () =>
-      activeConfig
-        ? configAtDensity(
-            {
-              ...activeConfig,
-              chemicalCommunicationArchitecture:
-                chemicalArchitectureOverride ??
-                chemicalCommunicationArchitectureFromConfig(activeConfig),
-            },
-            effectiveParticleDensity
-          )
-        : null,
-    [activeConfig, chemicalArchitectureOverride, effectiveParticleDensity]
+    () => {
+      if (!activeConfig) return null
+      const densityResolved = configAtDensity(
+        {
+          ...activeConfig,
+          chemicalCommunicationArchitecture:
+            chemicalArchitectureOverride ??
+            chemicalCommunicationArchitectureFromConfig(activeConfig),
+          chirality: effectiveChirality,
+        },
+        effectiveParticleDensity
+      )
+      // Playback population is an explicit viewer control. Density currently
+      // changes numerical physics/chemistry only, never count or seed count.
+      return {
+        ...densityResolved,
+        particles: activeConfig.particles,
+        initialParticleCount: activeConfig.initialParticleCount,
+      }
+    },
+    [
+      activeConfig,
+      chemicalArchitectureOverride,
+      effectiveChirality,
+      effectiveParticleDensity,
+    ]
   )
   useEffect(() => {
     const maxStart = Math.max(0, (activeConfig?.channels ?? 3) - 3)
@@ -276,7 +294,6 @@ export function TrainingView() {
     if (particleCapRunRef.current === runKey) return
     particleCapRunRef.current = runKey
     setFrontendParticleCap(activeConfig.particles)
-    setFrontendParticleCapInput(String(activeConfig.particles))
     const initialCount = Math.min(
       activeConfig.particles,
       Math.max(
@@ -290,27 +307,6 @@ export function TrainingView() {
     setFrontendInitialParticleCount(initialCount)
     setFrontendInitialParticleCountInput(String(initialCount))
   }, [viewingRunId, activeConfig?.particles])
-  useEffect(() => {
-    if (!playbackConfig) return
-    setFrontendParticleCap(playbackConfig.particles)
-    setFrontendParticleCapInput(String(playbackConfig.particles))
-    const initialCount = Math.min(
-      playbackConfig.particles,
-      Math.max(
-        1,
-        Math.floor(
-          playbackConfig.initialParticleCount ??
-            coreConstants.INITIAL_PARTICLE_COUNT
-        )
-      )
-    )
-    setFrontendInitialParticleCount(initialCount)
-    setFrontendInitialParticleCountInput(String(initialCount))
-  }, [
-    effectiveParticleDensity,
-    playbackConfig?.particles,
-    playbackConfig?.initialParticleCount,
-  ])
   // null = following this generation's own trained physics/growth values;
   // non-null once either live-control panel's sliders have been touched.
   // Reset whenever the run or the generation
@@ -428,12 +424,6 @@ export function TrainingView() {
         const density = combination.particleDensityMultiplier
         const resolvedConfig =
           density === undefined ? null : configAtDensity(activeConfig, density)
-        if (resolvedConfig && resolvedConfig.particles > MAX_PARTICLES) {
-          throw new Error(
-            `Particle density ${density}× requires ${resolvedConfig.particles.toLocaleString()} particles, ` +
-              `above the viewer limit of ${MAX_PARTICLES.toLocaleString()}.`
-          )
-        }
         const physics = { ...basePhysics }
         if (resolvedConfig) {
           const resolvedPhysics = physicsSettingsFromConfig(resolvedConfig)
@@ -447,10 +437,8 @@ export function TrainingView() {
         }
         return {
           physics,
-          particleCap: resolvedConfig?.particles ?? frontendParticleCap,
-          initialParticleCount:
-            resolvedConfig?.initialParticleCount ??
-            frontendInitialParticleCount,
+          particleCap: frontendParticleCap,
+          initialParticleCount: frontendInitialParticleCount,
           particleDensityMultiplier: density ?? effectiveParticleDensity,
           particleRadiusPx:
             particleRadiusPx / Math.sqrt(density ?? effectiveParticleDensity),
@@ -464,9 +452,27 @@ export function TrainingView() {
         frontendParticleCap,
         frontendInitialParticleCount,
         particleRadiusPx,
+        request.includeJson,
         setSampleCompleted,
         controller.signal
       )
+      if (request.axes.length === 2) {
+        captures.push({
+          filename: "atlas.png",
+          blob: await createSampleAtlas({
+            images: captures.filter((capture) => capture.filename.endsWith(".png")),
+            rows: {
+              label: request.axes[0].label,
+              values: sweepValues(request.axes[0]),
+            },
+            columns: {
+              label: request.axes[1].label,
+              values: sweepValues(request.axes[1]),
+            },
+            signal: controller.signal,
+          }),
+        })
+      }
       const zip = await createZip(captures)
       const generation = activeConfig?.generation ?? "unknown"
       downloadBlob(zip, `mpm-samples-generation-${generation}.zip`)
@@ -619,57 +625,38 @@ export function TrainingView() {
               {Array.from(new Set([0.5, 1, 2, effectiveParticleDensity]))
                 .sort((a, b) => a - b)
                 .map((density) => (
-                  <option
-                    key={density}
-                    value={density}
-                    disabled={Boolean(
-                      activeConfig &&
-                      Math.floor(activeConfig.particles * density + 0.5) >
-                        MAX_PARTICLES
-                    )}
-                  >
+                  <option key={density} value={density}>
                     {density}×
                   </option>
                 ))}
             </select>
           </div>
+          <label
+            className="checkbox-row"
+            title="Changing chirality rebuilds and restarts playback"
+          >
+            <input
+              type="checkbox"
+              checked={effectiveChirality}
+              disabled={!activeConfig}
+              onChange={(event) => {
+                const trained = activeConfig?.chirality ?? true
+                const selected = event.target.checked
+                setChiralityOverride(selected === trained ? null : selected)
+              }}
+            />
+            Chirality
+          </label>
           <label className="slider-row">
             <span>Playback particle cap</span>
-            <input
-              className="number-input"
-              type="number"
+            <Slider
               min={2}
               max={MAX_PARTICLES}
               step={1}
-              value={frontendParticleCapInput}
-              onChange={(e) => {
-                setFrontendParticleCapInput(e.currentTarget.value)
-                const value = e.currentTarget.valueAsNumber
-                if (
-                  Number.isFinite(value) &&
-                  value >= 2 &&
-                  value <= MAX_PARTICLES
-                ) {
-                  const cap = Math.floor(value)
-                  setFrontendParticleCap(cap)
-                  if (frontendInitialParticleCount > cap) {
-                    setFrontendInitialParticleCount(cap)
-                    setFrontendInitialParticleCountInput(String(cap))
-                  }
-                }
-              }}
-              onBlur={(e) => {
-                const value = e.currentTarget.valueAsNumber
-                const cap = Math.min(
-                  MAX_PARTICLES,
-                  Math.max(
-                    2,
-                    Number.isFinite(value)
-                      ? Math.floor(value)
-                      : frontendParticleCap
-                  )
-                )
-                setFrontendParticleCapInput(String(cap))
+              value={frontendParticleCap}
+              disabled={!activeConfig}
+              onChange={(value) => {
+                const cap = Math.floor(value)
                 setFrontendParticleCap(cap)
                 if (frontendInitialParticleCount > cap) {
                   setFrontendInitialParticleCount(cap)
@@ -677,6 +664,9 @@ export function TrainingView() {
                 }
               }}
             />
+            <span className="slider-value playback-cap-value">
+              {frontendParticleCap.toLocaleString()}
+            </span>
           </label>
           <label className="slider-row">
             <span>Initial agents</span>
@@ -714,12 +704,6 @@ export function TrainingView() {
               }}
             />
           </label>
-          <p className="hint">
-            Initial agents occupy a perfect hexagonal lattice clipped by
-            circular radius at {Math.round(densityModel.INITIAL_PACKING_SPACING_SCALE * 100)}%
-            of daughter split spacing. Counts that finish a radial shell are
-            exactly rotationally balanced; partial shells are spread evenly.
-          </p>
         </section>
 
         <section>

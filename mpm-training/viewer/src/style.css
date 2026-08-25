@@ -63,9 +63,17 @@ body {
 
 .stat-row {
   display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 8px;
   font-size: 13px;
   margin-bottom: 6px;
+}
+
+.stat-row > span:first-child {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #9a9a9a;
 }
 
 .hint {
@@ -235,6 +243,10 @@ body {
   text-align: right;
   color: #9a9a9a;
   font-variant-numeric: tabular-nums;
+}
+
+.playback-cap-value {
+  min-width: 52px;
 }
 
 .channel-window-control {
@@ -877,6 +889,11 @@ body {
 
 .sample-steps-row .number-input {
   flex: 0 0 140px;
+}
+
+.sample-json-row {
+  margin-top: 12px;
+  font-size: 13px;
 }
 
 .sample-summary {

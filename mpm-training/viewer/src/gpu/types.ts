@@ -52,6 +52,7 @@ export interface RunSettings {
   fieldN: number;
   morphologyBlurSigma?: number;
   morphologyDensityReference?: number;
+  boundaryTangentMinGradient?: number;
   neuralUpdatesPerMacro?: number;
   communicationSpeed?: number;
   internalStateSpeed?: number;
@@ -266,6 +267,8 @@ export interface PhysicsSettings {
   morphologyBlurSigma: number;
   /** Half-saturation density used by rho/(rho + reference). */
   morphologyDensityReference: number;
+  /** Gradient magnitude below which tangent division falls back to the policy. */
+  boundaryTangentMinGradient: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;
   mpmEnabled: boolean;
@@ -326,6 +329,8 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     splatRadius: config.splatRadius,
     morphologyBlurSigma: config.morphologyBlurSigma ?? 0.01,
     morphologyDensityReference: config.morphologyDensityReference ?? 1.0,
+    boundaryTangentMinGradient: config.boundaryTangentMinGradient
+      ?? coreConstants.BOUNDARY_TANGENT_MIN_GRADIENT,
     repulsionStrength: config.repulsionStrength,
     // Falls back to 40.0 (trainer/simulation_settings.py's own
     // REPULSION_MAX_DELTA default) for a `generation` message from a

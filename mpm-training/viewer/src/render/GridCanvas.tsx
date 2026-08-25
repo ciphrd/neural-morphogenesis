@@ -156,6 +156,7 @@ export interface GridCanvasHandle {
     restoreParticleCap: number,
     restoreInitialParticleCount: number,
     restoreParticleRadiusPx: number,
+    includeJson: boolean,
     onProgress: (completed: number) => void,
     signal: AbortSignal,
   ): Promise<Array<{ filename: string; blob: Blob }>>;
@@ -473,6 +474,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       restoreParticleCap,
       restoreInitialParticleCount,
       restoreParticleRadiusPx,
+      includeJson,
       onProgress,
       signal,
     ) => {
@@ -489,7 +491,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         // A normal animation frame may already be suspended in step()'s
         // particle-count readback. Let it finish before resetting state.
         await activeStepRef.current;
-        for (const sample of samples) {
+        for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += 1) {
+          const sample = samples[sampleIndex];
           if (signal.aborted) throw new DOMException("Sample collection cancelled", "AbortError");
           sim.setPhysics(sample.physics);
           sim.setParticleCap(sample.particleCap);
@@ -508,24 +511,26 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
             canvas.toBlob((result) => result ? resolve(result) : reject(new Error("Could not capture the simulation canvas.")), "image/png");
           });
           captures.push({ filename: sample.filename, blob });
-          const positions = await sim.readPositions();
-          const spatial = spatialMetrics(positions);
-          const metadata = {
-            particleDensityMultiplier: sample.particleDensityMultiplier,
-            particleCap: sample.particleCap,
-            initialParticleCount: sample.initialParticleCount,
-            finalParticleCount: sim.particleCount,
-            representedInitialCount: sample.initialParticleCount / sample.particleDensityMultiplier,
-            representedFinalCount: sim.particleCount / sample.particleDensityMultiplier,
-            simulationSteps: steps,
-            firstCapStep,
-            ...spatial,
-          };
-          captures.push({
-            filename: sample.filename.replace(/\.png$/i, ".json"),
-            blob: new Blob([JSON.stringify(metadata, null, 2)], { type: "application/json" }),
-          });
-          onProgress(captures.length / 2);
+          if (includeJson) {
+            const positions = await sim.readPositions();
+            const spatial = spatialMetrics(positions);
+            const metadata = {
+              particleDensityMultiplier: sample.particleDensityMultiplier,
+              particleCap: sample.particleCap,
+              initialParticleCount: sample.initialParticleCount,
+              finalParticleCount: sim.particleCount,
+              representedInitialCount: sample.initialParticleCount / sample.particleDensityMultiplier,
+              representedFinalCount: sim.particleCount / sample.particleDensityMultiplier,
+              simulationSteps: steps,
+              firstCapStep,
+              ...spatial,
+            };
+            captures.push({
+              filename: sample.filename.replace(/\.png$/i, ".json"),
+              blob: new Blob([JSON.stringify(metadata, null, 2)], { type: "application/json" }),
+            });
+          }
+          onProgress(sampleIndex + 1);
         }
         return captures;
       } finally {
