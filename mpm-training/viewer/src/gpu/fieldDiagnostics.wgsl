@@ -39,7 +39,6 @@
 const GRID_N: u32 = __GRID_N__u;
 const DX: f32 = __DX__;
 const INV_DX: f32 = __INV_DX__;
-const PARTICLE_MASS: f32 = __PARTICLE_MASS__;
 
 // Matches core/p2g.wgsl's own SCALE — same headroom reasoning (bounded
 // by a handful of nearby particles' worth of contribution, nowhere near
@@ -57,7 +56,7 @@ const CH_J: u32 = 0u;
 const CH_SHEAR: u32 = 1u;
 const CH_PRESSURE: u32 = 2u;
 const CH_MASS: u32 = 3u;
-const CHANNELS: u32 = 4u;
+const CHANNELS: u32 = 3u;
 
 @group(0) @binding(0) var<storage, read> particlePos: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read> particleF: array<vec4<f32>>;
@@ -74,7 +73,7 @@ struct ParticleRest {
   divisionBias: f32,
   growthFrameHeading: f32,
   appearanceScale: f32,
-  weldExpression: f32,
+  _padding: f32,
 }
 @group(0) @binding(2) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(3) var<storage, read_write> diagnostics: array<atomic<i32>>;
@@ -85,6 +84,11 @@ struct Material {
   hardening: f32,
   yieldLow: f32,
   yieldHigh: f32,
+  growthRate: f32,
+  growthMax: f32,
+  growthAnisotropy: f32,
+  particleMass: f32,
+  particleVolume: f32,
 }
 @group(0) @binding(4) var<uniform> material: Material;
 @group(0) @binding(5) var<uniform> activeCount: u32;
@@ -209,7 +213,7 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
 
       let wgt = w[i].x * w[j].y;
       // Same grown mass weighting as core/p2g.wgsl.
-      let massContribution = wgt * PARTICLE_MASS * g;
+      let massContribution = wgt * material.particleMass * g;
 
       let nodeIndex = (ni * (GRID_N + 1u) + nj) * CHANNELS;
       atomicAdd(&diagnostics[nodeIndex + CH_J], i32(round(massContribution * J * SCALE)));

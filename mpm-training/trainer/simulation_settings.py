@@ -55,15 +55,11 @@ CHEMICAL_COMMUNICATION_ARCHITECTURE: str = _CORE_CONSTANTS.get(
 INTERNAL_STATE_SPEED: float = _CORE_CONSTANTS["INTERNAL_STATE_SPEED"]
 # Strength of occupancy-weighted cycle admission. 0 preserves the historical
 # chemistry-only admission rule; the viewer exposes [0,1] for live testing.
-INTERIOR_SUPPORT_STRENGTH = 0.0
 # Playback/training defaults grant the policy full directional authority.
 # The viewer exposes both as [0,1] live controls for morphology experiments.
 DIVISION_DIRECTIONALITY = 1.0
 # NN-controlled velocity diffusion performed entirely on the MPM grid.
 # Cells publish the signal through chemical channel 0; zero is an exact no-op.
-GRID_WELDING_STRENGTH = 0.0
-GRID_WELDING_MAX_BLEND = 0.1
-GRID_WELDING_DENSITY_REFERENCE = 1.0
 # Neural evaluations performed before each mechanical macro step. These are
 # numerical communication substeps; increasing this improves temporal
 # resolution without multiplying chemical/turning speed.
@@ -144,14 +140,6 @@ GROWTH_DURATION_MACRO_STEPS = 48.0
 # Division area ratio. 2 makes one g=2 parent exactly equivalent in mass
 # and rest area to two g=1 daughters.
 GROWTH_MAX = 2.0
-# Compression reference for continuous mechanical feedback. Below this
-# elastic volume Je, growth is slowed by Je/reference; it is never
-# switched off at a threshold. 0 disables inhibition.
-GROWTH_THRESHOLD = 0.85
-# Blend between uninhibited growth (0) and the Je/reference slowdown above
-# (1). Kept at 1 for training compatibility; the viewer exposes it live for
-# testing whether interior growth produces fuller, less arborescent bodies.
-GROWTH_COMPRESSION_INHIBITION = 1.0
 GROWTH_ANISOTROPY_AUTHORITY = 1.0
 
 # CLI default shared with MpmCore's construction-time material initialization.
@@ -187,5 +175,3 @@ REPULSION_MAX_DELTA = 40.0
 # Boundary-localized cohesion sampled from the blurred morphology occupancy.
 # Zero strength preserves historical mechanics; the cap uses the same safe
 # per-substep velocity scale as repulsion for live experimentation.
-TISSUE_SURFACE_TENSION = 0.0
-TISSUE_SURFACE_FORCE_CAP = 0.05

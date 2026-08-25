@@ -35,7 +35,6 @@ from simulation_settings import (
     FIELD_N,
     FRICTION,
     GROWTH_MAX,
-    GROWTH_THRESHOLD,
     HIDDEN_DIM,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
@@ -252,7 +251,6 @@ def main() -> None:
             "growth": {
                 "legacy_internal_rate": BASELINE_GROWTH_RATE,
                 "division_area_ratio": GROWTH_MAX,
-                "compression_reference": GROWTH_THRESHOLD,
                 "split_displacement": BASELINE_SPLIT_DISPLACEMENT,
                 "division_cooldown": DIVISION_COOLDOWN,
             },

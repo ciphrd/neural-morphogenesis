@@ -16,12 +16,9 @@ own module docstring.
   elasticity).
 - `gridUpdate.wgsl` — momentum → velocity, gravity, damping, sticky
   boundary.
-- `gridWelding.wgsl` — NN-gated, momentum-conserving velocity viscosity
-  between occupied neighboring MPM nodes.
 - `g2p.wgsl` — grid-to-particle transfer, F/Jp update, SVD-based
   plasticity clamp.
 - `repulsion.wgsl` — particle-particle repulsion via a density field
-- `tissueTension.wgsl` — boundary-gated cohesion from morphology occupancy
   (`clearDensity`/`splatDensity`/`densityToTexture`/`applyRepulsion`),
   **always on, every substep** — a real, standard part of the simulation
   here, not an optional extra. It's what keeps particles from overlapping

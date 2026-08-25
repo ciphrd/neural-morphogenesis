@@ -80,6 +80,7 @@ export interface AgentsConfig {
   spawnY: number;
   elasticStrainScale: number;
   elasticStrainInputsEnabled: boolean;
+  chemicalGradientInputScale?: number;
 }
 
 function weightLayout(channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128") {
@@ -217,13 +218,13 @@ export class Agents {
     const layout = weightLayout(config.channels, config.hiddenDim, this.policyArchitecture);
     const { totalFloats } = layout;
     this.weightsBuffer = device.createBuffer({ size: totalFloats * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // 64 bytes — core/agents.wgsl's AgentPhysics ends with the growth cap
-    // and elastic-strain normalization scalar.
+    // 80 bytes — original layout plus density-resolved chemical-gradient
+    // normalization and uniform-struct alignment padding.
     // The final spawnX/spawnY/maxActiveParticles fields are
     // NOT written by setPhysics() below; see setSpawnCenter()'s own
     // docstring for why those get a separate setter into this same
     // buffer instead.
-    this.physicsUniform = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.physicsUniform = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setPhysics({
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
@@ -241,6 +242,7 @@ export class Agents {
     this.setSpawnCenter(config.spawnX, config.spawnY);
     this.setMaxActiveParticles(config.maxActiveParticles);
     this.setElasticStrainScale(config.elasticStrainScale);
+    this.setChemicalGradientInputScale(config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE);
 
     // Persistent per-particle state — owned here (not MpmCore, not
     // Environment), zeroed at creation and whenever resetHeading() is
@@ -298,7 +300,6 @@ export class Agents {
         FIELD_HEIGHT: environment.height,
         MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
         CHEMICAL_VALUE_INPUT_SCALE: coreConstants.CHEMICAL_VALUE_INPUT_SCALE,
-        CHEMICAL_GRADIENT_INPUT_SCALE: coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
         MORPHOLOGY_GRADIENT_INPUT_SCALE: coreConstants.MORPHOLOGY_GRADIENT_INPUT_SCALE,
         GROWTH_DIRECTION_RESPONSE_RATE: coreConstants.GROWTH_DIRECTION_RESPONSE_RATE,
         GROWTH_ANISOTROPY_RESPONSE_RATE: coreConstants.GROWTH_ANISOTROPY_RESPONSE_RATE,
@@ -339,8 +340,7 @@ export class Agents {
       device.queue.writeBuffer(buffer, 0, new Uint32Array([commit]));
       writeFloat32(device, buffer, 4, new Float32Array([1.0]));
       writeFloat32(device, buffer, 8, new Float32Array([1.0]));
-      writeFloat32(device, buffer, 12, new Float32Array([0.0]));
-      writeFloat32(device, buffer, 16, new Float32Array([1.0]));
+      writeFloat32(device, buffer, 12, new Float32Array([1.0]));
       return buffer;
     }) as [GPUBuffer, GPUBuffer];
 
@@ -464,20 +464,11 @@ export class Agents {
     }
   }
 
-  /** Occupancy support for cycle admission: 0 = chemistry only, 1 = fully
-   * multiplied by local morphology occupancy. */
-  setInteriorSupportStrength(strength: number): void {
-    const value = new Float32Array([Math.max(0, Math.min(1, strength))]);
-    for (const buffer of this.stepModeUniforms) {
-      writeFloat32(this.device, buffer, 12, value);
-    }
-  }
-
   /** Caps polarized daughter placement: 0 = symmetric, 1 = full policy. */
   setDivisionDirectionality(strength: number): void {
     const value = new Float32Array([Math.max(0, Math.min(1, strength))]);
     for (const buffer of this.stepModeUniforms) {
-      writeFloat32(this.device, buffer, 16, value);
+      writeFloat32(this.device, buffer, 12, value);
     }
   }
 
@@ -498,6 +489,10 @@ export class Agents {
   /** AgentPhysics.elasticStrainScale at byte offset 60. */
   setElasticStrainScale(scale: number): void {
     writeFloat32(this.device, this.physicsUniform, 60, new Float32Array([Math.max(scale, 1e-6)]));
+  }
+
+  setChemicalGradientInputScale(scale: number): void {
+    writeFloat32(this.device, this.physicsUniform, 64, new Float32Array([Math.max(scale, 1e-6)]));
   }
 
   /** Updates this class's own agentStep() dispatch size AND growth's own

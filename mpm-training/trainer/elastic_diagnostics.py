@@ -88,6 +88,7 @@ def particle_elastic_state(
     material_e: float,
     material_nu: float,
     material_hardening: float,
+    particle_volume: float = VOL,
 ) -> ElasticParticleState:
     """Compute per-particle quantities used by the tensor-growth material.
 
@@ -139,7 +140,7 @@ def particle_elastic_state(
     lam = lambda0 * hardening_scale
     pressure = -lam * (je - 1.0)
     energy_density = mu * corotated**2 + 0.5 * lam * (je - 1.0) ** 2
-    energy = VOL * growth * energy_density
+    energy = particle_volume * growth * energy_density
 
     return ElasticParticleState(
         elastic_f=fe,
@@ -201,8 +202,10 @@ def summarize_elastic_state(
     *,
     velocities: np.ndarray | None = None,
     positions: np.ndarray | None = None,
+    particle_mass: float = PARTICLE_MASS,
+    particle_volume: float = VOL,
 ) -> dict[str, Any]:
-    weights = PARTICLE_MASS * state.growth_area_ratio
+    weights = particle_mass * state.growth_area_ratio
     metrics = {
         "elastic_volume_ratio": state.elastic_volume_ratio,
         "principal_stretch_max": state.principal_stretch_max,
@@ -258,7 +261,7 @@ def summarize_elastic_state(
     result = {
         "particle_count": int(weights.size),
         "active_cycle_count": int(np.count_nonzero(state.cycle_active > 0.5)),
-        "total_rest_area": float(VOL * state.growth_area_ratio.sum()),
+        "total_rest_area": float(particle_volume * state.growth_area_ratio.sum()),
         "total_mass": float(weights.sum()),
         "total_elastic_energy": float(state.elastic_energy.sum()),
         "metrics": {name: distribution_summary(values, weights) for name, values in metrics.items()},
@@ -283,9 +286,12 @@ def measure_core(
         material_e=material_e,
         material_nu=material_nu,
         material_hardening=material_hardening,
+        particle_volume=core.particle_volume,
     )
     return summarize_elastic_state(
         state,
         velocities=core.read_velocities(),
         positions=core.read_positions(),
+        particle_mass=core.particle_mass,
+        particle_volume=core.particle_volume,
     )

@@ -31,6 +31,13 @@ export interface RunSettings {
   // cap through AgentPhysics.maxActiveParticles without changing it.
   particles: number;
   initialParticleCount?: number;
+  densityModelVersion?: number;
+  trainingDensityMultipliers?: number[];
+  densityAggregation?: "worst" | "mean";
+  particleCapacity?: number;
+  particleMass?: number;
+  particleVolume?: number;
+  chemicalGradientInputScale?: number;
   macroSteps: number;
   // Optional time cutoff for starting new cycles. null/absent means
   // growth remains chemically controlled for the whole replay.
@@ -44,17 +51,9 @@ export interface RunSettings {
   fieldN: number;
   morphologyBlurSigma?: number;
   morphologyDensityReference?: number;
-  /** Boundary-localized inward acceleration; 0 disables cohesion. */
-  tissueSurfaceTension?: number;
-  /** Maximum tissue-tension velocity delta per physics substep. */
-  tissueSurfaceForceCap?: number;
-  /** NN-controlled velocity diffusion performed on the MPM grid. */
-  gridWeldingStrength?: number;
   neuralUpdatesPerMacro?: number;
   communicationSpeed?: number;
   internalStateSpeed?: number;
-  /** Occupancy weighting for cycle admission: 0 off, 1 full support. */
-  interiorSupportStrength?: number;
   /** Cap on policy-polarized daughter placement: 0 symmetric, 1 full. */
   divisionDirectionality?: number;
   elasticStrainScale?: number;
@@ -100,9 +99,6 @@ export interface RunSettings {
   /** Legacy run field, converted to a duration when growthDuration is absent. */
   growthRate?: number;
   growthMax: number;
-  growthThreshold: number;
-  /** 0 removes compression slowdown; 1 preserves the original response. */
-  growthCompressionInhibition?: number;
   /** Cap on policy-directed rest-growth anisotropy. */
   growthAnisotropy?: number;
   // Debug/testing toggle — off skips MpmCore's own physics substeps
@@ -206,6 +202,9 @@ export interface GenerationRecord {
   seed: number;
   /** Seeds shared by every candidate during this generation's evaluation. */
   evaluationSeeds?: number[];
+  /** Representative worst-case sampling density for this winner replay. */
+  particleDensityMultiplier?: number;
+  densityFitnesses?: Record<string, number>;
   weights: UpdateRuleWeights;
 }
 
@@ -234,6 +233,9 @@ export interface PhysicsSettings {
   materialNu: number;
   materialHardening: number;
   materialElasticity: number;
+  particleMass: number;
+  particleVolume: number;
+  chemicalGradientInputScale: number;
   decay: number;
   depositRate: number;
   maxAccel: number;
@@ -252,14 +254,8 @@ export interface PhysicsSettings {
   neuralUpdatesPerMacro: number;
   communicationSpeed: number;
   internalStateSpeed: number;
-  interiorSupportStrength: number;
   divisionDirectionality: number;
-  tissueSurfaceTension: number;
-  tissueSurfaceForceCap: number;
-  gridWeldingStrength: number;
   growthMax: number;
-  growthThreshold: number;
-  growthCompressionInhibition: number;
   // Global cap on the neural per-particle anisotropy output.
   growthAnisotropy: number;
   splatRadius: number;
@@ -279,6 +275,9 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     materialNu: config.materialNu,
     materialHardening: config.materialHardening,
     materialElasticity: config.materialElasticity,
+    particleMass: config.particleMass ?? coreConstants.PARTICLE_MASS,
+    particleVolume: config.particleVolume ?? coreConstants.VOL,
+    chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
     decay: config.decay,
     // Falls back to 1.0 (= unchanged, matching this project's own
     // pre-depositRate behavior — see simulation_settings.py's own
@@ -313,14 +312,8 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     neuralUpdatesPerMacro: Math.max(1, Math.round(config.neuralUpdatesPerMacro ?? 1)),
     communicationSpeed: Math.max(0, config.communicationSpeed ?? 1.0),
     internalStateSpeed: Math.max(0, config.internalStateSpeed ?? 1.0),
-    interiorSupportStrength: Math.max(0, Math.min(1, config.interiorSupportStrength ?? 0.0)),
     divisionDirectionality: Math.max(0, Math.min(1, config.divisionDirectionality ?? 1.0)),
-    tissueSurfaceTension: Math.max(0, config.tissueSurfaceTension ?? 0.0),
-    tissueSurfaceForceCap: Math.max(0, config.tissueSurfaceForceCap ?? 0.05),
-    gridWeldingStrength: Math.max(0, config.gridWeldingStrength ?? 0.0),
     growthMax: config.growthMax ?? 2.0,
-    growthThreshold: config.growthThreshold ?? 0.0,
-    growthCompressionInhibition: Math.max(0, Math.min(1, config.growthCompressionInhibition ?? 1.0)),
     growthAnisotropy: Math.max(0, Math.min(1, config.growthAnisotropy ?? 1.0)),
     splatRadius: config.splatRadius,
     repulsionStrength: config.repulsionStrength,

@@ -1,5 +1,5 @@
 // Zeroes p2g.wgsl's grid accumulator buffer — momentum-x, momentum-y,
-// mass, and mass-weighted neural welding expression (see that file's own
+// and mass (see that file's own
 // header for what each holds and why they're
 // all packed into one `array<atomic<i32>>` with a fixed per-node stride
 // rather than one buffer per channel: WebGPU caps at 8 storage buffers
@@ -18,7 +18,7 @@
 
 const GRID_N: u32 = __GRID_N__u;
 const NODE_COUNT: u32 = (GRID_N + 1u) * (GRID_N + 1u);
-const CHANNELS: u32 = 4u; // must match p2g.wgsl/gridUpdate/gridWelding
+const CHANNELS: u32 = 3u; // must match p2g.wgsl/gridUpdate
 
 @group(0) @binding(0) var<storage, read_write> gridAccum: array<atomic<i32>>;
 

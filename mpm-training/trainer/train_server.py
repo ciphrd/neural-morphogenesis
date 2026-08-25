@@ -40,25 +40,28 @@ from fastapi.responses import FileResponse
 
 from agents_gpu import AgentsGPU
 from debug_images import save_grown_image, save_raster_image
+from density import DENSITY_MODEL_VERSION
 from device import pick_device
 from environment_gpu import EnvironmentGPU
 from evolve import (
     CHECKPOINTS_DIR,
     RASTER_EXTENT,
     build_arg_parser,
+    finalize_density_configuration,
     finalize_policy_configuration,
     get_weights,
     rollout,
     run_generation,
     set_weights,
 )
-from mpm_core import MpmCore
+from mpm_core import PARTICLE_MASS, VOL, MpmCore
 from parallel_workers import build_pool
 from policy_parameters import mutation_scales, policy_hidden_dim
 from raster import build_target_distance_field, build_target_raster, training_raster_distance
 from simulation_settings import (
     ANGULAR_DAMPING,
     CHEM_CHANNELS,
+    CHEMICAL_GRADIENT_INPUT_SCALE,
     CHIRALITY,
     COMMUNICATION_SPEED,
     DAMPING_LOSS_FRACTION,
@@ -73,13 +76,9 @@ from simulation_settings import (
     FIELD_N,
     FRICTION,
     GROWTH_DURATION_MACRO_STEPS,
-    GROWTH_COMPRESSION_INHIBITION,
     GROWTH_ANISOTROPY_AUTHORITY,
     GROWTH_MAX,
-    GROWTH_THRESHOLD,
-    GRID_WELDING_STRENGTH,
     INTERNAL_STATE_SPEED,
-    INTERIOR_SUPPORT_STRENGTH,
     MASS_RAMP_MACRO_STEPS,
     MORPHOLOGY_BLUR_SIGMA,
     MORPHOLOGY_DENSITY_REFERENCE,
@@ -96,8 +95,6 @@ from simulation_settings import (
     MPM_ENABLED,
     REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
-    TISSUE_SURFACE_FORCE_CAP,
-    TISSUE_SURFACE_TENSION,
     SPLAT_RADIUS,
     SPLIT_DISPLACEMENT,
 )
@@ -151,6 +148,7 @@ def _setup() -> None:
         raise SystemExit("--initial-particles must be between 1 and --particles")
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
         raise SystemExit("--growth-steps must be between 0 and --macro-steps")
+    finalize_density_configuration(args)
 
     wgpu_device = pick_device()
 
@@ -253,7 +251,8 @@ def _archive_previous_run() -> None:
 
 
 def _save_generation_images(
-    generation: int, winner_weights: np.ndarray, winner_seed: int, core: MpmCore, agents: AgentsGPU, environment: EnvironmentGPU
+    generation: int, winner_weights: np.ndarray, winner_seed: int, winner_density: float,
+    core: MpmCore, agents: AgentsGPU, environment: EnvironmentGPU
 ) -> None:
     """Three PNGs per generation — see debug_images.py's own module
     docstring for what each one is and why: `..._grown.png` (raw,
@@ -280,6 +279,7 @@ def _save_generation_images(
         agents,
         environment,
         return_positions=True,
+        density_multiplier=winner_density,
     )
     _, agent_raster = training_raster_distance(
         positions,
@@ -291,6 +291,7 @@ def _save_generation_images(
         args.raster_sigma,
         outside_weight=args.outside_weight,
         track_best_raster=True,
+        particle_weight=1.0 / winner_density,
     )
 
     prefix = f"gen_{generation:05d}"
@@ -381,7 +382,7 @@ async def _training_loop_body() -> None:
         MAX_ANGULAR_VELOCITY,
         CHIRALITY,
         DEPOSIT_DISTANCE,
-        args.particles,
+        args.particle_capacity,
         SPLIT_DISPLACEMENT,
         DIVISION_COOLDOWN,
         FRICTION,
@@ -397,7 +398,7 @@ async def _training_loop_body() -> None:
     # ..." confirmation once, above, for this process's own wgpu_device;
     # see build_pool()'s own docstring for why it would otherwise repeat
     # that exact line a second time.
-    pool = build_pool(num_workers, args.particles, target, target_raster, target_distance_field, args, log_device=False)
+    pool = build_pool(num_workers, args.particle_capacity, target, target_raster, target_distance_field, args, log_device=False)
     update_rule = UpdateRule(CHEM_CHANNELS, args.policy_architecture)
     population = [get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture)) for _ in range(args.population)]
 
@@ -419,6 +420,13 @@ async def _training_loop_body() -> None:
         "target": args.target,
         "particles": args.particles,
         "initialParticleCount": args.initial_particles,
+        "densityModelVersion": DENSITY_MODEL_VERSION,
+        "trainingDensityMultipliers": args.particle_densities,
+        "densityAggregation": args.density_aggregation,
+        "particleCapacity": args.particle_capacity,
+        "particleMass": PARTICLE_MASS,
+        "particleVolume": VOL,
+        "chemicalGradientInputScale": CHEMICAL_GRADIENT_INPUT_SCALE,
         "macroSteps": args.macro_steps,
         "growthSteps": args.growth_steps,
         "substepsPerMacro": args.substeps_per_macro,
@@ -430,13 +438,9 @@ async def _training_loop_body() -> None:
         "fieldN": FIELD_N,
         "morphologyBlurSigma": MORPHOLOGY_BLUR_SIGMA,
         "morphologyDensityReference": MORPHOLOGY_DENSITY_REFERENCE,
-        "tissueSurfaceTension": TISSUE_SURFACE_TENSION,
-        "tissueSurfaceForceCap": TISSUE_SURFACE_FORCE_CAP,
-        "gridWeldingStrength": GRID_WELDING_STRENGTH,
         "neuralUpdatesPerMacro": NEURAL_UPDATES_PER_MACRO,
         "communicationSpeed": COMMUNICATION_SPEED,
         "internalStateSpeed": INTERNAL_STATE_SPEED,
-        "interiorSupportStrength": INTERIOR_SUPPORT_STRENGTH,
         "divisionDirectionality": DIVISION_DIRECTIONALITY,
         "elasticStrainScale": ELASTIC_STRAIN_SCALE,
         "elasticStrainInputsEnabled": ELASTIC_STRAIN_INPUTS_ENABLED,
@@ -461,8 +465,6 @@ async def _training_loop_body() -> None:
         "massRampMacroSteps": MASS_RAMP_MACRO_STEPS,
         "growthDuration": GROWTH_DURATION_MACRO_STEPS,
         "growthMax": GROWTH_MAX,
-        "growthThreshold": GROWTH_THRESHOLD,
-        "growthCompressionInhibition": GROWTH_COMPRESSION_INHIBITION,
         "growthAnisotropy": GROWTH_ANISOTROPY_AUTHORITY,
         # simulation_settings.py's own MPM_ENABLED (that constant's own
         # comment has the full "why" — a real testing/debug mode that
@@ -497,6 +499,8 @@ async def _training_loop_body() -> None:
     best_fitness = float("inf")
     best_weights = population[0]
     best_winner_seed = args.seed
+    best_winner_density = args.particle_densities[0]
+    best_density_fitnesses: dict[str, float] = {}
     best_evaluation_seeds: list[int] = []
 
     for generation in range(args.generations):
@@ -505,7 +509,7 @@ async def _training_loop_body() -> None:
         # see parallel_workers.py's own module docstring), and doing that
         # directly on the event loop thread would stall websocket message
         # flushing for as long as it takes.
-        population, fitnesses, winner_seed, evaluation_seeds = await asyncio.to_thread(
+        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses = await asyncio.to_thread(
             run_generation, population, args, rng, pool
         )
 
@@ -514,13 +518,18 @@ async def _training_loop_body() -> None:
             best_fitness = fitnesses[0]
             best_weights = winner_weights.copy()
             best_winner_seed = winner_seed
+            best_winner_density = winner_density
+            best_density_fitnesses = dict(density_fitnesses)
             best_evaluation_seeds = list(evaluation_seeds)
 
         # Also off the event loop thread — re-runs the winner's rollout
         # once more (see _save_generation_images()'s own docstring) plus
         # PNG encoding/disk I/O, neither of which should stall websocket
         # message flushing either.
-        await asyncio.to_thread(_save_generation_images, generation, winner_weights, winner_seed, core, agents, environment)
+        await asyncio.to_thread(
+            _save_generation_images, generation, winner_weights, winner_seed, winner_density,
+            core, agents, environment,
+        )
 
         finite = [f for f in fitnesses if np.isfinite(f)]
         print(
@@ -545,6 +554,8 @@ async def _training_loop_body() -> None:
             # the whole training invocation was started with — that one
             # lives in `settings` instead (runSeed), fixed for the run.
             "seed": winner_seed,
+            "particleDensityMultiplier": winner_density,
+            "densityFitnesses": density_fitnesses,
             # Shared by every candidate in this generation. The batch rotates
             # on the next generation; `seed` above is the winning candidate's
             # worst member, used for the single-rollout browser replay.
@@ -589,6 +600,15 @@ async def _training_loop_body() -> None:
                         "target": args.target,
                         "particles": args.particles,
                         "initial_particle_count": args.initial_particles,
+                        "density_model_version": DENSITY_MODEL_VERSION,
+                        "particle_density_multipliers": args.particle_densities,
+                        "density_aggregation": args.density_aggregation,
+                        "particle_capacity": args.particle_capacity,
+                        "particle_mass": PARTICLE_MASS,
+                        "particle_volume": VOL,
+                        "chemical_gradient_input_scale": CHEMICAL_GRADIENT_INPUT_SCALE,
+                        "winner_density_multiplier": best_winner_density,
+                        "density_fitnesses": best_density_fitnesses,
                         "macro_steps": args.macro_steps,
                         "growth_steps": args.growth_steps,
                         "substeps_per_macro": args.substeps_per_macro,
@@ -634,19 +654,13 @@ async def _training_loop_body() -> None:
                         "growth_duration_macro_steps": GROWTH_DURATION_MACRO_STEPS,
                         "morphology_blur_sigma": MORPHOLOGY_BLUR_SIGMA,
                         "morphology_density_reference": MORPHOLOGY_DENSITY_REFERENCE,
-                        "tissue_surface_tension": TISSUE_SURFACE_TENSION,
-                        "tissue_surface_force_cap": TISSUE_SURFACE_FORCE_CAP,
-                        "grid_welding_strength": GRID_WELDING_STRENGTH,
                         "neural_updates_per_macro": NEURAL_UPDATES_PER_MACRO,
                         "communication_speed": COMMUNICATION_SPEED,
                         "internal_state_speed": INTERNAL_STATE_SPEED,
-                        "interior_support_strength": INTERIOR_SUPPORT_STRENGTH,
                         "division_directionality": DIVISION_DIRECTIONALITY,
                         "elastic_strain_scale": ELASTIC_STRAIN_SCALE,
                         "elastic_strain_inputs_enabled": ELASTIC_STRAIN_INPUTS_ENABLED,
                         "growth_max": GROWTH_MAX,
-                        "growth_threshold": GROWTH_THRESHOLD,
-                        "growth_compression_inhibition": GROWTH_COMPRESSION_INHIBITION,
                         "growth_anisotropy_authority": GROWTH_ANISOTROPY_AUTHORITY,
                         "chirality": CHIRALITY,
                         "damping": DAMPING_LOSS_FRACTION,

@@ -19,9 +19,10 @@ import numpy as np
 import wgpu
 
 from agents_gpu import PARTICLE_META_BUFFER_OFFSET, AgentsGPU, weight_layout
+from density import DensityReference, resolve_checkpoint_density
 from device import pick_device
 from environment_gpu import EnvironmentGPU
-from mpm_core import MpmCore, REPULSION_FIELD_N, ceil_div
+from mpm_core import PARTICLE_MASS, VOL, MpmCore, REPULSION_FIELD_N, ceil_div
 from shader_template import load_core_shader
 from simulation_settings import (
     ANGULAR_DAMPING, CHEM_CHANNELS, CHIRALITY, COMMUNICATION_SPEED,
@@ -29,9 +30,7 @@ from simulation_settings import (
     DAMPING_LOSS_FRACTION, DECAY, DEPOSIT_DISTANCE, DEPOSIT_RATE,
     DEPOSIT_SIGMA, DIVISION_COOLDOWN, DIVISION_DIRECTIONALITY, ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE, FIELD_N, FRICTION, GROWTH_DURATION_MACRO_STEPS,
-    GROWTH_ANISOTROPY_AUTHORITY, GROWTH_COMPRESSION_INHIBITION, GROWTH_MAX, GROWTH_THRESHOLD, INITIAL_PARTICLE_COUNT,
-    GRID_WELDING_STRENGTH,
-    INTERIOR_SUPPORT_STRENGTH,
+    GROWTH_ANISOTROPY_AUTHORITY, GROWTH_MAX, INITIAL_PARTICLE_COUNT,
     INTERNAL_STATE_SPEED,
     MATERIAL_E, MATERIAL_ELASTICITY, MATERIAL_HARDENING, MATERIAL_NU,
     MAX_ACCEL, MAX_ANGULAR_ACCEL, MAX_ANGULAR_VELOCITY, MAX_ENV_WRITE,
@@ -39,7 +38,6 @@ from simulation_settings import (
     MORPHOLOGY_GRADIENT_INPUT_SCALE,
     NEURAL_UPDATES_PER_MACRO, REPULSION_MAX_DELTA, REPULSION_STRENGTH,
     SPLAT_RADIUS, SPLIT_DISPLACEMENT,
-    TISSUE_SURFACE_FORCE_CAP, TISSUE_SURFACE_TENSION,
 )
 from training_sim import TrainingRollout
 from policy_parameters import (
@@ -86,7 +84,7 @@ class PolicyInputProbe:
     def __init__(
         self, device: wgpu.GPUDevice, core: MpmCore, agents: AgentsGPU,
         environment: EnvironmentGPU, tracked: int, elastic_scale: float,
-        elastic_enabled: bool,
+        elastic_enabled: bool, chemical_gradient_scale: float,
     ) -> None:
         self.device = device
         self.agents = agents
@@ -118,7 +116,7 @@ class PolicyInputProbe:
                 "ELASTIC_SCALE": repr(float(elastic_scale)),
                 "ELASTIC_ENABLED": "true" if elastic_enabled else "false",
                 "CHEMICAL_VALUE_INPUT_SCALE": repr(CHEMICAL_VALUE_INPUT_SCALE),
-                "CHEMICAL_GRADIENT_INPUT_SCALE": repr(CHEMICAL_GRADIENT_INPUT_SCALE),
+                "CHEMICAL_GRADIENT_INPUT_SCALE": repr(float(chemical_gradient_scale)),
                 "MORPHOLOGY_GRADIENT_INPUT_SCALE": repr(MORPHOLOGY_GRADIENT_INPUT_SCALE),
             },
         ))
@@ -319,12 +317,29 @@ def main() -> int:
     steps = int(args.steps if args.steps is not None else meta["macro_steps"])
     seed = int(args.seed if args.seed is not None else meta.get("winner_seed", meta.get("seed", 0)))
     growth_steps = meta.get("growth_steps")
+    field_n = int(meta.get("field_n", FIELD_N))
+    density = resolve_checkpoint_density(
+        meta,
+        DensityReference(
+            particle_cap=int(meta["particles"]),
+            initial_particles=int(meta.get("initial_particle_count", INITIAL_PARTICLE_COUNT)),
+            chemical_field_n=field_n,
+            particle_mass=float(meta.get("particle_mass", PARTICLE_MASS)),
+            particle_volume=float(meta.get("particle_volume", VOL)),
+            chemical_gradient_input_scale=float(meta.get("chemical_gradient_input_scale", CHEMICAL_GRADIENT_INPUT_SCALE)),
+            repulsion_strength=float(meta.get("repulsion_strength", REPULSION_STRENGTH)),
+            repulsion_max_delta=float(meta.get("repulsion_max_delta", REPULSION_MAX_DELTA)),
+        ),
+        legacy_split_displacement=SPLIT_DISPLACEMENT,
+        legacy_deposit_sigma=DEPOSIT_SIGMA,
+        legacy_splat_radius=SPLAT_RADIUS,
+    )
     initial_particle_count = int(
         args.initial_particles
         if args.initial_particles is not None
-        else meta.get("initial_particle_count", INITIAL_PARTICLE_COUNT)
+        else density.initial_particles
     )
-    particle_cap = int(meta["particles"])
+    particle_cap = density.particle_cap
     if initial_particle_count > particle_cap:
         raise SystemExit(
             f"initial particle count {initial_particle_count} exceeds checkpoint particle cap {particle_cap}"
@@ -332,34 +347,25 @@ def main() -> int:
     device = pick_device()
     core = MpmCore(device)
     core.set_morphology(meta.get("morphology_blur_sigma", MORPHOLOGY_BLUR_SIGMA), meta.get("morphology_density_reference", MORPHOLOGY_DENSITY_REFERENCE))
-    core.set_tissue_tension(
-        meta.get("tissue_surface_tension", TISSUE_SURFACE_TENSION),
-        meta.get("tissue_surface_force_cap", TISSUE_SURFACE_FORCE_CAP),
-    )
-    core.set_grid_welding_strength(
-        meta.get("grid_welding_strength", GRID_WELDING_STRENGTH)
-    )
     substeps = int(meta.get("substeps_per_macro", 1))
     core.set_material(
         meta.get("material_e", MATERIAL_E), meta.get("material_nu", MATERIAL_NU),
         meta.get("material_hardening", MATERIAL_HARDENING),
         elasticity=meta.get("material_elasticity", MATERIAL_ELASTICITY),
         growth_duration_macro_steps=meta.get("growth_duration_macro_steps", GROWTH_DURATION_MACRO_STEPS),
-        growth_max=meta.get("growth_max", GROWTH_MAX), growth_threshold=meta.get("growth_threshold", GROWTH_THRESHOLD),
-        growth_compression_inhibition=meta.get(
-            "growth_compression_inhibition", GROWTH_COMPRESSION_INHIBITION
-        ),
+        growth_max=meta.get("growth_max", GROWTH_MAX),
         growth_anisotropy=meta.get(
             "growth_anisotropy_authority", GROWTH_ANISOTROPY_AUTHORITY
         ),
         substeps_per_macro=substeps,
+        particle_mass=density.particle_mass,
+        particle_volume=density.particle_volume,
     )
     core.set_damping(meta.get("damping_loss_fraction", meta.get("damping", DAMPING_LOSS_FRACTION)), substeps)
-    core.set_splat_radius(meta.get("splat_radius", SPLAT_RADIUS))
+    core.set_splat_radius(density.splat_radius)
     core.set_repulsion_strength(
-        meta.get("repulsion_strength", REPULSION_STRENGTH), meta.get("repulsion_max_delta", REPULSION_MAX_DELTA),
+        density.repulsion_strength, density.repulsion_max_delta,
     )
-    field_n = int(meta.get("field_n", FIELD_N))
     chemical_architecture = resolve_chemical_communication_architecture(
         meta.get("chemical_communication_architecture"), meta.get("decay", DECAY)
     )
@@ -373,17 +379,18 @@ def main() -> int:
         meta.get("max_angular_accel", MAX_ANGULAR_ACCEL), meta.get("angular_damping", ANGULAR_DAMPING),
         meta.get("max_angular_velocity", MAX_ANGULAR_VELOCITY), meta.get("chirality", CHIRALITY),
         meta.get("deposit_distance", DEPOSIT_DISTANCE), particle_cap,
-        meta.get("split_displacement", SPLIT_DISPLACEMENT), meta.get("division_cooldown", DIVISION_COOLDOWN),
-        meta.get("friction", FRICTION), meta.get("deposit_sigma", DEPOSIT_SIGMA), 1.0,
+        density.spacing, meta.get("division_cooldown", DIVISION_COOLDOWN),
+        meta.get("friction", FRICTION), density.deposit_sigma, 1.0,
         meta.get("spawn_x", 0.5), meta.get("spawn_y", 0.5),
         meta.get("elastic_strain_scale", ELASTIC_STRAIN_SCALE),
         meta.get("elastic_strain_inputs_enabled", ELASTIC_STRAIN_INPUTS_ENABLED),
+        density.chemical_gradient_input_scale,
         policy_architecture=architecture,
         internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
-        interior_support_strength=meta.get("interior_support_strength", INTERIOR_SUPPORT_STRENGTH),
         division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
         chemical_communication_architecture=chemical_architecture,
     )
+    agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
     def restart_rollout() -> TrainingRollout:
         return TrainingRollout(
             core, agents, environment,
@@ -513,7 +520,7 @@ def main() -> int:
         "raw_summary": percentile_summary(all_raw_values, names), "samples": sampled_times,
         "normalization": {
             "chemical_value_scale": CHEMICAL_VALUE_INPUT_SCALE,
-            "chemical_gradient_scale": CHEMICAL_GRADIENT_INPUT_SCALE,
+            "chemical_gradient_scale": density.chemical_gradient_input_scale,
             "morphology_occupancy": "clamp(2*x-1,-1,1)",
             "morphology_gradient_scale": MORPHOLOGY_GRADIENT_INPUT_SCALE,
             "elastic": "already normalized; unchanged",

@@ -97,13 +97,15 @@ import torch
 
 from agents_gpu import AgentsGPU
 from alignment import training_alignment_distance
+from density import DENSITY_MODEL_VERSION, DensityReference, ResolvedDensity, parse_multipliers, resolve_density
 from environment_gpu import EnvironmentGPU
-from mpm_core import MpmCore
+from mpm_core import MAX_PARTICLES, PARTICLE_MASS, VOL, MpmCore
 from parallel_workers import build_pool, worker_rollout
 from raster import build_target_distance_field, build_target_raster
 from simulation_settings import (
     CHEM_CHANNELS,
     CHEMICAL_COMMUNICATION_ARCHITECTURE,
+    CHEMICAL_GRADIENT_INPUT_SCALE,
     COMMUNICATION_SPEED,
     DAMPING_LOSS_FRACTION,
     DECAY,
@@ -113,12 +115,9 @@ from simulation_settings import (
     ELASTIC_STRAIN_INPUTS_ENABLED,
     FIELD_N,
     GROWTH_DURATION_MACRO_STEPS,
-    GRID_WELDING_STRENGTH,
-    GROWTH_COMPRESSION_INHIBITION,
     GROWTH_ANISOTROPY_AUTHORITY,
     INITIAL_PARTICLE_COUNT,
     INTERNAL_STATE_SPEED,
-    INTERIOR_SUPPORT_STRENGTH,
     DIVISION_DIRECTIONALITY,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
@@ -131,8 +130,6 @@ from simulation_settings import (
     POLICY_ARCHITECTURE,
     REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
-    TISSUE_SURFACE_FORCE_CAP,
-    TISSUE_SURFACE_TENSION,
     SPLAT_RADIUS,
 )
 from policy_parameters import (
@@ -151,6 +148,27 @@ from training_sim import TrainingRollout
 from update_rule import UpdateRule
 
 CHECKPOINTS_DIR = Path(__file__).parent / "checkpoints"
+
+
+def density_reference(args: argparse.Namespace) -> DensityReference:
+    """The run's q=1 settings; public particle counts remain reference counts."""
+    return DensityReference(
+        particle_cap=int(args.particles),
+        initial_particles=int(args.initial_particles),
+        chemical_field_n=FIELD_N,
+        particle_mass=PARTICLE_MASS,
+        particle_volume=VOL,
+        chemical_gradient_input_scale=CHEMICAL_GRADIENT_INPUT_SCALE,
+        repulsion_strength=REPULSION_STRENGTH,
+        repulsion_max_delta=REPULSION_MAX_DELTA,
+    )
+
+
+def resolve_run_density(args: argparse.Namespace, multiplier: float) -> ResolvedDensity:
+    return resolve_density(
+        density_reference(args), multiplier,
+        allow_unsafe=bool(getattr(args, "allow_unsafe_density", False)),
+    )
 
 # Target points and particle positions both already live in MpmCore's
 # fixed [0,1]^2 domain (see targets.py) — unlike envnca's own raster
@@ -251,6 +269,7 @@ def rollout(
     agents: AgentsGPU,
     environment: EnvironmentGPU,
     return_positions: bool = False,
+    density_multiplier: float = 1.0,
 ) -> float | tuple[float, np.ndarray]:
     """Runs one seed-to-`args.macro_steps` rollout with `weights` loaded
     into the (reused, GPU-resident) `agents` and `core`, and returns a
@@ -286,6 +305,11 @@ def rollout(
     end-of-generation debug images), not the hot per-candidate training
     path, which only ever wants the scalar fitness."""
     agents.load_weights(weights)
+    density = resolve_run_density(args, density_multiplier)
+    if density.particle_cap > agents.particle_capacity:
+        raise ValueError(
+            f"resolved particle cap {density.particle_cap} exceeds worker capacity {agents.particle_capacity}"
+        )
 
     core.set_material(
         MATERIAL_E,
@@ -294,10 +318,15 @@ def rollout(
         MATERIAL_ELASTICITY,
         growth_duration_macro_steps=GROWTH_DURATION_MACRO_STEPS,
         substeps_per_macro=args.substeps_per_macro,
+        particle_mass=density.particle_mass,
+        particle_volume=density.particle_volume,
     )
     core.set_damping(DAMPING_LOSS_FRACTION, args.substeps_per_macro)
-    core.set_splat_radius(SPLAT_RADIUS)
-    core.set_repulsion_strength(REPULSION_STRENGTH, REPULSION_MAX_DELTA)
+    core.set_splat_radius(density.splat_radius)
+    core.set_repulsion_strength(density.repulsion_strength, density.repulsion_max_delta)
+    agents.set_density_geometry(density.spacing, density.deposit_sigma)
+    agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
+    agents.set_max_active_particles(density.particle_cap)
 
     sim = TrainingRollout(
         core,
@@ -308,7 +337,7 @@ def rollout(
         gravity=args.gravity,
         seed=seed,
         mpm_enabled=MPM_ENABLED,
-        initial_particle_count=args.initial_particles,
+        initial_particle_count=density.initial_particles,
     )
 
     # Deduplicated and sorted ascending — offsets can collide onto the
@@ -339,7 +368,7 @@ def run_generation(
     args: argparse.Namespace,
     rng: np.random.Generator,
     pool: ProcessPoolExecutor,
-) -> tuple[list[np.ndarray], list[float], int, list[int]]:
+) -> tuple[list[np.ndarray], list[float], int, float, list[int], dict[str, float]]:
     """Evaluates every candidate on the same rotating seed batch.
 
     A fresh batch is drawn from the run RNG once per generation, then every
@@ -376,24 +405,41 @@ def run_generation(
     evaluation_seeds = [
         int(seed) for seed in rng.integers(0, 2**31 - 1, size=seeds_per_candidate)
     ]
-    task_weights = [weights for weights in population for _ in evaluation_seeds]
-    task_seeds = evaluation_seeds * len(population)
+    densities = tuple(float(q) for q in getattr(args, "particle_densities", (1.0,)))
+    task_weights = [
+        weights for weights in population for _q in densities for _seed in evaluation_seeds
+    ]
+    task_densities = [
+        q for _weights in population for q in densities for _seed in evaluation_seeds
+    ]
+    task_seeds = [
+        seed for _weights in population for _q in densities for seed in evaluation_seeds
+    ]
     rollout_fitnesses = np.asarray(
-        list(pool.map(worker_rollout, task_weights, task_seeds)), dtype=np.float64
-    ).reshape(len(population), seeds_per_candidate)
-    fitnesses = np.mean(rollout_fitnesses, axis=1)
+        list(pool.map(worker_rollout, task_weights, task_seeds, task_densities)), dtype=np.float64
+    ).reshape(len(population), len(densities), seeds_per_candidate)
+    per_density_fitnesses = np.mean(rollout_fitnesses, axis=2)
+    fitnesses = (
+        np.max(per_density_fitnesses, axis=1)
+        if getattr(args, "density_aggregation", "worst") == "worst"
+        else np.mean(per_density_fitnesses, axis=1)
+    )
     # Replaying the hardest seed is more informative than choosing an
     # arbitrary or lucky member of the batch. np.argmax is stable and picks
     # the first seed when several scores tie.
-    representative_seeds = [
-        evaluation_seeds[int(np.argmax(candidate_scores))]
-        for candidate_scores in rollout_fitnesses
-    ]
+    representative_cases = []
+    for candidate_scores in rollout_fitnesses:
+        density_index, seed_index = np.unravel_index(np.argmax(candidate_scores), candidate_scores.shape)
+        representative_cases.append((evaluation_seeds[int(seed_index)], densities[int(density_index)]))
 
     order = np.argsort(fitnesses, kind="stable")
+    winner_density_fitnesses = {
+        f"{q:g}": float(per_density_fitnesses[int(order[0]), density_index])
+        for density_index, q in enumerate(densities)
+    }
     population = [population[i] for i in order]
     fitnesses = [float(fitnesses[i]) for i in order]
-    representative_seeds = [representative_seeds[i] for i in order]
+    representative_cases = [representative_cases[i] for i in order]
 
     elites = population[: args.elites]
     next_population = list(elites)
@@ -401,7 +447,11 @@ def run_generation(
         parent = elites[rng.integers(len(elites))]
         next_population.append(mutate(parent, args.mutation_sigma, rng, args.policy_architecture))
 
-    return next_population, fitnesses, representative_seeds[0], evaluation_seeds
+    winner_seed, winner_density = representative_cases[0]
+    return (
+        next_population, fitnesses, winner_seed, winner_density,
+        evaluation_seeds, winner_density_fitnesses,
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -461,6 +511,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=400,
         help="maximum particle count a rollout can grow to via splitting",
+    )
+    parser.add_argument(
+        "--particle-densities",
+        type=float,
+        nargs="+",
+        default=[1.0],
+        metavar="Q",
+        help="particle sampling-density multipliers evaluated for every candidate (default: 1.0)",
+    )
+    parser.add_argument(
+        "--density-aggregation",
+        choices=("worst", "mean"),
+        default="worst",
+        help="combine one candidate's mean-per-density fitnesses (default: worst)",
+    )
+    parser.add_argument(
+        "--allow-unsafe-density",
+        action="store_true",
+        help="allow multipliers outside core/density.json's calibrated range",
     )
     parser.add_argument(
         "--initial-particles",
@@ -542,6 +611,20 @@ def finalize_policy_configuration(args: argparse.Namespace) -> None:
     args.hidden_layers = [policy_hidden_dim(args.policy_architecture)]
 
 
+def finalize_density_configuration(args: argparse.Namespace) -> None:
+    try:
+        args.particle_densities = list(parse_multipliers(
+            args.particle_densities, allow_unsafe=args.allow_unsafe_density
+        ))
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    args.particle_capacity = max(resolve_run_density(args, q).particle_cap for q in args.particle_densities)
+    if args.particle_capacity > MAX_PARTICLES:
+        raise SystemExit(
+            f"maximum resolved particle cap {args.particle_capacity} exceeds GPU capacity {MAX_PARTICLES}"
+        )
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
     finalize_policy_configuration(args)
@@ -552,6 +635,7 @@ def main() -> None:
         raise SystemExit("--seeds-per-candidate must be at least 1")
     if not 1 <= args.initial_particles <= args.particles:
         raise SystemExit("--initial-particles must be between 1 and --particles")
+    finalize_density_configuration(args)
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
         raise SystemExit("--growth-steps must be between 0 and --macro-steps")
 
@@ -580,7 +664,7 @@ def main() -> None:
     # the checkpoint block below) — it never runs a live forward pass,
     # see training_sim.py's own module docstring for why.
     num_workers = args.workers if args.workers is not None else min(os.cpu_count() or 4, args.population)
-    pool = build_pool(num_workers, args.particles, target, target_raster, target_distance_field, args)
+    pool = build_pool(num_workers, args.particle_capacity, target, target_raster, target_distance_field, args)
     update_rule = UpdateRule(CHEM_CHANNELS, args.policy_architecture)
 
     population = [get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture)) for _ in range(args.population)]
@@ -590,14 +674,22 @@ def main() -> None:
     best_fitness = float("inf")
     best_weights = population[0]
     best_evaluation_seeds: list[int] = []
+    best_winner_seed = args.seed
+    best_winner_density = args.particle_densities[0]
+    best_density_fitnesses: dict[str, float] = {}
 
     for generation in range(args.generations):
-        population, fitnesses, _, evaluation_seeds = run_generation(population, args, rng, pool)
+        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses = run_generation(
+            population, args, rng, pool
+        )
 
         if fitnesses[0] < best_fitness:
             best_fitness = fitnesses[0]
             best_weights = population[0].copy()
             best_evaluation_seeds = list(evaluation_seeds)
+            best_winner_seed = winner_seed
+            best_winner_density = winner_density
+            best_density_fitnesses = dict(density_fitnesses)
 
         finite = [f for f in fitnesses if np.isfinite(f)]
         print(
@@ -617,21 +709,26 @@ def main() -> None:
                         "target": args.target,
                         "particles": args.particles,
                         "initial_particle_count": args.initial_particles,
+                        "density_model_version": DENSITY_MODEL_VERSION,
+                        "particle_density_multipliers": args.particle_densities,
+                        "density_aggregation": args.density_aggregation,
+                        "particle_capacity": args.particle_capacity,
+                        "particle_mass": PARTICLE_MASS,
+                        "particle_volume": VOL,
+                        "chemical_gradient_input_scale": CHEMICAL_GRADIENT_INPUT_SCALE,
+                        "winner_seed": best_winner_seed,
+                        "winner_density_multiplier": best_winner_density,
+                        "density_fitnesses": best_density_fitnesses,
                         "macro_steps": args.macro_steps,
                         "growth_steps": args.growth_steps,
                         "substeps_per_macro": args.substeps_per_macro,
                         "growth_duration_macro_steps": GROWTH_DURATION_MACRO_STEPS,
-                        "growth_compression_inhibition": GROWTH_COMPRESSION_INHIBITION,
                         "growth_anisotropy_authority": GROWTH_ANISOTROPY_AUTHORITY,
                         "morphology_blur_sigma": MORPHOLOGY_BLUR_SIGMA,
                         "morphology_density_reference": MORPHOLOGY_DENSITY_REFERENCE,
-                        "tissue_surface_tension": TISSUE_SURFACE_TENSION,
-                        "tissue_surface_force_cap": TISSUE_SURFACE_FORCE_CAP,
-                        "grid_welding_strength": GRID_WELDING_STRENGTH,
                         "neural_updates_per_macro": NEURAL_UPDATES_PER_MACRO,
                         "communication_speed": COMMUNICATION_SPEED,
                         "internal_state_speed": INTERNAL_STATE_SPEED,
-                        "interior_support_strength": INTERIOR_SUPPORT_STRENGTH,
                         "division_directionality": DIVISION_DIRECTIONALITY,
                         "elastic_strain_scale": ELASTIC_STRAIN_SCALE,
                         "elastic_strain_inputs_enabled": ELASTIC_STRAIN_INPUTS_ENABLED,

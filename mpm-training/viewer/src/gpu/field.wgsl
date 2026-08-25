@@ -281,7 +281,7 @@ fn colorizeField(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var color = BG;
   if (mode == MODE_DENSITY) {
-    let mass = f32(atomicLoad(&gridAccum[idx * 4u + CH_MASS])) / SCALE;
+    let mass = f32(atomicLoad(&gridAccum[idx * 3u + CH_MASS])) / SCALE;
     color = scalarColor(mass / DENSITY_MAX);
   } else if (mode == MODE_SPEED) {
     let speed = length(gridVel[idx]);

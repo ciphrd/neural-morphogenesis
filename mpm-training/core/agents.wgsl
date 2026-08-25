@@ -155,7 +155,6 @@ const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
 const IN_DIM: u32 = __IN_DIM__u;
 const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
 const CHEMICAL_VALUE_INPUT_SCALE: f32 = __CHEMICAL_VALUE_INPUT_SCALE__;
-const CHEMICAL_GRADIENT_INPUT_SCALE: f32 = __CHEMICAL_GRADIENT_INPUT_SCALE__;
 const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__;
 const GROWTH_DIRECTION_RESPONSE_RATE: f32 = __GROWTH_DIRECTION_RESPONSE_RATE__;
 const GROWTH_ANISOTROPY_RESPONSE_RATE: f32 = __GROWTH_ANISOTROPY_RESPONSE_RATE__;
@@ -248,6 +247,8 @@ struct AgentPhysics {
   // Log-strain magnitude mapped to roughly tanh(1). This is input
   // normalization only; it does not change mechanics.
   elasticStrainScale: f32,
+  // Density-resolved normalization for the field-pixel Sobel gradient.
+  chemicalGradientInputScale: f32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -369,10 +370,8 @@ struct ParticleRest {
   // this with the same curve and compression response as rest area. It fills
   // the struct's former alignment lane, so the 48-byte ABI is unchanged.
   appearanceScale: f32,
-  // Scalar expression consumed only through the MPM grid. The policy controls
-  // it indirectly through persistent chemical channel 0; smoothstep gives
-  // neutral chemistry an exact off state while preserving checkpoint shape.
-  weldExpression: f32,
+  // Explicit tail padding preserves the 48-byte storage ABI.
+  _padding: f32,
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(12) var morphologyTexture: texture_2d<f32>;
@@ -382,10 +381,6 @@ struct StepMode {
   // Host sets this to communicationSpeed / neuralUpdatesPerMacro.
   communicationDt: f32,
   stateUpdateSpeed: f32,
-  // Strength of morphology-occupancy support in cycle admission. 0 leaves
-  // chemical growth probability unchanged; 1 multiplies it by local bounded
-  // occupancy so embedded cells are favored over exposed cells.
-  interiorSupportStrength: f32,
   // Global cap on the policy's polarized daughter placement. 0 restores
   // center-preserving symmetric division; 1 grants full policy authority.
   divisionDirectionality: f32,
@@ -432,7 +427,7 @@ fn normalizeChemicalValue(raw: f32) -> f32 {
 }
 
 fn normalizeChemicalGradient(raw: f32) -> f32 {
-  return safeTanh(raw / max(CHEMICAL_GRADIENT_INPUT_SCALE, 1e-6));
+  return safeTanh(raw / max(physics.chemicalGradientInputScale, 1e-6));
 }
 
 fn normalizeMorphologyGradient(raw: f32) -> f32 {
@@ -877,9 +872,6 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
         1.0,
       );
     }
-    particleRest[pi].weldExpression = smoothstep(
-      0.5, 0.7, safeSigmoid(agentState.particleMeta[pi].chemicalState[0u])
-    );
   } else {
     // Persistent-environment retains the original interpretation: chemical
     // outputs are direct spatial writes. Environment decay/deposit-rate owns
@@ -888,9 +880,6 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       result.envWrite,
       fieldPos,
       clamp(particleRest[pi].appearanceScale, 0.0, 1.0),
-    );
-    particleRest[pi].weldExpression = smoothstep(
-      0.5, 0.7, safeSigmoid(result.envWrite[0u])
     );
   }
 
@@ -971,12 +960,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // replaced by two baseline daughters.
   // Lifecycle semantics remain in raw substrate units. Input normalization is
   // exclusively a neural-sensing transform and must not accelerate division.
-  let interiorSupport = mix(
-    1.0,
-    morphologyOccupancy,
-    clamp(stepMode.interiorSupportStrength, 0.0, 1.0),
-  );
-  let splitProb = clamp(rawGrowthSignal, 0.0, 1.0) * interiorSupport;
+  let splitProb = clamp(rawGrowthSignal, 0.0, 1.0);
   // Division cooldown — counted down every step regardless of whether
   // the division clock would otherwise cross (so it's a clean
   // macro-step countdown, independent of the stochastic threshold),
@@ -1119,11 +1103,11 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       let parentGrowthAnisotropy = particleRest[pi].growthAnisotropy;
       let parentDivisionBias = particleRest[pi].divisionBias;
       let parentGrowthFrameHeading = particleRest[pi].growthFrameHeading;
-      let parentWeldExpression = particleRest[pi].weldExpression;
+      let parentPadding = particleRest[pi]._padding;
       let identity = vec4<f32>(1.0, 0.0, 0.0, 1.0);
       particleRest[pi] = ParticleRest(
         identity, parentJp, 0.0, parentGrowthAngle, parentGrowthAnisotropy,
-        parentDivisionBias, parentGrowthFrameHeading, 1.0, parentWeldExpression
+        parentDivisionBias, parentGrowthFrameHeading, 1.0, parentPadding
       );
       particleRest[newIndex] = ParticleRest(
         identity,
@@ -1134,7 +1118,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
         parentDivisionBias,
         parentGrowthFrameHeading,
         0.0,
-        parentWeldExpression,
+        parentPadding,
       );
     } else {
       particleRest[pi].cycleActive = 0.0;

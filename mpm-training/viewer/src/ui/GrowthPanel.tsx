@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthThreshold" | "growthCompressionInhibition" | "interiorSupportStrength" | "growthAnisotropy" | "divisionDirectionality" | "tissueSurfaceTension" | "tissueSurfaceForceCap" | "gridWeldingStrength" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  "growthDuration" | "growthAnisotropy" | "divisionDirectionality" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 export interface GrowthSliderSpec {
@@ -32,8 +32,7 @@ export interface GrowthSliderSpec {
 
 // All absolute ranges, deliberately NOT PhysicsPanel's own
 // scaledRange(trained, N): every knob here is bounded by real physics or
-// real semantics (a division factor must exceed 1 and the compression
-// compression reference is an elastic-area ratio), none of which depend on whatever value the
+// real semantics, none of which depend on whatever value the
 // run happened to be trained with.
 export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
@@ -73,33 +72,6 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
     format: (v) => `${v.toFixed(0)} ticks`,
   },
   {
-    key: "growthThreshold",
-    label: "Compression reference",
-    hint: "Below this elastic area ratio, compression continuously slows growth. 0 disables mechanical inhibition.",
-    min: 0,
-    max: 1,
-    step: 0.001,
-    format: (v) => v.toFixed(3),
-  },
-  {
-    key: "growthCompressionInhibition",
-    label: "Compression inhibition",
-    hint: "How strongly compression slows active growth. 1× preserves the original Je/reference response; 0 removes compression inhibition so interior cells grow at full rate.",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    format: (v) => `${v.toFixed(2)}×`,
-  },
-  {
-    key: "interiorSupportStrength",
-    label: "Interior support",
-    hint: "Biases cycle admission toward locally dense morphology. 0× uses chemistry alone; 1× multiplies growth probability by local occupancy, suppressing exposed cells relative to interior cells.",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    format: (v) => `${v.toFixed(2)}×`,
-  },
-  {
     key: "growthAnisotropy",
     label: "Growth anisotropy",
     hint: "Caps policy-directed rest-growth elongation. 1× grants full policy authority; 0 makes mechanical growth isotropic.",
@@ -117,33 +89,6 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
     step: 0.01,
     format: (v) => `${v.toFixed(2)}×`,
   },
-  {
-    key: "gridWeldingStrength",
-    label: "Grid welding",
-    hint: "NN-gated viscosity on the MPM grid. Nearby fronts couple only after sharing grid nodes; 0 is an exact no-op. Chemical channel 0 controls local expression.",
-    min: 0,
-    max: 2000,
-    step: 10,
-    format: (v) => v.toFixed(0),
-  },
-  {
-    key: "tissueSurfaceTension",
-    label: "Tissue surface tension",
-    hint: "Pulls exposed cells inward along the blurred morphology gradient. Dense interior cells are gated out. 0 disables the mechanical prior.",
-    min: 0,
-    max: 1000,
-    step: 0.1,
-    format: (v) => v.toFixed(1),
-  },
-  {
-    key: "tissueSurfaceForceCap",
-    label: "Surface-force cap",
-    hint: "Maximum velocity change contributed by tissue tension in one MPM substep. Lower this if large tension values become unstable.",
-    min: 0,
-    max: 1,
-    step: 0.001,
-    format: (v) => v.toFixed(3),
-  },
 ]
 
 /** Collapsible "Growth" section (default closed), sibling to
@@ -155,12 +100,8 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
  * Split into its own section rather than appended to PhysicsPanel's own
  * flat list because these controls behave as a group:
  * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
- * growthDuration/growthThreshold/growthCompressionInhibition control the
- * substrate-driven cell cycle and its optional continuous mechanical feedback;
- * interiorSupportStrength biases admission toward locally supported cells;
- * growthAnisotropy and divisionDirectionality cap directional authority;
- * tissueSurfaceTension adds boundary cohesion with an independent safety cap;
- * gridWeldingStrength adds NN-gated viscosity entirely on the MPM grid.
+ * growthDuration controls the substrate-driven cell cycle;
+ * growthAnisotropy and divisionDirectionality cap directional authority.
  * Same live-uniform-write path as every
  * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
  * any of these never disturbs the rollout in flight and never affects

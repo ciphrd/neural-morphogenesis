@@ -245,7 +245,7 @@ export function PhysicsPanel({
           <span className={"physics-panel-chevron" + (open ? " is-open" : "")}>
             ▸
           </span>
-          <h2>Physics</h2>
+          <h2>Advanced physics overrides</h2>
         </button>
         <button
           className="icon-button"
@@ -259,6 +259,10 @@ export function PhysicsPanel({
       </div>
       {open && (
         <div className="physics-panel-body">
+          <p className="hint">
+            Split displacement, deposit radius, and repulsion radius are derived
+            from Particle density. Moving them here intentionally overrides that preset.
+          </p>
           {/* Boolean, not a slider — kept out of specsFor()'s own
            * SliderSpec list (which assumes a numeric range) and rendered
            * as its own checkbox row instead (same label-left/checkbox-

@@ -33,7 +33,7 @@
 // hand below.
 //
 // No native float atomics on storage buffers in core WebGPU, so the P2G
-// scatter-add (momentum-x, momentum-y, mass, neural weld-mass — accumulated from however
+// scatter-add (momentum-x, momentum-y, mass — accumulated from however
 // many particles land near a given grid node) goes through a fixed-point
 // i32 buffer, decoded back to float by gridUpdate.wgsl next.
 
@@ -43,8 +43,6 @@ const NODE_COUNT: u32 = (GRID_N + 1u) * (GRID_N + 1u);
 const DX: f32 = __DX__;
 const INV_DX: f32 = __INV_DX__;
 const DT: f32 = __DT__;
-const PARTICLE_MASS: f32 = __PARTICLE_MASS__;
-const VOL: f32 = __VOL__;
 
 // Matches g2p's shared SCALE — headroom: total mass/momentum landing on
 // 4096 retains sub-per-mille transfer precision while providing 16x the
@@ -59,8 +57,7 @@ const SCALE: f32 = 4096.0;
 const CH_MOM_X: u32 = 0u;
 const CH_MOM_Y: u32 = 1u;
 const CH_MASS: u32 = 2u;
-const CH_WELD_MASS: u32 = 3u;
-const CHANNELS: u32 = 4u;
+const CHANNELS: u32 = 3u;
 
 @group(0) @binding(0) var<storage, read> particlePos: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read> particleVel: array<vec2<f32>>;
@@ -80,9 +77,7 @@ struct ParticleRest {
   divisionBias: f32,
   growthFrameHeading: f32,
   appearanceScale: f32,
-  // NN-controlled grid viscosity expression. This occupies the former
-  // alignment lane, preserving ParticleRest's 48-byte ABI.
-  weldExpression: f32,
+  _padding: f32,
 }
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read_write> gridAccum: array<atomic<i32>>;
@@ -115,9 +110,12 @@ struct Material {
   // shader reads THOSE, g2p reads these).
   growthRate: f32,
   growthMax: f32,
-  growthThreshold: f32,
   growthAnisotropy: f32,
-  growthCompressionInhibition: f32,
+  // Base mass and rest area represented by one g=1 sampling particle.
+  // Runtime values let density vary between rollouts without rebuilding
+  // pipelines; both scale together so physical material density is fixed.
+  particleMass: f32,
+  particleVolume: f32,
 }
 @group(0) @binding(6) var<uniform> material: Material;
 
@@ -259,8 +257,8 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   // momentum are continuous across the split.  Growth itself makes Fe
   // compressive and therefore supplies the mechanical expansion; no
   // post-division mass fade or repulsion-driven volume creation is needed.
-  let volEff = VOL * g;
-  let massEff = PARTICLE_MASS * g;
+  let volEff = material.particleVolume * g;
+  let massEff = material.particleMass * g;
 
   let PF = matAddScaledIdentity(2.0 * mu * matMul(Fe - r, matTranspose(Fe)), lambda * (Je - 1.0) * Je);
   let stress = -(DT * volEff * Dinv) * PF;
@@ -283,10 +281,6 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
       atomicAdd(&gridAccum[nodeIndex + CH_MOM_X], i32(round(momentum.x * SCALE)));
       atomicAdd(&gridAccum[nodeIndex + CH_MOM_Y], i32(round(momentum.y * SCALE)));
       atomicAdd(&gridAccum[nodeIndex + CH_MASS], i32(round(massContribution * SCALE)));
-      atomicAdd(
-        &gridAccum[nodeIndex + CH_WELD_MASS],
-        i32(round(massContribution * clamp(rest.weldExpression, 0.0, 1.0) * SCALE)),
-      );
     }
   }
 }

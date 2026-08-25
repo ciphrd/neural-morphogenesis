@@ -141,7 +141,7 @@ def _gpu_constitutive_probe(
         const MU0: f32 = {mu0};
         const LAMBDA0: f32 = {lambda0};
         const HARDENING: f32 = {HARDENING};
-        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, weldExpression: f32, }}
+        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, _padding: f32, }}
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> particleRest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> output: array<vec4<f32>>;

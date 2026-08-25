@@ -1365,7 +1365,6 @@
     "dt": 6.25e-05,
     "gravity": 0.0,
     "growth": {
-      "compression_reference": 0.85,
       "division_area_ratio": 2.0,
       "division_cooldown": 1.0,
       "rate": 50.0,

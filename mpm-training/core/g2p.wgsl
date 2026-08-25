@@ -40,7 +40,7 @@ struct ParticleRest {
   divisionBias: f32,
   growthFrameHeading: f32,
   appearanceScale: f32,
-  weldExpression: f32,
+  _padding: f32,
 }
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
@@ -67,17 +67,11 @@ struct Material {
   // is fixed at area ratio 2 below because any other value would make one
   // parent -> two baseline daughters non-conservative.
   growthMax: f32,
-  // Compression reference for continuous mechanical inhibition. Below
-  // this Je, growth is slowed in proportion to Je/reference rather than
-  // stopped. 0 disables mechanical inhibition entirely.
-  growthThreshold: f32,
   // Global multiplier on the policy's per-particle anisotropy. The trainer
   // uses 1; the viewer exposes [0,1] as a live blob-vs-tendril bias.
   growthAnisotropy: f32,
-  // Strength of compression-dependent growth inhibition. 1 preserves the
-  // original Je/reference slowdown; 0 gives every active cycle its full
-  // configured growth rate regardless of compression.
-  growthCompressionInhibition: f32,
+  particleMass: f32,
+  particleVolume: f32,
 }
 @group(0) @binding(7) var<uniform> material: Material;
 
@@ -297,41 +291,24 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // then expands the compatible body. This is growth followed by elastic
   // relaxation, rather than the old circular repulsion -> dilation ->
   // growth ratchet.
-  let je = oldJe;
   var gNew = g0;
   var FgNew = Fg0;
-  // Continuous feedback, not a checkpoint. At and above the reference,
-  // growth runs at its full configured rate; compression below it slows
-  // the rate smoothly. Any physically valid Je > 0 retains a positive
-  // growth rate, so a cycle cannot become permanently latched merely by
-  // crossing a threshold. The max(..., 0) guard prevents an inverted F
-  // from turning growth into exponential shrinkage.
-  var inhibitedScale = 1.0;
-  if (material.growthThreshold > 0.0) {
-    inhibitedScale = clamp(max(je, 0.0) / material.growthThreshold, 0.0, 1.0);
-  }
-  let compressionScale = mix(
-    1.0,
-    inhibitedScale,
-    clamp(material.growthCompressionInhibition, 0.0, 1.0),
-  );
   // A newborn's visible disc area follows the exact normalized rest-area
   // growth curve: exp(rate*t)-1 goes from 0 to 1 over the same interval in
-  // which active morphoelastic growth goes from g=1 to g=2. Applying the
-  // same compressionScale keeps visual emergence synchronized with local
-  // mechanical inhibition. This state is rendering-only; conservative mass
-  // and stress remain fully present immediately after division.
+  // which active morphoelastic growth goes from g=1 to g=2. This state is
+  // rendering-only; conservative mass and stress remain fully present
+  // immediately after division.
   var appearanceScaleNew = clamp(rest0.appearanceScale, 0.0, 1.0);
   if (appearanceScaleNew < 1.0 && material.growthRate > 0.0) {
     appearanceScaleNew = min(
       (appearanceScaleNew + 1.0)
-        * exp(material.growthRate * compressionScale * DT) - 1.0,
+        * exp(material.growthRate * DT) - 1.0,
       1.0,
     );
   }
   if (rest0.cycleActive > 0.5 && material.growthRate > 0.0) {
     gNew = min(
-      g0 * exp(material.growthRate * compressionScale * DT),
+      g0 * exp(material.growthRate * DT),
       2.0
     );
     let areaFactor = gNew / g0;
@@ -383,6 +360,6 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     FgNew, JpNew, rest0.cycleActive, rest0.growthAngle,
     rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameHeading,
     appearanceScaleNew,
-    rest0.weldExpression
+    rest0._padding
   );
 }

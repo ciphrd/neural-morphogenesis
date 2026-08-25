@@ -262,6 +262,7 @@ export class GpuSimulation {
       spawnY: config.spawnY,
       elasticStrainScale: config.elasticStrainScale ?? 0.15,
       elasticStrainInputsEnabled: config.elasticStrainInputsEnabled ?? false,
+      chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
     });
     agents.loadWeights(config.weights);
 
@@ -378,10 +379,10 @@ export class GpuSimulation {
       // the shader's internal per-substep rate from this and the run cadence.
       physics.growthDuration,
       physics.growthMax ?? 2.0,
-      physics.growthThreshold ?? 0.0,
       physics.growthAnisotropy ?? 1.0,
-      physics.growthCompressionInhibition ?? 1.0,
-      this.config.substepsPerMacro
+      this.config.substepsPerMacro,
+      physics.particleMass,
+      physics.particleVolume,
     );
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
     this.mpmCore.setSplatRadius(physics.splatRadius);
@@ -397,15 +398,10 @@ export class GpuSimulation {
       this.config.morphologyBlurSigma ?? 0.01,
       this.config.morphologyDensityReference ?? 1.0
     );
-    this.mpmCore.setTissueTension(
-      physics.tissueSurfaceTension ?? 0.0,
-      physics.tissueSurfaceForceCap ?? 0.05,
-    );
-    this.mpmCore.setGridWeldingStrength(physics.gridWeldingStrength ?? 0.0);
     this.agents.setCommunicationTimestep(communicationDt);
     this.agents.setInternalStateSpeed(physics.internalStateSpeed ?? 1.0);
-    this.agents.setInteriorSupportStrength(physics.interiorSupportStrength ?? 0.0);
     this.agents.setDivisionDirectionality(physics.divisionDirectionality ?? 1.0);
+    this.agents.setChemicalGradientInputScale(physics.chemicalGradientInputScale);
     this.agents.setPhysics({
       maxAccel: physics.maxAccel,
       maxStrafe: physics.maxStrafe,

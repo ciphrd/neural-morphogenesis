@@ -130,7 +130,7 @@ def _worker_init(
     _args = args
 
 
-def worker_rollout(weights: np.ndarray, seed: int) -> float:
+def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1.0) -> float:
     """The only thing actually sent to a worker per candidate — `weights`
     and `seed`. Public (not `_`-prefixed, unlike this module's other
     worker-local state) because evolve.py's own run_generation() needs a
@@ -142,7 +142,10 @@ def worker_rollout(weights: np.ndarray, seed: int) -> float:
     up."""
     from evolve import rollout
 
-    return rollout(weights, _target, _target_raster, _target_distance_field, _args, seed, _core, _agents, _environment)
+    return rollout(
+        weights, _target, _target_raster, _target_distance_field, _args, seed,
+        _core, _agents, _environment, density_multiplier=density_multiplier,
+    )
 
 
 def build_pool(

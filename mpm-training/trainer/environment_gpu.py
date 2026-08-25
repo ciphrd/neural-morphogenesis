@@ -60,8 +60,14 @@ class EnvironmentGPU:
         f32 = 4
 
         self.buffers = [
-            device.create_buffer(size=total * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST),
-            device.create_buffer(size=total * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST),
+            device.create_buffer(
+                size=total * f32,
+                usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
+            ),
+            device.create_buffer(
+                size=total * f32,
+                usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
+            ),
         ]
         self.gradient = device.create_buffer(size=total * 2 * f32, usage=wgpu.BufferUsage.STORAGE)
         self.deposit_scratch = device.create_buffer(size=total * f32, usage=wgpu.BufferUsage.STORAGE)

@@ -168,6 +168,7 @@ def rasterize_points_sum(
     resolution: int,
     extent: tuple[float, float, float, float],
     sigma: float,
+    particle_weight: float = 1.0,
 ) -> np.ndarray:
     """Particle-side counterpart to rasterize_points() above, differing
     in exactly one way: overlapping points combine via *sum*, not max.
@@ -226,7 +227,9 @@ def rasterize_points_sum(
     # rasterize_points()'s np.maximum.at: overlapping points' windows
     # routinely hit the same pixel, and only .at() correctly accumulates
     # over repeated indices within one call.
-    np.add.at(raster, (row_idx[valid], col_idx[valid]), kernel[valid])
+    if not np.isfinite(particle_weight) or particle_weight <= 0.0:
+        raise ValueError("particle_weight must be finite and positive")
+    np.add.at(raster, (row_idx[valid], col_idx[valid]), particle_weight * kernel[valid])
 
     return raster
 
@@ -359,6 +362,7 @@ def training_raster_distance(
     outside_weight: float = 1.0,
     num_angles: int = TRAIN_NUM_ANGLES,
     track_best_raster: bool = False,
+    particle_weight: float = 1.0,
 ) -> float | tuple[float, np.ndarray | None]:
     """Rotation-search fitness scoring, shaped exactly like
     alignment.training_alignment_distance (same coarse angle grid,
@@ -401,7 +405,9 @@ def training_raster_distance(
     for i in range(num_angles):
         theta = 2.0 * np.pi * i / num_angles
         rotated = centered @ _rotation_matrix(theta).T + target_centroid
-        candidate_raster = rasterize_points_sum(rotated, resolution, extent, sigma)
+        candidate_raster = rasterize_points_sum(
+            rotated, resolution, extent, sigma, particle_weight=particle_weight
+        )
         coverage = raster_distance(target_raster, candidate_raster)
         penalty = outside_shape_penalty(rotated, target_distance_field, extent)
         dist = coverage + outside_weight * penalty

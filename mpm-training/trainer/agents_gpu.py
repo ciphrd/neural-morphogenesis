@@ -31,7 +31,6 @@ from simulation_settings import (
     GROWTH_ANISOTROPY_RESPONSE_RATE,
     GROWTH_DIRECTION_RESPONSE_RATE,
     INTERNAL_STATE_SPEED,
-    INTERIOR_SUPPORT_STRENGTH,
     MORPHOLOGY_GRADIENT_INPUT_SCALE,
 )
 
@@ -189,7 +188,6 @@ class AgentsGPU:
         elastic_strain_inputs_enabled: bool = ELASTIC_STRAIN_INPUTS_ENABLED,
         policy_architecture: str = STATELESS_ARCHITECTURE,
         internal_state_speed: float = INTERNAL_STATE_SPEED,
-        interior_support_strength: float = INTERIOR_SUPPORT_STRENGTH,
         division_directionality: float = DIVISION_DIRECTIONALITY,
         chemical_communication_architecture: str = CELL_OWNED_PROJECTION_ARCHITECTURE,
     ) -> None:
@@ -201,9 +199,9 @@ class AgentsGPU:
             chemical_communication_architecture
         )
         self._internal_state_speed = max(0.0, float(internal_state_speed))
-        self._interior_support_strength = max(0.0, min(1.0, float(interior_support_strength)))
         self._division_directionality = max(0.0, min(1.0, float(division_directionality)))
-        self._max_active_particles = max_active_particles
+        self._particle_capacity = max(1, int(max_active_particles))
+        self._max_active_particles = self._particle_capacity
         # Public rollout geometry setting: TrainingRollout uses the same
         # displacement configured on this agent instance for its coordinated
         # two-particle seed, keeping diagnostic/replay overrides consistent.
@@ -214,12 +212,12 @@ class AgentsGPU:
         self._weights_buffer = device.create_buffer(
             size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
         )
-        # 64 bytes — core/agents.wgsl's AgentPhysics ends with a u32 growth
-        # cap and f32 elastic-strain normalization.
+        # 80 bytes — the original 64-byte layout plus one density-resolved
+        # chemical-gradient scale and uniform-struct alignment padding.
         # NOT written by set_physics() below; see set_spawn_center()'s own
         # docstring for why those get a separate setter into this same
         # buffer instead.
-        self._physics_uniform = device.create_buffer(size=64, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self._physics_uniform = device.create_buffer(size=80, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_physics(
             max_accel,
             max_strafe,
@@ -237,6 +235,7 @@ class AgentsGPU:
         self.set_spawn_center(spawn_x, spawn_y)
         self.set_max_active_particles(max_active_particles)
         self.set_elastic_strain_scale(elastic_strain_scale)
+        self.set_chemical_gradient_input_scale(CHEMICAL_GRADIENT_INPUT_SCALE)
 
         # Persistent per-particle state — owned here (not MpmCore, not
         # EnvironmentGPU), zeroed at creation (randomized/reseeded
@@ -286,7 +285,7 @@ class AgentsGPU:
         # byte 256. Besides satisfying storage-offset alignment for the
         # viewer's render binding, this frees one agent shader binding for C.
         self._agent_state_buffer = device.create_buffer(
-            size=PARTICLE_META_BUFFER_OFFSET + max(max_active_particles, 1) * self._particle_meta_dtype.itemsize,
+            size=PARTICLE_META_BUFFER_OFFSET + self._particle_capacity * self._particle_meta_dtype.itemsize,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
         )
         # Rollouts start with their configured initial particle count and grow
@@ -310,7 +309,6 @@ class AgentsGPU:
                     "FIELD_HEIGHT": environment.height,
                     "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
                     "CHEMICAL_VALUE_INPUT_SCALE": repr(CHEMICAL_VALUE_INPUT_SCALE),
-                    "CHEMICAL_GRADIENT_INPUT_SCALE": repr(CHEMICAL_GRADIENT_INPUT_SCALE),
                     "MORPHOLOGY_GRADIENT_INPUT_SCALE": repr(MORPHOLOGY_GRADIENT_INPUT_SCALE),
                     "GROWTH_DIRECTION_RESPONSE_RATE": repr(GROWTH_DIRECTION_RESPONSE_RATE),
                     "GROWTH_ANISOTROPY_RESPONSE_RATE": repr(GROWTH_ANISOTROPY_RESPONSE_RATE),
@@ -406,13 +404,13 @@ class AgentsGPU:
 
     @property
     def max_active_particles(self) -> int:
-        """The growth cap this instance was constructed with (--particles
-        — see evolve.py's own module docstring) — training_sim.py's own
-        TrainingRollout reads this rather than taking a redundant
-        constructor parameter of its own, so there's exactly one source
-        of truth for "how many slots does this instance's own
-        particleMeta buffer actually have"."""
+        """Current rollout growth cap, bounded by ``particle_capacity``."""
         return self._max_active_particles
+
+    @property
+    def particle_capacity(self) -> int:
+        """Construction-time slot capacity shared by every density rollout."""
+        return self._particle_capacity
 
     def load_weights(self, flat_weights: np.ndarray) -> None:
         """`flat_weights` is a flat (total_floats,) float array already
@@ -446,6 +444,7 @@ class AgentsGPU:
         deposit_sigma: float,
         growth_enabled: float,
     ) -> None:
+        self.split_displacement = float(split_displacement)
         self.device.queue.write_buffer(
             self._physics_uniform,
             0,
@@ -489,8 +488,7 @@ class AgentsGPU:
             data[0] = commit
             data.view(np.float32)[1] = max(0.0, float(dt))
             data.view(np.float32)[2] = self._internal_state_speed
-            data.view(np.float32)[3] = self._interior_support_strength
-            data.view(np.float32)[4] = self._division_directionality
+            data.view(np.float32)[3] = self._division_directionality
             self.device.queue.write_buffer(buffer, 0, data)
 
     def set_internal_state_speed(self, speed: float) -> None:
@@ -501,20 +499,12 @@ class AgentsGPU:
                 buffer, 8, np.array([self._internal_state_speed], dtype=np.float32)
             )
 
-    def set_interior_support_strength(self, strength: float) -> None:
-        """Blend occupancy support into cycle-start probability; 0 disables."""
-        self._interior_support_strength = max(0.0, min(1.0, float(strength)))
-        for buffer in self._step_mode_uniforms:
-            self.device.queue.write_buffer(
-                buffer, 12, np.array([self._interior_support_strength], dtype=np.float32)
-            )
-
     def set_division_directionality(self, strength: float) -> None:
         """Cap policy-polarized daughter placement; 0 is symmetric."""
         self._division_directionality = max(0.0, min(1.0, float(strength)))
         for buffer in self._step_mode_uniforms:
             self.device.queue.write_buffer(
-                buffer, 16, np.array([self._division_directionality], dtype=np.float32)
+                buffer, 12, np.array([self._division_directionality], dtype=np.float32)
             )
 
     def set_spawn_center(self, spawn_x: float, spawn_y: float) -> None:
@@ -528,10 +518,26 @@ class AgentsGPU:
 
     def set_max_active_particles(self, max_active_particles: int) -> None:
         """Writes AgentPhysics.maxActiveParticles at byte offset 56."""
+        cap = max(1, int(max_active_particles))
+        if cap > self._particle_capacity:
+            raise ValueError(f"particle cap {cap} exceeds allocated capacity {self._particle_capacity}")
+        self._max_active_particles = cap
         self.device.queue.write_buffer(
             self._physics_uniform,
             56,
-            np.array([max(1, int(max_active_particles))], dtype=np.uint32),
+            np.array([cap], dtype=np.uint32),
+        )
+
+    def set_density_geometry(self, split_displacement: float, deposit_sigma: float) -> None:
+        """Update the two particle-scale lengths without disturbing other physics."""
+        if split_displacement <= 0.0 or deposit_sigma <= 0.0:
+            raise ValueError("density geometry lengths must be positive")
+        self.split_displacement = float(split_displacement)
+        self.device.queue.write_buffer(
+            self._physics_uniform, 28, np.array([split_displacement], dtype=np.float32)
+        )
+        self.device.queue.write_buffer(
+            self._physics_uniform, 40, np.array([deposit_sigma], dtype=np.float32)
         )
 
     def set_elastic_strain_scale(self, scale: float) -> None:
@@ -539,6 +545,14 @@ class AgentsGPU:
         self.device.queue.write_buffer(
             self._physics_uniform,
             60,
+            np.array([max(float(scale), 1e-6)], dtype=np.float32),
+        )
+
+    def set_chemical_gradient_input_scale(self, scale: float) -> None:
+        """Writes density-resolved AgentPhysics scale at byte offset 64."""
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            64,
             np.array([max(float(scale), 1e-6)], dtype=np.float32),
         )
 

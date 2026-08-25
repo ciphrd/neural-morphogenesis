@@ -50,7 +50,7 @@ def _probe(core: MpmCore, count: int) -> np.ndarray:
     """Returns [Je, g, cycleActive] without adding COPY_SRC to hot buffers."""
     shader = core.device.create_shader_module(
         code="""
-        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, weldExpression: f32, }
+        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, _padding: f32, }
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> rest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
@@ -128,92 +128,6 @@ def check_morphology_occupancy(device: wgpu.GPUDevice) -> None:
     weaker = core.read_morphology()
     assert float(weaker.max()) < float(occupancy.max())
     print(f"[PASS] morphology_occupancy bounded=yes blurred=yes reference_response=yes peak={occupancy.max():.6f}")
-
-
-def check_tissue_surface_tension(device: wgpu.GPUDevice) -> None:
-    positions = np.array(
-        [[0.48, 0.5], [0.49, 0.5], [0.50, 0.5], [0.51, 0.5], [0.52, 0.5]],
-        dtype=np.float32,
-    )
-
-    def run(strength: float, cap: float) -> np.ndarray:
-        core = MpmCore(device)
-        count = len(positions)
-        core.load_scene(
-            positions,
-            np.zeros((count, 2), dtype=np.float32),
-            np.repeat(np.eye(2, dtype=np.float32).reshape(1, 4), count, axis=0),
-            np.zeros((count, 4), dtype=np.float32),
-            np.ones(count, dtype=np.float32),
-        )
-        core.set_morphology(0.02, 1.0)
-        core.set_tissue_tension(strength, cap)
-        encoder = device.create_command_encoder()
-        core.encode_morphology(encoder)
-        tension_pass = encoder.begin_compute_pass()
-        tension_pass.set_pipeline(core.tissue_tension_pipeline)
-        tension_pass.set_bind_group(0, core.tissue_tension_bind_group)
-        tension_pass.dispatch_workgroups(ceil_div(count, 64))
-        tension_pass.end()
-        device.queue.submit([encoder.finish()])
-        return core.read_velocities()
-
-    disabled = run(0.0, 0.005)
-    capped = run(50.0, 0.0005)
-    assert np.allclose(disabled, 0.0, atol=1e-8), disabled
-    assert capped[0, 0] > 0.0 and capped[-1, 0] < 0.0, capped
-    assert np.max(np.linalg.norm(capped, axis=1)) <= 0.000501, capped
-    assert np.linalg.norm(capped[2]) < 0.15 * np.linalg.norm(capped[0]), capped
-    assert np.max(np.abs(capped[[0, -1], 1])) < 1e-5, capped
-    print("[PASS] tissue surface tension pulls boundary inward, gates symmetric interior, and obeys force cap")
-
-
-def check_grid_native_welding(device: wgpu.GPUDevice) -> None:
-    """Grid viscosity couples colliding fronts only when cells express it."""
-    positions = np.array(
-        [[0.492, 0.498], [0.492, 0.502], [0.508, 0.498], [0.508, 0.502]],
-        dtype=np.float32,
-    )
-    initial_velocities = np.array(
-        [[0.2, 0.0], [0.2, 0.0], [-0.2, 0.0], [-0.2, 0.0]],
-        dtype=np.float32,
-    )
-
-    def run(strength: float, expression: float) -> np.ndarray:
-        core = MpmCore(device)
-        core.load_scene(
-            positions,
-            initial_velocities,
-            np.repeat(np.eye(2, dtype=np.float32).reshape(1, 4), 4, axis=0),
-            np.zeros((4, 4), dtype=np.float32),
-            np.ones(4, dtype=np.float32),
-        )
-        rest = _rest_state(np.ones(4), np.ones(4), np.zeros(4))
-        rest[:, 11] = expression
-        device.queue.write_buffer(core.rest, 0, rest)
-        core.set_gravity(0.0)
-        core.set_damping(0.0, 1)
-        core.set_material(0.0, 0.2, 0.0, 1.0, growth_rate=0.0)
-        core.set_repulsion_strength(0.0, 0.0)
-        core.set_tissue_tension(0.0, 0.0)
-        core.set_grid_welding_strength(strength)
-        core.step(1)
-        return core.read_velocities()
-
-    disabled = run(0.0, 1.0)
-    unexpressed = run(10000.0, 0.0)
-    welded = run(10000.0, 1.0)
-    np.testing.assert_allclose(unexpressed, disabled, atol=1e-7)
-    relative_disabled = float(disabled[:2, 0].mean() - disabled[2:, 0].mean())
-    relative_welded = float(welded[:2, 0].mean() - welded[2:, 0].mean())
-    assert relative_welded < relative_disabled * 0.95, (
-        relative_disabled, relative_welded, disabled, welded
-    )
-    np.testing.assert_allclose(welded.sum(axis=0), disabled.sum(axis=0), atol=2e-5)
-    print(
-        f"[PASS] grid welding is NN-gated, reduces front-relative velocity "
-        f"{relative_disabled:.6f}->{relative_welded:.6f}, and conserves momentum"
-    )
 
 
 def check_single_cell_rollout_seed(device: wgpu.GPUDevice) -> None:
@@ -304,19 +218,14 @@ def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
     once = field_sum(1)
     four = field_sum(4)
     assert np.isclose(once, four, atol=2e-6), (once, four)
-    weld_expression = float(core.read_rest_state()[0, 11])
-    assert weld_expression > 0.5, weld_expression
-    print(
-        f"[PASS] supersampled_communication cell_state1={once:.3f} "
-        f"cell_state4={four:.3f} grid_weld={weld_expression:.3f}"
-    )
+    print(f"[PASS] supersampled_communication cell_state1={once:.3f} cell_state4={four:.3f}")
 
 
 def check_growth_without_repulsion(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     core.set_gravity(0.0)
     core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(1e4, 0.2, 3.0, 0.2, 400.0, 2.0, 0.0)
+    core.set_material(1e4, 0.2, 3.0, 0.2, 400.0, 2.0)
     _load_two(core)
     # cycleActive=1 for both particles: growth must not require prior dilation.
     device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(2), np.ones(2), np.ones(2)))
@@ -330,34 +239,25 @@ def check_growth_without_repulsion(device: wgpu.GPUDevice) -> None:
     print(f"[PASS] growth_without_repulsion separation={separation:.6f}")
 
 
-def check_compression_inhibition_strength(device: wgpu.GPUDevice) -> None:
+def check_compressed_growth_uses_full_rate(device: wgpu.GPUDevice) -> None:
+    """Elastic compression does not alter the configured growth clock."""
     core = MpmCore(device)
     core.set_gravity(0.0)
     core.set_repulsion_strength(0.0, 40.0)
-    # E=0 isolates the feedback law: the deliberately compressed F cannot
-    # elastically rebound above the reference before g2p evaluates Je.
-    def grow_once(inhibition: float) -> float:
-        core.set_material(
-            0.0, 0.2, 3.0, 0.2, 50.0, 2.0, 0.85,
-            growth_compression_inhibition=inhibition,
-        )
-        core.load_scene(
-            np.array([[0.5, 0.5]], dtype=np.float32),
-            np.zeros((1, 2), dtype=np.float32),
-            np.array([[np.sqrt(0.5), 0, 0, np.sqrt(0.5)]], dtype=np.float32),
-            np.zeros((1, 4), dtype=np.float32),
-            np.ones(1, dtype=np.float32),
-        )
-        device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
-        core.step(1)
-        return float(_probe(core, 1)[0, 1])
-
-    inhibited = grow_once(1.0)
-    uninhibited = grow_once(0.0)
-    expected_full_rate = np.exp(50.0 * DT)
-    assert 1.0 < inhibited < uninhibited, (inhibited, uninhibited)
-    assert np.isclose(uninhibited, expected_full_rate, atol=2e-6), (uninhibited, expected_full_rate)
-    print(f"[PASS] compression_inhibition strength1={inhibited:.6f} strength0={uninhibited:.6f}")
+    core.set_material(0.0, 0.2, 3.0, 0.2, growth_rate=50.0)
+    core.load_scene(
+        np.array([[0.5, 0.5]], dtype=np.float32),
+        np.zeros((1, 2), dtype=np.float32),
+        np.array([[np.sqrt(0.5), 0, 0, np.sqrt(0.5)]], dtype=np.float32),
+        np.zeros((1, 4), dtype=np.float32),
+        np.ones(1, dtype=np.float32),
+    )
+    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
+    core.step(1)
+    actual = float(_probe(core, 1)[0, 1])
+    expected = np.exp(50.0 * DT)
+    assert np.isclose(actual, expected, atol=2e-6), (actual, expected)
+    print(f"[PASS] compressed growth uses full configured rate g={actual:.6f}")
 
 
 def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
@@ -692,8 +592,6 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
         0.0, 0.2, 3.0, 0.0,
         growth_duration_macro_steps=8.0,
         substeps_per_macro=4,
-        growth_threshold=0.0,
-        growth_compression_inhibition=0.0,
     )
     core.step(4)
     ramped_rest = core.read_rest_state()
@@ -869,7 +767,7 @@ def check_isotropic_increment_preserves_tensor_shape(device: wgpu.GPUDevice) -> 
     core = MpmCore(device)
     core.set_gravity(0.0)
     core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(0.0, 0.2, 3.0, 1.0, growth_rate=50.0, growth_max=2.0, growth_threshold=0.0)
+    core.set_material(0.0, 0.2, 3.0, 1.0, growth_rate=50.0, growth_max=2.0)
     fg = np.array([[1.15, 0.18], [0.04, 0.92]], dtype=np.float32)
     fe = np.array([[1.02, 0.01], [-0.02, 0.99]], dtype=np.float32)
     core.load_scene(
@@ -905,7 +803,6 @@ def _directional_increment_case(
         1.0,
         growth_rate=50.0,
         growth_max=2.0,
-        growth_threshold=0.0,
         growth_anisotropy=global_anisotropy,
     )
     c, s = np.cos(rotation_angle), np.sin(rotation_angle)
@@ -957,7 +854,6 @@ def _duration_growth_case(device: wgpu.GPUDevice, substeps: int) -> float:
         1.0,
         growth_duration_macro_steps=20.0,
         substeps_per_macro=substeps,
-        growth_threshold=0.0,
     )
     core.load_scene(
         np.array([[0.5, 0.5]], dtype=np.float32),
@@ -1033,7 +929,7 @@ def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
         np.ones(count, dtype=np.float32),
     )
     core.step(1)
-    accum = np.frombuffer(device.queue.read_buffer(core.grid_accum), np.int32).reshape(-1, 4)
+    accum = np.frombuffer(device.queue.read_buffer(core.grid_accum), np.int32).reshape(-1, 3)
     scale = 4096.0
     mass = float(accum[:, 2].astype(np.int64).sum() / scale)
     momentum_x = float(accum[:, 0].astype(np.int64).sum() / scale)
@@ -1154,69 +1050,6 @@ def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
     assert capped[2] == 0.0, capped
     assert np.isclose(capped[1], 1.4), capped
     print("[PASS] cycle_start_gates final_round_only enabled=yes disabled=no static/runtime_cap=no capped_cycle_closed_g_preserved")
-
-
-def check_interior_support_admission(device: wgpu.GPUDevice) -> None:
-    """The live strength blends chemistry-only and occupancy-weighted hazard."""
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 1.0, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 8, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, True, 2.0,
-        4, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
-    )
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        np.array([[1, 0, 0, 1]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    agents.set_active_count(1)
-    agents.reset_heading(41)
-    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
-
-    def reset_clock() -> None:
-        raw = device.queue.read_buffer(
-            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
-            agents._particle_meta_dtype.itemsize,
-        )
-        meta = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1).copy()
-        meta["divisionHazard"][0] = 0.0
-        meta["divisionThreshold"][0] = 10.0
-        meta["chemicalState"][0, 7] = 0.2
-        device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
-
-    def hazard_once(strength: float) -> float:
-        reset_clock()
-        agents.set_interior_support_strength(strength)
-        encoder = device.create_command_encoder()
-        core.encode_morphology(encoder)
-        environment.encode_clear(encoder)
-        agents.encode_splat_chemical_state(encoder)
-        environment.encode_sense(encoder)
-        agents.encode_step(encoder, environment.parity, commit_lifecycle=True)
-        device.queue.submit([encoder.finish()])
-        raw = device.queue.read_buffer(
-            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
-            agents._particle_meta_dtype.itemsize,
-        )
-        return float(np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)["divisionHazard"][0])
-
-    unsupported = hazard_once(0.0)
-    supported = hazard_once(1.0)
-    morphology = core.read_morphology()
-    occupancy = float(morphology[morphology.shape[0] // 2, morphology.shape[1] // 2])
-    represented_signal = round(0.2 * 4096.0) / 4096.0
-    expected_unsupported = -np.log(1.0 - represented_signal)
-    expected_supported = -np.log(1.0 - represented_signal * occupancy)
-    assert np.isclose(unsupported, expected_unsupported, atol=2e-6), (unsupported, expected_unsupported)
-    assert np.isclose(supported, expected_supported, atol=2e-6), (supported, expected_supported, occupancy)
-    assert 0.0 < supported < unsupported, (supported, unsupported)
-    print(
-        f"[PASS] interior_support occupancy={occupancy:.6f} "
-        f"strength0_hazard={unsupported:.6f} strength1_hazard={supported:.6f}"
-    )
 
 
 def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
@@ -1365,12 +1198,10 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
 def main() -> None:
     device = pick_device()
     check_morphology_occupancy(device)
-    check_tissue_surface_tension(device)
-    check_grid_native_welding(device)
     check_single_cell_rollout_seed(device)
     check_supersampled_communication_rounds(device)
     check_growth_without_repulsion(device)
-    check_compression_inhibition_strength(device)
+    check_compressed_growth_uses_full_rate(device)
     check_transient_cell_chemical_splats(device)
     check_persistent_environment_chemistry(device)
     check_elastic_strain_policy_inputs(device)
@@ -1385,7 +1216,6 @@ def main() -> None:
     check_p2g_fixed_point_headroom(device)
     check_high_strain_elastic_stability(device)
     check_cycle_start_gates(device)
-    check_interior_support_admission(device)
     check_persistent_division_hazard(device)
     check_stateful_private_memory(device)
 

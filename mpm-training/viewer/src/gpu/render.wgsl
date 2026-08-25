@@ -37,7 +37,7 @@ struct ParticleRest {
   divisionBias: f32,
   growthFrameHeading: f32,
   appearanceScale: f32,
-  weldExpression: f32,
+  _padding: f32,
 }
 
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;

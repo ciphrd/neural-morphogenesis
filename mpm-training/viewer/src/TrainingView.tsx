@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { FitnessChart } from "./charts/FitnessChart"
 import { MAX_PARTICLES } from "./gpu/mpmCore"
 import { randomWeights } from "./gpu/agents"
+import { configAtDensity } from "./gpu/density"
 import type { FieldMode, ParticleRenderMode } from "./gpu/render"
 import type { CellMemory, ChemicalCommunicationArchitecture, PhysicsSettings } from "./gpu/types"
 import { cellMemoryFromConfig, chemicalCommunicationArchitectureFromConfig, hiddenLayersFromConfig, physicsSettingsFromConfig, policyArchitectureForCellMemory } from "./gpu/types"
@@ -177,17 +178,22 @@ export function TrainingView() {
       : latest
   const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
     useState<ChemicalCommunicationArchitecture | null>(null)
+  const [particleDensityOverride, setParticleDensityOverride] = useState<number | null>(null)
   useEffect(() => {
     setChemicalArchitectureOverride(null)
+    setParticleDensityOverride(null)
   }, [viewingRunId, activeConfig?.generation])
+  const effectiveParticleDensity = particleDensityOverride
+    ?? activeConfig?.particleDensityMultiplier
+    ?? 1
   const playbackConfig = useMemo(() => activeConfig
-    ? {
+    ? configAtDensity({
         ...activeConfig,
         chemicalCommunicationArchitecture:
           chemicalArchitectureOverride
           ?? chemicalCommunicationArchitectureFromConfig(activeConfig),
-      }
-    : null, [activeConfig, chemicalArchitectureOverride])
+      }, effectiveParticleDensity)
+    : null, [activeConfig, chemicalArchitectureOverride, effectiveParticleDensity])
   useEffect(() => {
     const maxStart = Math.max(0, (activeConfig?.channels ?? 3) - 3)
     setSubstrateChannelStart((start) => Math.min(start, maxStart))
@@ -246,6 +252,17 @@ export function TrainingView() {
     setFrontendInitialParticleCount(initialCount)
     setFrontendInitialParticleCountInput(String(initialCount))
   }, [viewingRunId, activeConfig?.particles])
+  useEffect(() => {
+    if (!playbackConfig) return
+    setFrontendParticleCap(playbackConfig.particles)
+    setFrontendParticleCapInput(String(playbackConfig.particles))
+    const initialCount = Math.min(
+      playbackConfig.particles,
+      Math.max(1, Math.floor(playbackConfig.initialParticleCount ?? coreConstants.INITIAL_PARTICLE_COUNT)),
+    )
+    setFrontendInitialParticleCount(initialCount)
+    setFrontendInitialParticleCountInput(String(initialCount))
+  }, [effectiveParticleDensity, playbackConfig?.particles, playbackConfig?.initialParticleCount])
   // null = following this generation's own trained physics/growth values;
   // non-null once either live-control panel's sliders have been touched.
   // Reset whenever the run or the generation
@@ -256,8 +273,8 @@ export function TrainingView() {
   useEffect(() => {
     setPhysicsOverride(null)
   }, [viewingRunId, activeConfig?.generation])
-  const trainedPhysics = activeConfig
-    ? physicsSettingsFromConfig(activeConfig)
+  const trainedPhysics = playbackConfig
+    ? physicsSettingsFromConfig(playbackConfig)
     : null
   const physicsValues = physicsOverride ?? trainedPhysics
   const activeStat =
@@ -479,6 +496,30 @@ export function TrainingView() {
             >
               <option value="cell-owned-projection">Cell-owned projection</option>
               <option value="persistent-environment">Persistent environment</option>
+            </select>
+          </div>
+          <div className="stat-row">
+            <span>Particle density</span>
+            <select
+              aria-label="Particle density"
+              value={effectiveParticleDensity}
+              disabled={!activeConfig}
+              onChange={(event) => {
+                const selected = Number(event.target.value)
+                const trained = activeConfig?.particleDensityMultiplier ?? 1
+                setParticleDensityOverride(selected === trained ? null : selected)
+                setPhysicsOverride(null)
+              }}
+            >
+              {Array.from(new Set([0.5, 1, 2, effectiveParticleDensity])).sort((a, b) => a - b).map((density) => (
+                <option
+                  key={density}
+                  value={density}
+                  disabled={Boolean(activeConfig && Math.floor(activeConfig.particles * density + 0.5) > MAX_PARTICLES)}
+                >
+                  {density}×
+                </option>
+              ))}
             </select>
           </div>
         </section>

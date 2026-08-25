@@ -18,6 +18,38 @@ an input to the neural policy. It is used only to evaluate morphology during
 evolution. The policy must discover chemical signaling and directional growth
 behaviors that produce a good target match.
 
+## Particle-density normalization
+
+Particle count is a numerical sampling choice. Use `--particle-densities` to
+train the same policy across relative sampling densities without hand-tuning
+split spacing, chemical radius, repulsion radius, or particle mass:
+
+```bash
+cd trainer
+.venv/bin/python evolve.py \
+  --particles 400 --initial-particles 5 \
+  --particle-densities 0.5 1.0 \
+  --density-aggregation worst
+```
+
+`--particles` and `--initial-particles` are the reference counts at `1×`.
+For multiplier `q`, spacing scales as `1/sqrt(q)`, counts scale as `q`, and
+per-particle mass/rest area scale as `1/q`. Chemical and repulsion length scales
+and chemical-gradient input normalization are resolved from the same preset.
+Workers allocate once for the largest requested cap and switch density through
+runtime uniforms between rollouts.
+
+The default remains `--particle-densities 1.0`, which resolves exactly to the
+historical settings. The calibrated range is currently `0.5×`–`2×`; values
+outside it require `--allow-unsafe-density`. With multiple densities, each
+candidate sees the identical density/seed matrix and selection uses the worst
+mean-per-density fitness by default. The viewer replays the representative
+worst-density rollout and exposes a single `Particle density` selector; the old
+individual controls remain under advanced physics overrides.
+
+See `DENSITY_MODEL.md` for the scaling rationale and
+`DENSITY_IMPLEMENTATION_PLAN.md` for validation details.
+
 ## What drives growth
 
 Three signals have distinct responsibilities:
@@ -205,8 +237,7 @@ repeat neural_updates_per_macro communication rounds:
     particle.color = sigmoid(red_output, green_output, blue_output)
 
     if this is the final communication round:
-      interior_support = mix(1, morphology_occupancy, interior_support_strength)
-      growth_probability = clamp(last_substrate_value, 0, 1) * interior_support
+      growth_probability = clamp(last_substrate_value, 0, 1)
       decrement division cooldown
 
       if growth is enabled
@@ -221,7 +252,6 @@ propagate any newly divided particle count to the simulation
 repeat MLS-MPM physics substeps:
     splat the particle density field
     apply bounded short-range repulsion
-    apply boundary-gated tissue surface tension
     particle-to-grid transfer, including elastic stress
     update grid velocities
     grid-to-particle transfer
@@ -239,11 +269,10 @@ physics. It begins running its own neural policy on the following macro step.
 
 Growth admission uses a persistent stochastic clock rather than discarding a
 new Bernoulli draw every macro step. Before updating it, the bounded final-channel
-signal is optionally weighted by local morphology occupancy:
+signal advances the clock directly:
 
 ```text
-support = mix(1, morphology_occupancy, interior_support_strength)
-p = clamp(last_chemical, 0, 1) * support
+p = clamp(last_chemical, 0, 1)
 division_hazard += -log(1 - p)
 threshold = exponential_random(mean=1)  # drawn once per prospective cycle
 
@@ -255,10 +284,7 @@ if division_hazard >= threshold:
 
 Thus zero signal never advances the clock, weak or intermittent signal retains
 its accumulated contribution, and saturated signal preserves immediate
-admission when interior support is disabled. The viewer's Growth panel exposes
-`interior_support_strength`: `0` preserves chemistry-only admission, while `1`
-fully weights admission by local occupancy. Parent and daughter clocks reset
-independently after division.
+admission. Parent and daughter clocks reset independently after division.
 
 ## Morphoelastic deformation model
 
@@ -290,22 +316,16 @@ Je = determinant(Fe)   # elastic area multiplier
 For a particle in an active cell cycle:
 
 ```text
-inhibited_scale = clamp(Je / compression_reference, 0, 1)
-compression_scale = mix(1, inhibited_scale, compression_inhibition)
 log_area_per_substep = ln(2) / (growth_duration * substeps_per_macro)
 
 new_g = min(
-    g * exp(log_area_per_substep * compression_scale),
+    g * exp(log_area_per_substep),
     division_area
 )
 
 area_factor = new_g / g
 strength = neural_growth_anisotropy * global_anisotropy
 ```
-
-`compression_inhibition` is live-adjustable in the viewer's Growth panel:
-`1` preserves the original slowdown, while `0` lets compressed interior cells
-grow at the full configured rate.
 
 `growth_duration` is measured in macro/controller updates, not physics time.
 Consequently, changing `substeps_per_macro` for numerical stability does not
@@ -406,7 +426,7 @@ cooldown and independent random-number state.
 
 Visually, the existing daughter remains full-sized while the newly created
 daughter emerges from zero size. Its visible area follows the same exponential
-curve and compression slowdown as stress-free volume growth, reaching full
+curve as stress-free volume growth, reaching full
 size after one `growth_duration`. The renderer applies the square root of that
 area fraction to particle radius. This appearance ramp does not alter physical
 mass, deformation, stress, or the conservative split described above. Seeded
@@ -415,48 +435,6 @@ substrate deposit is multiplied by the same area fraction, so its communication
 strength rises in step with its visible size. Its persistent internal chemical
 state is not scaled.
 
-
-## Blob-forming tissue surface tension
-
-The blurred morphology occupancy is also a mechanical field. During every
-physics substep, each particle samples its occupancy and central-difference
-gradient. The inward velocity increment is
-
-```text
-boundary_gate = 4 * occupancy * (1 - occupancy)
-inward = gradient / max(length(gradient), 1)
-delta_v = inward * tissue_surface_tension * boundary_gate * dt
-delta_v = clamp_magnitude(delta_v, tissue_surface_force_cap)
-```
-
-The gate vanishes in empty and dense regions and peaks at the tissue boundary.
-Soft gradient normalization prevents tiny symmetric-field errors from becoming
-full-strength forces. The Growth panel exposes both controls; tension `0`
-preserves the original mechanics, while the cap independently bounds one
-substep's impulse.
-
-## NN-gated grid welding
-
-The first contact-welding experiment stays entirely inside the MLS-MPM
-transfer. After each brain update, chemical channel 0 is mapped to a bounded
-per-cell welding expression. Neutral or negative channel values produce an
-exact zero through a smooth threshold, so the NN must actively express the
-behavior. This scalar occupies the previously unused alignment lane in the
-existing 48-byte particle rest record; no policy or particle-buffer ABI grows.
-
-During P2G, cells scatter mass-weighted welding expression alongside momentum
-and mass. After the ordinary grid velocity update, a separate grid pass
-exchanges momentum between occupied neighboring nodes. Each edge uses the
-minimum activation of its two endpoints and a harmonic mass, making its two
-momentum changes equal and opposite. G2P then samples this welded velocity.
-There are no particle pairs, neighbor lists, or persistent world bonds.
-
-The Growth panel's **Grid welding** slider controls the diffusion rate; `0` is
-an exact velocity copy. This stage can suppress relative motion, sliding, and
-elastic rebound while two fronts share MPM support. It is intentionally only
-the first stage: because viscosity has no tensile memory, permanent junction
-remodeling may still require the later plastic-relaxation experiment discussed
-for this feature.
 
 ## What determines the final morphology
 
@@ -470,8 +448,6 @@ The visible organism is an emergent result of:
 - **plasticity:** which sufficiently large elastic deformations become
   permanent;
 - **repulsion:** bounded local separation of overlapping particles;
-- **surface tension:** boundary-localized cohesion that favors compact tissue;
-- **grid welding:** NN-gated continuum viscosity when tissue fronts contact;
 - **damping and friction:** removal of kinetic energy after growth events.
 
 There is no global rest-shape mesh. Each particle owns a local `Fg`, while

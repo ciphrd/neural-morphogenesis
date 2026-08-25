@@ -35,7 +35,7 @@ import renderSrc from "./render.wgsl?raw";
 import { writeFloat32, ceilDiv } from "./gpuUtil";
 import { PARTICLE_META_BUFFER_OFFSET } from "./agents";
 import type { Environment } from "./environment";
-import { DX, GRID_N, INV_DX, PARTICLE_MASS, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
+import { DX, GRID_N, INV_DX, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
 export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient";
@@ -424,7 +424,7 @@ export class Renderer {
     // not incrementally maintained.
     this.diagnosticsBuffer = device.createBuffer({ size: nodes * nodes * 4 * 4, usage: GPUBufferUsage.STORAGE });
     const diagnosticsModule = device.createShaderModule({
-      code: templateShader(fieldDiagnosticsSrc, { GRID_N, DX, INV_DX, PARTICLE_MASS }),
+      code: templateShader(fieldDiagnosticsSrc, { GRID_N, DX, INV_DX }),
     });
     this.clearDiagnosticsPipeline = device.createComputePipeline({
       layout: "auto",
