@@ -110,6 +110,7 @@ from simulation_settings import (
     DAMPING_LOSS_FRACTION,
     DECAY,
     DEPOSIT_RATE,
+    DEPOSIT_SIGMA,
     DEFAULT_SUBSTEPS_PER_MACRO,
     ELASTIC_STRAIN_SCALE,
     ELASTIC_STRAIN_INPUTS_ENABLED,
@@ -158,6 +159,7 @@ def density_reference(args: argparse.Namespace) -> DensityReference:
         chemical_field_n=FIELD_N,
         particle_mass=PARTICLE_MASS,
         particle_volume=VOL,
+        deposit_sigma=DEPOSIT_SIGMA,
         chemical_gradient_input_scale=CHEMICAL_GRADIENT_INPUT_SCALE,
         repulsion_strength=REPULSION_STRENGTH,
         repulsion_max_delta=REPULSION_MAX_DELTA,
@@ -326,6 +328,7 @@ def rollout(
     core.set_repulsion_strength(density.repulsion_strength, density.repulsion_max_delta)
     agents.set_density_geometry(density.spacing, density.deposit_sigma)
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
+    agents.set_chemical_projection_weight(density.chemical_projection_weight)
     agents.set_max_active_particles(density.particle_cap)
 
     sim = TrainingRollout(
@@ -715,6 +718,8 @@ def main() -> None:
                         "particle_capacity": args.particle_capacity,
                         "particle_mass": PARTICLE_MASS,
                         "particle_volume": VOL,
+                        "deposit_sigma": DEPOSIT_SIGMA,
+                        "chemical_projection_weight": 1.0,
                         "chemical_gradient_input_scale": CHEMICAL_GRADIENT_INPUT_SCALE,
                         "winner_seed": best_winner_seed,
                         "winner_density_multiplier": best_winner_density,

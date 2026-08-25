@@ -718,6 +718,94 @@ def check_polarized_division_uses_signed_growth_direction(device: wgpu.GPUDevice
     print("[PASS] signed growth direction places child; global directionality can restore symmetric division")
 
 
+def check_boundary_gradient_forces_tangent_split(device: wgpu.GPUDevice) -> None:
+    """The daughter axis must be perpendicular to the sampled morphology gradient."""
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
+    agents = AgentsGPU(
+        device, core, environment, 8, 128,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
+        6, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
+    )
+    # Particle 0 is just to the right of a small cluster. Its morphology
+    # gradient is nonzero, while a zeroed policy would otherwise request a
+    # horizontal split. The assertion below reconstructs the exact sampled
+    # gradient rather than assuming an ideal direction on the discrete grid.
+    positions = np.array([
+        [0.53, 0.50],
+        [0.50, 0.49],
+        [0.50, 0.50],
+        [0.50, 0.51],
+        [0.505, 0.50],
+    ], dtype=np.float32)
+    count = len(positions)
+    root2 = np.float32(np.sqrt(2.0))
+    particle_f = np.tile(np.eye(2, dtype=np.float32).reshape(1, 4), (count, 1))
+    particle_f[0] = np.array([root2, 0.0, 0.0, root2], dtype=np.float32)
+    core.load_scene(
+        positions,
+        np.zeros((count, 2), dtype=np.float32),
+        particle_f,
+        np.zeros((count, 4), dtype=np.float32),
+        np.ones(count, dtype=np.float32),
+    )
+    core.reset_growth_buffers(6)
+    growth = np.ones(count, dtype=np.float32)
+    growth[0] = 2.0
+    cycle = np.zeros(count, dtype=np.float32)
+    cycle[0] = 1.0
+    device.queue.write_buffer(core.F, 0, particle_f)
+    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(count), growth, cycle))
+    core.set_active_count(count)
+    environment.reset()
+    agents.set_active_count(count)
+    agents.reset_heading(29)
+    agents.set_headings(np.zeros(count, dtype=np.float32))
+    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
+
+    encoder = device.create_command_encoder()
+    core.encode_morphology(encoder)
+    environment.encode_sense(encoder)
+    agents.encode_step(encoder, environment.parity)
+    device.queue.submit([encoder.finish()])
+    grown_count = agents.read_grown_count()
+    core.set_active_count(grown_count)
+    assert grown_count == count + 1
+    morphology = core.read_morphology()
+
+    def sample_morphology(field_position: np.ndarray) -> float:
+        base = np.floor(field_position).astype(np.int32)
+        fraction = field_position - base
+        n = morphology.shape[0]
+
+        def load(dx: int, dy: int) -> float:
+            return float(morphology[(base[1] + dy) % n, (base[0] + dx) % n])
+
+        a = load(0, 0) * (1.0 - fraction[0]) + load(1, 0) * fraction[0]
+        b = load(0, 1) * (1.0 - fraction[0]) + load(1, 1) * fraction[0]
+        return a * (1.0 - fraction[1]) + b * fraction[1]
+
+    field_position = positions[0] * morphology.shape[0]
+    gradient = 0.5 * np.array([
+        sample_morphology(field_position + [1.0, 0.0])
+        - sample_morphology(field_position - [1.0, 0.0]),
+        sample_morphology(field_position + [0.0, 1.0])
+        - sample_morphology(field_position - [0.0, 1.0]),
+    ])
+    assert np.linalg.norm(gradient) > 1e-6, gradient
+    result = core.read_positions()
+    daughters = result[[0, count]]
+    separation = daughters[1] - daughters[0]
+    separation = (separation + 0.5) % 1.0 - 0.5
+    assert np.isclose(np.linalg.norm(separation), 0.01, atol=2e-5), daughters
+    tangent_error = abs(np.dot(separation, gradient)) / (
+        np.linalg.norm(separation) * np.linalg.norm(gradient)
+    )
+    assert tangent_error < 2e-4, (daughters, gradient, tangent_error)
+    np.testing.assert_allclose(daughters.mean(axis=0), positions[0], atol=2e-5)
+    print("[PASS] morphology boundary normal forces a symmetric tangent split")
+
+
 def check_anisotropic_tensor_split(device: wgpu.GPUDevice) -> None:
     """A det(Fg)=2 sheared rest state must split into two Fe daughters."""
     core = MpmCore(device)
@@ -1208,6 +1296,7 @@ def main() -> None:
     check_conservative_split(device)
     check_desired_heading_derives_angular_acceleration(device)
     check_polarized_division_uses_signed_growth_direction(device)
+    check_boundary_gradient_forces_tangent_split(device)
     check_anisotropic_tensor_split(device)
     check_isotropic_increment_preserves_tensor_shape(device)
     check_directional_increment_and_objectivity(device)

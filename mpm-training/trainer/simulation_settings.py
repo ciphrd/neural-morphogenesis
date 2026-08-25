@@ -74,7 +74,7 @@ ACCEL_DIM = 2
 STRAFE_DIM = 2
 
 # --- Chemical field (environment_gpu.py / core/environment.wgsl) ---
-FIELD_N = 256
+FIELD_N = 512
 # Used by persistent-environment communication. Cell-owned projection ignores
 # decay because the spatial field is rebuilt from cell state every round.
 DECAY = 0.91

@@ -1,5 +1,10 @@
 # Density feature implementation plan
 
+> Historical plan note: model v2 superseded the original shrinking chemical
+> kernel with fixed field-space sigma and `1/q` projection weight. Model v3
+> additionally replaces slot-index branching randomness with a shared spatial
+> random field; see `DENSITY_MODEL.md`.
+
 This plan implements the model in `DENSITY_MODEL.md` while preserving today's
 simulation exactly at density multiplier `q=1`.
 
@@ -8,11 +13,13 @@ simulation exactly at density multiplier `q=1`.
 Implemented through the first usable end-to-end version:
 
 - shared versioned resolver and Python golden tests;
-- runtime particle mass, volume, geometry, repulsion, and policy-gradient scale;
+- runtime particle mass, volume, geometry, repulsion, and chemical projection weight;
 - multi-density worker evaluation with mean-per-density and worst/mean aggregation;
 - backward-compatible checkpoint/run metadata and replay tooling;
 - density-weighted debug rasters;
 - viewer density selector with derived counts and advanced overrides;
+- density-consistent spatial headings/lifecycle thresholds and sample-sidecar
+  time-to-cap plus toroidal envelope metrics;
 - CPU, TypeScript, WebGPU shader, growth-regression, density-switching, and
   one-generation multiprocessing smoke tests.
 

@@ -86,6 +86,7 @@ export class GpuSimulation {
   private pendingNeuralColorAlpha = 1.0;
   private pendingInternalStateAlpha = 1.0;
   private pendingInternalStateChannelStart = 0;
+  private pendingBoundaryGradientScale = 0.01;
   private pendingPointRadiusPx: number | null = null;
   private pendingGrowthAxisLengthPx = 24;
   // 0 = identity — see gpu/render.ts's own setAccent()/field.wgsl's own
@@ -168,6 +169,9 @@ export class GpuSimulation {
    * first rebuild(). */
   get particleCount(): number {
     return this.mpmCore?.activeCount ?? 0;
+  }
+  async readPositions(): Promise<Float32Array> {
+    return this.mpmCore ? this.mpmCore.readPositions() : new Float32Array();
   }
   private growthIsEnabled(): boolean {
     if (!this.config) return false;
@@ -263,6 +267,7 @@ export class GpuSimulation {
       elasticStrainScale: config.elasticStrainScale ?? 0.15,
       elasticStrainInputsEnabled: config.elasticStrainInputsEnabled ?? false,
       chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
+      chemicalProjectionWeight: config.chemicalProjectionWeight ?? 1.0,
     });
     agents.loadWeights(config.weights);
 
@@ -278,6 +283,7 @@ export class GpuSimulation {
     renderer.setNeuralColorAlpha(this.pendingNeuralColorAlpha);
     renderer.setInternalStateAlpha(this.pendingInternalStateAlpha);
     renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart);
+    renderer.setBoundaryGradientScale(this.pendingBoundaryGradientScale);
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
     renderer.setGrowthAxisLengthPx(this.pendingGrowthAxisLengthPx);
     renderer.setAccent(this.pendingAccent);
@@ -343,7 +349,7 @@ export class GpuSimulation {
     // (two DIFFERENT hash domains, see spawnUniform01()'s own comment
     // for why they're safe to derive from the identical raw seed
     // without correlating) — see Agents.resetHeading()'s own docstring.
-    this.agents.resetHeading(this.config.seed);
+    this.agents.resetHeading(this.config.seed, scene.positions);
     this._currentStep = 0;
   }
 
@@ -386,6 +392,10 @@ export class GpuSimulation {
     );
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
     this.mpmCore.setSplatRadius(physics.splatRadius);
+    this.mpmCore.setMorphology(
+      physics.morphologyBlurSigma,
+      physics.morphologyDensityReference,
+    );
     // ?? 40.0 (trainer/simulation_settings.py's own REPULSION_MAX_DELTA
     // default) guards a call to this with a raw SimulationConfig from a
     // train_server.py process still running pre-repulsionMaxDelta code,
@@ -394,14 +404,11 @@ export class GpuSimulation {
       physics.repulsionStrength,
       physics.repulsionMaxDelta ?? 40.0,
     );
-    this.mpmCore.setMorphology(
-      this.config.morphologyBlurSigma ?? 0.01,
-      this.config.morphologyDensityReference ?? 1.0
-    );
     this.agents.setCommunicationTimestep(communicationDt);
     this.agents.setInternalStateSpeed(physics.internalStateSpeed ?? 1.0);
     this.agents.setDivisionDirectionality(physics.divisionDirectionality ?? 1.0);
     this.agents.setChemicalGradientInputScale(physics.chemicalGradientInputScale);
+    this.agents.setChemicalProjectionWeight(physics.chemicalProjectionWeight);
     this.agents.setPhysics({
       maxAccel: physics.maxAccel,
       maxStrafe: physics.maxStrafe,
@@ -599,6 +606,11 @@ export class GpuSimulation {
   setInternalStateChannelStart(start: number): void {
     this.pendingInternalStateChannelStart = start;
     this.renderer?.setInternalStateChannelStart(start);
+  }
+
+  setBoundaryGradientScale(g0: number): void {
+    this.pendingBoundaryGradientScale = g0;
+    this.renderer?.setBoundaryGradientScale(g0);
   }
 
   setGrowthAxisLengthPx(px: number): void {

@@ -51,10 +51,11 @@
 // delta. No post-brain value is written to persistent environmental state.
 //
 // Growth — each particle may spawn a copy of itself after completing its
-// tensor-growth cycle. The signed network growth vector polarizes division:
-// the child is placed along +n and the pair's center shifts toward +n in
-// proportion to signal magnitude. A zero signal retains the old symmetric,
-// uniformly-random split exactly. Growth admission integrates persistent
+// tensor-growth cycle. As a first boundary-tangent experiment, division uses
+// the tangent perpendicular to the local morphology-density gradient and
+// places the daughters symmetrically along that axis. A locally flat field has
+// no defined tangent, so it falls back to the signed network growth direction.
+// Growth admission integrates persistent
 // hazard from the LAST channel's sensed VALUE (inputVec[CHANNELS-1u] — the same
 // value already fed into this step's own NN input, clamped to [0,1];
 // NOT a network output, so CHIRALITY's mirror-averaging never touches
@@ -99,10 +100,9 @@
 // per-particle scalars into one
 // struct/buffer: rng+cooldown (growth's own state, only growth itself
 // ever reads/writes them) and heading+angularVelocity (this shader's
-// facing-direction integrator, see below) — rng is xorshift32 state,
-// seeded once per rollout by Agents.resetHeading() (see xorshift32()'s
-// own comment for why growth's random draw needs dedicated state rather
-// than hashing something that already changes each step); cooldown is
+// facing-direction integrator, see below). `rng` is retained as the ABI name
+// but stores lineage generation in density model v3; lifecycle randomness is
+// sampled from a rollout-seeded world-space field, never particle slot. cooldown is
 // macro steps remaining before this slot can split again, counted down
 // every step, reset to physics.divisionCooldown on BOTH the parent and
 // the new child whenever a split succeeds (without this, a particle
@@ -159,6 +159,10 @@ const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__
 const GROWTH_DIRECTION_RESPONSE_RATE: f32 = __GROWTH_DIRECTION_RESPONSE_RATE__;
 const GROWTH_ANISOTROPY_RESPONSE_RATE: f32 = __GROWTH_ANISOTROPY_RESPONSE_RATE__;
 const DIRECTION_CONFIDENCE_SCALE: f32 = __DIRECTION_CONFIDENCE_SCALE__;
+// Below this magnitude the morphology field is effectively flat and its
+// tangent is dominated by floating-point noise. Typical measured boundary
+// gradients are around 1e-2, so this only rejects genuinely undefined cases.
+const BOUNDARY_TANGENT_MIN_GRADIENT: f32 = 1e-6;
 
 // One chemical-state delta per channel. The legacy name is retained in the
 // checkpoint/output ABI.
@@ -181,6 +185,7 @@ const FIELD_TOTAL: u32 = FIELD_PLANE * CHANNELS;
 
 // Must match environment.wgsl's own copy exactly.
 const DEPOSIT_SCALE: f32 = 4096.0;
+const SPATIAL_RANDOM_CELLS: u32 = __SPATIAL_RANDOM_CELLS__u;
 
 @group(0) @binding(0) var<storage, read> weights: array<f32>;
 @group(0) @binding(1) var<storage, read_write> positions: array<vec2<f32>>;
@@ -249,6 +254,13 @@ struct AgentPhysics {
   elasticStrainScale: f32,
   // Density-resolved normalization for the field-pixel Sobel gradient.
   chemicalGradientInputScale: f32,
+  // Represented material area carried by one chemical projection.  q times
+  // as many particles each publish at 1/q so the fixed-resolution chemical
+  // field observes the same continuum concentration across sampling density.
+  chemicalProjectionWeight: f32,
+  // Seed for a fixed world-space lifecycle random field. Nearby numerical
+  // samples share thresholds regardless of particle slot or density.
+  rolloutSeed: u32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -266,8 +278,8 @@ struct AgentPhysics {
 // heading is no longer derived from velocity (see this file's own
 // module docstring). Every field zeroed/randomized by
 // Agents.resetHeading() whenever a rollout restarts (simulation.ts's
-// own restartRollout()). rng/cooldown: see xorshift32()'s own comment
-// (rng) and the growth-cooldown logic below (cooldown) — unrelated to
+// own restartRollout()). rng/cooldown are the lineage generation and
+// growth-cooldown state respectively — unrelated to
 // heading/angularVelocity otherwise, nothing besides growth's own
 // agentStep() logic ever reads those two fields.
 struct ParticleMeta {
@@ -498,24 +510,26 @@ fn elasticStrainInput(F: vec4<f32>, Fg: vec4<f32>, forward: vec2<f32>, lateral: 
   );
 }
 
-// Simple, deterministic PRNG (xorshift32) — growth's own random draw
-// (agentStep()'s own comment) needs a DEDICATED, persistent per-particle
-// state that evolves every call regardless of what else is happening,
-// not a hash of something that might not change (position, heading,
-// ...): a particle sitting still (e.g. pinned by a local repulsion/
-// deposit balance) would keep re-deriving the exact SAME "random" draw
-// every step instead of a properly evolving sequence — the same "don't
-// derive persistent state from something that might not change" pitfall
-// this file's own heading state already avoids re: velocity (see this
-// file's own module docstring). Requires a nonzero state (xorshift's
-// own fixed point at 0) — every seed this file ever writes into
-// particleMeta[].rng is OR'd with 1u to guarantee that.
-fn xorshift32(stateIn: u32) -> u32 {
-  var state = stateIn;
-  state = state ^ (state << 13u);
-  state = state ^ (state >> 17u);
-  state = state ^ (state << 5u);
-  return state;
+// Portable integer hash shared conceptually with trainer/agents_gpu.py and
+// viewer/src/gpu/rng.ts. Position selects a fixed spatial cell; lineage
+// generation supplies a fresh threshold after every conservative split.
+fn hashU32(valueIn: u32) -> u32 {
+  var value = valueIn;
+  value = (value ^ (value >> 16u)) * 0x7feb352du;
+  value = (value ^ (value >> 15u)) * 0x846ca68bu;
+  return value ^ (value >> 16u);
+}
+
+fn spatialUniform01(pos: vec2<f32>, generation: u32, domain: u32) -> f32 {
+  let wrapped = fract(pos);
+  let cellX = min(u32(floor(wrapped.x * f32(SPATIAL_RANDOM_CELLS))), SPATIAL_RANDOM_CELLS - 1u);
+  let cellY = min(u32(floor(wrapped.y * f32(SPATIAL_RANDOM_CELLS))), SPATIAL_RANDOM_CELLS - 1u);
+  let combined = physics.rolloutSeed
+    ^ hashU32(cellX + 0x9e3779b9u)
+    ^ hashU32(cellY + 0x85ebca6bu)
+    ^ hashU32(generation + 0xc2b2ae35u)
+    ^ domain;
+  return f32(hashU32(combined) >> 8u) * (1.0 / 16777216.0);
 }
 
 struct Corners {
@@ -647,7 +661,8 @@ fn depositGaussian(
       let wx = u32(wrapDepositIndex(ti, FIELD_WIDTH));
       let wy = u32(wrapDepositIndex(tj, FIELD_HEIGHT));
       for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-        let scaled = envWrite[c] * weight * contributionScale * DEPOSIT_SCALE;
+        let scaled = envWrite[c] * weight * contributionScale
+          * physics.chemicalProjectionWeight * DEPOSIT_SCALE;
         atomicAdd(&depositScratch[fieldIndex(c, wy, wx)], i32(round(scaled)));
       }
     }
@@ -993,9 +1008,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     // cycle, not once per tick. -log(1-u) is Exp(1); top 24 RNG bits match
     // the precision convention used for the division-angle draw below.
     if (agentState.particleMeta[pi].divisionThreshold <= 0.0) {
-      let thresholdState = xorshift32(agentState.particleMeta[pi].rng);
-      agentState.particleMeta[pi].rng = thresholdState;
-      let u = f32(thresholdState >> 8u) * (1.0 / 16777216.0);
+      let u = spatialUniform01(pos, agentState.particleMeta[pi].rng, 0x54485245u);
       agentState.particleMeta[pi].divisionThreshold = max(-log(max(1.0 - u, 1e-7)), 1e-7);
     }
     var hazardIncrement = -log(max(1.0 - splitProb, 1e-7));
@@ -1033,23 +1046,25 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     // regardless of how high this atomic itself climbs.
     let newIndex = atomicAdd(&agentState.growthCount, 1u);
     if (newIndex < physics.maxActiveParticles) {
-      // Always consume the historical random-angle draw so zero-direction
-      // policies remain bit-for-bit deterministic. A nonzero signed growth
-      // vector replaces that random axis: +n is the NEW daughter's side.
-      let angleState = xorshift32(agentState.particleMeta[pi].rng);
-      agentState.particleMeta[pi].rng = angleState; // parent's own rng now reflects BOTH draws this step
-      let angleDraw = f32(angleState >> 8u) * (1.0 / 16777216.0);
-      let spawnAngle = angleDraw * 2.0 * PI;
+      let nextGeneration = agentState.particleMeta[pi].rng + 1u;
+      let morphologyGradient = vec2<f32>(morphologyGx, morphologyGy);
+      let morphologyGradientMagnitude = length(morphologyGradient);
       var spawnDir = growthDirectionWorld;
       let directionStrength = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
         * clamp(stepMode.divisionDirectionality, 0.0, 1.0);
+      var centerShift = spawnDir * (0.5 * physics.splitDisplacement) * directionStrength;
+      if (morphologyGradientMagnitude > BOUNDARY_TANGENT_MIN_GRADIENT) {
+        // The gradient is the boundary normal. Rotating it by +90 degrees
+        // gives either representative of the tangent axis; because daughter
+        // placement is symmetric, the sign of that representative is
+        // irrelevant.
+        spawnDir = vec2<f32>(-morphologyGradient.y, morphologyGradient.x)
+          / morphologyGradientMagnitude;
+        centerShift = vec2<f32>(0.0);
+      }
       let halfOffset = spawnDir * (0.5 * physics.splitDisplacement);
-      // Smoothly interpolate from the old center-preserving split (s=0)
-      // to a fully polarized split (s=1): the parent remains at its old
-      // position and the child appears one full splitDisplacement along
-      // +n. Thus sign now matters even though n*n^T tensor stretch itself
-      // remains axial. The deliberate pair-center shift is s*halfOffset.
-      let centerShift = halfOffset * directionStrength;
+      // A measurable boundary keeps the pair center fixed; the flat-field
+      // fallback retains the existing network-controlled center shift.
       positions[pi] = fract(pos - halfOffset + centerShift);
       positions[newIndex] = fract(pos + halfOffset + centerShift);
       // "A copy of itself": heading/angularVelocity copied from this
@@ -1068,14 +1083,10 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
         agentState.particleMeta[newIndex].chemicalState[c] = agentState.particleMeta[pi].chemicalState[c];
       }
-      // Reseeded from the parent's own latest post-advance state (both
-      // draws, `angleState`) mixed with the new slot index, not copied
-      // outright — two particles sharing an identical RNG state would
-      // draw the exact same "random" sequence forever after, a real,
-      // easy-to-hit correlation since a child starts every subsequent
-      // step from close to the same position/heading its parent had at
-      // birth too.
-      agentState.particleMeta[newIndex].rng = xorshift32(angleState ^ newIndex) | 1u;
+      // Both daughters advance the same lineage generation. Their next
+      // thresholds come from their world-space cells, not q-dependent slots.
+      agentState.particleMeta[pi].rng = nextGeneration;
+      agentState.particleMeta[newIndex].rng = nextGeneration;
       // BOTH the parent (this slot, `pi`) and the new child go on
       // cooldown — a freshly split child immediately splitting again
       // would defeat the whole point of throttling growth, same as a

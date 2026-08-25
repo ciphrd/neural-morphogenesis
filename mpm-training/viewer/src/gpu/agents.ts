@@ -33,11 +33,12 @@
 
 import agentsSrc from "../../../core/agents.wgsl?raw";
 import coreConstants from "../../../core/constants.json";
+import densityModel from "../../../core/density.json";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
 import type { Environment } from "./environment";
 import { MAX_PARTICLES, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
-import { growthSeed, spawnUniform01 } from "./rng";
+import { spatialUniform01, spawnUniform01 } from "./rng";
 import { policyHasRecurrence, type ChemicalCommunicationArchitecture, type PolicyArchitecture, type UpdateRuleWeights } from "./types";
 import policyParameters from "../../../core/policy_parameters.json";
 import { policyWeightsShapeError } from "./policyEval";
@@ -81,6 +82,7 @@ export interface AgentsConfig {
   elasticStrainScale: number;
   elasticStrainInputsEnabled: boolean;
   chemicalGradientInputScale?: number;
+  chemicalProjectionWeight?: number;
 }
 
 function weightLayout(channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128") {
@@ -243,6 +245,8 @@ export class Agents {
     this.setMaxActiveParticles(config.maxActiveParticles);
     this.setElasticStrainScale(config.elasticStrainScale);
     this.setChemicalGradientInputScale(config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE);
+    this.setChemicalProjectionWeight(config.chemicalProjectionWeight ?? 1.0);
+    this.setRolloutSeed(0);
 
     // Persistent per-particle state — owned here (not MpmCore, not
     // Environment), zeroed at creation and whenever resetHeading() is
@@ -299,6 +303,7 @@ export class Agents {
         FIELD_WIDTH: environment.width,
         FIELD_HEIGHT: environment.height,
         MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
+        SPATIAL_RANDOM_CELLS: densityModel.SPATIAL_RANDOM_CELLS,
         CHEMICAL_VALUE_INPUT_SCALE: coreConstants.CHEMICAL_VALUE_INPUT_SCALE,
         MORPHOLOGY_GRADIENT_INPUT_SCALE: coreConstants.MORPHOLOGY_GRADIENT_INPUT_SCALE,
         GROWTH_DIRECTION_RESPONSE_RATE: coreConstants.GROWTH_DIRECTION_RESPONSE_RATE,
@@ -495,6 +500,16 @@ export class Agents {
     writeFloat32(this.device, this.physicsUniform, 64, new Float32Array([Math.max(scale, 1e-6)]));
   }
 
+  setChemicalProjectionWeight(weight: number): void {
+    if (!(weight > 0)) throw new Error("chemical projection weight must be positive");
+    writeFloat32(this.device, this.physicsUniform, 68, new Float32Array([weight]));
+  }
+
+  /** Common spatial-random-field seed at AgentPhysics byte offset 72. */
+  setRolloutSeed(seed: number): void {
+    this.device.queue.writeBuffer(this.physicsUniform, 72, new Uint32Array([seed >>> 0]));
+  }
+
   /** Updates this class's own agentStep() dispatch size AND growth's own
    * atomic "next free slot" counter (core/agents.wgsl's own module
    * docstring), which always needs to start from the current
@@ -576,7 +591,7 @@ export class Agents {
    * the "offset the seed to decorrelate two draws off one shared
    * mulberry32 stream" trick this used to need (see rng.ts's own
    * spawnUniform01()/growthSeed() comments). */
-  resetHeading(seed: number): void {
+  resetHeading(seed: number, initialPositions?: Float32Array): void {
     const count = (this.agentStateBuffer.size - PARTICLE_META_BUFFER_OFFSET) / this.particleMetaStride;
     // One combined DataView write, matching core/agents.wgsl's own
     // ParticleMeta struct exactly (four scalar fields, vec4 color, then the
@@ -589,10 +604,20 @@ export class Agents {
     const view = new DataView(buf);
     for (let i = 0; i < count; i++) {
       const base = i * this.particleMetaStride;
-      view.setUint32(base + PARTICLE_META_OFFSET_RNG, growthSeed(seed, i), true);
+      // Density model v3 uses this u32 as a lineage-generation counter.
+      view.setUint32(base + PARTICLE_META_OFFSET_RNG, 0, true);
       view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, (spawnUniform01(seed, 5 + i) * 2 - 1) * Math.PI, true);
     }
+    if (initialPositions) {
+      const initialCount = Math.min(initialPositions.length / 2, count);
+      for (let i = 0; i < initialCount; i++) {
+        const base = i * this.particleMetaStride;
+        const u = spatialUniform01(seed, initialPositions[i * 2], initialPositions[i * 2 + 1]);
+        view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, (u * 2 - 1) * Math.PI, true);
+      }
+    }
     this.device.queue.writeBuffer(this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET, buf);
+    this.setRolloutSeed(seed);
   }
 
   /** Overwrites the FIRST headings.length heading fields directly, a

@@ -1,4 +1,5 @@
 import { useState } from "react"
+import coreConstants from "../../../core/constants.json"
 import type { PhysicsSettings } from "../gpu/types"
 import { Slider } from "./Slider"
 
@@ -51,7 +52,9 @@ function scaledRange(
 // physically bounded, not scaled from the trained value like the others.
 const FRACTION_RANGE = { min: 0, max: 1, step: 0.001 } as const
 
-export function physicsSliderSpecsFor(trained: PhysicsSettings): PhysicsSliderSpec[] {
+export function physicsSliderSpecsFor(
+  trained: PhysicsSettings
+): PhysicsSliderSpec[] {
   return [
     {
       key: "gravity",
@@ -167,9 +170,23 @@ export function physicsSliderSpecsFor(trained: PhysicsSettings): PhysicsSliderSp
     },
     {
       key: "splatRadius",
-      label: "Splat radius",
+      label: "Density splat radius",
       ...scaledRange(trained.splatRadius, 3),
       format: (v) => v.toFixed(4),
+    },
+    {
+      key: "morphologyBlurSigma",
+      label: "Morphology blur sigma",
+      ...scaledRange(trained.morphologyBlurSigma, 3),
+      format: (v) => v.toFixed(4),
+    },
+    {
+      key: "morphologyDensityReference",
+      label: "Morphology density reference",
+      min: 0.001,
+      max: Math.max(3, trained.morphologyDensityReference * 3),
+      step: 0.001,
+      format: (v) => v.toFixed(3),
     },
     {
       key: "repulsionStrength",
@@ -215,7 +232,8 @@ export function physicsSliderSpecsFor(trained: PhysicsSettings): PhysicsSliderSp
  * the growth cap itself is `particles` — see types.ts's own
  * SimulationConfig.particles docstring for why that's a CAP now, not a
  * starting count, and not a slider here since it's rebuild-triggering,
- * same as channels/fieldN/hiddenDim), repulsion's splatRadius/strength,
+ * same as channels/fieldN/hiddenDim), density's splatRadius,
+ * morphologyBlurSigma, and morphologyDensityReference, repulsion strength,
  * and mpmEnabled (a checkbox, not a slider — off skips MpmCore's own
  * physics substeps entirely each macro step, a debug/testing aid to
  * isolate sensing/communication/growth/chirality from elastic material
@@ -259,10 +277,6 @@ export function PhysicsPanel({
       </div>
       {open && (
         <div className="physics-panel-body">
-          <p className="hint">
-            Split displacement, deposit radius, and repulsion radius are derived
-            from Particle density. Moving them here intentionally overrides that preset.
-          </p>
           {/* Boolean, not a slider — kept out of specsFor()'s own
            * SliderSpec list (which assumes a numeric range) and rendered
            * as its own checkbox row instead (same label-left/checkbox-

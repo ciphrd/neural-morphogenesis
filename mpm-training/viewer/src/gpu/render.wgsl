@@ -289,6 +289,87 @@ fn internalStateParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32
   return vec4<f32>(in.color, internalStateStyle.alpha);
 }
 
+// --- boundary-value dots ---------------------------------------------------
+//
+// Shows the exact scalar proposed for boundary weighting:
+//   wb = |grad(rho)| / (|grad(rho)| + g0)
+// rho is MpmCore's policy morphology texture, sampled with the same wrapped
+// bilinear interpolation and +/- one-texel central difference as
+// core/agents.wgsl. This is deliberately a particle mode rather than a
+// background: it shows the value each policy-controlled cell observes at its
+// own position. The sequential blue -> teal -> yellow ramp maps wb in [0,1].
+
+@group(0) @binding(9) var boundaryMorphologyTexture: texture_2d<f32>;
+@group(0) @binding(10) var<uniform> boundaryGradientScale: f32;
+
+fn boundaryMorphologyLoad(p: vec2<i32>) -> f32 {
+  let dims = vec2<i32>(textureDimensions(boundaryMorphologyTexture));
+  let q = ((p % dims) + dims) % dims;
+  return textureLoad(boundaryMorphologyTexture, q, 0).x;
+}
+
+fn sampleBoundaryMorphology(p: vec2<f32>) -> f32 {
+  let base = vec2<i32>(floor(p));
+  let f = fract(p);
+  let a = mix(
+    boundaryMorphologyLoad(base),
+    boundaryMorphologyLoad(base + vec2<i32>(1, 0)),
+    f.x,
+  );
+  let b = mix(
+    boundaryMorphologyLoad(base + vec2<i32>(0, 1)),
+    boundaryMorphologyLoad(base + vec2<i32>(1, 1)),
+    f.x,
+  );
+  return mix(a, b, f.y);
+}
+
+fn boundaryValueColor(value: f32) -> vec3<f32> {
+  let low = vec3<f32>(0.075, 0.12, 0.31);
+  let middle = vec3<f32>(0.05, 0.63, 0.60);
+  let high = vec3<f32>(0.99, 0.86, 0.25);
+  if (value < 0.5) {
+    return mix(low, middle, value * 2.0);
+  }
+  return mix(middle, high, (value - 0.5) * 2.0);
+}
+
+@vertex
+fn boundaryValueParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
+  let position = fract(pointPositions[instanceIndex]);
+  let center = position * 2.0 - vec2<f32>(1.0, 1.0);
+  let offset = QUAD_OFFSETS[vertexIndex];
+  let dims = vec2<f32>(textureDimensions(boundaryMorphologyTexture));
+  let fieldPos = position * dims;
+  let gx = 0.5 * (
+    sampleBoundaryMorphology(fieldPos + vec2<f32>(1.0, 0.0))
+      - sampleBoundaryMorphology(fieldPos - vec2<f32>(1.0, 0.0))
+  );
+  let gy = 0.5 * (
+    sampleBoundaryMorphology(fieldPos + vec2<f32>(0.0, 1.0))
+      - sampleBoundaryMorphology(fieldPos - vec2<f32>(0.0, 1.0))
+  );
+  let gradientMagnitude = length(vec2<f32>(gx, gy));
+  let g0 = max(boundaryGradientScale, 1e-8);
+  let boundaryValue = gradientMagnitude / (gradientMagnitude + g0);
+
+  var out: NeuralColorDotOut;
+  out.position = vec4<f32>(
+    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex),
+    0.0,
+    1.0,
+  );
+  out.uv = offset;
+  out.color = boundaryValueColor(boundaryValue);
+  return out;
+}
+
+@fragment
+fn boundaryValueParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
+  if (dot(in.uv, in.uv) > 1.0) { discard; }
+  return vec4<f32>(in.color, 1.0);
+}
+
 // Local-space wedge pointing along +X, rotated by each particle's own
 // heading before translating to its position — an isoceles triangle, not
 // a quad-carved shape, so this is its own 3-vertex draw (render.ts's own

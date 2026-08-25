@@ -35,6 +35,7 @@ from simulation_settings import (
 )
 
 from environment_gpu import EnvironmentGPU, ceil_div
+from density import SPATIAL_RANDOM_CELLS
 from mpm_core import MpmCore, REPULSION_FIELD_N
 from shader_template import load_core_shader
 from policy_parameters import (
@@ -105,6 +106,7 @@ def _growth_seed(seed: int, count: int) -> np.ndarray:
 # growth's own child-reseeding, core/agents.wgsl's own agentStep()
 # comment). Arbitrary, just needs to be nonzero.
 _SPAWN_HASH_DOMAIN = np.uint32(0xC0FFEE00)
+_SPATIAL_HEADING_DOMAIN = np.uint32(0x48454144)
 
 
 def _spawn_uniform01(seed: int, index: int) -> float:
@@ -130,6 +132,20 @@ def _spawn_uniform01_batch(seed: int, indices: np.ndarray) -> np.ndarray:
     own per-slot fill (up to max_active_particles draws every rollout)."""
     indices = indices.astype(np.uint32)
     combined = np.uint32(seed) ^ _hash_u32(_SPAWN_HASH_DOMAIN ^ indices)
+    hashed = _hash_u32(combined)
+    return (hashed >> np.uint32(8)).astype(np.float64) / 16777216.0
+
+
+def _spatial_uniform01_batch(seed: int, positions: np.ndarray, domain: np.uint32) -> np.ndarray:
+    """Sample a fixed world-space random field, independent of slot and q."""
+    wrapped = np.mod(np.asarray(positions, dtype=np.float64), 1.0)
+    cells = np.floor(wrapped * SPATIAL_RANDOM_CELLS).astype(np.uint32)
+    combined = (
+        np.uint32(seed)
+        ^ _hash_u32(cells[:, 0] + np.uint32(0x9E3779B9))
+        ^ _hash_u32(cells[:, 1] + np.uint32(0x85EBCA6B))
+        ^ domain
+    )
     hashed = _hash_u32(combined)
     return (hashed >> np.uint32(8)).astype(np.float64) / 16777216.0
 
@@ -236,6 +252,8 @@ class AgentsGPU:
         self.set_max_active_particles(max_active_particles)
         self.set_elastic_strain_scale(elastic_strain_scale)
         self.set_chemical_gradient_input_scale(CHEMICAL_GRADIENT_INPUT_SCALE)
+        self.set_chemical_projection_weight(1.0)
+        self.set_rollout_seed(0)
 
         # Persistent per-particle state — owned here (not MpmCore, not
         # EnvironmentGPU), zeroed at creation (randomized/reseeded
@@ -308,6 +326,7 @@ class AgentsGPU:
                     "FIELD_WIDTH": environment.width,
                     "FIELD_HEIGHT": environment.height,
                     "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
+                    "SPATIAL_RANDOM_CELLS": SPATIAL_RANDOM_CELLS,
                     "CHEMICAL_VALUE_INPUT_SCALE": repr(CHEMICAL_VALUE_INPUT_SCALE),
                     "MORPHOLOGY_GRADIENT_INPUT_SCALE": repr(MORPHOLOGY_GRADIENT_INPUT_SCALE),
                     "GROWTH_DIRECTION_RESPONSE_RATE": repr(GROWTH_DIRECTION_RESPONSE_RATE),
@@ -556,6 +575,24 @@ class AgentsGPU:
             np.array([max(float(scale), 1e-6)], dtype=np.float32),
         )
 
+    def set_chemical_projection_weight(self, weight: float) -> None:
+        """Writes represented chemical area at AgentPhysics byte offset 68."""
+        if weight <= 0.0:
+            raise ValueError("chemical projection weight must be positive")
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            68,
+            np.array([float(weight)], dtype=np.float32),
+        )
+
+    def set_rollout_seed(self, seed: int) -> None:
+        """Write the common spatial-random-field seed at byte offset 72."""
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            72,
+            np.array([int(seed) & 0xFFFFFFFF], dtype=np.uint32),
+        )
+
     def set_active_count(self, active_count: int) -> None:
         """Updates this class's own agentStep() dispatch size AND
         growth's own atomic "next free slot" counter (core/agents.wgsl's
@@ -587,7 +624,7 @@ class AgentsGPU:
         raw = self.device.queue.read_buffer(self._agent_state_buffer, 0, 4)
         return int(np.frombuffer(raw, dtype=np.uint32)[0])
 
-    def reset_heading(self, seed: int) -> None:
+    def reset_heading(self, seed: int, initial_positions: np.ndarray | None = None) -> None:
         """Randomizes persistent heading state (uniform over [-pi, pi],
         one independent draw per particle slot) and zeroes
         angularVelocity/cooldown, EVERY slot up to max_active_particles
@@ -647,13 +684,24 @@ class AgentsGPU:
         # ParticleMeta struct exactly (see this class's own __init__
         # comment for why the state fields are packed into one buffer).
         particle_meta = np.zeros(count, dtype=self._particle_meta_dtype)
-        particle_meta["rng"] = _growth_seed(seed, count)
+        # This field is a lineage-generation counter in density model v3.
+        # Threshold and fallback-angle randomness comes from a common spatial
+        # field in WGSL, so numerical particle slot identity never enters it.
+        particle_meta["rng"] = 0
         particle_meta["heading"] = (
             _spawn_uniform01_batch(seed, np.arange(count, dtype=np.uint32) + np.uint32(5)) * (2.0 * np.pi) - np.pi
         ).astype(np.float32)
+        if initial_positions is not None:
+            initial_positions = np.asarray(initial_positions, dtype=np.float32)
+            n = min(len(initial_positions), count)
+            particle_meta["heading"][:n] = (
+                _spatial_uniform01_batch(seed, initial_positions[:n], _SPATIAL_HEADING_DOMAIN)
+                * (2.0 * np.pi) - np.pi
+            ).astype(np.float32)
         # cooldown/angularVelocity are already 0.0 from np.zeros — "not on
         # cooldown," "no spin."
         self.device.queue.write_buffer(self._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, particle_meta.tobytes())
+        self.set_rollout_seed(seed)
 
     def set_headings(self, headings: np.ndarray) -> None:
         """Overwrites the FIRST len(headings) heading fields directly, a

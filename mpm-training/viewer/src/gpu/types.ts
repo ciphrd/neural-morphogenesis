@@ -38,6 +38,7 @@ export interface RunSettings {
   particleMass?: number;
   particleVolume?: number;
   chemicalGradientInputScale?: number;
+  chemicalProjectionWeight?: number;
   macroSteps: number;
   // Optional time cutoff for starting new cycles. null/absent means
   // growth remains chemically controlled for the whole replay.
@@ -236,6 +237,7 @@ export interface PhysicsSettings {
   particleMass: number;
   particleVolume: number;
   chemicalGradientInputScale: number;
+  chemicalProjectionWeight: number;
   decay: number;
   depositRate: number;
   maxAccel: number;
@@ -258,7 +260,12 @@ export interface PhysicsSettings {
   growthMax: number;
   // Global cap on the neural per-particle anisotropy output.
   growthAnisotropy: number;
+  /** Gaussian sigma of the raw particle-density splat, in domain units. */
   splatRadius: number;
+  /** Gaussian sigma of the policy morphology blur, in domain units. */
+  morphologyBlurSigma: number;
+  /** Half-saturation density used by rho/(rho + reference). */
+  morphologyDensityReference: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;
   mpmEnabled: boolean;
@@ -278,6 +285,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     particleMass: config.particleMass ?? coreConstants.PARTICLE_MASS,
     particleVolume: config.particleVolume ?? coreConstants.VOL,
     chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
+    chemicalProjectionWeight: config.chemicalProjectionWeight ?? 1.0,
     decay: config.decay,
     // Falls back to 1.0 (= unchanged, matching this project's own
     // pre-depositRate behavior — see simulation_settings.py's own
@@ -316,6 +324,8 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     growthMax: config.growthMax ?? 2.0,
     growthAnisotropy: Math.max(0, Math.min(1, config.growthAnisotropy ?? 1.0)),
     splatRadius: config.splatRadius,
+    morphologyBlurSigma: config.morphologyBlurSigma ?? 0.01,
+    morphologyDensityReference: config.morphologyDensityReference ?? 1.0,
     repulsionStrength: config.repulsionStrength,
     // Falls back to 40.0 (trainer/simulation_settings.py's own
     // REPULSION_MAX_DELTA default) for a `generation` message from a

@@ -88,6 +88,7 @@ def main() -> int:
             chemical_field_n=int(meta.get("field_n", FIELD_N)),
             particle_mass=PARTICLE_MASS,
             particle_volume=VOL,
+            deposit_sigma=DEPOSIT_SIGMA,
             chemical_gradient_input_scale=CHEMICAL_GRADIENT_INPUT_SCALE,
             repulsion_strength=float(meta.get("repulsion_strength", REPULSION_STRENGTH)),
             repulsion_max_delta=float(meta.get("repulsion_max_delta", REPULSION_MAX_DELTA)),
@@ -183,6 +184,7 @@ def main() -> int:
     )
     agents.load_weights(weights)
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
+    agents.set_chemical_projection_weight(density.chemical_projection_weight)
 
     target = load_target(meta["target"])
 

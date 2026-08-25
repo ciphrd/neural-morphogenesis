@@ -11,6 +11,7 @@ export interface DensityReference {
   chemicalFieldN: number;
   particleMass: number;
   particleVolume: number;
+  depositSigma: number;
   chemicalGradientInputScale: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;
@@ -26,6 +27,7 @@ export interface ResolvedDensity {
   particleMass: number;
   particleVolume: number;
   depositSigma: number;
+  chemicalProjectionWeight: number;
   splatRadius: number;
   chemicalGradientInputScale: number;
   repulsionStrength: number;
@@ -70,9 +72,10 @@ export function resolveDensity(
     particleCap: Math.max(1, Math.floor(reference.particleCap * q + 0.5)),
     particleMass: reference.particleMass / q,
     particleVolume: reference.particleVolume / q,
-    depositSigma: densityModel.CHEMICAL_RADIUS_IN_CELLS * spacing * reference.chemicalFieldN,
+    depositSigma: reference.depositSigma,
+    chemicalProjectionWeight: 1 / q,
     splatRadius: densityModel.REPULSION_RADIUS_IN_CELLS * spacing,
-    chemicalGradientInputScale: reference.chemicalGradientInputScale / spacingScale,
+    chemicalGradientInputScale: reference.chemicalGradientInputScale,
     repulsionStrength: reference.repulsionStrength * spacingScale * spacingScale,
     repulsionMaxDelta: reference.repulsionMaxDelta * spacingScale,
   };
@@ -83,14 +86,18 @@ export function configAtDensity<T extends {
   particles: number;
   initialParticleCount?: number;
   fieldN: number;
+  particleMass?: number;
+  particleVolume?: number;
+  depositSigma?: number;
+  chemicalGradientInputScale?: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;
-  [key: string]: unknown;
 }>(config: T, multiplier: number): T & {
   particleDensityMultiplier: number;
   particleMass: number;
   particleVolume: number;
   chemicalGradientInputScale: number;
+  chemicalProjectionWeight: number;
 } {
   const resolved = resolveDensity({
     particleCap: config.particles,
@@ -98,6 +105,7 @@ export function configAtDensity<T extends {
     chemicalFieldN: config.fieldN,
     particleMass: typeof config.particleMass === "number" ? config.particleMass : coreConstants.PARTICLE_MASS,
     particleVolume: typeof config.particleVolume === "number" ? config.particleVolume : coreConstants.VOL,
+    depositSigma: typeof config.depositSigma === "number" ? config.depositSigma : 0.324,
     chemicalGradientInputScale: typeof config.chemicalGradientInputScale === "number"
       ? config.chemicalGradientInputScale
       : coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
@@ -112,6 +120,7 @@ export function configAtDensity<T extends {
     particleMass: resolved.particleMass,
     particleVolume: resolved.particleVolume,
     chemicalGradientInputScale: resolved.chemicalGradientInputScale,
+    chemicalProjectionWeight: resolved.chemicalProjectionWeight,
     depositSigma: resolved.depositSigma,
     splitDisplacement: resolved.spacing,
     splatRadius: resolved.splatRadius,

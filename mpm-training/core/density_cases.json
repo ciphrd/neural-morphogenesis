@@ -5,6 +5,7 @@
     "chemicalFieldN": 256,
     "particleMass": 1.0,
     "particleVolume": 1.0,
+    "depositSigma": 0.324,
     "chemicalGradientInputScale": 0.045,
     "repulsionStrength": 0.0,
     "repulsionMaxDelta": 40.0
@@ -17,9 +18,10 @@
       "particleCap": 200,
       "particleMass": 2.0,
       "particleVolume": 2.0,
-      "depositSigma": 0.4582051942088828,
+      "depositSigma": 0.324,
+      "chemicalProjectionWeight": 2.0,
       "splatRadius": 0.00565685424949238,
-      "chemicalGradientInputScale": 0.03181980515339464,
+      "chemicalGradientInputScale": 0.045,
       "repulsionStrength": 0.0,
       "repulsionMaxDelta": 56.5685424949238
     },
@@ -31,6 +33,7 @@
       "particleMass": 1.0,
       "particleVolume": 1.0,
       "depositSigma": 0.324,
+      "chemicalProjectionWeight": 1.0,
       "splatRadius": 0.004,
       "chemicalGradientInputScale": 0.045,
       "repulsionStrength": 0.0,
@@ -43,9 +46,10 @@
       "particleCap": 800,
       "particleMass": 0.5,
       "particleVolume": 0.5,
-      "depositSigma": 0.2291025971044414,
+      "depositSigma": 0.324,
+      "chemicalProjectionWeight": 0.5,
       "splatRadius": 0.00282842712474619,
-      "chemicalGradientInputScale": 0.06363961030678927,
+      "chemicalGradientInputScale": 0.045,
       "repulsionStrength": 0.0,
       "repulsionMaxDelta": 28.2842712474619
     }

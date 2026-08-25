@@ -93,27 +93,38 @@ import numpy as np
 from simulation_settings import COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, NEURAL_UPDATES_PER_MACRO
 
 from agents_gpu import AgentsGPU, _spawn_uniform01
+from density import INITIAL_PACKING_SPACING_SCALE
 from environment_gpu import EnvironmentGPU
 from mpm_core import MpmCore
 
 
 def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int) -> tuple[np.ndarray, ...]:
-    """Seed a compact, approximately circular hexagonal packing.
+    """Clip a perfect hexagonal lattice to the most circular ``count`` sites.
 
-    Complete lattice shells fill from the center outward. Sites on a partial
-    final shell are selected evenly around its circumference, avoiding a
-    one-sided arc. The complete packing receives one deterministic rotation.
-    Nearest lattice neighbors are exactly ``spacing`` apart before wrapping.
+    Sites fill by exact Euclidean-radius shells. In axial coordinates their
+    squared radius is the integer ``q² + q*r + r²``; this produces a circular
+    disk rather than the visibly hexagonal contour produced by axial rings.
+    Sites on a partial final shell are selected evenly around its circumference.
+    ``spacing`` remains the later daughter split distance; initial nearest
+    neighbors are ``spacing * INITIAL_PACKING_SPACING_SCALE`` apart so the seed
+    disk starts compact without changing subsequent growth geometry.
     viewer/src/gpu/rng.ts mirrors this construction.
     """
-    offsets: list[tuple[float, float]] = [(0.0, 0.0)]
-    ring = 1
-    while len(offsets) < count:
-        shell: list[tuple[float, float]] = []
-        for q in range(-ring, ring + 1):
-            for r in range(-ring, ring + 1):
-                if max(abs(q), abs(r), abs(q + r)) == ring:
-                    shell.append((spacing * (q + 0.5 * r), spacing * (np.sqrt(3.0) * 0.5 * r)))
+    packed_spacing = spacing * INITIAL_PACKING_SPACING_SCALE
+    limit = int(np.ceil(np.sqrt(count))) + 2
+    shells: dict[int, list[tuple[float, float]]] = {}
+    for q in range(-limit, limit + 1):
+        for r in range(-limit, limit + 1):
+            radius_squared = q * q + q * r + r * r
+            shells.setdefault(radius_squared, []).append(
+                (packed_spacing * (q + 0.5 * r), packed_spacing * (np.sqrt(3.0) * 0.5 * r))
+            )
+
+    offsets: list[tuple[float, float]] = []
+    for radius_squared in sorted(shells):
+        if len(offsets) >= count:
+            break
+        shell = shells[radius_squared]
         shell.sort(key=lambda p: np.arctan2(p[1], p[0]))
         take = min(count - len(offsets), len(shell))
         if take == len(shell):
@@ -121,12 +132,14 @@ def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int
         else:
             indices = [int(np.floor((j + 0.5) * len(shell) / take)) for j in range(take)]
             offsets.extend(shell[i] for i in indices)
-        ring += 1
 
     mean_x = sum(p[0] for p in offsets) / count
     mean_y = sum(p[1] for p in offsets) / count
     offsets = [(x - mean_x, y - mean_y) for x, y in offsets]
-    theta = (_spawn_uniform01(seed, 2 * count) * 2.0 - 1.0) * np.pi
+    # Rotation is a property of the rollout seed, not of its numerical
+    # sampling density.  Using ``2 * count`` made the same seed start from a
+    # different world orientation whenever density changed its initial count.
+    theta = (_spawn_uniform01(seed, 2) * 2.0 - 1.0) * np.pi
     cos_t, sin_t = np.cos(theta), np.sin(theta)
     positions = np.empty((count, 2), dtype=np.float32)
     for i, (x, y) in enumerate(offsets):
@@ -213,7 +226,7 @@ class TrainingRollout:
 
         environment.reset()
         agents.set_active_count(initial_count)
-        agents.reset_heading(seed)
+        agents.reset_heading(seed, positions)
 
     def macro_step(self, substeps_per_macro: int, *, growth_enabled: bool = True) -> None:
         core = self.core

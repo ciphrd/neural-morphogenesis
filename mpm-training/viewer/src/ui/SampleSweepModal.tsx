@@ -1,10 +1,15 @@
 import { useMemo, useState } from "react"
+import { MAX_SUPPORTED_DENSITY, MIN_SUPPORTED_DENSITY } from "../gpu/density"
 import type { PhysicsSettings } from "../gpu/types"
 import { GROWTH_SLIDER_SPECS } from "./GrowthPanel"
 import { physicsSliderSpecsFor } from "./PhysicsPanel"
 
+export type SweepParameterKey =
+  | Exclude<keyof PhysicsSettings, "mpmEnabled">
+  | "particleDensityMultiplier"
+
 export interface SweepAxis {
-  key: Exclude<keyof PhysicsSettings, "mpmEnabled">
+  key: SweepParameterKey
   label: string
   min: number
   max: number
@@ -18,6 +23,7 @@ export interface SampleSweepRequest {
 
 interface Props {
   current: PhysicsSettings
+  currentDensity: number
   defaultSteps: number
   running: boolean
   completed: number
@@ -57,6 +63,7 @@ export function sweepValues(axis: SweepAxis): number[] {
 
 export function SampleSweepModal({
   current,
+  currentDensity,
   defaultSteps,
   running,
   completed,
@@ -67,13 +74,23 @@ export function SampleSweepModal({
   onCancel,
 }: Props) {
   const specs = useMemo(() => [
+    {
+      key: "particleDensityMultiplier" as const,
+      label: "Particle density",
+      min: MIN_SUPPORTED_DENSITY,
+      max: MAX_SUPPORTED_DENSITY,
+      step: 0.5,
+      group: "Density",
+    },
     ...physicsSliderSpecsFor(current).map((spec) => ({ ...spec, group: "Physics" })),
     ...GROWTH_SLIDER_SPECS.map((spec) => ({ ...spec, group: "Growth" })),
   ], [current])
   const firstSpec = specs[0]
+  const currentValue = (key: SweepAxis["key"]): number =>
+    key === "particleDensityMultiplier" ? currentDensity : current[key]
   const makeDraft = (key: SweepAxis["key"]): AxisDraft => {
     const spec = specs.find((candidate) => candidate.key === key) ?? firstSpec
-    const value = current[spec.key]
+    const value = currentValue(spec.key)
     return { key: spec.key, min: String(value), max: String(value), step: String(spec.step) }
   }
   const [axes, setAxes] = useState<AxisDraft[]>(() => [makeDraft(firstSpec.key)])
@@ -133,7 +150,7 @@ export function SampleSweepModal({
                   updateAxis(index, makeDraft(key))
                 }}
               >
-                {["Physics", "Growth"].map((group) => (
+                {["Density", "Physics", "Growth"].map((group) => (
                   <optgroup label={group} key={group}>
                     {specs.filter((spec) => spec.group === group).map((spec) => (
                       <option value={spec.key} key={spec.key}>{spec.label}</option>

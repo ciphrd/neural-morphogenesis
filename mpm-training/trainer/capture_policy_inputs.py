@@ -326,6 +326,7 @@ def main() -> int:
             chemical_field_n=field_n,
             particle_mass=float(meta.get("particle_mass", PARTICLE_MASS)),
             particle_volume=float(meta.get("particle_volume", VOL)),
+            deposit_sigma=float(meta.get("deposit_sigma", DEPOSIT_SIGMA)),
             chemical_gradient_input_scale=float(meta.get("chemical_gradient_input_scale", CHEMICAL_GRADIENT_INPUT_SCALE)),
             repulsion_strength=float(meta.get("repulsion_strength", REPULSION_STRENGTH)),
             repulsion_max_delta=float(meta.get("repulsion_max_delta", REPULSION_MAX_DELTA)),
@@ -391,6 +392,7 @@ def main() -> int:
         chemical_communication_architecture=chemical_architecture,
     )
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
+    agents.set_chemical_projection_weight(density.chemical_projection_weight)
     def restart_rollout() -> TrainingRollout:
         return TrainingRollout(
             core, agents, environment,

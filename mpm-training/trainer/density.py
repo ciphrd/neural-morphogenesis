@@ -17,7 +17,8 @@ _MODEL = json.loads((Path(__file__).parent.parent / "core" / "density.json").rea
 
 DENSITY_MODEL_VERSION: int = int(_MODEL["MODEL_VERSION"])
 REFERENCE_SPACING: float = float(_MODEL["REFERENCE_SPACING"])
-CHEMICAL_RADIUS_IN_CELLS: float = float(_MODEL["CHEMICAL_RADIUS_IN_CELLS"])
+INITIAL_PACKING_SPACING_SCALE: float = float(_MODEL["INITIAL_PACKING_SPACING_SCALE"])
+SPATIAL_RANDOM_CELLS: int = int(_MODEL["SPATIAL_RANDOM_CELLS"])
 REPULSION_RADIUS_IN_CELLS: float = float(_MODEL["REPULSION_RADIUS_IN_CELLS"])
 MIN_SUPPORTED_MULTIPLIER: float = float(_MODEL["MIN_SUPPORTED_MULTIPLIER"])
 MAX_SUPPORTED_MULTIPLIER: float = float(_MODEL["MAX_SUPPORTED_MULTIPLIER"])
@@ -30,6 +31,7 @@ class DensityReference:
     chemical_field_n: int
     particle_mass: float
     particle_volume: float
+    deposit_sigma: float
     chemical_gradient_input_scale: float
     repulsion_strength: float
     repulsion_max_delta: float
@@ -46,6 +48,7 @@ class ResolvedDensity:
     particle_mass: float
     particle_volume: float
     deposit_sigma: float
+    chemical_projection_weight: float
     splat_radius: float
     chemical_gradient_input_scale: float
     repulsion_strength: float
@@ -61,6 +64,7 @@ class ResolvedDensity:
             "particle_mass": self.particle_mass,
             "particle_volume": self.particle_volume,
             "deposit_sigma": self.deposit_sigma,
+            "chemical_projection_weight": self.chemical_projection_weight,
             "splat_radius": self.splat_radius,
             "chemical_gradient_input_scale": self.chemical_gradient_input_scale,
             "repulsion_strength": self.repulsion_strength,
@@ -110,9 +114,14 @@ def resolve_density(
         particle_cap=max(1, _round_positive(reference.particle_cap * q)),
         particle_mass=reference.particle_mass / q,
         particle_volume=reference.particle_volume / q,
-        deposit_sigma=CHEMICAL_RADIUS_IN_CELLS * spacing * reference.chemical_field_n,
+        # The chemical field is a fixed numerical observation grid.  Shrinking
+        # the already-sub-texel q=1 kernel made higher-density particles alias
+        # onto the same texels.  Keep its grid-space support fixed and weight
+        # each particle by the represented material area instead.
+        deposit_sigma=reference.deposit_sigma,
+        chemical_projection_weight=1.0 / q,
         splat_radius=REPULSION_RADIUS_IN_CELLS * spacing,
-        chemical_gradient_input_scale=reference.chemical_gradient_input_scale / spacing_scale,
+        chemical_gradient_input_scale=reference.chemical_gradient_input_scale,
         repulsion_strength=reference.repulsion_strength * spacing_scale * spacing_scale,
         repulsion_max_delta=reference.repulsion_max_delta * spacing_scale,
     )
@@ -141,18 +150,23 @@ def resolve_checkpoint_density(
         float(metadata.get("winner_density_multiplier", 1.0)),
         allow_unsafe=True,
     )
-    if "density_model_version" in metadata:
+    # v3 changes stochastic forcing only; its resolved physical/chemical
+    # scaling is identical to v2, so v2 checkpoints remain modern here.
+    if int(metadata.get("density_model_version", 0)) in (2, DENSITY_MODEL_VERSION):
         return density
     return replace(
         density,
-        multiplier=1.0,
-        spacing_scale=1.0,
+        multiplier=float(metadata.get("winner_density_multiplier", metadata.get("particle_density_multiplier", 1.0))),
+        spacing_scale=1.0 / math.sqrt(float(metadata.get(
+            "winner_density_multiplier", metadata.get("particle_density_multiplier", 1.0)
+        ))),
         spacing=float(metadata.get("split_displacement", legacy_split_displacement)),
         initial_particles=int(metadata.get("initial_particle_count", reference.initial_particles)),
         particle_cap=int(metadata.get("particles", reference.particle_cap)),
         particle_mass=float(metadata.get("particle_mass", reference.particle_mass)),
         particle_volume=float(metadata.get("particle_volume", reference.particle_volume)),
         deposit_sigma=float(metadata.get("deposit_sigma", legacy_deposit_sigma)),
+        chemical_projection_weight=float(metadata.get("chemical_projection_weight", 1.0)),
         splat_radius=float(metadata.get("splat_radius", legacy_splat_radius)),
         chemical_gradient_input_scale=float(metadata.get(
             "chemical_gradient_input_scale", reference.chemical_gradient_input_scale

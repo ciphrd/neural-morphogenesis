@@ -1,3 +1,5 @@
+import densityModel from "../../../core/density.json";
+
 // Deterministic, bit-exact PRNG for a rollout's ENTIRE starting condition
 // — spawn-position jitter (seedBlob() below), back-to-back theta
 // (gpu/simulation.ts's own restartRollout()), and heading's own per-slot
@@ -31,6 +33,22 @@ function hashU32(x: number): number {
   x = Math.imul(x, 0x846ca68b) >>> 0;
   x = (x ^ (x >>> 16)) >>> 0;
   return x;
+}
+
+const SPATIAL_HEADING_DOMAIN = 0x48454144;
+
+/** Fixed world-space random field shared by every sampling density. */
+export function spatialUniform01(seed: number, x: number, y: number, domain = SPATIAL_HEADING_DOMAIN): number {
+  const cells = densityModel.SPATIAL_RANDOM_CELLS;
+  const cellX = Math.floor((((x % 1) + 1) % 1) * cells) >>> 0;
+  const cellY = Math.floor((((y % 1) + 1) % 1) * cells) >>> 0;
+  const combined = (
+    (seed >>> 0)
+    ^ hashU32((cellX + 0x9e3779b9) >>> 0)
+    ^ hashU32((cellY + 0x85ebca6b) >>> 0)
+    ^ (domain >>> 0)
+  ) >>> 0;
+  return (hashU32(combined) >>> 8) / 16777216;
 }
 
 /** particleMeta.rng's own initial per-particle seed — bit-exact with
@@ -83,23 +101,31 @@ export interface SeedBlobConfig {
   seed: number;
 }
 
-/** Compact hexagonal disk mirrored by trainer/training_sim.py's seed_blob().
- * Complete lattice shells fill outward from the center; a partial final shell
- * samples sites evenly around its circumference. The whole disk receives one
- * deterministic seed-derived rotation. Nearest neighbors are `spacing` apart. */
+/** Circular clipping of a perfect hexagonal lattice, mirrored by
+ * trainer/training_sim.py's seed_blob(). Sites fill in exact Euclidean-radius
+ * shells (the axial metric q²+qr+r²), rather than hex-coordinate rings whose
+ * outer contour is a hexagon. A partial final shell samples sites evenly around
+ * its circumference. The whole disk receives one deterministic seed-derived
+ * rotation. `spacing` remains the later daughter split distance; initial
+ * nearest neighbors use the shared compact-packing scale from density.json. */
 export function seedBlob(config: SeedBlobConfig) {
   const { count, centerX, centerY, spacing, seed } = config;
+  const packedSpacing = spacing * densityModel.INITIAL_PACKING_SPACING_SCALE;
 
-  const offsets: Array<[number, number]> = [[0, 0]];
-  for (let ring = 1; offsets.length < count; ring++) {
-    const shell: Array<[number, number]> = [];
-    for (let q = -ring; q <= ring; q++) {
-      for (let r = -ring; r <= ring; r++) {
-        if (Math.max(Math.abs(q), Math.abs(r), Math.abs(q + r)) === ring) {
-          shell.push([spacing * (q + 0.5 * r), spacing * (Math.sqrt(3) * 0.5 * r)]);
-        }
-      }
+  const limit = Math.ceil(Math.sqrt(count)) + 2;
+  const shells = new Map<number, Array<[number, number]>>();
+  for (let q = -limit; q <= limit; q++) {
+    for (let r = -limit; r <= limit; r++) {
+      const radiusSquared = q * q + q * r + r * r;
+      const shell = shells.get(radiusSquared) ?? [];
+      shell.push([packedSpacing * (q + 0.5 * r), packedSpacing * (Math.sqrt(3) * 0.5 * r)]);
+      shells.set(radiusSquared, shell);
     }
+  }
+  const offsets: Array<[number, number]> = [];
+  for (const radiusSquared of Array.from(shells.keys()).sort((a, b) => a - b)) {
+    if (offsets.length >= count) break;
+    const shell = shells.get(radiusSquared)!;
     shell.sort((a, b) => Math.atan2(a[1], a[0]) - Math.atan2(b[1], b[0]));
     const take = Math.min(count - offsets.length, shell.length);
     if (take === shell.length) offsets.push(...shell);
@@ -111,7 +137,9 @@ export function seedBlob(config: SeedBlobConfig) {
   }
   const meanX = offsets.reduce((sum, p) => sum + p[0], 0) / count;
   const meanY = offsets.reduce((sum, p) => sum + p[1], 0) / count;
-  const theta = (spawnUniform01(seed, 2 * count) * 2 - 1) * Math.PI;
+  // Keep world orientation identical when density changes `count`. Index 2 is
+  // the seed-blob rotation domain; per-particle headings begin at index 5.
+  const theta = (spawnUniform01(seed, 2) * 2 - 1) * Math.PI;
   const cosTheta = Math.cos(theta);
   const sinTheta = Math.sin(theta);
   const positions = new Float32Array(count * 2);

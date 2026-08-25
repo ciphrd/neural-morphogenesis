@@ -1,32 +1,46 @@
 import { useEffect, useMemo, useRef, useState } from "react"
+import coreConstants from "../../core/constants.json"
+import densityModel from "../../core/density.json"
 import { FitnessChart } from "./charts/FitnessChart"
-import { MAX_PARTICLES } from "./gpu/mpmCore"
 import { randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
+import { MAX_PARTICLES } from "./gpu/mpmCore"
 import type { FieldMode, ParticleRenderMode } from "./gpu/render"
-import type { CellMemory, ChemicalCommunicationArchitecture, PhysicsSettings } from "./gpu/types"
-import { cellMemoryFromConfig, chemicalCommunicationArchitectureFromConfig, hiddenLayersFromConfig, physicsSettingsFromConfig, policyArchitectureForCellMemory } from "./gpu/types"
+import type {
+  CellMemory,
+  ChemicalCommunicationArchitecture,
+  PhysicsSettings,
+} from "./gpu/types"
+import {
+  cellMemoryFromConfig,
+  chemicalCommunicationArchitectureFromConfig,
+  hiddenLayersFromConfig,
+  physicsSettingsFromConfig,
+  policyArchitectureForCellMemory,
+} from "./gpu/types"
 import { generationImageUrl } from "./net/images"
 import { fetchRunState } from "./net/runs"
 import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
 import { pickRecordingFormat } from "./render/canvasRecorder"
-import { createZip, downloadBlob } from "./render/zip"
 import type {
   DeformSettings,
   GridCanvasHandle,
   Tool,
 } from "./render/GridCanvas"
 import { GridCanvas } from "./render/GridCanvas"
+import { createZip, downloadBlob } from "./render/zip"
 import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
 import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { RunPicker } from "./ui/RunPicker"
+import type {
+  SampleSweepRequest,
+  SweepParameterKey,
+} from "./ui/SampleSweepModal"
 import { SampleSweepModal, sweepValues } from "./ui/SampleSweepModal"
-import type { SampleSweepRequest } from "./ui/SampleSweepModal"
 import { Slider } from "./ui/Slider"
-import coreConstants from "../../core/constants.json"
 
 const TRAIN_API_URL = "http://localhost:8003"
 const TRAIN_WS_URL = "ws://localhost:8003/ws"
@@ -119,7 +133,8 @@ export function TrainingView() {
   // First channel in the contiguous substrate RGB window. The renderer maps
   // start/start+1/start+2 to red/green/blue respectively.
   const [substrateChannelStart, setSubstrateChannelStart] = useState(0)
-  const [morphologyGradientVisible, setMorphologyGradientVisible] = useState(true)
+  const [morphologyGradientVisible, setMorphologyGradientVisible] =
+    useState(true)
   const [morphologyDensityVisible, setMorphologyDensityVisible] = useState(true)
   // [-2,2] exponential background contrast. Negative suppresses submaximal
   // field values, 0 is identity, positive accentuates faint values.
@@ -138,11 +153,16 @@ export function TrainingView() {
   const [gradientExponent, setGradientExponent] = useState(1)
   const [particleRenderMode, setParticleRenderMode] =
     useState<ParticleRenderMode>("dots-white")
+  const [boundaryGradientScale, setBoundaryGradientScale] = useState(0.01)
   const [particleRadiusPx, setParticleRadiusPx] = useState(4)
   const [frontendParticleCap, setFrontendParticleCap] = useState(2)
   const [frontendParticleCapInput, setFrontendParticleCapInput] = useState("2")
-  const [frontendInitialParticleCount, setFrontendInitialParticleCount] = useState(1)
-  const [frontendInitialParticleCountInput, setFrontendInitialParticleCountInput] = useState("1")
+  const [frontendInitialParticleCount, setFrontendInitialParticleCount] =
+    useState(1)
+  const [
+    frontendInitialParticleCountInput,
+    setFrontendInitialParticleCountInput,
+  ] = useState("1")
   const particleCapRunRef = useRef<string | null>(null)
   const [targetVisible, setTargetVisible] = useState(true)
   const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(1)
@@ -178,22 +198,30 @@ export function TrainingView() {
       : latest
   const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
     useState<ChemicalCommunicationArchitecture | null>(null)
-  const [particleDensityOverride, setParticleDensityOverride] = useState<number | null>(null)
+  const [particleDensityOverride, setParticleDensityOverride] = useState<
+    number | null
+  >(null)
   useEffect(() => {
     setChemicalArchitectureOverride(null)
     setParticleDensityOverride(null)
   }, [viewingRunId, activeConfig?.generation])
-  const effectiveParticleDensity = particleDensityOverride
-    ?? activeConfig?.particleDensityMultiplier
-    ?? 1
-  const playbackConfig = useMemo(() => activeConfig
-    ? configAtDensity({
-        ...activeConfig,
-        chemicalCommunicationArchitecture:
-          chemicalArchitectureOverride
-          ?? chemicalCommunicationArchitectureFromConfig(activeConfig),
-      }, effectiveParticleDensity)
-    : null, [activeConfig, chemicalArchitectureOverride, effectiveParticleDensity])
+  const effectiveParticleDensity =
+    particleDensityOverride ?? activeConfig?.particleDensityMultiplier ?? 1
+  const playbackConfig = useMemo(
+    () =>
+      activeConfig
+        ? configAtDensity(
+            {
+              ...activeConfig,
+              chemicalCommunicationArchitecture:
+                chemicalArchitectureOverride ??
+                chemicalCommunicationArchitectureFromConfig(activeConfig),
+            },
+            effectiveParticleDensity
+          )
+        : null,
+    [activeConfig, chemicalArchitectureOverride, effectiveParticleDensity]
+  )
   useEffect(() => {
     const maxStart = Math.max(0, (activeConfig?.channels ?? 3) - 3)
     setSubstrateChannelStart((start) => Math.min(start, maxStart))
@@ -210,7 +238,9 @@ export function TrainingView() {
   }, [viewingRunId, activeConfig?.generation])
   const previewConfig = useMemo(() => {
     if (!playbackConfig || !policyExploration) return playbackConfig
-    const policyArchitecture = policyArchitectureForCellMemory(policyExploration.cellMemory)
+    const policyArchitecture = policyArchitectureForCellMemory(
+      policyExploration.cellMemory
+    )
     return {
       ...playbackConfig,
       cellMemory: policyExploration.cellMemory,
@@ -221,14 +251,16 @@ export function TrainingView() {
         playbackConfig.channels,
         policyExploration.hiddenWidth,
         policyArchitecture,
-        explorationBrainSeed(playbackConfig.seed, policyExploration.variant),
+        explorationBrainSeed(playbackConfig.seed, policyExploration.variant)
       ),
     }
   }, [playbackConfig, policyExploration])
-  const displayedCellMemory = policyExploration?.cellMemory
-    ?? (activeConfig ? cellMemoryFromConfig(activeConfig) : "recurrent")
-  const displayedHiddenWidth = policyExploration?.hiddenWidth
-    ?? (activeConfig ? hiddenLayersFromConfig(activeConfig)[0] : 128)
+  const displayedCellMemory =
+    policyExploration?.cellMemory ??
+    (activeConfig ? cellMemoryFromConfig(activeConfig) : "recurrent")
+  const displayedHiddenWidth =
+    policyExploration?.hiddenWidth ??
+    (activeConfig ? hiddenLayersFromConfig(activeConfig)[0] : 128)
   const [replayStep, setReplayStep] = useState(0)
   // Live particle count — grows as growth splits (see GpuSimulation's
   // own particleCount getter), reported alongside the step by
@@ -247,7 +279,13 @@ export function TrainingView() {
     setFrontendParticleCapInput(String(activeConfig.particles))
     const initialCount = Math.min(
       activeConfig.particles,
-      Math.max(1, Math.floor(activeConfig.initialParticleCount ?? coreConstants.INITIAL_PARTICLE_COUNT))
+      Math.max(
+        1,
+        Math.floor(
+          activeConfig.initialParticleCount ??
+            coreConstants.INITIAL_PARTICLE_COUNT
+        )
+      )
     )
     setFrontendInitialParticleCount(initialCount)
     setFrontendInitialParticleCountInput(String(initialCount))
@@ -258,11 +296,21 @@ export function TrainingView() {
     setFrontendParticleCapInput(String(playbackConfig.particles))
     const initialCount = Math.min(
       playbackConfig.particles,
-      Math.max(1, Math.floor(playbackConfig.initialParticleCount ?? coreConstants.INITIAL_PARTICLE_COUNT)),
+      Math.max(
+        1,
+        Math.floor(
+          playbackConfig.initialParticleCount ??
+            coreConstants.INITIAL_PARTICLE_COUNT
+        )
+      )
     )
     setFrontendInitialParticleCount(initialCount)
     setFrontendInitialParticleCountInput(String(initialCount))
-  }, [effectiveParticleDensity, playbackConfig?.particles, playbackConfig?.initialParticleCount])
+  }, [
+    effectiveParticleDensity,
+    playbackConfig?.particles,
+    playbackConfig?.initialParticleCount,
+  ])
   // null = following this generation's own trained physics/growth values;
   // non-null once either live-control panel's sliders have been touched.
   // Reset whenever the run or the generation
@@ -334,9 +382,12 @@ export function TrainingView() {
 
   const handleSampleSweep = async (request: SampleSweepRequest) => {
     const canvas = gridCanvasRef.current
-    if (!canvas || !physicsValues) return
-    const combinations: Array<Record<string, number>> = []
-    const visit = (axisIndex: number, values: Record<string, number>) => {
+    if (!canvas || !physicsValues || !activeConfig) return
+    const combinations: Array<Partial<Record<SweepParameterKey, number>>> = []
+    const visit = (
+      axisIndex: number,
+      values: Partial<Record<SweepParameterKey, number>>
+    ) => {
       if (axisIndex === request.axes.length) {
         combinations.push({ ...values })
         return
@@ -356,20 +407,65 @@ export function TrainingView() {
     setSampleTotal(combinations.length)
     setSampleError(null)
     const basePhysics = { ...physicsValues }
-    const keyLabel = (key: string) => key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
-    const valueLabel = (value: number) => Number(value.toPrecision(12)).toString()
-    const samples = combinations.map((combination) => ({
-      physics: { ...basePhysics, ...combination },
-      filename: `${request.axes.map((axis) => `${keyLabel(axis.key)}=${valueLabel(combination[axis.key])}`).join(",")}.png`,
-    }))
+    const keyLabel = (key: string) =>
+      key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`)
+    const valueLabel = (value: number) =>
+      Number(value.toPrecision(12)).toString()
 
     try {
+      const densityPhysicsKeys = [
+        "particleMass",
+        "particleVolume",
+        "chemicalGradientInputScale",
+        "chemicalProjectionWeight",
+        "depositSigma",
+        "splitDisplacement",
+        "splatRadius",
+        "repulsionStrength",
+        "repulsionMaxDelta",
+      ] as const satisfies readonly (keyof PhysicsSettings)[]
+      const samples = combinations.map((combination) => {
+        const density = combination.particleDensityMultiplier
+        const resolvedConfig =
+          density === undefined ? null : configAtDensity(activeConfig, density)
+        if (resolvedConfig && resolvedConfig.particles > MAX_PARTICLES) {
+          throw new Error(
+            `Particle density ${density}× requires ${resolvedConfig.particles.toLocaleString()} particles, ` +
+              `above the viewer limit of ${MAX_PARTICLES.toLocaleString()}.`
+          )
+        }
+        const physics = { ...basePhysics }
+        if (resolvedConfig) {
+          const resolvedPhysics = physicsSettingsFromConfig(resolvedConfig)
+          for (const key of densityPhysicsKeys)
+            physics[key] = resolvedPhysics[key]
+        }
+        for (const axis of request.axes) {
+          if (axis.key !== "particleDensityMultiplier") {
+            physics[axis.key] = combination[axis.key]!
+          }
+        }
+        return {
+          physics,
+          particleCap: resolvedConfig?.particles ?? frontendParticleCap,
+          initialParticleCount:
+            resolvedConfig?.initialParticleCount ??
+            frontendInitialParticleCount,
+          particleDensityMultiplier: density ?? effectiveParticleDensity,
+          particleRadiusPx:
+            particleRadiusPx / Math.sqrt(density ?? effectiveParticleDensity),
+          filename: `${request.axes.map((axis) => `${keyLabel(axis.key)}=${valueLabel(combination[axis.key]!)}`).join(",")}.png`,
+        }
+      })
       const captures = await canvas.collectSamples(
         samples,
         request.steps,
         basePhysics,
+        frontendParticleCap,
+        frontendInitialParticleCount,
+        particleRadiusPx,
         setSampleCompleted,
-        controller.signal,
+        controller.signal
       )
       const zip = await createZip(captures)
       const generation = activeConfig?.generation ?? "unknown"
@@ -401,25 +497,6 @@ export function TrainingView() {
         <section>
           <h2>Rollout</h2>
           <div className="stat-row">
-            <span>Step (replay)</span>
-            <span>
-              {activeConfig
-                ? `${replayStep} / ${activeConfig.macroSteps}`
-                : "—"}
-            </span>
-          </div>
-          {/* Live count, not the cap — grows as growth splits. */}
-          <div className="stat-row">
-            <span>Cells</span>
-            <span>
-              {activeConfig ? `${cellCount} / ${frontendParticleCap}` : "—"}
-            </span>
-          </div>
-          <div className="stat-row">
-            <span>All-time best</span>
-            <span>{activeStat ? activeStat.allTimeBest.toFixed(3) : "—"}</span>
-          </div>
-          <div className="stat-row">
             <span>Training particle cap</span>
             <span>{activeConfig ? activeConfig.particles : "—"}</span>
           </div>
@@ -435,17 +512,24 @@ export function TrainingView() {
             <span>Channels</span>
             <span>{activeConfig ? activeConfig.channels : "—"}</span>
           </div>
+        </section>
+
+        <section>
+          <h2>Simulation</h2>
           <div className="stat-row">
             <span>Cell memory</span>
             <select
+              className="select"
               aria-label="Cell memory"
               value={displayedCellMemory}
               disabled={!activeConfig}
-              onChange={(event) => setPolicyExploration({
-                cellMemory: event.target.value as CellMemory,
-                hiddenWidth: displayedHiddenWidth,
-                variant: 0,
-              })}
+              onChange={(event) =>
+                setPolicyExploration({
+                  cellMemory: event.target.value as CellMemory,
+                  hiddenWidth: displayedHiddenWidth,
+                  variant: 0,
+                })
+              }
             >
               <option value="none">None</option>
               <option value="recurrent">Recurrent</option>
@@ -454,89 +538,101 @@ export function TrainingView() {
           <div className="stat-row">
             <span>Hidden layer</span>
             <select
+              className="select"
               aria-label="Hidden layer width"
               value={displayedHiddenWidth}
               disabled={!activeConfig}
-              onChange={(event) => setPolicyExploration({
-                cellMemory: displayedCellMemory,
-                hiddenWidth: Number(event.target.value),
-                variant: 0,
-              })}
+              onChange={(event) =>
+                setPolicyExploration({
+                  cellMemory: displayedCellMemory,
+                  hiddenWidth: Number(event.target.value),
+                  variant: 0,
+                })
+              }
             >
               {[16, 32, 64, 128, 256].map((width) => (
-                <option key={width} value={width}>{width}</option>
+                <option key={width} value={width}>
+                  {width}
+                </option>
               ))}
             </select>
           </div>
           <div className="stat-row">
             <span>Brain source</span>
             <button
-              className="icon-button"
+              className="select simulation-control-button"
               disabled={!policyExploration}
               onClick={() => setPolicyExploration(null)}
               title="Restore the selected generation's trained brain"
               aria-label="Restore trained brain"
             >
-              {policyExploration ? `Seeded random #${policyExploration.variant + 1} ↺` : "Trained"}
+              {policyExploration
+                ? `Seeded random #${policyExploration.variant + 1} ↺`
+                : "Trained"}
             </button>
           </div>
           <div className="stat-row">
             <span>Chemical architecture</span>
             <select
+              className="select"
               aria-label="Chemical architecture"
-              value={playbackConfig?.chemicalCommunicationArchitecture ?? "cell-owned-projection"}
+              value={
+                playbackConfig?.chemicalCommunicationArchitecture ??
+                "cell-owned-projection"
+              }
               disabled={!activeConfig}
               onChange={(event) => {
-                const selected = event.target.value as ChemicalCommunicationArchitecture
+                const selected = event.target
+                  .value as ChemicalCommunicationArchitecture
                 const trained = activeConfig
                   ? chemicalCommunicationArchitectureFromConfig(activeConfig)
                   : "cell-owned-projection"
-                setChemicalArchitectureOverride(selected === trained ? null : selected)
+                setChemicalArchitectureOverride(
+                  selected === trained ? null : selected
+                )
               }}
             >
-              <option value="cell-owned-projection">Cell-owned projection</option>
-              <option value="persistent-environment">Persistent environment</option>
+              <option value="cell-owned-projection">
+                Cell-owned projection
+              </option>
+              <option value="persistent-environment">
+                Persistent environment
+              </option>
             </select>
           </div>
           <div className="stat-row">
             <span>Particle density</span>
             <select
+              className="select"
               aria-label="Particle density"
               value={effectiveParticleDensity}
               disabled={!activeConfig}
               onChange={(event) => {
                 const selected = Number(event.target.value)
                 const trained = activeConfig?.particleDensityMultiplier ?? 1
-                setParticleDensityOverride(selected === trained ? null : selected)
+                setParticleDensityOverride(
+                  selected === trained ? null : selected
+                )
                 setPhysicsOverride(null)
               }}
             >
-              {Array.from(new Set([0.5, 1, 2, effectiveParticleDensity])).sort((a, b) => a - b).map((density) => (
-                <option
-                  key={density}
-                  value={density}
-                  disabled={Boolean(activeConfig && Math.floor(activeConfig.particles * density + 0.5) > MAX_PARTICLES)}
-                >
-                  {density}×
-                </option>
-              ))}
+              {Array.from(new Set([0.5, 1, 2, effectiveParticleDensity]))
+                .sort((a, b) => a - b)
+                .map((density) => (
+                  <option
+                    key={density}
+                    value={density}
+                    disabled={Boolean(
+                      activeConfig &&
+                      Math.floor(activeConfig.particles * density + 0.5) >
+                        MAX_PARTICLES
+                    )}
+                  >
+                    {density}×
+                  </option>
+                ))}
             </select>
           </div>
-        </section>
-
-        <section>
-          <h2>Rendering</h2>
-          <label className="slider-row">
-            <span>Particle size</span>
-            <Slider
-              min={1}
-              max={16}
-              step={1}
-              value={particleRadiusPx}
-              onChange={setParticleRadiusPx}
-            />
-            <span className="slider-value">{particleRadiusPx}px</span>
-          </label>
           <label className="slider-row">
             <span>Playback particle cap</span>
             <input
@@ -549,7 +645,11 @@ export function TrainingView() {
               onChange={(e) => {
                 setFrontendParticleCapInput(e.currentTarget.value)
                 const value = e.currentTarget.valueAsNumber
-                if (Number.isFinite(value) && value >= 2 && value <= MAX_PARTICLES) {
+                if (
+                  Number.isFinite(value) &&
+                  value >= 2 &&
+                  value <= MAX_PARTICLES
+                ) {
                   const cap = Math.floor(value)
                   setFrontendParticleCap(cap)
                   if (frontendInitialParticleCount > cap) {
@@ -562,7 +662,12 @@ export function TrainingView() {
                 const value = e.currentTarget.valueAsNumber
                 const cap = Math.min(
                   MAX_PARTICLES,
-                  Math.max(2, Number.isFinite(value) ? Math.floor(value) : frontendParticleCap)
+                  Math.max(
+                    2,
+                    Number.isFinite(value)
+                      ? Math.floor(value)
+                      : frontendParticleCap
+                  )
                 )
                 setFrontendParticleCapInput(String(cap))
                 setFrontendParticleCap(cap)
@@ -585,7 +690,11 @@ export function TrainingView() {
               onChange={(e) => {
                 setFrontendInitialParticleCountInput(e.currentTarget.value)
                 const value = e.currentTarget.valueAsNumber
-                if (Number.isFinite(value) && value >= 1 && value <= frontendParticleCap) {
+                if (
+                  Number.isFinite(value) &&
+                  value >= 1 &&
+                  value <= frontendParticleCap
+                ) {
                   setFrontendInitialParticleCount(Math.floor(value))
                 }
               }}
@@ -595,13 +704,36 @@ export function TrainingView() {
                   frontendParticleCap,
                   Math.max(
                     1,
-                    Number.isFinite(value) ? Math.floor(value) : frontendInitialParticleCount
+                    Number.isFinite(value)
+                      ? Math.floor(value)
+                      : frontendInitialParticleCount
                   )
                 )
                 setFrontendInitialParticleCountInput(String(count))
                 setFrontendInitialParticleCount(count)
               }}
             />
+          </label>
+          <p className="hint">
+            Initial agents occupy a perfect hexagonal lattice clipped by
+            circular radius at {Math.round(densityModel.INITIAL_PACKING_SPACING_SCALE * 100)}%
+            of daughter split spacing. Counts that finish a radial shell are
+            exactly rotationally balanced; partial shells are spread evenly.
+          </p>
+        </section>
+
+        <section>
+          <h2>Rendering</h2>
+          <label className="slider-row">
+            <span>Particle size</span>
+            <Slider
+              min={1}
+              max={16}
+              step={1}
+              value={particleRadiusPx}
+              onChange={setParticleRadiusPx}
+            />
+            <span className="slider-value">{particleRadiusPx}px</span>
           </label>
           <label className="slider-row">
             <span>Particles</span>
@@ -616,6 +748,7 @@ export function TrainingView() {
               <option value="dots-neural-color">Dots (neural RGB)</option>
               <option value="dots-internal-state">Chemical memory</option>
               <option value="dots-chemical-levels">Chemical levels</option>
+              <option value="dots-boundary-value">Boundary value</option>
               <option value="dots-activation">Dots (neurons)</option>
               <option value="dots-activation-translucent">
                 Dots (translucent neurons)
@@ -646,13 +779,20 @@ export function TrainingView() {
                 value={neuralColorAlpha}
                 onChange={setNeuralColorAlpha}
               />
-              <span className="slider-value">{neuralColorAlpha.toFixed(2)}</span>
+              <span className="slider-value">
+                {neuralColorAlpha.toFixed(2)}
+              </span>
             </label>
           )}
-          {(particleRenderMode === "dots-internal-state" || particleRenderMode === "dots-chemical-levels") && (
+          {(particleRenderMode === "dots-internal-state" ||
+            particleRenderMode === "dots-chemical-levels") && (
             <>
               <label className="slider-row">
-                <span>{particleRenderMode === "dots-internal-state" ? "Chemical memory alpha" : "Chemical levels alpha"}</span>
+                <span>
+                  {particleRenderMode === "dots-internal-state"
+                    ? "Chemical memory alpha"
+                    : "Chemical levels alpha"}
+                </span>
                 <Slider
                   min={0}
                   max={1}
@@ -660,27 +800,69 @@ export function TrainingView() {
                   value={internalStateAlpha}
                   onChange={setInternalStateAlpha}
                 />
-                <span className="slider-value">{internalStateAlpha.toFixed(2)}</span>
+                <span className="slider-value">
+                  {internalStateAlpha.toFixed(2)}
+                </span>
               </label>
               <div className="channel-window-control">
                 <div className="channel-window-label">
                   <span>Channels</span>
-                  <span>{internalStateChannelStart}–{internalStateChannelStart + 2}</span>
+                  <span>
+                    {internalStateChannelStart}–{internalStateChannelStart + 2}
+                  </span>
                 </div>
                 <ChannelWindowSlider
-                  channels={particleRenderMode === "dots-internal-state" ? 8 : (activeConfig?.channels ?? 8)}
+                  channels={
+                    particleRenderMode === "dots-internal-state"
+                      ? 8
+                      : (activeConfig?.channels ?? 8)
+                  }
                   value={internalStateChannelStart}
                   onChange={setInternalStateChannelStart}
-                  channelKind={particleRenderMode === "dots-internal-state" ? "chemical memory" : "chemical levels"}
+                  channelKind={
+                    particleRenderMode === "dots-internal-state"
+                      ? "chemical memory"
+                      : "chemical levels"
+                  }
                 />
               </div>
-              {particleRenderMode === "dots-internal-state" && previewConfig && cellMemoryFromConfig(previewConfig) !== "recurrent" && (
-                <p className="hint">Cell memory is disabled, so these channels remain zero.</p>
-              )}
-              {particleRenderMode === "dots-chemical-levels" && activeConfig
-                && chemicalCommunicationArchitectureFromConfig(previewConfig ?? activeConfig) !== "cell-owned-projection" && (
-                <p className="hint">Chemical levels are inactive in persistent-environment mode.</p>
-              )}
+              {particleRenderMode === "dots-internal-state" &&
+                previewConfig &&
+                cellMemoryFromConfig(previewConfig) !== "recurrent" && (
+                  <p className="hint">
+                    Cell memory is disabled, so these channels remain zero.
+                  </p>
+                )}
+              {particleRenderMode === "dots-chemical-levels" &&
+                activeConfig &&
+                chemicalCommunicationArchitectureFromConfig(
+                  previewConfig ?? activeConfig
+                ) !== "cell-owned-projection" && (
+                  <p className="hint">
+                    Chemical levels are inactive in persistent-environment mode.
+                  </p>
+                )}
+            </>
+          )}
+          {particleRenderMode === "dots-boundary-value" && (
+            <>
+              <label className="slider-row">
+                <span>Boundary g0</span>
+                <Slider
+                  min={0.001}
+                  max={0.1}
+                  step={0.001}
+                  value={boundaryGradientScale}
+                  onChange={setBoundaryGradientScale}
+                />
+                <span className="slider-value">
+                  {boundaryGradientScale.toFixed(3)}
+                </span>
+              </label>
+              <p className="hint">
+                Cell color shows |∇ρ|/(|∇ρ|+g0): dark blue is interior, teal is
+                0.5, and yellow is a strong boundary.
+              </p>
             </>
           )}
           {particleRenderMode === "dots-activation-translucent" && (
@@ -729,7 +911,9 @@ export function TrainingView() {
               <option value="pressure">Pressure</option>
               <option value="shear">Shear</option>
               <option value="repulsion">Repulsion field</option>
-              <option value="morphology">Policy morphology (gradient + density)</option>
+              <option value="morphology">
+                Policy morphology (gradient + density)
+              </option>
               <option value="substrate">Substrate</option>
               <option value="growth">Growth (cividis)</option>
               <option value="gradient">Boundary gradient</option>
@@ -741,7 +925,9 @@ export function TrainingView() {
                 <input
                   type="checkbox"
                   checked={morphologyGradientVisible}
-                  onChange={(e) => setMorphologyGradientVisible(e.target.checked)}
+                  onChange={(e) =>
+                    setMorphologyGradientVisible(e.target.checked)
+                  }
                 />
                 Show morphology gradient (R/G)
               </label>
@@ -749,15 +935,12 @@ export function TrainingView() {
                 <input
                   type="checkbox"
                   checked={morphologyDensityVisible}
-                  onChange={(e) => setMorphologyDensityVisible(e.target.checked)}
+                  onChange={(e) =>
+                    setMorphologyDensityVisible(e.target.checked)
+                  }
                 />
                 Show morphology density (B)
               </label>
-              <p className="hint">
-                R/G encode the signed world-space density gradient (0.5 is
-                zero); B is the blurred, normalized density. These are the
-                exact quantities sampled by the policy before heading rotation.
-              </p>
             </>
           )}
           {fieldMode === "substrate" && activeConfig && (
@@ -765,7 +948,11 @@ export function TrainingView() {
               <div className="channel-window-label">
                 <span>RGB channels</span>
                 <span>
-                  {substrateChannelStart}–{Math.min(activeConfig.channels - 1, substrateChannelStart + 2)}
+                  {substrateChannelStart}–
+                  {Math.min(
+                    activeConfig.channels - 1,
+                    substrateChannelStart + 2
+                  )}
                 </span>
               </div>
               <ChannelWindowSlider
@@ -871,6 +1058,7 @@ export function TrainingView() {
             activationAlpha={activationAlpha}
             neuralColorAlpha={neuralColorAlpha}
             internalStateAlpha={internalStateAlpha}
+            boundaryGradientScale={boundaryGradientScale}
             internalStateChannelStart={internalStateChannelStart}
             growthAxisLengthPx={growthAxisLengthPx}
             tool={tool}
@@ -882,6 +1070,19 @@ export function TrainingView() {
             loopAtTrainedSteps={loopAtTrainedSteps}
             paused={paused}
           />
+          <div className="viewport-telemetry" aria-label="Rollout status">
+            <span>
+              {activeConfig
+                ? `${replayStep} / ${activeConfig.macroSteps} steps`
+                : "— steps"}
+            </span>
+            {/* Live count, not the cap — grows as growth splits. */}
+            <span>
+              {activeConfig
+                ? `${cellCount} / ${frontendParticleCap} cells`
+                : "— cells"}
+            </span>
+          </div>
         </div>
         <div className="toolbar">
           <div className="tool-buttons-wrap">
@@ -1020,7 +1221,9 @@ export function TrainingView() {
                 setSampleError(null)
                 setSampleModalOpen(true)
               }}
-              disabled={!activeConfig || !physicsValues || sampleRunning || recording}
+              disabled={
+                !activeConfig || !physicsValues || sampleRunning || recording
+              }
               title="Collect a matrix of parameter-sweep screenshots"
               aria-label="Collect parameter samples"
             >
@@ -1033,9 +1236,10 @@ export function TrainingView() {
                 setPolicyExploration((current) => ({
                   cellMemory: displayedCellMemory,
                   hiddenWidth: displayedHiddenWidth,
-                  variant: current
-                    && current.cellMemory === displayedCellMemory
-                    && current.hiddenWidth === displayedHiddenWidth
+                  variant:
+                    current &&
+                    current.cellMemory === displayedCellMemory &&
+                    current.hiddenWidth === displayedHiddenWidth
                       ? current.variant + 1
                       : 0,
                 }))
@@ -1178,6 +1382,7 @@ export function TrainingView() {
       {sampleModalOpen && physicsValues && (
         <SampleSweepModal
           current={physicsValues}
+          currentDensity={effectiveParticleDensity}
           defaultSteps={activeConfig?.macroSteps ?? 1}
           running={sampleRunning}
           completed={sampleCompleted}

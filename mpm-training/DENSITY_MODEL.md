@@ -69,34 +69,42 @@ These quantities are lengths measured in cell spacings. They scale with `s`.
 | Quantity | Proposed resolution | Current reference ratio |
 | --- | --- | --- |
 | daughter separation | `h0 * s` | `1.0 h` |
-| chemical deposit sigma | `chemical_radius_in_cells * h * FIELD_N` field texels | `0.469 h` |
 | repulsion splat sigma | `repulsion_radius_in_cells * h` world units | `1.481 h` |
 | directional deposit offset, if restored | `deposit_offset_in_cells * h` | current `DEPOSIT_DISTANCE` is inactive |
 
 The active chemical parameter is `DEPOSIT_SIGMA`, not `DEPOSIT_DISTANCE`.
 `DEPOSIT_DISTANCE` is currently a legacy uniform slot and deposits are centered
-under each particle. `DEPOSIT_SIGMA` is expressed in chemical-field texels while
-split displacement is expressed in world units; the resolver should eliminate
-that mixed-unit interface.
+under each particle. `DEPOSIT_SIGMA` is expressed in chemical-field texels.
 
-Scaling the deposit kernel with `h` preserves the graph neighborhood: a nearest
-neighbor sees approximately the same kernel weight at each density. Because
-particle count per area grows as `1/h^2` and kernel area shrinks as `h^2`, the
-mean projected chemical value also remains approximately constant without an
-extra amplitude correction.
-
-The chemical Sobel gradient is not divided by a world-space distance. A field
-pattern that is identical in particle coordinates therefore has a raw gradient
-that scales approximately as `1/s`. To keep the policy input invariant:
+Density model v1 scaled this already-sub-texel kernel with `h`: 0.458 texels at
+q=0.5, 0.324 at q=1, and 0.229 at q=2. The fixed 256² observation grid cannot
+represent that continuous shrinking-support argument; increasingly many cells
+alias onto the same texels at high q. Model v2 instead treats chemistry as a
+fixed-grid continuum observation:
 
 ```text
-chemical_gradient_input_scale(q)
-    = reference_chemical_gradient_input_scale / s
+deposit_sigma(q)                  = reference_deposit_sigma
+chemical_projection_weight(q)    = 1 / q
+chemical_gradient_input_scale(q) = reference_chemical_gradient_input_scale
 ```
 
-This should be verified from captured policy-input distributions rather than
-accepted only from dimensional analysis, because the bounded deposit kernel and
-field discretization matter at the coarsest densities.
+Thus q times as many particles publish at 1/q amplitude through the same
+grid-resolved kernel. The GPU density regression verifies projected mass,
+particle-sampled signal, represented population N/q, and controlled spatial
+spread across q={0.5,1,2}.
+
+Density model v3 also removes particle-slot identity from the branching
+process. Initial headings and division thresholds sample a rollout-seeded
+128x128 world-space random field. Nearby numerical samples therefore share the
+same macroscopic stochastic forcing at every q. After a conservative split,
+both daughters advance a lineage-generation counter so the next threshold is a
+new spatial-field layer rather than a child-slot hash.
+
+This intentionally changes stochastic q=1 trajectories relative to model v2;
+the mechanical and chemical q=1 constants remain unchanged. Sample sidecars
+record `firstCapStep`, toroidal envelope width/height/area, RMS radius, and p95
+radius so learned-policy comparisons measure spatial convergence, not only
+final particle count.
 
 ### 2. Per-particle extensive quantities
 
@@ -114,10 +122,9 @@ grid mass, and momentum sampling consistent as particle resolution changes.
 The current compile-time values are both `1.0`; keeping them fixed makes a
 twice-as-dense sample contain twice as much physical material.
 
-Any future per-particle source that is integrated over world area should use the
-same `1/q` weight. A source whose support radius already scales with `h`, such as
-the proposed chemical splat above, should not also receive this correction: the
-shrinking kernel area has already supplied it.
+Any future per-particle source integrated over world area should use the same
+`1/q` weight. Chemical projection now follows this rule explicitly because its
+support is fixed on the numerical observation grid.
 
 ### 3. Continuum/world-scale quantities
 

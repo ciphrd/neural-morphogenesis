@@ -199,7 +199,7 @@ export class MpmCore {
     this.device = device;
     const f32 = 4;
 
-    this.positions = device.createBuffer({ size: MAX_PARTICLES * 2 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.positions = device.createBuffer({ size: MAX_PARTICLES * 2 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.velocities = device.createBuffer({ size: MAX_PARTICLES * 2 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.F = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.C = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
@@ -388,6 +388,24 @@ export class MpmCore {
   setActiveCount(count: number): void {
     this._activeCount = count;
     writeFloat32(this.device, this.activeCountUniform, 0, new Uint32Array([count]));
+  }
+
+  /** Diagnostic-only active position readback, used once per sample sweep. */
+  async readPositions(): Promise<Float32Array> {
+    const byteLength = this._activeCount * 2 * 4;
+    if (byteLength === 0) return new Float32Array();
+    const staging = this.device.createBuffer({
+      size: byteLength,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(this.positions, 0, staging, 0, byteLength);
+    this.device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(staging.getMappedRange().slice(0));
+    staging.unmap();
+    staging.destroy();
+    return result;
   }
 
   /** Zero/identity-fills velocities/F/C/ParticleRest for [0, maxActive) — call once

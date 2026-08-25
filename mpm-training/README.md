@@ -34,8 +34,13 @@ cd trainer
 
 `--particles` and `--initial-particles` are the reference counts at `1×`.
 For multiplier `q`, spacing scales as `1/sqrt(q)`, counts scale as `q`, and
-per-particle mass/rest area scale as `1/q`. Chemical and repulsion length scales
-and chemical-gradient input normalization are resolved from the same preset.
+per-particle mass/rest area scale as `1/q`. Chemical and repulsion settings are
+resolved from the same preset. The chemical kernel and gradient normalization
+remain fixed in field-texel space; each particle contributes `1 / density` so
+the fixed-resolution field observes a comparable continuum concentration.
+A rollout-seeded world-space random field also supplies initial headings and
+lifecycle thresholds, so changing q no longer changes stochastic forcing merely
+because numerical particle slots were added or removed.
 Workers allocate once for the largest requested cap and switch density through
 runtime uniforms between rollouts.
 

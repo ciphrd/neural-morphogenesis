@@ -39,7 +39,7 @@ import { DX, GRID_N, INV_DX, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
 export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient";
-export type ParticleRenderMode = "dots-white" | "dots-neural-color" | "dots-internal-state" | "dots-chemical-levels" | "dots-activation" | "dots-activation-translucent" | "directional-arrows";
+export type ParticleRenderMode = "dots-white" | "dots-neural-color" | "dots-internal-state" | "dots-chemical-levels" | "dots-boundary-value" | "dots-activation" | "dots-activation-translucent" | "directional-arrows";
 
 const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "growth" | "gradient">, number> = {
   none: 0,
@@ -95,6 +95,9 @@ export class Renderer {
   private readonly chemicalLevelsParticlePipeline: GPURenderPipeline;
   private readonly internalStateParticleBindGroup: GPUBindGroup;
   private readonly internalStateStyleUniform: GPUBuffer;
+  private readonly boundaryValueParticlePipeline: GPURenderPipeline;
+  private readonly boundaryValueParticleBindGroup: GPUBindGroup;
+  private readonly boundaryGradientScaleUniform: GPUBuffer;
   private readonly activationAlphaUniform: GPUBuffer;
   private readonly growthAxisPipeline: GPURenderPipeline;
   private readonly growthAxisBindGroup: GPUBindGroup;
@@ -352,6 +355,37 @@ export class Renderer {
         { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
         { binding: 4, resource: { buffer: mpmCore.rest } },
         { binding: 8, resource: { buffer: this.internalStateStyleUniform } },
+      ],
+    });
+
+    const boundaryValueLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+        { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 9, visibility: GPUShaderStage.VERTEX, texture: { sampleType: "unfilterable-float" } },
+        { binding: 10, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+      ],
+    });
+    this.boundaryValueParticlePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [boundaryValueLayout] }),
+      vertex: { module: renderModule, entryPoint: "boundaryValueParticleVertex" },
+      fragment: { module: renderModule, entryPoint: "boundaryValueParticleFragment", targets: [{ format, blend: alphaBlend() }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.boundaryGradientScaleUniform = device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    writeFloat32(device, this.boundaryGradientScaleUniform, 0, new Float32Array([0.01]));
+    this.boundaryValueParticleBindGroup = device.createBindGroup({
+      layout: boundaryValueLayout,
+      entries: [
+        { binding: 0, resource: { buffer: mpmCore.positions } },
+        { binding: 1, resource: { buffer: this.particleRadiusUniform } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
+        { binding: 9, resource: mpmCore.morphologyTexture.createView() },
+        { binding: 10, resource: { buffer: this.boundaryGradientScaleUniform } },
       ],
     });
 
@@ -729,6 +763,16 @@ export class Renderer {
     }
   }
 
+  /** Half-activation gradient g0 for wb=|grad(rho)|/(|grad(rho)|+g0). */
+  setBoundaryGradientScale(g0: number): void {
+    writeFloat32(
+      this.device,
+      this.boundaryGradientScaleUniform,
+      0,
+      new Float32Array([Math.max(1e-8, g0)]),
+    );
+  }
+
   setActivationAlpha(alpha: number): void {
     this.activationAlpha = Math.min(1, Math.max(0, alpha));
     if (this.particleRenderMode === "dots-activation-translucent") {
@@ -939,6 +983,10 @@ export class Renderer {
         pass.setPipeline(this.chemicalLevelsParticlePipeline);
         pass.setBindGroup(0, this.internalStateParticleBindGroup);
         pass.draw(6, activeCount);
+      } else if (this.particleRenderMode === "dots-boundary-value") {
+        pass.setPipeline(this.boundaryValueParticlePipeline);
+        pass.setBindGroup(0, this.boundaryValueParticleBindGroup);
+        pass.draw(6, activeCount);
       } else if (this.particleRenderMode === "dots-activation" || this.particleRenderMode === "dots-activation-translucent") {
         pass.setPipeline(this.activationParticlePipeline);
         pass.setBindGroup(0, this.activationParticleBindGroup);
@@ -960,6 +1008,7 @@ export class Renderer {
     this.activationAlphaUniform.destroy();
     this.neuralColorStyleUniform.destroy();
     this.internalStateStyleUniform.destroy();
+    this.boundaryGradientScaleUniform.destroy();
     this.growthAxisStyleUniform.destroy();
     this.growthAxisColorUniform.destroy();
     this.targetRadiusUniform.destroy();

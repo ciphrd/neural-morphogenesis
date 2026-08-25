@@ -62,6 +62,8 @@ interface GridCanvasProps {
   activationAlpha?: number;
   neuralColorAlpha?: number;
   internalStateAlpha?: number;
+  /** Boundary diagnostic half-activation gradient g0. */
+  boundaryGradientScale?: number;
   /** First of three contiguous private-state channels mapped to cell RGB. */
   internalStateChannelStart?: number;
   /** Full-strength axis length in device pixels. */
@@ -141,15 +143,64 @@ export interface GridCanvasHandle {
   /** Runs deterministic rollouts under the already-loaded policy, capturing
    * the rendered final frame of each settings combination as a PNG. */
   collectSamples(
-    samples: Array<{ physics: PhysicsSettings; filename: string }>,
+    samples: Array<{
+      physics: PhysicsSettings;
+      particleCap: number;
+      initialParticleCount: number;
+      particleDensityMultiplier: number;
+      particleRadiusPx: number;
+      filename: string;
+    }>,
     steps: number,
     restorePhysics: PhysicsSettings,
+    restoreParticleCap: number,
+    restoreInitialParticleCount: number,
+    restoreParticleRadiusPx: number,
     onProgress: (completed: number) => void,
     signal: AbortSignal,
   ): Promise<Array<{ filename: string; blob: Blob }>>;
 }
 
 type Status = "loading" | "ready" | "unsupported" | "lost" | "incompatible";
+
+function toroidalSpan(values: number[]): number {
+  if (values.length <= 1) return 0;
+  const sorted = values.map((v) => ((v % 1) + 1) % 1).sort((a, b) => a - b);
+  let largestGap = sorted[0] + 1 - sorted[sorted.length - 1];
+  for (let i = 1; i < sorted.length; i++) largestGap = Math.max(largestGap, sorted[i] - sorted[i - 1]);
+  return 1 - largestGap;
+}
+
+function spatialMetrics(flatPositions: Float32Array) {
+  const count = flatPositions.length / 2;
+  if (count === 0) return { envelopeWidth: 0, envelopeHeight: 0, envelopeArea: 0, rmsRadius: 0, radiusP95: 0 };
+  const xs: number[] = [];
+  const ys: number[] = [];
+  let cosX = 0, sinX = 0, cosY = 0, sinY = 0;
+  for (let i = 0; i < count; i++) {
+    const x = ((flatPositions[i * 2] % 1) + 1) % 1;
+    const y = ((flatPositions[i * 2 + 1] % 1) + 1) % 1;
+    xs.push(x); ys.push(y);
+    cosX += Math.cos(2 * Math.PI * x); sinX += Math.sin(2 * Math.PI * x);
+    cosY += Math.cos(2 * Math.PI * y); sinY += Math.sin(2 * Math.PI * y);
+  }
+  const centerX = ((Math.atan2(sinX, cosX) / (2 * Math.PI)) + 1) % 1;
+  const centerY = ((Math.atan2(sinY, cosY) / (2 * Math.PI)) + 1) % 1;
+  const radii = xs.map((x, i) => {
+    const dx = ((x - centerX + 0.5) % 1 + 1) % 1 - 0.5;
+    const dy = ((ys[i] - centerY + 0.5) % 1 + 1) % 1 - 0.5;
+    return Math.hypot(dx, dy);
+  }).sort((a, b) => a - b);
+  const width = toroidalSpan(xs);
+  const height = toroidalSpan(ys);
+  return {
+    envelopeWidth: width,
+    envelopeHeight: height,
+    envelopeArea: width * height,
+    rmsRadius: Math.sqrt(radii.reduce((sum, r) => sum + r * r, 0) / count),
+    radiusP95: radii[Math.min(radii.length - 1, Math.floor(0.95 * radii.length))],
+  };
+}
 
 /** Sizes `canvas` to a SQUARE that fits inside its own parent element
  * (`.grid-canvas-container`, see this file's own JSX) — the simulation's
@@ -226,6 +277,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     activationAlpha = 0.2,
     neuralColorAlpha = 1,
     internalStateAlpha = 1,
+    boundaryGradientScale = 0.01,
     internalStateChannelStart = 0,
     growthAxisLengthPx = 24,
     accent = 0,
@@ -257,6 +309,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const activationAlphaRef = useRef(activationAlpha);
   const neuralColorAlphaRef = useRef(neuralColorAlpha);
   const internalStateAlphaRef = useRef(internalStateAlpha);
+  const boundaryGradientScaleRef = useRef(boundaryGradientScale);
   const internalStateChannelStartRef = useRef(internalStateChannelStart);
   const growthAxisLengthPxRef = useRef(growthAxisLengthPx);
   const accentRef = useRef(accent);
@@ -388,6 +441,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   activationAlphaRef.current = activationAlpha;
   neuralColorAlphaRef.current = neuralColorAlpha;
   internalStateAlphaRef.current = internalStateAlpha;
+  boundaryGradientScaleRef.current = boundaryGradientScale;
   internalStateChannelStartRef.current = internalStateChannelStart;
   growthAxisLengthPxRef.current = growthAxisLengthPx;
   accentRef.current = accent;
@@ -412,7 +466,16 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       if (canvasRef.current) getRecorder().start(canvasRef.current);
     },
     stopRecording: () => getRecorder().stop("mpm-training"),
-    collectSamples: async (samples, steps, restorePhysics, onProgress, signal) => {
+    collectSamples: async (
+      samples,
+      steps,
+      restorePhysics,
+      restoreParticleCap,
+      restoreInitialParticleCount,
+      restoreParticleRadiusPx,
+      onProgress,
+      signal,
+    ) => {
       const sim = simulationRef.current;
       const context = contextRef.current;
       const canvas = canvasRef.current;
@@ -429,10 +492,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         for (const sample of samples) {
           if (signal.aborted) throw new DOMException("Sample collection cancelled", "AbortError");
           sim.setPhysics(sample.physics);
+          sim.setParticleCap(sample.particleCap);
+          sim.setInitialParticleCount(sample.initialParticleCount);
+          sim.setPointRadiusPx(sample.particleRadiusPx);
           sim.restartRollout();
+          let firstCapStep: number | null = sim.particleCount >= sample.particleCap ? 0 : null;
           for (let step = 0; step < steps; step += 1) {
             if (signal.aborted) throw new DOMException("Sample collection cancelled", "AbortError");
             await sim.step();
+            if (firstCapStep === null && sim.particleCount >= sample.particleCap) firstCapStep = step + 1;
           }
           sim.render(context);
           await device.queue.onSubmittedWorkDone();
@@ -440,11 +508,31 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
             canvas.toBlob((result) => result ? resolve(result) : reject(new Error("Could not capture the simulation canvas.")), "image/png");
           });
           captures.push({ filename: sample.filename, blob });
-          onProgress(captures.length);
+          const positions = await sim.readPositions();
+          const spatial = spatialMetrics(positions);
+          const metadata = {
+            particleDensityMultiplier: sample.particleDensityMultiplier,
+            particleCap: sample.particleCap,
+            initialParticleCount: sample.initialParticleCount,
+            finalParticleCount: sim.particleCount,
+            representedInitialCount: sample.initialParticleCount / sample.particleDensityMultiplier,
+            representedFinalCount: sim.particleCount / sample.particleDensityMultiplier,
+            simulationSteps: steps,
+            firstCapStep,
+            ...spatial,
+          };
+          captures.push({
+            filename: sample.filename.replace(/\.png$/i, ".json"),
+            blob: new Blob([JSON.stringify(metadata, null, 2)], { type: "application/json" }),
+          });
+          onProgress(captures.length / 2);
         }
         return captures;
       } finally {
         sim.setPhysics(restorePhysics);
+        sim.setParticleCap(restoreParticleCap);
+        sim.setInitialParticleCount(restoreInitialParticleCount);
+        sim.setPointRadiusPx(restoreParticleRadiusPx);
         sim.restartRollout();
         batchRunningRef.current = false;
       }
@@ -511,6 +599,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setActivationAlpha(activationAlphaRef.current);
       simulation.setNeuralColorAlpha(neuralColorAlphaRef.current);
       simulation.setInternalStateAlpha(internalStateAlphaRef.current);
+      simulation.setBoundaryGradientScale(boundaryGradientScaleRef.current);
       simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
       if (particleRadiusPxRef.current !== undefined) simulation.setPointRadiusPx(particleRadiusPxRef.current);
       simulation.setGrowthAxisLengthPx(growthAxisLengthPxRef.current);
@@ -812,6 +901,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     simulationRef.current?.setInternalStateAlpha(internalStateAlpha);
   }, [internalStateAlpha]);
+
+  useEffect(() => {
+    simulationRef.current?.setBoundaryGradientScale(boundaryGradientScale);
+  }, [boundaryGradientScale]);
 
   useEffect(() => {
     simulationRef.current?.setInternalStateChannelStart(internalStateChannelStart);
