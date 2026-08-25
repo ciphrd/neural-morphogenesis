@@ -1,4 +1,4 @@
-import type { RunSettings } from "../gpu/types";
+import { cellMemoryFromConfig, chemicalCommunicationArchitectureFromConfig, type RunSettings } from "../gpu/types";
 
 const STORAGE_KEY = "mpm-training:last-run-settings:v1";
 
@@ -32,8 +32,11 @@ export const DEFAULT_RUN_SETTINGS: RunSettings = {
   elasticStrainScale: 0.15,
   elasticStrainInputsEnabled: true,
   hiddenDim: 128,
-  policyArchitecture: "stateless-128",
-  decay: 0,
+  hiddenLayers: [128],
+  cellMemory: "recurrent",
+  policyArchitecture: "stateful-128",
+  chemicalCommunicationArchitecture: "cell-owned-projection",
+  decay: 0.91,
   depositRate: 1,
   maxAccel: 0,
   maxStrafe: 0,
@@ -90,9 +93,18 @@ export function loadDefaultRunSettings(): RunSettings {
     const serialized = window.localStorage.getItem(STORAGE_KEY);
     if (!serialized) return DEFAULT_RUN_SETTINGS;
     const cached: unknown = JSON.parse(serialized);
-    return looksLikeSettings(cached)
-      ? { ...DEFAULT_RUN_SETTINGS, ...cached }
-      : DEFAULT_RUN_SETTINGS;
+    if (!looksLikeSettings(cached)) return DEFAULT_RUN_SETTINGS;
+    const merged = { ...DEFAULT_RUN_SETTINGS, ...cached };
+    if (!("chemicalCommunicationArchitecture" in cached)) {
+      merged.chemicalCommunicationArchitecture = chemicalCommunicationArchitectureFromConfig({
+        decay: typeof cached.decay === "number" ? cached.decay : 0,
+      });
+    }
+    if (!("hiddenLayers" in cached)) merged.hiddenLayers = [cached.hiddenDim ?? merged.hiddenDim];
+    if (!("cellMemory" in cached)) {
+      merged.cellMemory = cellMemoryFromConfig({ policyArchitecture: cached.policyArchitecture });
+    }
+    return merged;
   } catch {
     // localStorage may be unavailable (privacy/security policy) or corrupt.
     return DEFAULT_RUN_SETTINGS;

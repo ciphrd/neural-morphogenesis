@@ -367,6 +367,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const recorderRef = useRef<CanvasRecorder | null>(null);
   const batchRunningRef = useRef(false);
   const activeStepRef = useRef<Promise<void> | null>(null);
+  const configReloadingRef = useRef(false);
+  const configRevisionRef = useRef(0);
   function getRecorder(): CanvasRecorder {
     if (!recorderRef.current) recorderRef.current = new CanvasRecorder();
     return recorderRef.current;
@@ -736,15 +738,37 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     const simulation = simulationRef.current;
     if (!config || !simulation) return;
+    const revision = ++configRevisionRef.current;
     const weightsError = policyWeightsShapeError(config.weights, config.channels, config.hiddenDim, config.policyArchitecture);
     if (weightsError) {
+      configReloadingRef.current = false;
       setStatus("incompatible");
       setStatusMessage(weightsError);
       return;
     }
-    simulation.loadGeneration(config);
-    setStatus("ready");
-    setStatusMessage("");
+    configReloadingRef.current = true;
+    void (async () => {
+      // Architecture/width changes rebuild and destroy policy buffers. Wait
+      // for the current growth-count mapAsync before doing so; otherwise a
+      // rapid exploration switch aborts that in-flight readback.
+      try {
+        await activeStepRef.current;
+      } catch {
+        // The frame loop owns reporting genuine step failures.
+      }
+      if (revision !== configRevisionRef.current) return;
+      simulation.loadGeneration(config);
+      // loadGeneration deliberately restores the run's recorded settings so
+      // selecting another trained generation is reproducible. An exploration
+      // brain reload uses that same path, but must then restore every current
+      // playback override; React will not rerun the [physics] effect because
+      // the override object itself did not change. This covers decay and the
+      // entire PhysicsSettings/GrowthPanel surface, not a decay-only patch.
+      if (physicsRef.current) simulation.setPhysics(physicsRef.current);
+      configReloadingRef.current = false;
+      setStatus("ready");
+      setStatusMessage("");
+    })();
   }, [config]);
 
   useEffect(() => {
@@ -854,7 +878,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     const frame = async () => {
       const sim = simulationRef.current;
       const context = contextRef.current;
-      if (sim?.ready && context && !batchRunningRef.current) {
+      if (sim?.ready && context && !batchRunningRef.current && !configReloadingRef.current) {
         if (!pausedRef.current) {
           try {
             const stepPromise = sim.step();

@@ -103,8 +103,11 @@ from parallel_workers import build_pool, worker_rollout
 from raster import build_target_distance_field, build_target_raster
 from simulation_settings import (
     CHEM_CHANNELS,
+    CHEMICAL_COMMUNICATION_ARCHITECTURE,
     COMMUNICATION_SPEED,
     DAMPING_LOSS_FRACTION,
+    DECAY,
+    DEPOSIT_RATE,
     DEFAULT_SUBSTEPS_PER_MACRO,
     ELASTIC_STRAIN_SCALE,
     ELASTIC_STRAIN_INPUTS_ENABLED,
@@ -133,8 +136,12 @@ from simulation_settings import (
     SPLAT_RADIUS,
 )
 from policy_parameters import (
+    CELL_MEMORY_OPTIONS,
+    CHEMICAL_COMMUNICATION_ARCHITECTURES,
     POLICY_ARCHITECTURES,
     STATELESS_ARCHITECTURE,
+    architecture_for_cell_memory,
+    cell_memory_for_architecture,
     mutation_scale_vector,
     mutation_scales,
     policy_hidden_dim,
@@ -399,15 +406,35 @@ def run_generation(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    # Normal selection lives in core/constants.json. This hidden override is
-    # exclusively for compare_policy_architectures.py, which must launch both
-    # variants without rewriting project configuration between subprocesses.
-    parser.set_defaults(policy_architecture=POLICY_ARCHITECTURE)
+    # Defaults live in core/constants.json; both architecture axes are public
+    # run selections. The hidden alias remains exclusively for the paired
+    # comparison utility's existing subprocess interface.
+    parser.set_defaults(policy_architecture=None, cell_memory=None)
+    parser.add_argument(
+        "--cell-memory",
+        choices=CELL_MEMORY_OPTIONS,
+        help="private neural memory: none uses a reactive policy; recurrent adds gated per-cell state",
+    )
+    parser.add_argument(
+        "--policy-architecture",
+        dest="policy_architecture",
+        choices=POLICY_ARCHITECTURES,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--_comparison-policy-architecture",
         dest="policy_architecture",
         choices=POLICY_ARCHITECTURES,
         help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--chemical-communication-architecture",
+        choices=CHEMICAL_COMMUNICATION_ARCHITECTURES,
+        default=CHEMICAL_COMMUNICATION_ARCHITECTURE,
+        help=(
+            "persistent-environment keeps a diffusing/decaying spatial field; "
+            "cell-owned-projection stores chemistry per cell and rebuilds the field each round"
+        ),
     )
     parser.add_argument(
         "--checkpoint-dir", type=Path, default=CHECKPOINTS_DIR,
@@ -502,8 +529,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def finalize_policy_configuration(args: argparse.Namespace) -> None:
+    """Resolve the public memory switch while retaining legacy CLI support."""
+    if args.policy_architecture is not None:
+        legacy_memory = cell_memory_for_architecture(args.policy_architecture)
+        if args.cell_memory is not None and args.cell_memory != legacy_memory:
+            raise SystemExit("--cell-memory conflicts with the legacy --policy-architecture value")
+        args.cell_memory = legacy_memory
+    else:
+        args.cell_memory = args.cell_memory or cell_memory_for_architecture(POLICY_ARCHITECTURE)
+        args.policy_architecture = architecture_for_cell_memory(args.cell_memory)
+    args.hidden_layers = [policy_hidden_dim(args.policy_architecture)]
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
+    finalize_policy_configuration(args)
 
     if not 1 <= args.elites <= args.population:
         raise SystemExit("--elites must be between 1 and --population")
@@ -608,6 +649,11 @@ def main() -> None:
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
                         "policy_architecture": args.policy_architecture,
+                        "cell_memory": args.cell_memory,
+                        "hidden_layers": args.hidden_layers,
+                        "chemical_communication_architecture": args.chemical_communication_architecture,
+                        "decay": DECAY,
+                        "deposit_rate": DEPOSIT_RATE,
                         "hidden_dim": policy_hidden_dim(args.policy_architecture),
                         "mutation_scales": mutation_scales(args.policy_architecture),
                         "raster_resolution": args.raster_resolution,

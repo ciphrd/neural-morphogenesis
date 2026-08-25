@@ -38,7 +38,7 @@ import { ceilDiv, writeFloat32 } from "./gpuUtil";
 import type { Environment } from "./environment";
 import { MAX_PARTICLES, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { growthSeed, spawnUniform01 } from "./rng";
-import type { PolicyArchitecture, UpdateRuleWeights } from "./types";
+import { policyHasRecurrence, type ChemicalCommunicationArchitecture, type PolicyArchitecture, type UpdateRuleWeights } from "./types";
 import policyParameters from "../../../core/policy_parameters.json";
 import { policyWeightsShapeError } from "./policyEval";
 
@@ -61,6 +61,7 @@ export interface AgentsConfig {
   channels: number;
   hiddenDim: number;
   policyArchitecture?: PolicyArchitecture;
+  chemicalCommunicationArchitecture?: ChemicalCommunicationArchitecture;
   maxAccel: number;
   maxStrafe: number;
   maxEnvWrite: number;
@@ -84,7 +85,7 @@ export interface AgentsConfig {
 function weightLayout(channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128") {
   // core/agents.wgsl's IN_DIM: value + heading-forward gradient + lateral
   // gradient per channel, with no positional inputs.
-  const stateful = architecture === "stateful-64";
+  const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
   // One centered env_write per channel + desired heading(2) + ACCEL_DIM(2)
   // + STRAFE_DIM(2) + RGB_DIM(3).
@@ -114,22 +115,35 @@ function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim:
   return out;
 }
 
-function randomSymmetric(bound: number): number {
-  return (Math.random() * 2 - 1) * bound;
+function policyRandom(seed?: number): () => number {
+  if (seed === undefined) return Math.random;
+  let state = ((seed >>> 0) ^ 0x9e3779b9) >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let x = state;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function randomSymmetric(bound: number, random: () => number): number {
+  return (random() * 2 - 1) * bound;
 }
 
 function randomHead(
   outDim: number,
   inDim: number,
   config: { weightGain: number; biasCenter: number[]; biasJitter: number },
+  random: () => number,
 ): { w: number[][]; b: number[] } {
   const bound = config.weightGain * Math.sqrt(6 / (inDim + outDim));
-  const w = Array.from({ length: outDim }, () => Array.from({ length: inDim }, () => randomSymmetric(bound)));
+  const w = Array.from({ length: outDim }, () => Array.from({ length: inDim }, () => randomSymmetric(bound, random)));
   const centers = config.biasCenter.length === 1
     ? Array.from({ length: outDim }, () => config.biasCenter[0])
     : config.biasCenter;
   if (centers.length !== outDim) throw new Error(`policy head has ${centers.length} bias centers for ${outDim} outputs`);
-  const b = centers.map((center) => center + randomSymmetric(config.biasJitter));
+  const b = centers.map((center) => center + randomSymmetric(config.biasJitter, random));
   return { w, b };
 }
 
@@ -139,15 +153,19 @@ function randomHead(
  * Agents.randomizeWeights() below uses for the "Randomize weights"
  * button, just also reachable without an Agents instance to call it on. */
 export function randomWeights(
-  channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128"
+  channels: number,
+  hiddenDim: number,
+  architecture: PolicyArchitecture = "stateless-128",
+  seed?: number,
 ): UpdateRuleWeights {
+  const random = policyRandom(seed);
   const { inDim } = weightLayout(channels, hiddenDim, architecture);
   const trunk = policyParameters.trunk;
   const trunkBound = trunk.weightGain * Math.sqrt(6 / (inDim + hiddenDim));
   const fc1w = Array.from({ length: hiddenDim }, () =>
-    Array.from({ length: inDim }, () => randomSymmetric(trunkBound))
+    Array.from({ length: inDim }, () => randomSymmetric(trunkBound, random))
   );
-  const fc1b = Array.from({ length: hiddenDim }, () => randomSymmetric(trunk.biasJitter));
+  const fc1b = Array.from({ length: hiddenDim }, () => randomSymmetric(trunk.biasJitter, random));
   const common = [
     [channels, policyParameters.heads.chemical],
     [2, policyParameters.heads.heading],
@@ -155,10 +173,10 @@ export function randomWeights(
     [1, policyParameters.heads.division],
     [2, policyParameters.heads.growthDirection],
   ] as const;
-  const specs = architecture === "stateful-64"
+  const specs = policyHasRecurrence(architecture)
     ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const]
     : [...common, [3, policyParameters.heads.color] as const];
-  const initialized = specs.map(([size, config]) => randomHead(size, hiddenDim, config));
+  const initialized = specs.map(([size, config]) => randomHead(size, hiddenDim, config, random));
   return {
     fc1w,
     fc1b,
@@ -292,11 +310,12 @@ export class Agents {
         // gotcha (Python's str(bool) gives "True"/"False", invalid
         // WGSL, so that side needs the explicit conversion).
         CHIRALITY: config.chirality ? "true" : "false",
-        STATEFUL: this.policyArchitecture === "stateful-64" ? "true" : "false",
-        PRIVATE_STATE_INPUTS: this.policyArchitecture === "stateful-64"
+        STATEFUL: policyHasRecurrence(this.policyArchitecture) ? "true" : "false",
+        CELL_OWNED_CHEMISTRY: (config.chemicalCommunicationArchitecture ?? "cell-owned-projection") === "cell-owned-projection" ? "true" : "false",
+        PRIVATE_STATE_INPUTS: policyHasRecurrence(this.policyArchitecture)
           ? "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { inputVec[3u * CHANNELS + 6u + s] = tanh(agentState.particleMeta[pi].privateState[s]); }"
           : "",
-        POLICY_TAIL_DECODE: this.policyArchitecture === "stateful-64"
+        POLICY_TAIL_DECODE: policyHasRecurrence(this.policyArchitecture)
           ? "out.color = vec3<f32>(0.5); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 6u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 6u + PRIVATE_STATE_DIM + s]); }"
           : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 6u]), safeSigmoid(outVec[ENV_WRITE_DIM + 7u]), safeSigmoid(outVec[ENV_WRITE_DIM + 8u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
         ELASTIC_STRAIN_INPUTS_ENABLED: config.elasticStrainInputsEnabled ? "true" : "false",
@@ -334,6 +353,7 @@ export class Agents {
           { binding: 2, resource: { buffer: mpmCore.activeCountUniform } },
           { binding: 3, resource: { buffer: environment.buffers[p] } },
           { binding: 4, resource: { buffer: environment.gradient } },
+          { binding: 5, resource: { buffer: environment.depositScratch } },
           { binding: 6, resource: { buffer: this.physicsUniform } },
           { binding: 7, resource: { buffer: this.agentStateBuffer } },
           { binding: 8, resource: { buffer: mpmCore.C } },

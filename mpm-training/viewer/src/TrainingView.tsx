@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { FitnessChart } from "./charts/FitnessChart"
 import { MAX_PARTICLES } from "./gpu/mpmCore"
+import { randomWeights } from "./gpu/agents"
 import type { FieldMode, ParticleRenderMode } from "./gpu/render"
-import type { PhysicsSettings, UpdateRuleWeights } from "./gpu/types"
-import { physicsSettingsFromConfig } from "./gpu/types"
+import type { CellMemory, ChemicalCommunicationArchitecture, PhysicsSettings } from "./gpu/types"
+import { cellMemoryFromConfig, chemicalCommunicationArchitectureFromConfig, hiddenLayersFromConfig, physicsSettingsFromConfig, policyArchitectureForCellMemory } from "./gpu/types"
 import { generationImageUrl } from "./net/images"
 import { fetchRunState } from "./net/runs"
 import type { TrainingSocketState } from "./net/trainingSocket"
@@ -33,6 +34,14 @@ const TRAIN_WS_URL = "ws://localhost:8003/ws"
 // pickRecordingFormat()'s own docstring), so it's computed once here
 // rather than round-tripped through GridCanvasHandle every render.
 const RECORDING_FORMAT = pickRecordingFormat()
+
+function explorationBrainSeed(seed: number, variant: number): number {
+  if (variant === 0) return seed >>> 0
+  let x = ((seed >>> 0) ^ Math.imul(variant, 0x9e3779b9)) >>> 0
+  x = Math.imul(x ^ (x >>> 16), 0x7feb352d) >>> 0
+  x = Math.imul(x ^ (x >>> 15), 0x846ca68b) >>> 0
+  return (x ^ (x >>> 16)) >>> 0
+}
 
 /** Passive training viewer — a live WebGPU replay of whichever
  * generation's weights are selected, plus a fitness-history timeline.
@@ -166,21 +175,54 @@ export function TrainingView() {
     selectedGeneration !== null
       ? (configByGeneration.get(selectedGeneration) ?? latest)
       : latest
+  const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
+    useState<ChemicalCommunicationArchitecture | null>(null)
+  useEffect(() => {
+    setChemicalArchitectureOverride(null)
+  }, [viewingRunId, activeConfig?.generation])
+  const playbackConfig = useMemo(() => activeConfig
+    ? {
+        ...activeConfig,
+        chemicalCommunicationArchitecture:
+          chemicalArchitectureOverride
+          ?? chemicalCommunicationArchitectureFromConfig(activeConfig),
+      }
+    : null, [activeConfig, chemicalArchitectureOverride])
   useEffect(() => {
     const maxStart = Math.max(0, (activeConfig?.channels ?? 3) - 3)
     setSubstrateChannelStart((start) => Math.min(start, maxStart))
   }, [activeConfig?.channels])
-  // Playback-only randomized policy. The selected generation remains intact;
-  // this mirrors the exact weights currently loaded into the GPU and feeds
-  // the right-hand inspector until another generation/run is selected.
-  const [randomizedWeights, setRandomizedWeights] =
-    useState<UpdateRuleWeights | null>(null)
+  // Shape-changing exploration never reinterprets checkpoint weights. It
+  // creates a deterministic fresh policy from this rollout's own seed.
+  const [policyExploration, setPolicyExploration] = useState<{
+    cellMemory: CellMemory
+    hiddenWidth: number
+    variant: number
+  } | null>(null)
   useEffect(() => {
-    setRandomizedWeights(null)
+    setPolicyExploration(null)
   }, [viewingRunId, activeConfig?.generation])
-  const previewConfig = activeConfig && randomizedWeights
-    ? { ...activeConfig, weights: randomizedWeights }
-    : activeConfig
+  const previewConfig = useMemo(() => {
+    if (!playbackConfig || !policyExploration) return playbackConfig
+    const policyArchitecture = policyArchitectureForCellMemory(policyExploration.cellMemory)
+    return {
+      ...playbackConfig,
+      cellMemory: policyExploration.cellMemory,
+      hiddenDim: policyExploration.hiddenWidth,
+      hiddenLayers: [policyExploration.hiddenWidth],
+      policyArchitecture,
+      weights: randomWeights(
+        playbackConfig.channels,
+        policyExploration.hiddenWidth,
+        policyArchitecture,
+        explorationBrainSeed(playbackConfig.seed, policyExploration.variant),
+      ),
+    }
+  }, [playbackConfig, policyExploration])
+  const displayedCellMemory = policyExploration?.cellMemory
+    ?? (activeConfig ? cellMemoryFromConfig(activeConfig) : "recurrent")
+  const displayedHiddenWidth = policyExploration?.hiddenWidth
+    ?? (activeConfig ? hiddenLayersFromConfig(activeConfig)[0] : 128)
   const [replayStep, setReplayStep] = useState(0)
   // Live particle count — grows as growth splits (see GpuSimulation's
   // own particleCount getter), reported alongside the step by
@@ -376,6 +418,69 @@ export function TrainingView() {
             <span>Channels</span>
             <span>{activeConfig ? activeConfig.channels : "—"}</span>
           </div>
+          <div className="stat-row">
+            <span>Cell memory</span>
+            <select
+              aria-label="Cell memory"
+              value={displayedCellMemory}
+              disabled={!activeConfig}
+              onChange={(event) => setPolicyExploration({
+                cellMemory: event.target.value as CellMemory,
+                hiddenWidth: displayedHiddenWidth,
+                variant: 0,
+              })}
+            >
+              <option value="none">None</option>
+              <option value="recurrent">Recurrent</option>
+            </select>
+          </div>
+          <div className="stat-row">
+            <span>Hidden layer</span>
+            <select
+              aria-label="Hidden layer width"
+              value={displayedHiddenWidth}
+              disabled={!activeConfig}
+              onChange={(event) => setPolicyExploration({
+                cellMemory: displayedCellMemory,
+                hiddenWidth: Number(event.target.value),
+                variant: 0,
+              })}
+            >
+              {[16, 32, 64, 128, 256].map((width) => (
+                <option key={width} value={width}>{width}</option>
+              ))}
+            </select>
+          </div>
+          <div className="stat-row">
+            <span>Brain source</span>
+            <button
+              className="icon-button"
+              disabled={!policyExploration}
+              onClick={() => setPolicyExploration(null)}
+              title="Restore the selected generation's trained brain"
+              aria-label="Restore trained brain"
+            >
+              {policyExploration ? `Seeded random #${policyExploration.variant + 1} ↺` : "Trained"}
+            </button>
+          </div>
+          <div className="stat-row">
+            <span>Chemical architecture</span>
+            <select
+              aria-label="Chemical architecture"
+              value={playbackConfig?.chemicalCommunicationArchitecture ?? "cell-owned-projection"}
+              disabled={!activeConfig}
+              onChange={(event) => {
+                const selected = event.target.value as ChemicalCommunicationArchitecture
+                const trained = activeConfig
+                  ? chemicalCommunicationArchitectureFromConfig(activeConfig)
+                  : "cell-owned-projection"
+                setChemicalArchitectureOverride(selected === trained ? null : selected)
+              }}
+            >
+              <option value="cell-owned-projection">Cell-owned projection</option>
+              <option value="persistent-environment">Persistent environment</option>
+            </select>
+          </div>
         </section>
 
         <section>
@@ -468,7 +573,8 @@ export function TrainingView() {
             >
               <option value="dots-white">Dots (white)</option>
               <option value="dots-neural-color">Dots (neural RGB)</option>
-              <option value="dots-internal-state">Internal state</option>
+              <option value="dots-internal-state">Chemical memory</option>
+              <option value="dots-chemical-levels">Chemical levels</option>
               <option value="dots-activation">Dots (neurons)</option>
               <option value="dots-activation-translucent">
                 Dots (translucent neurons)
@@ -502,10 +608,10 @@ export function TrainingView() {
               <span className="slider-value">{neuralColorAlpha.toFixed(2)}</span>
             </label>
           )}
-          {particleRenderMode === "dots-internal-state" && (
+          {(particleRenderMode === "dots-internal-state" || particleRenderMode === "dots-chemical-levels") && (
             <>
               <label className="slider-row">
-                <span>Internal state alpha</span>
+                <span>{particleRenderMode === "dots-internal-state" ? "Chemical memory alpha" : "Chemical levels alpha"}</span>
                 <Slider
                   min={0}
                   max={1}
@@ -521,14 +627,18 @@ export function TrainingView() {
                   <span>{internalStateChannelStart}–{internalStateChannelStart + 2}</span>
                 </div>
                 <ChannelWindowSlider
-                  channels={8}
+                  channels={particleRenderMode === "dots-internal-state" ? 8 : (activeConfig?.channels ?? 8)}
                   value={internalStateChannelStart}
                   onChange={setInternalStateChannelStart}
-                  channelKind="private state"
+                  channelKind={particleRenderMode === "dots-internal-state" ? "chemical memory" : "chemical levels"}
                 />
               </div>
-              {activeConfig?.policyArchitecture !== "stateful-64" && (
-                <p className="hint">The stateless architecture keeps these channels at zero.</p>
+              {particleRenderMode === "dots-internal-state" && previewConfig && cellMemoryFromConfig(previewConfig) !== "recurrent" && (
+                <p className="hint">Cell memory is disabled, so these channels remain zero.</p>
+              )}
+              {particleRenderMode === "dots-chemical-levels" && activeConfig
+                && chemicalCommunicationArchitectureFromConfig(previewConfig ?? activeConfig) !== "cell-owned-projection" && (
+                <p className="hint">Chemical levels are inactive in persistent-environment mode.</p>
               )}
             </>
           )}
@@ -701,7 +811,7 @@ export function TrainingView() {
         <div className="viewport">
           <GridCanvas
             ref={gridCanvasRef}
-            config={activeConfig}
+            config={previewConfig}
             targetPoints={targetPoints}
             targetVisible={targetVisible}
             physics={physicsValues}
@@ -878,12 +988,20 @@ export function TrainingView() {
             <button
               className="icon-button"
               onClick={() => {
-                const weights = gridCanvasRef.current?.randomizeWeights()
-                if (weights) setRandomizedWeights(weights)
+                if (!activeConfig) return
+                setPolicyExploration((current) => ({
+                  cellMemory: displayedCellMemory,
+                  hiddenWidth: displayedHiddenWidth,
+                  variant: current
+                    && current.cellMemory === displayedCellMemory
+                    && current.hiddenWidth === displayedHiddenWidth
+                      ? current.variant + 1
+                      : 0,
+                }))
               }}
               disabled={!activeConfig}
-              title="Randomize weights — replace the update rule's weights/biases with a fresh random init and restart the rollout under it, until a new one loads or you switch generations"
-              aria-label="Randomize weights"
+              title="Advance to the next deterministic random brain derived from the active rollout seed"
+              aria-label="Load seeded random brain"
             >
               🎲
             </button>

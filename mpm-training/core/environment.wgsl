@@ -1,8 +1,8 @@
-// GPU-resident transient chemical field sensed by the evolved policy.
-// Persistence lives in agents.wgsl's per-cell chemicalState. Each brain round
-// clears fixed-point atomic splats, lets cells publish Gaussian projections,
-// materializes them into a flat (C,H,W) buffer, and computes a shared Sobel
-// gradient. TOROIDAL, matching
+// GPU-resident chemical communication field. The host selects one of two
+// lifecycles without changing its storage interface: cell-owned-projection
+// replaces gridCurrent from persistent per-cell chemistry every brain round;
+// persistent-environment keeps a ping-pong spatial field, diffuses/decays its
+// old contents, then merges the policy's fresh deposits. TOROIDAL, matching
 // envnca's own version exactly: MpmCore's own MLS-MPM domain has no
 // walls either now (gridUpdate.wgsl's own module docstring — a
 // particle's 3x3 P2G/G2P stencil wraps at the domain edge, not clamps),
@@ -53,6 +53,15 @@ fn gridIndex(c: u32, y: u32, x: u32) -> u32 {
 // convention envnca/frontend/src/gpu/environment.wgsl uses.
 @group(0) @binding(1) var<storage, read_write> gradient: array<f32>;
 @group(0) @binding(2) var<storage, read_write> depositScratch: array<atomic<i32>>;
+@group(0) @binding(3) var<storage, read_write> gridNext: array<f32>;
+
+struct EnvPhysics {
+  decay: f32,
+  depositRate: f32,
+  diffusionStep: f32,
+  _padding: f32,
+}
+@group(0) @binding(4) var<uniform> physics: EnvPhysics;
 
 @compute @workgroup_size(256)
 fn clearScratch(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -70,6 +79,46 @@ fn materializeSplat(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= TOTAL) { return; }
   gridCurrent[i] = f32(atomicLoad(&depositScratch[i])) / DEPOSIT_SCALE;
+}
+
+// Persistent-environment only: add this round's policy writes after the old
+// field has diffused and decayed, so a new write is sensed once at full
+// depositRate before it begins aging on the following round.
+@compute @workgroup_size(256)
+fn mergeDeposit(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= TOTAL) { return; }
+  gridCurrent[i] = gridCurrent[i]
+    + (f32(atomicLoad(&depositScratch[i])) / DEPOSIT_SCALE) * physics.depositRate;
+}
+
+fn blurWeight(dy: i32, dx: i32) -> f32 {
+  if (dy == 0 && dx == 0) { return 0.25; }
+  if (abs(dy) == 1 && abs(dx) == 1) { return 0.0625; }
+  return 0.125;
+}
+
+// Persistent-environment only: a mass-preserving 3x3 binomial blur blended
+// by the communication timestep, followed by exponential timestep-scaled
+// decay. Ping-pong binding selection is owned by the host wrappers.
+@compute @workgroup_size(16, 16, 1)
+fn diffuseDecay(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x;
+  let y = gid.y;
+  let c = gid.z;
+  if (x >= WIDTH || y >= HEIGHT || c >= CHANNELS) { return; }
+
+  var acc: f32 = 0.0;
+  for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
+    for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
+      let nx = u32((i32(x) + dx + i32(WIDTH)) % i32(WIDTH));
+      let ny = u32((i32(y) + dy + i32(HEIGHT)) % i32(HEIGHT));
+      acc = acc + gridCurrent[gridIndex(c, ny, nx)] * blurWeight(dy, dx);
+    }
+  }
+  let idx = gridIndex(c, y, x);
+  let diffused = mix(gridCurrent[idx], acc, clamp(physics.diffusionStep, 0.0, 1.0));
+  gridNext[idx] = diffused * physics.decay;
 }
 
 // Matches trainer/environment.py's own _SOBEL_X (and its transpose for Y)

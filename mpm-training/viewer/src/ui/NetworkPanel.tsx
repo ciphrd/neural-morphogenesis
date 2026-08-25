@@ -1,7 +1,7 @@
 import type { PointerEvent as ReactPointerEvent } from "react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { evalPolicy, policyWeightsShapeError } from "../gpu/policyEval"
-import type { PhysicsSettings, PolicyArchitecture, SimulationConfig, UpdateRuleWeights } from "../gpu/types"
+import { chemicalCommunicationArchitectureFromConfig, policyHasRecurrence, type PhysicsSettings, type PolicyArchitecture, type SimulationConfig, type UpdateRuleWeights } from "../gpu/types"
 import { Slider } from "./Slider"
 
 interface NetworkPanelProps {
@@ -329,6 +329,8 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
   const channels = config?.channels ?? 0
   const hiddenDim = config?.hiddenDim ?? 0
   const architecture = config?.policyArchitecture ?? "stateless-128"
+  const cellOwnedChemistry = !config
+    || chemicalCommunicationArchitectureFromConfig(config) === "cell-owned-projection"
   const maxEnvWrite = physics?.maxEnvWrite ?? 1
   const maxAngularAccel = physics?.maxAngularAccel ?? 1
   const maxStrafe = physics?.maxStrafe ?? 1
@@ -436,7 +438,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       <div className="nn-block">
         <h3>Input</h3>
         <p className="hint">
-          Background: this channel's own cell-state delta output, swept across the pad (its own value + every other
+          Background: this channel's own {cellOwnedChemistry ? "cell-state delta" : "environment deposit"} output, swept across the pad (its own value + every other
           channel held as set). Contrast is exaggerated independently per pad
           by stretching its observed min/max across Viridis. This shows
           response shape, not absolute output strength.
@@ -532,7 +534,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       {output && (
         <>
           <div className="nn-block">
-            <h3>Output — chemical Δ</h3>
+            <h3>Output — chemical {cellOwnedChemistry ? "Δ" : "deposit"}</h3>
             <div className="nn-group">
               <span className="nn-group-label">Under particle</span>
               {Array.from({ length: channels }, (_, c) => (
@@ -579,7 +581,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
             </div>
           </div>
 
-          {architecture === "stateful-64" && (
+          {policyHasRecurrence(architecture) && (
             <div className="nn-block">
               <h3>Output — private-state update</h3>
               <p className="hint">Candidate residuals and gates at zero private state.</p>
@@ -595,7 +597,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           )}
 
           <div className="nn-block">
-            <h3>{architecture === "stateful-64" ? "Derived color — zero private state" : "Output — cell color"}</h3>
+            <h3>{policyHasRecurrence(architecture) ? "Derived color — zero private state" : "Output — cell color"}</h3>
             <div
               aria-label="Current neural RGB color"
               style={{

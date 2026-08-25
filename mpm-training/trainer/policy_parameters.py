@@ -16,8 +16,18 @@ import numpy as np
 _CONFIG = json.loads((Path(__file__).parent.parent / "core" / "policy_parameters.json").read_text())
 STATELESS_ARCHITECTURE = "stateless-128"
 STATEFUL_ARCHITECTURE = "stateful-64"
-POLICY_ARCHITECTURES = (STATELESS_ARCHITECTURE, STATEFUL_ARCHITECTURE)
+STATEFUL_128_ARCHITECTURE = "stateful-128"
+POLICY_ARCHITECTURES = (STATELESS_ARCHITECTURE, STATEFUL_ARCHITECTURE, STATEFUL_128_ARCHITECTURE)
+NO_CELL_MEMORY = "none"
+RECURRENT_CELL_MEMORY = "recurrent"
+CELL_MEMORY_OPTIONS = (NO_CELL_MEMORY, RECURRENT_CELL_MEMORY)
 PRIVATE_STATE_DIM = 8
+PERSISTENT_ENVIRONMENT_ARCHITECTURE = "persistent-environment"
+CELL_OWNED_PROJECTION_ARCHITECTURE = "cell-owned-projection"
+CHEMICAL_COMMUNICATION_ARCHITECTURES = (
+    PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+    CELL_OWNED_PROJECTION_ARCHITECTURE,
+)
 
 
 @dataclass(frozen=True)
@@ -37,12 +47,50 @@ def normalize_architecture(architecture: str | None) -> str:
     return architecture
 
 
+def policy_has_recurrence(architecture: str) -> bool:
+    return normalize_architecture(architecture) in (STATEFUL_ARCHITECTURE, STATEFUL_128_ARCHITECTURE)
+
+
+def cell_memory_for_architecture(architecture: str) -> str:
+    return RECURRENT_CELL_MEMORY if policy_has_recurrence(architecture) else NO_CELL_MEMORY
+
+
+def architecture_for_cell_memory(cell_memory: str | None) -> str:
+    cell_memory = cell_memory or RECURRENT_CELL_MEMORY
+    if cell_memory not in CELL_MEMORY_OPTIONS:
+        raise ValueError(f"unknown cell memory {cell_memory!r}; expected one of {CELL_MEMORY_OPTIONS}")
+    return STATEFUL_128_ARCHITECTURE if cell_memory == RECURRENT_CELL_MEMORY else STATELESS_ARCHITECTURE
+
+
+def normalize_chemical_communication_architecture(architecture: str | None) -> str:
+    architecture = architecture or CELL_OWNED_PROJECTION_ARCHITECTURE
+    if architecture not in CHEMICAL_COMMUNICATION_ARCHITECTURES:
+        raise ValueError(
+            f"unknown chemical communication architecture {architecture!r}; "
+            f"expected one of {CHEMICAL_COMMUNICATION_ARCHITECTURES}"
+        )
+    return architecture
+
+
+def resolve_chemical_communication_architecture(
+    architecture: str | None, decay: float = 0.0
+) -> str:
+    """Infer the lifecycle used by checkpoints created before it was tagged."""
+    if architecture is None:
+        architecture = (
+            PERSISTENT_ENVIRONMENT_ARCHITECTURE
+            if decay > 0.0
+            else CELL_OWNED_PROJECTION_ARCHITECTURE
+        )
+    return normalize_chemical_communication_architecture(architecture)
+
+
 def policy_hidden_dim(architecture: str) -> int:
     return 64 if normalize_architecture(architecture) == STATEFUL_ARCHITECTURE else 128
 
 
 def policy_input_dim(num_channels: int, architecture: str) -> int:
-    return 3 * num_channels + 6 + (PRIVATE_STATE_DIM if normalize_architecture(architecture) == STATEFUL_ARCHITECTURE else 0)
+    return 3 * num_channels + 6 + (PRIVATE_STATE_DIM if policy_has_recurrence(architecture) else 0)
 
 
 def policy_heads(num_channels: int, architecture: str = STATELESS_ARCHITECTURE) -> tuple[PolicyHead, ...]:
@@ -54,7 +102,7 @@ def policy_heads(num_channels: int, architecture: str = STATELESS_ARCHITECTURE) 
         "division": 1,
         "growthDirection": 2,
     }
-    if architecture == STATEFUL_ARCHITECTURE:
+    if policy_has_recurrence(architecture):
         sizes.update({"stateDelta": PRIVATE_STATE_DIM, "stateGate": PRIVATE_STATE_DIM})
     else:
         sizes["color"] = 3

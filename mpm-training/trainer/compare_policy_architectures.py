@@ -19,7 +19,7 @@ import time
 
 import numpy as np
 
-from policy_parameters import POLICY_ARCHITECTURES
+from policy_parameters import CELL_MEMORY_OPTIONS
 
 
 def main() -> None:
@@ -28,34 +28,34 @@ def main() -> None:
     parser.add_argument("evolve_args", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     forwarded = args.evolve_args[1:] if args.evolve_args[:1] == ["--"] else args.evolve_args
-    forbidden = {"--_comparison-policy-architecture", "--checkpoint-dir"}
+    forbidden = {"--cell-memory", "--_comparison-policy-architecture", "--checkpoint-dir"}
     if forbidden.intersection(forwarded):
         raise SystemExit("architecture and checkpoint directory are controlled by this comparison script")
 
     args.output.mkdir(parents=True, exist_ok=True)
     evolve = Path(__file__).with_name("evolve.py")
     rows: list[dict[str, object]] = []
-    for architecture in POLICY_ARCHITECTURES:
-        run_dir = args.output / architecture
+    for cell_memory in CELL_MEMORY_OPTIONS:
+        run_dir = args.output / cell_memory
         run_dir.mkdir(parents=True, exist_ok=True)
         command = [
             sys.executable, str(evolve),
-            "--_comparison-policy-architecture", architecture,
+            "--cell-memory", cell_memory,
             "--checkpoint-dir", str(run_dir),
             *forwarded,
         ]
-        print(f"[compare] starting {architecture}: {' '.join(command)}", flush=True)
+        print(f"[compare] starting {cell_memory}: {' '.join(command)}", flush=True)
         started = time.perf_counter()
         with (run_dir / "training.log").open("w") as log:
             completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, text=True)
         elapsed = time.perf_counter() - started
         if completed.returncode != 0:
-            raise SystemExit(f"{architecture} failed; inspect {run_dir / 'training.log'}")
+            raise SystemExit(f"{cell_memory} failed; inspect {run_dir / 'training.log'}")
         meta = json.loads((run_dir / "best_meta.json").read_text())
         parameter_count = int(np.load(run_dir / "best.npy", mmap_mode="r").size)
         rows.append(
             {
-                "architecture": architecture,
+                "cell_memory": cell_memory,
                 "hidden_dim": meta["hidden_dim"],
                 "parameter_count": parameter_count,
                 "best_fitness": meta["fitness"],
@@ -63,13 +63,13 @@ def main() -> None:
                 "checkpoint_dir": str(run_dir),
             }
         )
-        print(f"[compare] finished {architecture}: fitness={meta['fitness']:.6g} time={elapsed:.1f}s", flush=True)
+        print(f"[compare] finished {cell_memory}: fitness={meta['fitness']:.6g} time={elapsed:.1f}s", flush=True)
 
     summary = {"forwarded_arguments": forwarded, "runs": rows}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2))
     table_rows = "".join(
         "<tr>"
-        f"<td>{html.escape(str(row['architecture']))}</td>"
+        f"<td>{html.escape(str(row['cell_memory']))}</td>"
         f"<td>{row['hidden_dim']}</td><td>{row['parameter_count']}</td>"
         f"<td>{float(row['best_fitness']):.6g}</td><td>{float(row['elapsed_seconds']):.1f}s</td>"
         "</tr>"

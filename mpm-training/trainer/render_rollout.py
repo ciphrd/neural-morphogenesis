@@ -71,7 +71,7 @@ from simulation_settings import (
 )
 from targets import load_target
 from training_sim import TrainingRollout
-from policy_parameters import STATELESS_ARCHITECTURE, policy_hidden_dim
+from policy_parameters import STATELESS_ARCHITECTURE, policy_hidden_dim, resolve_chemical_communication_architecture
 
 
 def main() -> int:
@@ -124,8 +124,14 @@ def main() -> int:
     core.set_damping(DAMPING_LOSS_FRACTION, meta["substeps_per_macro"])
 
     architecture = meta.get("policy_architecture", STATELESS_ARCHITECTURE)
+    chemical_architecture = resolve_chemical_communication_architecture(
+        meta.get("chemical_communication_architecture"), meta.get("decay", DECAY)
+    )
     hidden_dim = int(meta.get("hidden_dim", policy_hidden_dim(architecture)))
-    environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, meta.get("deposit_rate", DEPOSIT_RATE))
+    environment = EnvironmentGPU(
+        wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, meta.get("decay", DECAY),
+        meta.get("deposit_rate", DEPOSIT_RATE), chemical_architecture,
+    )
     agents = AgentsGPU(
         wgpu_device,
         core,
@@ -165,6 +171,7 @@ def main() -> int:
         internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
         interior_support_strength=meta.get("interior_support_strength", INTERIOR_SUPPORT_STRENGTH),
         division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
+        chemical_communication_architecture=chemical_architecture,
     )
     agents.load_weights(weights)
 

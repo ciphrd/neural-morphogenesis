@@ -39,7 +39,7 @@ import { DX, GRID_N, INV_DX, PARTICLE_MASS, REPULSION_FIELD_N, type MpmCore } fr
 import { templateShader } from "./shaderTemplate";
 
 export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient";
-export type ParticleRenderMode = "dots-white" | "dots-neural-color" | "dots-internal-state" | "dots-activation" | "dots-activation-translucent" | "directional-arrows";
+export type ParticleRenderMode = "dots-white" | "dots-neural-color" | "dots-internal-state" | "dots-chemical-levels" | "dots-activation" | "dots-activation-translucent" | "directional-arrows";
 
 const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "growth" | "gradient">, number> = {
   none: 0,
@@ -92,6 +92,7 @@ export class Renderer {
   private readonly neuralColorParticleBindGroup: GPUBindGroup;
   private readonly neuralColorStyleUniform: GPUBuffer;
   private readonly internalStateParticlePipeline: GPURenderPipeline;
+  private readonly chemicalLevelsParticlePipeline: GPURenderPipeline;
   private readonly internalStateParticleBindGroup: GPUBindGroup;
   private readonly internalStateStyleUniform: GPUBuffer;
   private readonly activationAlphaUniform: GPUBuffer;
@@ -328,6 +329,12 @@ export class Renderer {
     this.internalStateParticlePipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [internalStateLayout] }),
       vertex: { module: renderModule, entryPoint: "internalStateParticleVertex" },
+      fragment: { module: renderModule, entryPoint: "internalStateParticleFragment", targets: [{ format, blend: alphaBlend() }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.chemicalLevelsParticlePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [internalStateLayout] }),
+      vertex: { module: renderModule, entryPoint: "chemicalLevelsParticleVertex" },
       fragment: { module: renderModule, entryPoint: "internalStateParticleFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
@@ -926,6 +933,10 @@ export class Renderer {
         pass.draw(6, activeCount);
       } else if (this.particleRenderMode === "dots-internal-state") {
         pass.setPipeline(this.internalStateParticlePipeline);
+        pass.setBindGroup(0, this.internalStateParticleBindGroup);
+        pass.draw(6, activeCount);
+      } else if (this.particleRenderMode === "dots-chemical-levels") {
+        pass.setPipeline(this.chemicalLevelsParticlePipeline);
         pass.setBindGroup(0, this.internalStateParticleBindGroup);
         pass.draw(6, activeCount);
       } else if (this.particleRenderMode === "dots-activation" || this.particleRenderMode === "dots-activation-translucent") {

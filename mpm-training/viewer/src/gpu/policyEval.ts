@@ -13,7 +13,7 @@
 // enforces chirality by evaluating the mirrored lateral gradient and
 // combining the two responses.
 
-import type { PolicyArchitecture, UpdateRuleWeights } from "./types";
+import { policyHasRecurrence, type PolicyArchitecture, type UpdateRuleWeights } from "./types";
 import coreConstants from "../../../core/constants.json";
 
 export interface PolicyOutput {
@@ -38,7 +38,7 @@ export function policyWeightsShapeError(
   hiddenDim: number,
   architecture: PolicyArchitecture = "stateless-128",
 ): string | null {
-  const stateful = architecture === "stateful-64";
+  const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
   const outDim = channels + (stateful ? 22 : 9);
   const fc1w = weights?.fc1w;
@@ -107,7 +107,7 @@ export function evalPolicy(
     hidden[j] = safeTanh(acc);
   }
 
-  const stateful = architecture === "stateful-64";
+  const stateful = policyHasRecurrence(architecture);
   const outDim = channels + (stateful ? 22 : 9);
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {

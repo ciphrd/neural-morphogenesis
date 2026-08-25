@@ -16,16 +16,18 @@
 // has from training_sim.py's own macro_step(), not a design choice.
 //
 // Per macro step, in order:
-//   1. environment.encodeClear() + agents.encodeSplatChemicalState() —
-//      rebuild a transient substrate from persistent per-cell chemistry.
-//   2. environment.encodeSense()      — materialize splats and compute the
-//      shared gradient.
-//   3. agents.encodeStep()            — NN forward pass: reads that field,
-//      applies each chemical output as a delta to cell-owned state, and writes the
+//   1. Clear the round's deposit scratch. Cell-owned mode then publishes each
+//      cell's chemistry; persistent mode leaves it ready for direct NN writes.
+//   2. environment.encodeSense() — materialize cell splats when applicable and
+//      compute the shared gradient over the architecture's current field.
+//   3. agents.encodeStep() — NN forward pass: reads that field and either
+//      updates cell-owned chemistry or deposits directly into the environment.
+//      It also writes the
 //      desired growth vector into persistent ParticleRest.growthAngle and
 //      relaxes the persistent anisotropy toward its sigmoid target
 //      (optionally also physical acceleration through maxStrafe) —
-//      may also grow activeCount (agents.wgsl's own agentStep()).
+//      may also grow activeCount (agents.wgsl's own agentStep()). Persistent
+//      mode then diffuses/decays the old field and merges the fresh writes.
 //   4. agents.encodeReadGrownCount()/readGrownCount() — copies growth's
 //      own atomic counter out and awaits it (submit happens between
 //      encode and await, see step()'s own body), propagating any change
@@ -49,7 +51,7 @@ import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
 import { Renderer, type FieldMode, type ParticleRenderMode } from "./render";
 import { seedBlob } from "./rng";
-import { physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig, type UpdateRuleWeights } from "./types";
+import { chemicalCommunicationArchitectureFromConfig, physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig, type UpdateRuleWeights } from "./types";
 import coreConstants from "../../../core/constants.json";
 
 export class GpuSimulation {
@@ -191,6 +193,7 @@ export class GpuSimulation {
       config.fieldN,
       config.hiddenDim,
       config.policyArchitecture ?? "stateless-128",
+      chemicalCommunicationArchitectureFromConfig(config),
       config.chirality,
       config.elasticStrainScale ?? 0.15,
       config.elasticStrainInputsEnabled ?? false,
@@ -227,12 +230,14 @@ export class GpuSimulation {
       // see types.ts's own physicsSettingsFromConfig() for the matching
       // guard on the PhysicsPanel's own read of this same field.
       depositRate: config.depositRate ?? 1.0,
+      chemicalCommunicationArchitecture: chemicalCommunicationArchitectureFromConfig(config),
     });
 
     const agents = new Agents(this.device, mpmCore, environment, {
       channels: config.channels,
       hiddenDim: config.hiddenDim,
       policyArchitecture: config.policyArchitecture ?? "stateless-128",
+      chemicalCommunicationArchitecture: chemicalCommunicationArchitectureFromConfig(config),
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
       maxEnvWrite: config.maxEnvWrite,
@@ -358,6 +363,12 @@ export class GpuSimulation {
     this.mpmCore.setGravity(physics.gravity);
     this.neuralUpdatesPerMacro = Math.max(1, Math.round(physics.neuralUpdatesPerMacro));
     const communicationDt = Math.max(0, physics.communicationSpeed ?? 1.0) / this.neuralUpdatesPerMacro;
+    this.environment.setPhysics(
+      physics.decay,
+      physics.depositRate,
+      this.neuralUpdatesPerMacro,
+      physics.communicationSpeed ?? 1.0,
+    );
     this.mpmCore.setMaterial(
       physics.materialE,
       physics.materialNu,
@@ -488,13 +499,16 @@ export class GpuSimulation {
     this.mpmCore.encodeMorphology(encoder);
     for (let communicationRound = 0; communicationRound < this.neuralUpdatesPerMacro; communicationRound++) {
       this.environment.encodeClear(encoder);
-      this.agents.encodeSplatChemicalState(encoder);
+      if (this.environment.chemicalCommunicationArchitecture === "cell-owned-projection") {
+        this.agents.encodeSplatChemicalState(encoder);
+      }
       this.environment.encodeSense(encoder);
       this.agents.encodeStep(
         encoder,
         this.environment.parity,
         communicationRound === this.neuralUpdatesPerMacro - 1
       );
+      this.environment.encodeAdvancePersistent(encoder);
     }
     this.agents.encodeReadGrownCount(encoder);
     this.device.queue.submit([encoder.finish()]);

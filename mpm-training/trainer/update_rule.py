@@ -53,6 +53,7 @@ from policy_parameters import (
     STATELESS_ARCHITECTURE,
     normalize_architecture,
     policy_heads,
+    policy_has_recurrence,
     policy_hidden_dim,
     policy_input_dim,
     trunk_initialization,
@@ -119,7 +120,7 @@ class UpdateRule(nn.Module):
         not transient spatial splat geometry), same division of responsibility
         envnca's own UpdateRule/Simulation split."""
         inputs = [value, grad_forward, grad_lateral, morphology, elastic_strain]
-        if self.architecture != STATELESS_ARCHITECTURE:
+        if policy_has_recurrence(self.architecture):
             if private_state is None:
                 raise ValueError("stateful policy requires private_state")
             inputs.append(private_state)
@@ -133,7 +134,7 @@ class UpdateRule(nn.Module):
         direction = self.heads["growthDirection"](hidden)
         tail = (
             self.heads["color"](hidden)
-            if self.architecture == STATELESS_ARCHITECTURE
+            if not policy_has_recurrence(self.architecture)
             else torch.cat([self.heads["stateDelta"](hidden), self.heads["stateGate"](hidden)], dim=-1)
         )
         return env_write, heading_target, growth_controls, direction, tail

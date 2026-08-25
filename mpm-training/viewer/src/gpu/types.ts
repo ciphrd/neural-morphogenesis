@@ -4,7 +4,9 @@ export interface UpdateRuleWeights {
   fc2w: number[][]; // stateless: channels+9; stateful: channels+22
   fc2b: number[];
 }
-export type PolicyArchitecture = "stateless-128" | "stateful-64";
+export type PolicyArchitecture = "stateless-128" | "stateful-64" | "stateful-128";
+export type CellMemory = "none" | "recurrent";
+export type ChemicalCommunicationArchitecture = "persistent-environment" | "cell-owned-projection";
 
 // Mirrors train_server.py's own GET /settings response, field for field
 // (camelCase on the wire, same JSON keys) — every simulation/search
@@ -58,10 +60,16 @@ export interface RunSettings {
   elasticStrainScale?: number;
   elasticStrainInputsEnabled?: boolean;
   hiddenDim: number;
+  /** Ordered hidden-layer widths. Currently one layer; hiddenDim is its legacy alias. */
+  hiddenLayers?: number[];
+  /** Behavioral memory selection, independent from network capacity. */
+  cellMemory?: CellMemory;
   policyArchitecture?: PolicyArchitecture;
-  /** Legacy run metadata; transient substrates do not decay. */
+  /** Where chemical memory lives and how the policy's chemical head is used. */
+  chemicalCommunicationArchitecture?: ChemicalCommunicationArchitecture;
+  /** Used by persistent-environment; ignored by cell-owned-projection. */
   decay: number;
-  /** Legacy run metadata; cell-state splats are not rate-scaled. */
+  /** Used by persistent-environment; ignored by cell-owned-projection. */
   depositRate: number;
   maxAccel: number;
   maxStrafe: number;
@@ -149,6 +157,37 @@ export interface RunSettings {
   runSeed: number;
   totalGenerations: number;
   checkpointEvery: number;
+}
+
+/** Resolve untagged legacy runs without changing the explicit modern default.
+ * The pre-cell-owned runtime always had a decaying persistent field, whereas
+ * the first cell-owned records disabled decay entirely. */
+export function chemicalCommunicationArchitectureFromConfig(
+  config: Pick<RunSettings, "chemicalCommunicationArchitecture" | "decay">,
+): ChemicalCommunicationArchitecture {
+  return config.chemicalCommunicationArchitecture
+    ?? (config.decay > 0 ? "persistent-environment" : "cell-owned-projection");
+}
+
+export function policyHasRecurrence(architecture: PolicyArchitecture): boolean {
+  return architecture === "stateful-64" || architecture === "stateful-128";
+}
+
+export function policyArchitectureForCellMemory(cellMemory: CellMemory): PolicyArchitecture {
+  return cellMemory === "recurrent" ? "stateful-128" : "stateless-128";
+}
+
+export function cellMemoryFromConfig(
+  config: Pick<RunSettings, "cellMemory" | "policyArchitecture">,
+): CellMemory {
+  if (config.cellMemory) return config.cellMemory;
+  return policyHasRecurrence(config.policyArchitecture ?? "stateless-128") ? "recurrent" : "none";
+}
+
+export function hiddenLayersFromConfig(
+  config: Pick<RunSettings, "hiddenLayers" | "hiddenDim">,
+): number[] {
+  return config.hiddenLayers?.length ? [...config.hiddenLayers] : [config.hiddenDim];
 }
 
 // Mirrors train_server.py's own trimmed "generation" broadcast message —

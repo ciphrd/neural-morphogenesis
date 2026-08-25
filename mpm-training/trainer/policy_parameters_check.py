@@ -5,11 +5,17 @@ import numpy as np
 
 from evolve import get_weights, mutate, set_weights
 from policy_parameters import (
+    CELL_OWNED_PROJECTION_ARCHITECTURE,
+    CHEMICAL_COMMUNICATION_ARCHITECTURES,
+    PERSISTENT_ENVIRONMENT_ARCHITECTURE,
     STATEFUL_ARCHITECTURE,
+    STATEFUL_128_ARCHITECTURE,
     mutation_scale_vector,
     policy_heads,
     policy_hidden_dim,
     random_flat_policy_weights,
+    normalize_chemical_communication_architecture,
+    resolve_chemical_communication_architecture,
 )
 from simulation_settings import CHEM_CHANNELS, HIDDEN_DIM
 from update_rule import UpdateRule
@@ -64,6 +70,23 @@ def main() -> None:
     )
     assert stateful_mutated.shape == stateful_flat.shape
     print("[PASS] stateful-64 has 38 inputs, 30 outputs, 4446 parameters, and state-head mutation buckets")
+
+    recurrent_128 = UpdateRule(CHEM_CHANNELS, STATEFUL_128_ARCHITECTURE)
+    recurrent_128_flat = get_weights(recurrent_128)
+    assert policy_hidden_dim(STATEFUL_128_ARCHITECTURE) == 128
+    assert recurrent_128_flat.size == 8862
+    print("[PASS] new recurrent policy keeps 128 hidden units and has 8862 parameters")
+
+    assert CHEMICAL_COMMUNICATION_ARCHITECTURES == (
+        PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+        CELL_OWNED_PROJECTION_ARCHITECTURE,
+    )
+    assert normalize_chemical_communication_architecture(None) == CELL_OWNED_PROJECTION_ARCHITECTURE
+    for chemical_architecture in CHEMICAL_COMMUNICATION_ARCHITECTURES:
+        assert normalize_chemical_communication_architecture(chemical_architecture) == chemical_architecture
+    assert resolve_chemical_communication_architecture(None, 0.91) == PERSISTENT_ENVIRONMENT_ARCHITECTURE
+    assert resolve_chemical_communication_architecture(None, 0.0) == CELL_OWNED_PROJECTION_ARCHITECTURE
+    print("[PASS] chemical communication architecture selection is validated independently of policy shape")
 
 
 if __name__ == "__main__":

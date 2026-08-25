@@ -11,7 +11,7 @@ from agents_gpu import PARTICLE_META_BUFFER_OFFSET, AgentsGPU, weight_layout
 from device import pick_device
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, MpmCore, ceil_div
-from policy_parameters import STATEFUL_ARCHITECTURE
+from policy_parameters import PERSISTENT_ENVIRONMENT_ARCHITECTURE, STATEFUL_128_ARCHITECTURE
 from training_sim import TrainingRollout
 
 
@@ -500,6 +500,57 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     assert np.allclose(meta["color"][0, :3], [1.0, 0.0, 0.5], atol=1e-6), meta["color"][0]
     assert np.isclose(meta["color"][0, 3], 1.0), meta["color"][0]
     print("[PASS] sigmoid RGB outputs are stored in particle state")
+
+
+def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
+    """Direct policy writes survive spatially, then diffuse and decay."""
+    channels = 1
+    width = height = 16
+    decay = 0.81
+    core = MpmCore(device)
+    environment = EnvironmentGPU(
+        device, channels, width, height, decay, 1.0,
+        PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+    )
+    agents = AgentsGPU(
+        device, core, environment, channels, 128,
+        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
+        2, 0.01, 1.0, 1.0, 0.2, 0.0, 0.5, 0.5,
+        chemical_communication_architecture=PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+    )
+    core.load_scene(
+        np.array([[0.5, 0.5]], dtype=np.float32),
+        np.zeros((1, 2), dtype=np.float32),
+        np.array([[1, 0, 0, 1]], dtype=np.float32),
+        np.zeros((1, 4), dtype=np.float32),
+        np.ones(1, dtype=np.float32),
+    )
+    core.set_active_count(1)
+    agents.set_active_count(1)
+    agents.reset_heading(23)
+    layout = weight_layout(channels, 128)
+    weights = np.zeros(layout["total_floats"], dtype=np.float32)
+    weights[layout["fc2b_offset"]] = 20.0
+    agents.load_weights(weights)
+
+    def communication_round() -> np.ndarray:
+        encoder = device.create_command_encoder()
+        environment.encode_clear(encoder)
+        environment.encode_sense(encoder)
+        agents.encode_step(encoder, environment.parity)
+        environment.encode_advance_persistent(encoder)
+        device.queue.submit([encoder.finish()])
+        return np.frombuffer(
+            device.queue.read_buffer(environment.buffers[environment.parity]), np.float32
+        ).copy()
+
+    deposited = communication_round()
+    assert deposited.max() > 0.0 and deposited.sum() > 0.0, deposited
+    agents.load_weights(np.zeros_like(weights))
+    aged = communication_round()
+    np.testing.assert_allclose(aged.sum(), deposited.sum() * decay, rtol=2e-5, atol=2e-5)
+    assert aged.max() < deposited.max(), (aged.max(), deposited.max())
+    print("[PASS] persistent-environment direct writes survive, diffuse, and decay")
 
 
 def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
@@ -1245,10 +1296,10 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0)
     agents = AgentsGPU(
-        device, core, environment, 1, 64,
+        device, core, environment, 1, 128,
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
         4, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
-        policy_architecture=STATEFUL_ARCHITECTURE,
+        policy_architecture=STATEFUL_128_ARCHITECTURE,
     )
     core.load_scene(
         np.array([[0.5, 0.5]], dtype=np.float32),
@@ -1260,7 +1311,7 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     agents.set_active_count(1)
     agents.set_growth_enabled(False)
     agents.reset_heading(31)
-    layout = weight_layout(1, 64, STATEFUL_ARCHITECTURE)
+    layout = weight_layout(1, 128, STATEFUL_128_ARCHITECTURE)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     # Common outputs occupy C+6 rows. Drive private channel 0 positively and
     # open its corresponding gate; all other private channels remain still.
@@ -1308,7 +1359,7 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     )
     daughters = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=2)
     np.testing.assert_allclose(daughters[0]["privateState"], daughters[1]["privateState"], atol=1e-7)
-    print("[PASS] stateful policy applies speed-scaled gated memory, freezes at 0x, derives RGB, and inherits state at division")
+    print("[PASS] recurrent-128 policy applies speed-scaled gated memory, freezes at 0x, derives RGB, and inherits state at division")
 
 
 def main() -> None:
@@ -1321,6 +1372,7 @@ def main() -> None:
     check_growth_without_repulsion(device)
     check_compression_inhibition_strength(device)
     check_transient_cell_chemical_splats(device)
+    check_persistent_environment_chemistry(device)
     check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
     check_desired_heading_derives_angular_acceleration(device)

@@ -98,6 +98,12 @@ export function physicsSliderSpecsFor(trained: PhysicsSettings): PhysicsSliderSp
       format: (v) => v.toFixed(2),
     },
     {
+      key: "decay",
+      label: "Substrate decay",
+      ...FRACTION_RANGE,
+      format: (v) => v.toFixed(3),
+    },
+    {
       key: "maxAccel",
       label: "Max accel",
       ...scaledRange(trained.maxAccel, 3),
@@ -192,7 +198,8 @@ export function physicsSliderSpecsFor(trained: PhysicsSettings): PhysicsSliderSp
 
 /** Collapsible "Physics" section (default closed) exposing every
  * live-adjustable simulation setting as a slider — gravity, damping, MPM
- * material (E/nu/hardening/elasticity), cell-chemical delta magnitude,
+ * material (E/nu/hardening/elasticity), persistent substrate decay,
+ * cell-chemical delta magnitude,
  * strafe's own maxAccel/maxStrafe/friction (strafe
  * drives MpmCore's own velocity directly — an acceleration, damped by
  * friction — see agents.wgsl's own module docstring for the full

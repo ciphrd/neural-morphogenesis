@@ -46,6 +46,7 @@ from evolve import (
     CHECKPOINTS_DIR,
     RASTER_EXTENT,
     build_arg_parser,
+    finalize_policy_configuration,
     get_weights,
     rollout,
     run_generation,
@@ -140,6 +141,7 @@ target_distance_field = None
 def _setup() -> None:
     global args, wgpu_device, target, target_raster, target_distance_field
     args = parser.parse_args()
+    finalize_policy_configuration(args)
 
     if not 1 <= args.elites <= args.population:
         raise SystemExit("--elites must be between 1 and --population")
@@ -361,7 +363,10 @@ async def _training_loop_body() -> None:
     # (below) — never a live forward pass, see training_sim.py's own
     # module docstring.
     core = MpmCore(wgpu_device)
-    environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE)
+    environment = EnvironmentGPU(
+        wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE,
+        args.chemical_communication_architecture,
+    )
     agents = AgentsGPU(
         wgpu_device,
         core,
@@ -385,6 +390,7 @@ async def _training_loop_body() -> None:
         args.spawn_x,
         args.spawn_y,
         policy_architecture=args.policy_architecture,
+        chemical_communication_architecture=args.chemical_communication_architecture,
     )
     num_workers = args.workers if args.workers is not None else min(os.cpu_count() or 4, args.population)
     # log_device=False — _setup() already logged the "[device] adapter:
@@ -435,7 +441,10 @@ async def _training_loop_body() -> None:
         "elasticStrainScale": ELASTIC_STRAIN_SCALE,
         "elasticStrainInputsEnabled": ELASTIC_STRAIN_INPUTS_ENABLED,
         "hiddenDim": policy_hidden,
+        "hiddenLayers": args.hidden_layers,
+        "cellMemory": args.cell_memory,
         "policyArchitecture": args.policy_architecture,
+        "chemicalCommunicationArchitecture": args.chemical_communication_architecture,
         "decay": DECAY,
         "depositRate": DEPOSIT_RATE,
         "maxAccel": MAX_ACCEL,
@@ -597,6 +606,9 @@ async def _training_loop_body() -> None:
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
                         "policy_architecture": args.policy_architecture,
+                        "cell_memory": args.cell_memory,
+                        "hidden_layers": args.hidden_layers,
+                        "chemical_communication_architecture": args.chemical_communication_architecture,
                         "hidden_dim": policy_hidden,
                         "mutation_scales": mutation_scales(args.policy_architecture),
                         "seed": args.seed,

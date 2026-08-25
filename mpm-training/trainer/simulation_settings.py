@@ -47,6 +47,11 @@ DIRECTION_CONFIDENCE_SCALE: float = _CORE_CONSTANTS["DIRECTION_CONFIDENCE_SCALE"
 # settings; the paired comparison utility overrides it internally only while
 # launching its two controlled experiment subprocesses.
 POLICY_ARCHITECTURE: str = _CORE_CONSTANTS["POLICY_ARCHITECTURE"]
+CELL_MEMORY: str = _CORE_CONSTANTS.get("CELL_MEMORY", "recurrent")
+HIDDEN_LAYERS: tuple[int, ...] = tuple(_CORE_CONSTANTS.get("HIDDEN_LAYERS", [HIDDEN_DIM]))
+CHEMICAL_COMMUNICATION_ARCHITECTURE: str = _CORE_CONSTANTS.get(
+    "CHEMICAL_COMMUNICATION_ARCHITECTURE", "cell-owned-projection"
+)
 INTERNAL_STATE_SPEED: float = _CORE_CONSTANTS["INTERNAL_STATE_SPEED"]
 # Strength of occupancy-weighted cycle admission. 0 preserves the historical
 # chemistry-only admission rule; the viewer exposes [0,1] for live testing.
@@ -74,7 +79,9 @@ STRAFE_DIM = 2
 
 # --- Chemical field (environment_gpu.py / core/environment.wgsl) ---
 FIELD_N = 256
-DECAY = 0.0
+# Used by persistent-environment communication. Cell-owned projection ignores
+# decay because the spatial field is rebuilt from cell state every round.
+DECAY = 0.91
 
 # Motion
 MAX_ACCEL = 0.0 # 0.1 # not used rn

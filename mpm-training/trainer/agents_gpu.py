@@ -39,11 +39,14 @@ from environment_gpu import EnvironmentGPU, ceil_div
 from mpm_core import MpmCore, REPULSION_FIELD_N
 from shader_template import load_core_shader
 from policy_parameters import (
+    CELL_OWNED_PROJECTION_ARCHITECTURE,
     PRIVATE_STATE_DIM,
     STATEFUL_ARCHITECTURE,
     STATELESS_ARCHITECTURE,
     normalize_architecture,
+    normalize_chemical_communication_architecture,
     policy_heads,
+    policy_has_recurrence,
     policy_input_dim,
 )
 
@@ -188,11 +191,15 @@ class AgentsGPU:
         internal_state_speed: float = INTERNAL_STATE_SPEED,
         interior_support_strength: float = INTERIOR_SUPPORT_STRENGTH,
         division_directionality: float = DIVISION_DIRECTIONALITY,
+        chemical_communication_architecture: str = CELL_OWNED_PROJECTION_ARCHITECTURE,
     ) -> None:
         self.device = device
         self.channels = channels
         self.hidden_dim = hidden_dim
         self.policy_architecture = normalize_architecture(policy_architecture)
+        self.chemical_communication_architecture = normalize_chemical_communication_architecture(
+            chemical_communication_architecture
+        )
         self._internal_state_speed = max(0.0, float(internal_state_speed))
         self._interior_support_strength = max(0.0, min(1.0, float(interior_support_strength)))
         self._division_directionality = max(0.0, min(1.0, float(division_directionality)))
@@ -312,12 +319,15 @@ class AgentsGPU:
                     # str(bool) gives "True"/"False", invalid WGSL syntax,
                     # so this can't just be passed through as-is.
                     "CHIRALITY": "true" if chirality else "false",
-                    "STATEFUL": "true" if self.policy_architecture == STATEFUL_ARCHITECTURE else "false",
+                    "STATEFUL": "true" if policy_has_recurrence(self.policy_architecture) else "false",
+                    "CELL_OWNED_CHEMISTRY": (
+                        "true" if self.chemical_communication_architecture == CELL_OWNED_PROJECTION_ARCHITECTURE else "false"
+                    ),
                     "PRIVATE_STATE_INPUTS": (
                         "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
                         "    inputVec[3u * CHANNELS + 6u + s] = tanh(agentState.particleMeta[pi].privateState[s]);\n"
                         "  }"
-                        if self.policy_architecture == STATEFUL_ARCHITECTURE else ""
+                        if policy_has_recurrence(self.policy_architecture) else ""
                     ),
                     "POLICY_TAIL_DECODE": (
                         "out.color = vec3<f32>(0.5);\n"
@@ -325,7 +335,7 @@ class AgentsGPU:
                         "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 6u + s]);\n"
                         "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 6u + PRIVATE_STATE_DIM + s]);\n"
                         "  }"
-                        if self.policy_architecture == STATEFUL_ARCHITECTURE else
+                        if policy_has_recurrence(self.policy_architecture) else
                         "out.color = vec3<f32>(\n"
                         "    safeSigmoid(outVec[ENV_WRITE_DIM + 6u]),\n"
                         "    safeSigmoid(outVec[ENV_WRITE_DIM + 7u]),\n"
@@ -371,6 +381,7 @@ class AgentsGPU:
                     {"binding": 2, "resource": {"buffer": core.active_count_uniform, "offset": 0, "size": core.active_count_uniform.size}},
                     {"binding": 3, "resource": {"buffer": env_buf, "offset": 0, "size": env_buf.size}},
                     {"binding": 4, "resource": {"buffer": environment.gradient, "offset": 0, "size": environment.gradient.size}},
+                    {"binding": 5, "resource": {"buffer": environment.deposit_scratch, "offset": 0, "size": environment.deposit_scratch.size}},
                     {"binding": 6, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
                     {"binding": 7, "resource": {"buffer": self._agent_state_buffer, "offset": 0, "size": self._agent_state_buffer.size}},
                     {"binding": 8, "resource": {"buffer": core.C, "offset": 0, "size": core.C.size}},

@@ -45,6 +45,8 @@ from training_sim import TrainingRollout
 from policy_parameters import (
     STATEFUL_ARCHITECTURE, STATELESS_ARCHITECTURE,
     policy_hidden_dim, policy_input_dim, random_flat_policy_weights,
+    policy_has_recurrence,
+    resolve_chemical_communication_architecture,
 )
 
 META_NAMES = [
@@ -63,7 +65,7 @@ def feature_names(channels: int, architecture: str = STATELESS_ARCHITECTURE) -> 
         + ["morphology_occupancy", "morphology_gradient_forward", "morphology_gradient_lateral"]
         + ["elastic_volume", "elastic_axial", "elastic_shear"]
     )
-    if architecture == STATEFUL_ARCHITECTURE:
+    if policy_has_recurrence(architecture):
         names += [f"private_state_{i}" for i in range(8)]
     return names
 
@@ -111,7 +113,7 @@ class PolicyInputProbe:
                 "IN_DIM": self.input_dim,
                 "PRIVATE_STATE_PROBE": (
                     "for (var s=0u; s<8u; s=s+1u) { output[rawBase+3u*CHANNELS+6u+s]=agentState.privateState[s]; output[inputBase+3u*CHANNELS+6u+s]=tanh(agentState.privateState[s]); }"
-                    if agents.policy_architecture == STATEFUL_ARCHITECTURE else ""
+                    if policy_has_recurrence(agents.policy_architecture) else ""
                 ),
                 "ELASTIC_SCALE": repr(float(elastic_scale)),
                 "ELASTIC_ENABLED": "true" if elastic_enabled else "false",
@@ -153,7 +155,8 @@ class PolicyInputProbe:
         # on the next controller evaluation at the current particle state.
         core.encode_morphology(encoder)
         environment.encode_clear(encoder)
-        self.agents.encode_splat_chemical_state(encoder)
+        if environment.chemical_communication_architecture == "cell-owned-projection":
+            self.agents.encode_splat_chemical_state(encoder)
         environment.encode_sense(encoder)
         p = encoder.begin_compute_pass()
         p.set_pipeline(self.pipeline)
@@ -357,7 +360,13 @@ def main() -> int:
         meta.get("repulsion_strength", REPULSION_STRENGTH), meta.get("repulsion_max_delta", REPULSION_MAX_DELTA),
     )
     field_n = int(meta.get("field_n", FIELD_N))
-    environment = EnvironmentGPU(device, channels, field_n, field_n, meta.get("decay", DECAY), meta.get("deposit_rate", DEPOSIT_RATE))
+    chemical_architecture = resolve_chemical_communication_architecture(
+        meta.get("chemical_communication_architecture"), meta.get("decay", DECAY)
+    )
+    environment = EnvironmentGPU(
+        device, channels, field_n, field_n, meta.get("decay", DECAY),
+        meta.get("deposit_rate", DEPOSIT_RATE), chemical_architecture,
+    )
     agents = AgentsGPU(
         device, core, environment, channels, hidden,
         meta.get("max_accel", MAX_ACCEL), meta.get("max_strafe", MAX_STRAFE), meta.get("max_env_write", MAX_ENV_WRITE),
@@ -373,6 +382,7 @@ def main() -> int:
         internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
         interior_support_strength=meta.get("interior_support_strength", INTERIOR_SUPPORT_STRENGTH),
         division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
+        chemical_communication_architecture=chemical_architecture,
     )
     def restart_rollout() -> TrainingRollout:
         return TrainingRollout(
@@ -507,7 +517,7 @@ def main() -> int:
             "morphology_occupancy": "clamp(2*x-1,-1,1)",
             "morphology_gradient_scale": MORPHOLOGY_GRADIENT_INPUT_SCALE,
             "elastic": "already normalized; unchanged",
-            "private_state": "tanh(state), state clamped to [-4,4]" if architecture == STATEFUL_ARCHITECTURE else "not present",
+            "private_state": "tanh(state), state clamped to [-4,4]" if policy_has_recurrence(architecture) else "not present",
         },
         "search": {
             "enabled": args.search_for_split, "attempt": search_attempt,

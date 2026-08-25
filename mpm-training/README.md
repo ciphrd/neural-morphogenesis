@@ -3,9 +3,9 @@
 This project evolves particle-based organisms toward arbitrary target shapes.
 Particles are simulated as an elastic material with MLS-MPM, carry a small
 neural policy, sense the values and gradients of multiple chemical substrate
-channels, and preserve the underlying chemical levels inside the cells.
-Before each brain invocation, cells publish those levels as transient,
-centered Gaussian splats; the resulting world field is rebuilt from scratch.
+channels, and support two selectable chemical-memory architectures: a
+diffusing/decaying persistent world field, or persistent cell-owned chemistry
+projected into a transient world field before each brain invocation.
 
 Growth uses a conservative morphoelastic **grow-then-divide** model. It does
 not insert overlapping particles and rely on repulsion to create space.
@@ -35,7 +35,7 @@ Three signals have distinct responsibilities:
    lengthens this duration continuously, without a hard mechanical cutoff.
 
 The policy therefore does not directly output a scalar growth amount. It
-controls growth indirectly by changing its cell-owned growth chemical, reacting to all
+controls growth indirectly through the last chemical channel, reacting to all
 substrate values and gradients, changing its heading, and selecting a growth
 direction, anisotropy, and division polarity.
 
@@ -61,25 +61,26 @@ head multiplies it by a fixed sensitivity scale:
 | division bias | sigmoid = 0.50 | 0.25 |
 | growth direction | local-forward | 0.20 |
 | cell color | sigmoid = 0.50 | 0.50 |
-| private-state residual (`stateful-64`) | neutral | 0.20 |
-| private-state gate (`stateful-64`) | sigmoid ≈ 0.12 | 0.15 |
+| private-state residual (`recurrent`) | neutral | 0.20 |
+| private-state gate (`recurrent`) | sigmoid ≈ 0.12 | 0.15 |
 
 Small head-specific bias jitter prevents freshly initialized policies from
 being identical at zero input. Lower mutation multipliers on persistent
 direction and growth controls prevent a single mutation from causing a much
 larger behavioral jump than an equally sized trunk mutation.
 
-## Policy architecture comparison
+## Cell memory
 
-Training supports two explicit variants selected by `POLICY_ARCHITECTURE` in
-`core/constants.json`:
+Training supports two explicit behaviors selected with `--cell-memory`. Both
+new variants keep the same 128-unit hidden layer so memory does not silently
+change network capacity:
 
 | Variant | Inputs | Hidden width | Outputs | Parameters at C=8 |
 | --- | ---: | ---: | ---: | ---: |
-| `stateless-128` | 30 | 128 | 17 | 6,161 |
-| `stateful-64` | 38 | 64 | 30 | 4,446 |
+| `none` | 30 | 128 | 17 | 6,161 |
+| `recurrent` | 38 | 128 | 30 | 8,862 |
 
-The stateful controller adds eight private values to every particle. Each
+The recurrent controller adds eight private values to every particle. Each
 communication round senses `tanh(state)` and emits eight residual candidates
 and eight sigmoid gates. The update is `state += gate * tanh(delta) * dt`,
 clamped to `[-4,4]`. A daughter inherits the updated state of its parent, while
@@ -92,6 +93,17 @@ Under the existing optional mirror-average pass they are treated as ordinary
 reflection-invariant scalars; no channel is assigned even/odd parity or paired
 with another state channel.
 
+New settings and checkpoints store the topology as `hiddenLayers: [128]`
+(`hidden_layers` in Python metadata). `hiddenDim` remains as a compatibility
+alias for the current one-hidden-layer evaluator. Legacy `stateful-64`
+checkpoints retain their recorded width and replay unchanged.
+
+The viewer exposes `Cell memory` and the current single hidden-layer width as
+exploration controls. A shape change never reinterprets checkpoint weights:
+it creates a fresh deterministic brain from the active rollout seed, rebuilds
+the GPU policy, and labels the source `Seeded random`. Reset restores the
+selected generation's trained brain.
+
 Run a controlled paired experiment with identical evolution arguments and
 seed using:
 
@@ -103,6 +115,35 @@ cd trainer
 
 This writes isolated checkpoints and logs for both variants, plus
 `summary.json` and a directly viewable `report.html`.
+
+## Chemical communication architecture
+
+Chemical memory is an independent run-level architecture selected with
+`--chemical-communication-architecture`:
+
+| Variant | Memory owner | Chemical-head meaning | Field lifecycle |
+| --- | --- | --- | --- |
+| `persistent-environment` | spatial environment | direct Gaussian deposit | sense current field, then diffuse/decay and merge fresh writes |
+| `cell-owned-projection` | each cell | delta to persistent cell chemistry | clear and rebuild the sensed field from cell states every round |
+
+The cell-memory axis is selected independently with `--cell-memory`.
+For example, the earlier stateful persistent-field model is:
+
+```bash
+cd trainer
+.venv/bin/python train_server.py \
+  --cell-memory recurrent \
+  --chemical-communication-architecture persistent-environment
+```
+
+The cell-owned model is the compatibility default. Both architecture
+identifiers are stored in run settings and checkpoint metadata, and the viewer
+rebuilds the matching GPU pipelines automatically when a run is loaded. Its
+Rollout panel also offers a playback-only chemical-architecture selector for
+comparing the same weights under either communication model.
+Untagged legacy checkpoints are inferred from their recorded decay: positive
+decay selects `persistent-environment`, while zero decay selects
+`cell-owned-projection`.
 Any checkpoint from before elastic-strain sensing has a 27-column first layer;
 the current policy requires 30 and must be retrained.
 

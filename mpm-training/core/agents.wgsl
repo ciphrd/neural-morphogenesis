@@ -143,6 +143,7 @@
 // makes sense for.
 const CHIRALITY: bool = __CHIRALITY__;
 const STATEFUL: bool = __STATEFUL__;
+const CELL_OWNED_CHEMISTRY: bool = __CELL_OWNED_CHEMISTRY__;
 const ELASTIC_STRAIN_INPUTS_ENABLED: bool = __ELASTIC_STRAIN_INPUTS_ENABLED__;
 const PRIVATE_STATE_DIM: u32 = 8u;
 
@@ -865,18 +866,33 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let communicationDt = max(stepMode.communicationDt, 0.0);
 
-  // The former environment-write head is now a delta to cell-owned chemical
-  // state. Clamp keeps persistent, non-decaying chemistry numerically bounded.
-  for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-    agentState.particleMeta[pi].chemicalState[c] = clamp(
-      agentState.particleMeta[pi].chemicalState[c] + result.envWrite[c] * communicationDt,
-      -1.0,
-      1.0,
+  if (CELL_OWNED_CHEMISTRY) {
+    // Cell-owned-projection interprets the chemical head as a delta to
+    // persistent per-cell chemistry. The separate splat pass publishes the
+    // pre-update state on the following communication round.
+    for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+      agentState.particleMeta[pi].chemicalState[c] = clamp(
+        agentState.particleMeta[pi].chemicalState[c] + result.envWrite[c] * communicationDt,
+        -1.0,
+        1.0,
+      );
+    }
+    particleRest[pi].weldExpression = smoothstep(
+      0.5, 0.7, safeSigmoid(agentState.particleMeta[pi].chemicalState[0u])
+    );
+  } else {
+    // Persistent-environment retains the original interpretation: chemical
+    // outputs are direct spatial writes. Environment decay/deposit-rate owns
+    // timestep scaling, so result.envWrite is not integrated here.
+    depositGaussian(
+      result.envWrite,
+      fieldPos,
+      clamp(particleRest[pi].appearanceScale, 0.0, 1.0),
+    );
+    particleRest[pi].weldExpression = smoothstep(
+      0.5, 0.7, safeSigmoid(result.envWrite[0u])
     );
   }
-  particleRest[pi].weldExpression = smoothstep(
-    0.5, 0.7, safeSigmoid(agentState.particleMeta[pi].chemicalState[0u])
-  );
 
   if (STATEFUL) {
     for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {

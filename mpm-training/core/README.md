@@ -34,8 +34,10 @@ own module docstring.
   MLS-MPM itself — but shares this directory so both consumers load the
   exact same shader.
 - `environment.wgsl` — the GPU-resident chemical field `agents.wgsl`
-  senses/writes (bilinear sense/deposit, Sobel gradient, blur+decay),
-  toroidal to match `gridUpdate.wgsl`'s own wraparound domain.
+  senses/writes. It contains both selectable lifecycles: transient
+  materialization from cell-owned chemistry, and persistent ping-pong
+  blur/decay plus direct policy deposits. Both use the same Sobel sensing and
+  toroidal domain.
 - `constants.json` — the numeric constants (`GRID_N`, `DX`, `INV_DX`,
   `DT`, `PARTICLE_MASS`, `VOL`, `MAX_PARTICLES`, `FIELD_N`,
   `DEFAULT_SPLAT_RADIUS`, `DEFAULT_REPULSION_STRENGTH`) every consumer

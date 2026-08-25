@@ -238,13 +238,15 @@ class TrainingRollout:
         core.encode_morphology(encoder)
         for communication_round in range(self.neural_updates_per_macro):
             self.environment.encode_clear(encoder)
-            self.agents.encode_splat_chemical_state(encoder)
+            if self.environment.chemical_communication_architecture == "cell-owned-projection":
+                self.agents.encode_splat_chemical_state(encoder)
             self.environment.encode_sense(encoder)
             self.agents.encode_step(
                 encoder,
                 self.environment.parity,
                 commit_lifecycle=communication_round == self.neural_updates_per_macro - 1,
             )
+            self.environment.encode_advance_persistent(encoder)
         core.device.queue.submit([encoder.finish()])
 
         # Growth's own readback — see this module's own module docstring

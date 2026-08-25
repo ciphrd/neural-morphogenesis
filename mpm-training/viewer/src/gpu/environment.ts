@@ -1,11 +1,12 @@
-// TS wrapper around environment.wgsl. The field is a transient projection of
-// cell-owned chemistry: clear atomic splats, materialize them into buffer 0,
-// then compute one shared Sobel gradient. Buffer 1 remains allocated only to
-// preserve the renderer-facing buffer/parity interface.
+// TS wrapper around environment.wgsl's two chemical lifecycles. Cell-owned
+// projection materializes per-cell state into buffer 0 each round; persistent
+// environment ping-pongs a spatial field through diffusion/decay and merges
+// direct policy deposits. Both expose the same parity-indexed sensing buffers.
 
 import environmentSrc from "../../../core/environment.wgsl?raw";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
+import type { ChemicalCommunicationArchitecture } from "./types";
 
 export interface EnvironmentConfig {
   channels: number;
@@ -14,12 +15,14 @@ export interface EnvironmentConfig {
   // Legacy run-metadata fields; transient fields do not use either value.
   decay: number;
   depositRate: number;
+  chemicalCommunicationArchitecture?: ChemicalCommunicationArchitecture;
 }
 
 const CLEAR_WORKGROUP = 256;
 const GRID_WORKGROUP = 16;
 
 export class Environment {
+  readonly chemicalCommunicationArchitecture: ChemicalCommunicationArchitecture;
   readonly channels: number;
   readonly width: number;
   readonly height: number;
@@ -31,6 +34,9 @@ export class Environment {
   readonly depositScratch: GPUBuffer;
 
   private readonly device: GPUDevice;
+  private baseDecay: number;
+  private baseDepositRate: number;
+  private readonly physicsUniform: GPUBuffer;
 
   private readonly clearScratchPipeline: GPUComputePipeline;
   private readonly clearScratchBindGroup: GPUBindGroup;
@@ -38,6 +44,10 @@ export class Environment {
   private readonly materializeSplatBindGroup: GPUBindGroup;
   private readonly computeGradientPipeline: GPUComputePipeline;
   private readonly computeGradientBindGroups: [GPUBindGroup, GPUBindGroup];
+  private readonly mergeDepositPipeline: GPUComputePipeline;
+  private readonly diffuseDecayPipeline: GPUComputePipeline;
+  private readonly mergeDepositBindGroups: [GPUBindGroup, GPUBindGroup];
+  private readonly diffuseDecayBindGroups: [GPUBindGroup, GPUBindGroup];
 
   private readonly clearDispatch: number;
   private readonly gridDispatch: [number, number, number];
@@ -52,6 +62,9 @@ export class Environment {
     this.channels = config.channels;
     this.width = config.width;
     this.height = config.height;
+    this.chemicalCommunicationArchitecture = config.chemicalCommunicationArchitecture ?? "cell-owned-projection";
+    this.baseDecay = config.decay;
+    this.baseDepositRate = config.depositRate;
 
     const total = config.width * config.height * config.channels;
     const f32 = 4;
@@ -62,6 +75,8 @@ export class Environment {
     ];
     this.gradient = device.createBuffer({ size: total * 2 * f32, usage: GPUBufferUsage.STORAGE });
     this.depositScratch = device.createBuffer({ size: total * f32, usage: GPUBufferUsage.STORAGE });
+    this.physicsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.setCommunicationTimestep(1, 1);
 
     const module = device.createShaderModule({
       code: templateShader(environmentSrc, { CHANNELS: config.channels, WIDTH: config.width, HEIGHT: config.height }),
@@ -83,6 +98,8 @@ export class Environment {
     });
 
     this.computeGradientPipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "computeGradient" } });
+    this.mergeDepositPipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "mergeDeposit" } });
+    this.diffuseDecayPipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "diffuseDecay" } });
 
     this.computeGradientBindGroups = [0, 1].map((p) =>
       device.createBindGroup({
@@ -93,9 +110,49 @@ export class Environment {
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];
+    this.mergeDepositBindGroups = [0, 1].map((p) =>
+      device.createBindGroup({
+        layout: this.mergeDepositPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.buffers[p] } },
+          { binding: 2, resource: { buffer: this.depositScratch } },
+          { binding: 4, resource: { buffer: this.physicsUniform } },
+        ],
+      })
+    ) as [GPUBindGroup, GPUBindGroup];
+    this.diffuseDecayBindGroups = [0, 1].map((p) =>
+      device.createBindGroup({
+        layout: this.diffuseDecayPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.buffers[p] } },
+          { binding: 3, resource: { buffer: this.buffers[1 - p] } },
+          { binding: 4, resource: { buffer: this.physicsUniform } },
+        ],
+      })
+    ) as [GPUBindGroup, GPUBindGroup];
 
     this.clearDispatch = ceilDiv(total, CLEAR_WORKGROUP);
     this.gridDispatch = [ceilDiv(config.width, GRID_WORKGROUP), ceilDiv(config.height, GRID_WORKGROUP), config.channels];
+  }
+
+  /** Applies one communication substep while preserving a macro-step's total
+   * decay, deposit strength, and diffusion as evaluation resolution changes. */
+  setCommunicationTimestep(rounds: number, speed: number): number {
+    const dt = Math.max(0, speed) / Math.max(1, Math.round(rounds));
+    const decay = Math.pow(Math.max(0, Math.min(1, this.baseDecay)), dt);
+    writeFloat32(this.device, this.physicsUniform, 0, new Float32Array([
+      decay,
+      this.baseDepositRate * dt,
+      Math.min(dt, 1),
+      0,
+    ]));
+    return dt;
+  }
+
+  setPhysics(decay: number, depositRate: number, rounds: number, speed: number): number {
+    this.baseDecay = decay;
+    this.baseDepositRate = depositRate;
+    return this.setCommunicationTimestep(rounds, speed);
   }
 
   /** Zeroes both grid buffers and resets parity to 0 — call at the start
@@ -122,17 +179,38 @@ export class Environment {
   /** Materializes the just-published cell states, then computes the field
    * gradient shared by every brain invocation in this round. */
   encodeSense(encoder: GPUCommandEncoder): void {
-    let pass = encoder.beginComputePass();
-    pass.setPipeline(this.materializeSplatPipeline);
-    pass.setBindGroup(0, this.materializeSplatBindGroup);
-    pass.dispatchWorkgroups(this.clearDispatch);
-    pass.end();
+    let pass: GPUComputePassEncoder;
+    if (this.chemicalCommunicationArchitecture === "cell-owned-projection") {
+      pass = encoder.beginComputePass();
+      pass.setPipeline(this.materializeSplatPipeline);
+      pass.setBindGroup(0, this.materializeSplatBindGroup);
+      pass.dispatchWorkgroups(this.clearDispatch);
+      pass.end();
+    }
 
     pass = encoder.beginComputePass();
     pass.setPipeline(this.computeGradientPipeline);
-    pass.setBindGroup(0, this.computeGradientBindGroups[0]);
+    pass.setBindGroup(0, this.computeGradientBindGroups[this._parity]);
     pass.dispatchWorkgroups(...this.gridDispatch);
     pass.end();
+  }
+
+  /** Persistent-environment post-policy lifecycle: age the previous field,
+   * merge fresh direct writes, and make the result current for the next round. */
+  encodeAdvancePersistent(encoder: GPUCommandEncoder): void {
+    if (this.chemicalCommunicationArchitecture !== "persistent-environment") return;
+    let pass = encoder.beginComputePass();
+    pass.setPipeline(this.diffuseDecayPipeline);
+    pass.setBindGroup(0, this.diffuseDecayBindGroups[this._parity]);
+    pass.dispatchWorkgroups(...this.gridDispatch);
+    pass.end();
+
+    pass = encoder.beginComputePass();
+    pass.setPipeline(this.mergeDepositPipeline);
+    pass.setBindGroup(0, this.mergeDepositBindGroups[1 - this._parity]);
+    pass.dispatchWorkgroups(this.clearDispatch);
+    pass.end();
+    this._parity = 1 - this._parity;
   }
 
   destroy(): void {
@@ -140,5 +218,6 @@ export class Environment {
     this.buffers[1].destroy();
     this.gradient.destroy();
     this.depositScratch.destroy();
+    this.physicsUniform.destroy();
   }
 }

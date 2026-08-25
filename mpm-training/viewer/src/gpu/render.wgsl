@@ -261,6 +261,28 @@ fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
   return out;
 }
 
+@vertex
+fn chemicalLevelsParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
+  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let offset = QUAD_OFFSETS[vertexIndex];
+  let levels = particleMeta[instanceIndex].chemicalState;
+  var out: NeuralColorDotOut;
+  out.position = vec4<f32>(
+    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex),
+    0.0, 1.0
+  );
+  out.uv = offset;
+  // Match substrate background's signed graypoint convention at accent=0:
+  // raw 0 is neutral 0.5 and SUBSTRATE_MAX=2 maps levels linearly around it.
+  let raw = vec3<f32>(
+    levels[internalStateStyle.channels.x],
+    levels[internalStateStyle.channels.y],
+    levels[internalStateStyle.channels.z],
+  );
+  out.color = clamp(raw / vec3<f32>(2.0), vec3<f32>(-1.0), vec3<f32>(1.0)) * 0.5 + 0.5;
+  return out;
+}
+
 @fragment
 fn internalStateParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
   if (dot(in.uv, in.uv) > 1.0) { discard; }

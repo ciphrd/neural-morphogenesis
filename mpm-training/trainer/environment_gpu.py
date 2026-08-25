@@ -24,6 +24,11 @@ import numpy as np
 import wgpu
 
 from mpm_core import ceil_div
+from policy_parameters import (
+    CELL_OWNED_PROJECTION_ARCHITECTURE,
+    PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+    normalize_chemical_communication_architecture,
+)
 from shader_template import load_core_shader
 
 CLEAR_WORKGROUP = 256
@@ -36,14 +41,20 @@ class EnvironmentGPU:
     builds its bind groups directly against these, same reasoning
     environment.ts's own docstring gives for why they're public there."""
 
-    def __init__(self, device: wgpu.GPUDevice, channels: int, width: int, height: int, decay: float, deposit_rate: float) -> None:
+    def __init__(
+        self, device: wgpu.GPUDevice, channels: int, width: int, height: int,
+        decay: float, deposit_rate: float,
+        chemical_communication_architecture: str = CELL_OWNED_PROJECTION_ARCHITECTURE,
+    ) -> None:
         self.device = device
         self.channels = channels
         self.width = width
         self.height = height
-        # Retained in the constructor for checkpoint/config compatibility;
-        # transient fields have neither environmental decay nor deposit rate.
-        _ = decay, deposit_rate
+        self.chemical_communication_architecture = normalize_chemical_communication_architecture(
+            chemical_communication_architecture
+        )
+        self.base_decay = float(decay)
+        self.base_deposit_rate = float(deposit_rate)
 
         total = width * height * channels
         f32 = 4
@@ -54,6 +65,10 @@ class EnvironmentGPU:
         ]
         self.gradient = device.create_buffer(size=total * 2 * f32, usage=wgpu.BufferUsage.STORAGE)
         self.deposit_scratch = device.create_buffer(size=total * f32, usage=wgpu.BufferUsage.STORAGE)
+        self._physics_uniform = device.create_buffer(
+            size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+        )
+        self.set_communication_timestep(1, 1.0)
 
         module = device.create_shader_module(code=load_core_shader("environment.wgsl", {"CHANNELS": channels, "WIDTH": width, "HEIGHT": height}))
 
@@ -78,6 +93,12 @@ class EnvironmentGPU:
         self._compute_gradient_pipeline = device.create_compute_pipeline(
             layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "computeGradient"}
         )
+        self._merge_deposit_pipeline = device.create_compute_pipeline(
+            layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "mergeDeposit"}
+        )
+        self._diffuse_decay_pipeline = device.create_compute_pipeline(
+            layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "diffuseDecay"}
+        )
 
         self._compute_gradient_bind_groups = [
             device.create_bind_group(
@@ -85,6 +106,28 @@ class EnvironmentGPU:
                 entries=[
                     {"binding": 0, "resource": {"buffer": self.buffers[p], "offset": 0, "size": self.buffers[p].size}},
                     {"binding": 1, "resource": {"buffer": self.gradient, "offset": 0, "size": self.gradient.size}},
+                ],
+            )
+            for p in (0, 1)
+        ]
+        self._merge_deposit_bind_groups = [
+            device.create_bind_group(
+                layout=self._merge_deposit_pipeline.get_bind_group_layout(0),
+                entries=[
+                    {"binding": 0, "resource": {"buffer": self.buffers[p], "offset": 0, "size": self.buffers[p].size}},
+                    {"binding": 2, "resource": {"buffer": self.deposit_scratch, "offset": 0, "size": self.deposit_scratch.size}},
+                    {"binding": 4, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
+                ],
+            )
+            for p in (0, 1)
+        ]
+        self._diffuse_decay_bind_groups = [
+            device.create_bind_group(
+                layout=self._diffuse_decay_pipeline.get_bind_group_layout(0),
+                entries=[
+                    {"binding": 0, "resource": {"buffer": self.buffers[p], "offset": 0, "size": self.buffers[p].size}},
+                    {"binding": 3, "resource": {"buffer": self.buffers[1 - p], "offset": 0, "size": self.buffers[1 - p].size}},
+                    {"binding": 4, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
                 ],
             )
             for p in (0, 1)
@@ -100,8 +143,15 @@ class EnvironmentGPU:
         return self._parity
 
     def set_communication_timestep(self, rounds: int, speed: float) -> float:
-        """Return the per-round brain/cell-state integration timestep."""
-        return max(0.0, float(speed)) / max(1, int(rounds))
+        """Configure timestep-invariant persistent-field dynamics."""
+        dt = max(0.0, float(speed)) / max(1, int(rounds))
+        decay = max(0.0, min(1.0, self.base_decay)) ** dt
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            0,
+            np.array([decay, self.base_deposit_rate * dt, min(dt, 1.0), 0.0], dtype=np.float32),
+        )
+        return dt
 
     def reset(self) -> None:
         """Zeroes both grid buffers and resets parity to 0 — call at the
@@ -125,14 +175,31 @@ class EnvironmentGPU:
 
     def encode_sense(self, encoder: wgpu.GPUCommandEncoder) -> None:
         """Materialize current cell splats and compute their shared gradient."""
-        p = encoder.begin_compute_pass()
-        p.set_pipeline(self._materialize_splat_pipeline)
-        p.set_bind_group(0, self._materialize_splat_bind_group)
-        p.dispatch_workgroups(self._clear_dispatch)
-        p.end()
+        if self.chemical_communication_architecture == CELL_OWNED_PROJECTION_ARCHITECTURE:
+            p = encoder.begin_compute_pass()
+            p.set_pipeline(self._materialize_splat_pipeline)
+            p.set_bind_group(0, self._materialize_splat_bind_group)
+            p.dispatch_workgroups(self._clear_dispatch)
+            p.end()
 
         p = encoder.begin_compute_pass()
         p.set_pipeline(self._compute_gradient_pipeline)
-        p.set_bind_group(0, self._compute_gradient_bind_groups[0])
+        p.set_bind_group(0, self._compute_gradient_bind_groups[self._parity])
         p.dispatch_workgroups(*self._grid_dispatch)
         p.end()
+
+    def encode_advance_persistent(self, encoder: wgpu.GPUCommandEncoder) -> None:
+        if self.chemical_communication_architecture != PERSISTENT_ENVIRONMENT_ARCHITECTURE:
+            return
+        p = encoder.begin_compute_pass()
+        p.set_pipeline(self._diffuse_decay_pipeline)
+        p.set_bind_group(0, self._diffuse_decay_bind_groups[self._parity])
+        p.dispatch_workgroups(*self._grid_dispatch)
+        p.end()
+
+        p = encoder.begin_compute_pass()
+        p.set_pipeline(self._merge_deposit_pipeline)
+        p.set_bind_group(0, self._merge_deposit_bind_groups[1 - self._parity])
+        p.dispatch_workgroups(self._clear_dispatch)
+        p.end()
+        self._parity = 1 - self._parity

@@ -95,7 +95,10 @@ def _worker_init(
     # docstring for why one line is enough on a single machine).
     wgpu_device = pick_device(verbose=False)
     _core = MpmCore(wgpu_device)
-    _environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE)
+    _environment = EnvironmentGPU(
+        wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE,
+        args.chemical_communication_architecture,
+    )
     _agents = AgentsGPU(
         wgpu_device,
         _core,
@@ -119,6 +122,7 @@ def _worker_init(
         args.spawn_x,
         args.spawn_y,
         policy_architecture=args.policy_architecture,
+        chemical_communication_architecture=args.chemical_communication_architecture,
     )
     _target = target
     _target_raster = target_raster
