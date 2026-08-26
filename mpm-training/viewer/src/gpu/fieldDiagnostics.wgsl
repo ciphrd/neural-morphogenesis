@@ -56,7 +56,10 @@ const CH_J: u32 = 0u;
 const CH_SHEAR: u32 = 1u;
 const CH_PRESSURE: u32 = 2u;
 const CH_MASS: u32 = 3u;
-const CHANNELS: u32 = 3u;
+// Four channels are allocated/read by render.ts/field.wgsl. Keeping this
+// stride at 3 made each node overlap the next one while colorizeField read
+// four-wide records, producing the characteristic vertical-strip corruption.
+const CHANNELS: u32 = 4u;
 
 @group(0) @binding(0) var<storage, read> particlePos: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read> particleF: array<vec4<f32>>;
