@@ -259,6 +259,12 @@ struct AgentPhysics {
   // Below this morphology-gradient magnitude, the boundary tangent is treated
   // as undefined and division falls back to the network growth direction.
   boundaryTangentMinGradient: f32,
+  // Lab-only lifecycle control. 0xffffffff disables it. Admission latches a
+  // normal cycle once; the index/direction can remain active afterward to
+  // keep the morphoelastic growth and eventual division axis deterministic.
+  forcedLifecycleIndex: u32,
+  forcedCycleAdmission: u32,
+  forcedDivisionDirection: vec2<f32>,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -949,8 +955,18 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   particleRest[pi].divisionBias = result.divisionBias;
   particleRest[pi].growthFrameHeading = headingVal;
 
-  let growthWorldAngle = headingVal + particleRest[pi].growthAngle;
-  let growthDirectionWorld = vec2<f32>(cos(growthWorldAngle), sin(growthWorldAngle));
+  let forcedLifecycle = physics.forcedLifecycleIndex == pi;
+  var growthWorldAngle = headingVal + particleRest[pi].growthAngle;
+  var growthDirectionWorld = vec2<f32>(cos(growthWorldAngle), sin(growthWorldAngle));
+  if (forcedLifecycle) {
+    // Lock the persistent world-frame growth axis, not merely the final
+    // daughter offset. g2p therefore grows Fg along this same direction and
+    // transfers its stress through the ordinary MPM grid before division.
+    growthDirectionWorld = normalize(physics.forcedDivisionDirection);
+    growthWorldAngle = atan2(growthDirectionWorld.y, growthDirectionWorld.x);
+    particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - headingVal);
+    particleRest[pi].growthFrameHeading = headingVal;
+  }
   agentState.particleMeta[pi].color = vec4<f32>(result.color, 1.0);
 
   if (stepMode.commitLifecycle != 0u) {
@@ -1001,6 +1017,20 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     activeCount < physics.maxActiveParticles &&
     particleRest[pi].cycleActive < 0.5 &&
     cooldownNow <= 0.0;
+  if (
+    forcedLifecycle &&
+    physics.forcedCycleAdmission != 0u &&
+    activeCount < physics.maxActiveParticles &&
+    particleRest[pi].cycleActive < 0.5 &&
+    cooldownNow <= 0.0
+  ) {
+    // This is the scenario's only synthetic action: admit the exact same
+    // persistent cycle organic substrate hazard would admit. Everything from
+    // Fg growth onward remains the production grow-then-divide path.
+    particleRest[pi].cycleActive = 1.0;
+    agentState.particleMeta[pi].divisionHazard = 0.0;
+    agentState.particleMeta[pi].divisionThreshold = 0.0;
+  }
   if (lifecycleEligible) {
     // A zero threshold is the reset sentinel. Draw once per prospective
     // cycle, not once per tick. -log(1-u) is Exp(1); top 24 RNG bits match
@@ -1051,7 +1081,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       let directionStrength = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
         * clamp(stepMode.divisionDirectionality, 0.0, 1.0);
       var centerShift = spawnDir * (0.5 * physics.splitDisplacement) * directionStrength;
-      if (morphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
+      if (!forcedLifecycle && morphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
         // The gradient is the boundary normal. Rotating it by +90 degrees
         // gives either representative of the tangent axis; because daughter
         // placement is symmetric, the sign of that representative is
@@ -1154,5 +1184,15 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   let newHeading = headingVal + newAngularVelocity * communicationDt;
   agentState.particleMeta[pi].heading = newHeading;
   particleRest[pi].growthFrameHeading = newHeading;
+  if (forcedLifecycle) {
+    // Heading integration happens after lifecycle logic. Re-express the same
+    // forced world direction in the new local frame so the g2p pass that
+    // follows this shader still receives an exactly horizontal axis.
+    let forcedWorldAngle = atan2(
+      physics.forcedDivisionDirection.y,
+      physics.forcedDivisionDirection.x,
+    );
+    particleRest[pi].growthAngle = wrapAngle(forcedWorldAngle - newHeading);
+  }
 
 }

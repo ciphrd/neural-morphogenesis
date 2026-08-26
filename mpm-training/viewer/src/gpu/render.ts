@@ -80,6 +80,8 @@ export class Renderer {
 
   // --- particles/target (render.wgsl) ---
   private readonly pointLayout: GPUBindGroupLayout;
+  private readonly viewUniform: GPUBuffer;
+  private readonly viewBindGroup: GPUBindGroup;
   private readonly circlePipeline: GPURenderPipeline;
   private readonly particleCirclePipeline: GPURenderPipeline;
 
@@ -222,6 +224,15 @@ export class Renderer {
     const renderModule = device.createShaderModule({ code: renderSrc });
 
     // --- particles/target ---
+    const viewLayout = device.createBindGroupLayout({
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } }],
+    });
+    this.viewUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    writeFloat32(device, this.viewUniform, 0, new Float32Array([1]));
+    this.viewBindGroup = device.createBindGroup({
+      layout: viewLayout,
+      entries: [{ binding: 0, resource: { buffer: this.viewUniform } }],
+    });
     this.pointLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
@@ -229,7 +240,7 @@ export class Renderer {
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       ],
     });
-    const pointLayoutPipeline = device.createPipelineLayout({ bindGroupLayouts: [this.pointLayout] });
+    const pointLayoutPipeline = device.createPipelineLayout({ bindGroupLayouts: [this.pointLayout, viewLayout] });
 
     this.circlePipeline = device.createRenderPipeline({
       layout: pointLayoutPipeline,
@@ -247,7 +258,7 @@ export class Renderer {
       ],
     });
     this.particleCirclePipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [particlePointLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [particlePointLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "particleVertex" },
       fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
@@ -274,7 +285,7 @@ export class Renderer {
       ],
     });
     this.activationParticlePipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [activationLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [activationLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "activationParticleVertex" },
       fragment: { module: renderModule, entryPoint: "activationParticleFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
@@ -301,7 +312,7 @@ export class Renderer {
       ],
     });
     this.neuralColorParticlePipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [neuralColorLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [neuralColorLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "neuralColorParticleVertex" },
       fragment: { module: renderModule, entryPoint: "neuralColorParticleFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
@@ -330,13 +341,13 @@ export class Renderer {
       ],
     });
     this.internalStateParticlePipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [internalStateLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [internalStateLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "internalStateParticleVertex" },
       fragment: { module: renderModule, entryPoint: "internalStateParticleFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
     this.chemicalLevelsParticlePipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [internalStateLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [internalStateLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "chemicalLevelsParticleVertex" },
       fragment: { module: renderModule, entryPoint: "internalStateParticleFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
@@ -368,7 +379,7 @@ export class Renderer {
       ],
     });
     this.boundaryValueParticlePipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [boundaryValueLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [boundaryValueLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "boundaryValueParticleVertex" },
       fragment: { module: renderModule, entryPoint: "boundaryValueParticleFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
@@ -402,7 +413,7 @@ export class Renderer {
       ],
     });
     this.growthAxisPipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [growthAxisLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [growthAxisLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "growthAxisVertex" },
       fragment: { module: renderModule, entryPoint: "growthAxisFragment", targets: [{ format, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
@@ -763,6 +774,13 @@ export class Renderer {
     }
   }
 
+  /** Camera zoom applied by every particle/target vertex shader. */
+  setZoom(zoom: number): void {
+    writeFloat32(this.device, this.viewUniform, 0, new Float32Array([
+      Math.min(8, Math.max(1, zoom)),
+    ]));
+  }
+
   /** Half-activation gradient g0 for wb=|grad(rho)|/(|grad(rho)|+g0). */
   setBoundaryGradientScale(g0: number): void {
     writeFloat32(
@@ -963,10 +981,12 @@ export class Renderer {
     if (this.targetVisible && this.targetBindGroup && this.targetCount > 0) {
       pass.setPipeline(this.circlePipeline);
       pass.setBindGroup(0, this.targetBindGroup);
+      pass.setBindGroup(1, this.viewBindGroup);
       pass.draw(6, this.targetCount);
     }
 
     if (activeCount > 0) {
+      pass.setBindGroup(1, this.viewBindGroup);
       if (this.particleRenderMode === "dots-white") {
         pass.setPipeline(this.particleCirclePipeline);
         pass.setBindGroup(0, this.circleParticleBindGroup);
@@ -1014,6 +1034,7 @@ export class Renderer {
     this.targetRadiusUniform.destroy();
     this.targetColorUniform.destroy();
     this.targetPositions?.destroy();
+    this.viewUniform.destroy();
     this.fieldModeUniform.destroy();
     this.accentUniform.destroy();
     this.morphologyDisplayUniform.destroy();

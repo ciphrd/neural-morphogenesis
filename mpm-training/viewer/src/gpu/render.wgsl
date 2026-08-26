@@ -27,6 +27,14 @@ const QUAD_OFFSETS = array<vec2<f32>, 6>(
 @group(0) @binding(0) var<storage, read> pointPositions: array<vec2<f32>>;
 @group(0) @binding(1) var<uniform> pointRadius: f32;
 @group(0) @binding(2) var<uniform> pointColor: vec4<f32>;
+// View zoom is applied in the geometry vertex stage. Particle quads are still
+// rasterized directly at the canvas's native resolution; no completed image
+// is enlarged in a later presentation pass.
+@group(1) @binding(0) var<uniform> viewZoom: f32;
+
+fn viewCenter(center: vec2<f32>) -> vec2<f32> {
+  return center * max(viewZoom, 1e-4);
+}
 
 struct ParticleRest {
   growthF: vec4<f32>,
@@ -51,11 +59,11 @@ fn appearanceRadiusScale(instanceIndex: u32) -> f32 {
 
 @vertex
 fn particleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VOut {
-  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let offset = QUAD_OFFSETS[vertexIndex];
   var out: VOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * appearanceRadiusScale(instanceIndex),
+    center + offset * pointRadius * appearanceRadiusScale(instanceIndex) * viewZoom,
     0.0, 1.0
   );
   out.uv = offset;
@@ -65,7 +73,7 @@ fn particleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_ind
 // Target points have no particle rest state and remain constant-sized.
 @vertex
 fn targetVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VOut {
-  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let offset = QUAD_OFFSETS[vertexIndex];
   var out: VOut;
   out.position = vec4<f32>(center + offset * pointRadius, 0.0, 1.0);
@@ -96,11 +104,11 @@ struct ActivationDotOut {
 
 @vertex
 fn activationParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> ActivationDotOut {
-  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let offset = QUAD_OFFSETS[vertexIndex];
   var out: ActivationDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * appearanceRadiusScale(instanceIndex),
+    center + offset * pointRadius * appearanceRadiusScale(instanceIndex) * viewZoom,
     0.0, 1.0
   );
   out.uv = offset;
@@ -199,11 +207,11 @@ struct NeuralColorDotOut {
 
 @vertex
 fn neuralColorParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
-  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let offset = QUAD_OFFSETS[vertexIndex];
   var out: NeuralColorDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex),
+    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex) * viewZoom,
     0.0, 1.0
   );
   out.uv = offset;
@@ -232,12 +240,12 @@ fn neuralColorParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> 
 
 @vertex
 fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
-  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let offset = QUAD_OFFSETS[vertexIndex];
   let state = particleMeta[instanceIndex].privateState;
   var out: NeuralColorDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex),
+    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex) * viewZoom,
     0.0, 1.0
   );
   out.uv = offset;
@@ -263,12 +271,12 @@ fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
 
 @vertex
 fn chemicalLevelsParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
-  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let offset = QUAD_OFFSETS[vertexIndex];
   let levels = particleMeta[instanceIndex].chemicalState;
   var out: NeuralColorDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex),
+    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex) * viewZoom,
     0.0, 1.0
   );
   out.uv = offset;
@@ -337,7 +345,7 @@ fn boundaryValueColor(value: f32) -> vec3<f32> {
 @vertex
 fn boundaryValueParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
   let position = fract(pointPositions[instanceIndex]);
-  let center = position * 2.0 - vec2<f32>(1.0, 1.0);
+  let center = viewCenter(position * 2.0 - vec2<f32>(1.0, 1.0));
   let offset = QUAD_OFFSETS[vertexIndex];
   let dims = vec2<f32>(textureDimensions(boundaryMorphologyTexture));
   let fieldPos = position * dims;
@@ -355,7 +363,7 @@ fn boundaryValueParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
 
   var out: NeuralColorDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex),
+    center + offset * pointRadius * 1.6 * appearanceRadiusScale(instanceIndex) * viewZoom,
     0.0,
     1.0,
   );
@@ -380,14 +388,14 @@ const TRI_LOCAL = array<vec2<f32>, 3>(
 
 @vertex
 fn triangleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> @builtin(position) vec4<f32> {
-  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let heading = particleMeta[instanceIndex].heading;
   let c = cos(heading);
   let s = sin(heading);
   let local = TRI_LOCAL[vertexIndex];
   let rotated = vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
   return vec4<f32>(
-    center + rotated * pointRadius * appearanceRadiusScale(instanceIndex),
+    center + rotated * pointRadius * appearanceRadiusScale(instanceIndex) * viewZoom,
     0.0, 1.0
   );
 }
@@ -420,7 +428,7 @@ struct GrowthAxisOut {
 
 @vertex
 fn growthAxisVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> GrowthAxisOut {
-  let center = pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0);
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let rest = particleRest[instanceIndex];
   let worldAngle = rest.growthFrameHeading + rest.growthAngle;
   let axis = vec2<f32>(cos(worldAngle), sin(worldAngle));
@@ -439,7 +447,7 @@ fn growthAxisVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_i
   }
 
   var out: GrowthAxisOut;
-  out.position = vec4<f32>(center + axis * along + normal * across, 0.0, 1.0);
+  out.position = vec4<f32>(center + (axis * along + normal * across) * viewZoom, 0.0, 1.0);
   out.strength = strength;
   return out;
 }

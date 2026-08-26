@@ -2,7 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import type { DeformDirection, DeformMode } from "../gpu/deform";
 import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu/device";
 import type { FieldMode, ParticleRenderMode } from "../gpu/render";
-import { GpuSimulation } from "../gpu/simulation";
+import { GpuSimulation, type SimulationScenario } from "../gpu/simulation";
 import { policyWeightsShapeError } from "../gpu/policyEval";
 import type { PhysicsSettings, SimulationConfig, UpdateRuleWeights } from "../gpu/types";
 import { CanvasRecorder } from "./canvasRecorder";
@@ -35,6 +35,8 @@ export interface DeformSettings {
 
 interface GridCanvasProps {
   config: SimulationConfig | null;
+  /** Optional deterministic lab setup; null preserves training playback. */
+  scenario?: SimulationScenario | null;
   /** Flat [x0,y0,x1,y1,...] in MpmCore's own [0,1]^2 domain. */
   targetPoints: Float32Array | null;
   /** Rendering-only visibility of the training-target overlay. */
@@ -83,6 +85,8 @@ interface GridCanvasProps {
    * own colorize pass reads this. Default 1 (identity, unchanged from
    * before this knob existed). */
   gradientExponent?: number;
+  /** Geometry-stage camera zoom; particle rendering remains native-resolution. */
+  zoom?: number;
   /** Which interaction tool (if any) is currently toggled on — see the
    * Tool type's own docstring. Default "none". */
   tool?: Tool;
@@ -265,6 +269,7 @@ function applySquareSize(canvas: HTMLCanvasElement): void {
 export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function GridCanvas(
   {
     config,
+    scenario = null,
     targetPoints,
     targetVisible = true,
     physics,
@@ -286,6 +291,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     morphologyDensityVisible = true,
     blur = 0,
     gradientExponent = 1,
+    zoom = 1,
     tool = "none",
     deformSettings,
     onStep,
@@ -299,6 +305,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const contextRef = useRef<GPUCanvasContext | null>(null);
   const deviceRef = useRef<GPUDevice | null>(null);
   const configRef = useRef<SimulationConfig | null>(null);
+  const scenarioRef = useRef(scenario);
   const physicsRef = useRef(physics);
   const particleCapRef = useRef(particleCap);
   const initialParticleCountRef = useRef(initialParticleCount);
@@ -318,6 +325,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const morphologyDensityVisibleRef = useRef(morphologyDensityVisible);
   const blurRef = useRef(blur);
   const gradientExponentRef = useRef(gradientExponent);
+  const zoomRef = useRef(zoom);
   const toolRef = useRef(tool);
   const deformSettingsRef = useRef(deformSettings);
   const onStepRef = useRef(onStep);
@@ -374,8 +382,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     const canvasRect = canvas.getBoundingClientRect();
     // Y-flip matches domainPos()'s own convention (screen is top-down,
     // the domain is bottom-up) — see that function's own comment.
-    const px = canvasRect.left - containerRect.left + hover.x * canvasRect.width;
-    const py = canvasRect.top - containerRect.top + (1 - hover.y) * canvasRect.height;
+    const cameraZoom = zoomRef.current;
+    const screenX = 0.5 + (hover.x - 0.5) * cameraZoom;
+    const screenY = 0.5 + (hover.y - 0.5) * cameraZoom;
+    const px = canvasRect.left - containerRect.left + screenX * canvasRect.width;
+    const py = canvasRect.top - containerRect.top + (1 - screenY) * canvasRect.height;
     // Domain units -> CSS pixels — canvasRect.width/height are equal
     // (GridCanvas.tsx's own applySquareSize() guarantees a square
     // canvas), so either axis gives the same domain-to-pixel scale.
@@ -612,11 +623,13 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setMorphologyDisplay(morphologyGradientVisibleRef.current, morphologyDensityVisibleRef.current);
       simulation.setBlur(blurRef.current);
       simulation.setGradientExponent(gradientExponentRef.current);
+      simulation.setZoom(zoomRef.current);
       simulationRef.current = simulation;
       const initialConfig = configRef.current;
       const initialWeightsError = initialConfig
         ? policyWeightsShapeError(initialConfig.weights, initialConfig.channels, initialConfig.hiddenDim, initialConfig.policyArchitecture)
         : null;
+      simulation.setScenario(scenarioRef.current);
       if (initialConfig && !initialWeightsError) simulation.loadGeneration(initialConfig);
       if (particleCapRef.current !== undefined) simulation.setParticleCap(particleCapRef.current);
       if (initialParticleCountRef.current !== undefined) {
@@ -721,8 +734,14 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     const domainPos = (ev: PointerEvent): { x: number; y: number } => {
       const rect = canvas.getBoundingClientRect();
       const nx = (ev.clientX - rect.left) / rect.width;
-      const ny = (ev.clientY - rect.top) / rect.height;
-      return { x: Math.min(1, Math.max(0, nx)), y: Math.min(1, Math.max(0, 1 - ny)) };
+      const ny = 1 - (ev.clientY - rect.top) / rect.height;
+      const cameraZoom = zoomRef.current;
+      const worldX = 0.5 + (nx - 0.5) / cameraZoom;
+      const worldY = 0.5 + (ny - 0.5) / cameraZoom;
+      return {
+        x: Math.min(1, Math.max(0, worldX)),
+        y: Math.min(1, Math.max(0, worldY)),
+      };
     };
 
     const handlePointerDown = (ev: PointerEvent) => {
@@ -880,6 +899,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [initialParticleCount]);
 
   useEffect(() => {
+    scenarioRef.current = scenario;
+    simulationRef.current?.setScenario(scenario);
+  }, [scenario]);
+
+  useEffect(() => {
     simulationRef.current?.setFieldMode(fieldMode);
   }, [fieldMode]);
 
@@ -938,6 +962,12 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     simulationRef.current?.setGradientExponent(gradientExponent);
   }, [gradientExponent]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+    simulationRef.current?.setZoom(zoom);
+    syncDeformPreview();
+  }, [zoom, syncDeformPreview]);
 
   // Stops any in-progress recording on unmount — a dangling
   // MediaRecorder/MediaStream left running past this component's own

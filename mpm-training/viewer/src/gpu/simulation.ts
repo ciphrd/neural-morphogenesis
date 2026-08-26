@@ -50,9 +50,20 @@ import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
 import { Renderer, type FieldMode, type ParticleRenderMode } from "./render";
-import { seedBlob } from "./rng";
+import { seedBlob, seedRows } from "./rng";
 import { chemicalCommunicationArchitectureFromConfig, physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig, type UpdateRuleWeights } from "./types";
 import coreConstants from "../../../core/constants.json";
+
+export interface SimulationScenario {
+  initialLayout: { kind: "rows"; rows: number; columns: number };
+  events: Array<{
+    step: number;
+    type: "split";
+    particleIndex: number;
+    direction?: readonly [number, number];
+  }>;
+  suppressNaturalGrowth?: boolean;
+}
 
 export class GpuSimulation {
   private readonly device: GPUDevice;
@@ -108,6 +119,8 @@ export class GpuSimulation {
   private particleCap = 2;
   private pendingTargetVisible = true;
   private neuralUpdatesPerMacro = 1;
+  private growthDuration = 0;
+  private scenario: SimulationScenario | null = null;
   // The canvas's own backing-store size in DEVICE pixels, as last
   // reported by GridCanvas's own applySquareSize()/ResizeObserver.
   // Same "view-only, survives rebuild()" reasoning as the pending
@@ -125,6 +138,7 @@ export class GpuSimulation {
   // realSize/512 — the "everything is drawn twice as big until
   // something jogs a resize" bug. null until the first report.
   private pendingCanvasSizePx: [number, number] | null = null;
+  private pendingZoom = 1;
 
   // Bumped by anything that invalidates in-flight GPU state (rebuild(),
   // restartRollout(), destroy()) — step() captures this at its own start
@@ -292,6 +306,7 @@ export class GpuSimulation {
     renderer.setMorphologyDisplay(this.pendingMorphologyGradientVisible, this.pendingMorphologyDensityVisible);
     renderer.setBlur(this.pendingBlur);
     renderer.setGradientExponent(this.pendingGradientExponent);
+    renderer.setZoom(this.pendingZoom);
 
     const interact = new Interact(this.device, mpmCore);
     const deform = new Deform(this.device, mpmCore);
@@ -322,13 +337,21 @@ export class GpuSimulation {
         ?? coreConstants.INITIAL_PARTICLE_COUNT
       ))
     );
-    const scene = seedBlob({
-      count: initialCount,
-      centerX: this.config.spawnX,
-      centerY: this.config.spawnY,
-      spacing: this.config.splitDisplacement,
-      seed: this.config.seed,
-    });
+    const scene = this.scenario?.initialLayout.kind === "rows"
+      ? seedRows({
+          rows: this.scenario.initialLayout.rows,
+          columns: this.scenario.initialLayout.columns,
+          centerX: this.config.spawnX,
+          centerY: this.config.spawnY,
+          spacing: this.config.splitDisplacement,
+        })
+      : seedBlob({
+          count: initialCount,
+          centerX: this.config.spawnX,
+          centerY: this.config.spawnY,
+          spacing: this.config.splitDisplacement,
+          seed: this.config.seed,
+        });
     this.mpmCore.loadScene(scene);
     // Every slot beyond the genuinely seeded particles is destined to become
     // a real particle via growth, at some unknown point in this rollout
@@ -345,7 +368,7 @@ export class GpuSimulation {
     // although position is no longer a policy input.
     this.agents.setSpawnCenter(this.config.spawnX, this.config.spawnY);
     this.agents.setMaxActiveParticles(this.particleCap);
-    this.agents.setActiveCount(initialCount);
+    this.agents.setActiveCount(scene.count);
     // Heading's own per-slot fill and growth's own seed are both bit-
     // exact via rng.ts's own spawnUniform01()/growthSeed() respectively
     // (two DIFFERENT hash domains, see spawnUniform01()'s own comment
@@ -353,6 +376,12 @@ export class GpuSimulation {
     // without correlating) — see Agents.resetHeading()'s own docstring.
     this.agents.resetHeading(this.config.seed, scene.positions);
     this._currentStep = 0;
+  }
+
+  /** Installs an isolated, deterministic lab scenario and restarts it. */
+  setScenario(scenario: SimulationScenario | null): void {
+    this.scenario = scenario;
+    if (this.mpmCore) this.restartRollout();
   }
 
   /** Live-adjustable knobs only — see types.ts's own PhysicsSettings
@@ -392,6 +421,7 @@ export class GpuSimulation {
       physics.particleMass,
       physics.particleVolume,
     );
+    this.growthDuration = physics.growthDuration;
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
     this.mpmCore.setSplatRadius(physics.splatRadius);
     this.mpmCore.setMorphology(
@@ -500,7 +530,22 @@ export class GpuSimulation {
   async step(): Promise<void> {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     const stepEpoch = this.epoch;
-    this.agents.setGrowthEnabled(this.growthIsEnabled());
+    const nextStep = this._currentStep + 1;
+    const forcedLifecycle = this.scenario?.events.find((event) => {
+      const admissionStep = Math.max(1, event.step - Math.ceil(this.growthDuration));
+      return event.type === "split" && nextStep >= admissionStep && nextStep <= event.step;
+    });
+    const admissionStep = forcedLifecycle
+      ? Math.max(1, forcedLifecycle.step - Math.ceil(this.growthDuration))
+      : -1;
+    this.agents.setForcedDivisionControl(
+      forcedLifecycle?.particleIndex ?? null,
+      forcedLifecycle?.direction ?? [1, 0],
+      nextStep === admissionStep,
+    );
+    this.agents.setGrowthEnabled(
+      !this.scenario?.suppressNaturalGrowth && this.growthIsEnabled(),
+    );
     const encoder = this.device.createCommandEncoder();
     this.mpmCore.encodeMorphology(encoder);
     for (let communicationRound = 0; communicationRound < this.neuralUpdatesPerMacro; communicationRound++) {
@@ -655,6 +700,11 @@ export class GpuSimulation {
   setGradientExponent(exponent: number): void {
     this.pendingGradientExponent = exponent;
     this.renderer?.setGradientExponent(exponent);
+  }
+
+  setZoom(zoom: number): void {
+    this.pendingZoom = Math.min(8, Math.max(1, zoom));
+    this.renderer?.setZoom(this.pendingZoom);
   }
 
   /** "Add Particle" tool — `(x, y)`: MpmCore's own [0,1]^2 domain

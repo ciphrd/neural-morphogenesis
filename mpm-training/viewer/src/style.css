@@ -19,6 +19,40 @@ body {
   background: #000000;
 }
 
+.app-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.app-nav {
+  height: 42px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: end;
+  gap: 2px;
+  padding: 0 16px;
+  background: #0d0d0d;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.app-nav button {
+  height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #8c8c8c;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.app-nav button:hover { color: #e8e8e8; }
+.app-nav button.is-active { color: #e8e8e8; border-bottom-color: #3987e5; }
+.app-view { flex: 1; min-height: 0; }
+
 .controls {
   width: 320px;
   flex-shrink: 0;
@@ -530,11 +564,19 @@ body {
    renders it directly, no sibling tool panel the way envnca's own .app
    flex row has). */
 .training-layout {
-  height: 100vh;
+  height: 100%;
   display: flex;
   min-width: 0;
   min-height: 0;
 }
+
+.lab-controls { width: 300px; }
+.lab-scenario-select { width: 100%; padding: 7px 9px; }
+.lab-event { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; }
+.lab-event-step { min-width: 34px; padding: 3px 5px; border: 1px solid #333; border-radius: 4px; color: #bdbdbd; text-align: center; font-variant-numeric: tabular-nums; }
+.lab-event small { display: block; margin-top: 4px; color: #777; font-size: 11px; }
+.lab-event.is-complete .lab-event-step { color: #72c995; border-color: #276b45; }
+.lab-layout .center-column { background: #050505; }
 
 .training-layout h1 {
   margin-bottom: 1em;

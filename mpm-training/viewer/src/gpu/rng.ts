@@ -101,6 +101,36 @@ export interface SeedBlobConfig {
   seed: number;
 }
 
+/** Exact, axis-aligned rows for deterministic lab scenarios. Unlike seedBlob,
+ * this layout has no packing scale or seed-derived rotation: adjacent cells
+ * are separated by the simulation's actual daughter split distance. Rows are
+ * emitted bottom-to-top and columns left-to-right, making cell indices stable. */
+export function seedRows(config: {
+  rows: number;
+  columns: number;
+  centerX: number;
+  centerY: number;
+  spacing: number;
+}) {
+  const { rows, columns, centerX, centerY, spacing } = config;
+  const count = rows * columns;
+  const positions = new Float32Array(count * 2);
+  const velocities = new Float32Array(count * 2);
+  const F = new Float32Array(count * 4);
+  const C = new Float32Array(count * 4);
+  const Jp = new Float32Array(count).fill(1);
+  for (let row = 0; row < rows; row++) {
+    for (let column = 0; column < columns; column++) {
+      const index = row * columns + column;
+      positions[index * 2] = centerX + (column - (columns - 1) / 2) * spacing;
+      positions[index * 2 + 1] = centerY + (row - (rows - 1) / 2) * spacing;
+      F[index * 4] = 1;
+      F[index * 4 + 3] = 1;
+    }
+  }
+  return { count, positions, velocities, F, C, Jp };
+}
+
 /** Circular clipping of a perfect hexagonal lattice, mirrored by
  * trainer/training_sim.py's seed_blob(). Sites fill in exact Euclidean-radius
  * shells (the axial metric q²+qr+r²), rather than hex-coordinate rings whose

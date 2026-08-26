@@ -221,14 +221,14 @@ export class Agents {
     const layout = weightLayout(config.channels, config.hiddenDim, this.policyArchitecture);
     const { totalFloats } = layout;
     this.weightsBuffer = device.createBuffer({ size: totalFloats * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // 80 bytes — original layout plus density-resolved chemical-gradient
+    // 96 bytes — original layout plus density-resolved chemical-gradient
     // normalization and the live boundary-tangent cutoff. The cutoff occupies
     // what was previously the uniform struct's final alignment-padding word.
     // The final spawnX/spawnY/maxActiveParticles fields are
     // NOT written by setPhysics() below; see setSpawnCenter()'s own
     // docstring for why those get a separate setter into this same
     // buffer instead.
-    this.physicsUniform = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.physicsUniform = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setPhysics({
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
@@ -252,6 +252,7 @@ export class Agents {
     this.setBoundaryTangentMinGradient(
       config.boundaryTangentMinGradient ?? coreConstants.BOUNDARY_TANGENT_MIN_GRADIENT,
     );
+    this.setForcedDivisionControl(null, [1, 0], false);
 
     // Persistent per-particle state — owned here (not MpmCore, not
     // Environment), zeroed at creation and whenever resetHeading() is
@@ -523,6 +524,22 @@ export class Agents {
       76,
       new Float32Array([Math.max(0, threshold)]),
     );
+  }
+
+  /** Controls deterministic lab admission/direction without bypassing growth. */
+  setForcedDivisionControl(
+    index: number | null,
+    direction: readonly [number, number],
+    admitCycle: boolean,
+  ): void {
+    const value = index === null ? 0xffffffff : Math.max(0, Math.floor(index));
+    this.device.queue.writeBuffer(this.physicsUniform, 80, new Uint32Array([value]));
+    this.device.queue.writeBuffer(this.physicsUniform, 84, new Uint32Array([admitCycle ? 1 : 0]));
+    const length = Math.hypot(direction[0], direction[1]) || 1;
+    writeFloat32(this.device, this.physicsUniform, 88, new Float32Array([
+      direction[0] / length,
+      direction[1] / length,
+    ]));
   }
 
   /** Updates this class's own agentStep() dispatch size AND growth's own

@@ -229,13 +229,13 @@ class AgentsGPU:
         self._weights_buffer = device.create_buffer(
             size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
         )
-        # 80 bytes — the original 64-byte layout plus density-resolved
+        # 96 bytes — the original 64-byte layout plus density-resolved
         # chemical-gradient state and the live boundary-tangent cutoff. The
         # cutoff occupies what was the final uniform-alignment padding word.
         # NOT written by set_physics() below; see set_spawn_center()'s own
         # docstring for why those get a separate setter into this same
         # buffer instead.
-        self._physics_uniform = device.create_buffer(size=80, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self._physics_uniform = device.create_buffer(size=96, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_physics(
             max_accel,
             max_strafe,
@@ -257,6 +257,17 @@ class AgentsGPU:
         self.set_chemical_projection_weight(1.0)
         self.set_rollout_seed(0)
         self.set_boundary_tangent_min_gradient(BOUNDARY_TANGENT_MIN_GRADIENT)
+        # Lab-only override is disabled during training. This trailing ABI
+        # slot is shared with the browser's scheduled-scenario support.
+        self.device.queue.write_buffer(
+            self._physics_uniform, 80, np.array([0xFFFFFFFF], dtype=np.uint32)
+        )
+        self.device.queue.write_buffer(
+            self._physics_uniform, 84, np.array([0], dtype=np.uint32)
+        )
+        self.device.queue.write_buffer(
+            self._physics_uniform, 88, np.array([1.0, 0.0], dtype=np.float32)
+        )
 
         # Persistent per-particle state — owned here (not MpmCore, not
         # EnvironmentGPU), zeroed at creation (randomized/reseeded
