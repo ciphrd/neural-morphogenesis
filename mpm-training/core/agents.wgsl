@@ -262,9 +262,13 @@ struct AgentPhysics {
   // Lab-only lifecycle control. 0xffffffff disables it. Admission latches a
   // normal cycle once; the index/direction can remain active afterward to
   // keep the morphoelastic growth and eventual division axis deterministic.
+  // A zero direction selects the local morphology-boundary tangent instead.
   forcedLifecycleIndex: u32,
   forcedCycleAdmission: u32,
   forcedDivisionDirection: vec2<f32>,
+  // Inclusive end of a contiguous Lab-controlled particle range. Equal to
+  // forcedLifecycleIndex for the existing single-particle scenarios.
+  forcedLifecycleEndIndex: u32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -391,6 +395,7 @@ struct ParticleRest {
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(12) var morphologyTexture: texture_2d<f32>;
+__MORPHOLOGY_SAMPLER_DECLARATION__
 struct StepMode {
   commitLifecycle: u32,
   // Chemical/orientation time represented by this neural evaluation.
@@ -413,11 +418,7 @@ fn morphologyLoad(p: vec2<i32>) -> f32 {
 }
 
 fn sampleMorphology(p: vec2<f32>) -> f32 {
-  let base = vec2<i32>(floor(p));
-  let f = fract(p);
-  let a = mix(morphologyLoad(base), morphologyLoad(base + vec2<i32>(1, 0)), f.x);
-  let b = mix(morphologyLoad(base + vec2<i32>(0, 1)), morphologyLoad(base + vec2<i32>(1, 1)), f.x);
-  return mix(a, b, f.y);
+  __MORPHOLOGY_SAMPLE_BODY__
 }
 
 fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
@@ -955,10 +956,26 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   particleRest[pi].divisionBias = result.divisionBias;
   particleRest[pi].growthFrameHeading = headingVal;
 
-  let forcedLifecycle = physics.forcedLifecycleIndex == pi;
+  let forcedLifecycle = pi >= physics.forcedLifecycleIndex
+    && pi <= physics.forcedLifecycleEndIndex;
+  let forcedBoundaryTangent = forcedLifecycle
+    && length(physics.forcedDivisionDirection) < 0.5;
   var growthWorldAngle = headingVal + particleRest[pi].growthAngle;
   var growthDirectionWorld = vec2<f32>(cos(growthWorldAngle), sin(growthWorldAngle));
-  if (forcedLifecycle) {
+  let lifecycleMorphologyGradient = vec2<f32>(morphologyGx, morphologyGy);
+  let lifecycleMorphologyGradientMagnitude = length(lifecycleMorphologyGradient);
+  if (forcedBoundaryTangent
+      && lifecycleMorphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
+    // During a tangent-controlled Lab cycle, align morphoelastic growth with
+    // the same local boundary tangent that will place the two daughters.
+    growthDirectionWorld = vec2<f32>(
+      -lifecycleMorphologyGradient.y,
+      lifecycleMorphologyGradient.x,
+    ) / lifecycleMorphologyGradientMagnitude;
+    growthWorldAngle = atan2(growthDirectionWorld.y, growthDirectionWorld.x);
+    particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - headingVal);
+    particleRest[pi].growthFrameHeading = headingVal;
+  } else if (forcedLifecycle && !forcedBoundaryTangent) {
     // Lock the persistent world-frame growth axis, not merely the final
     // daughter offset. g2p therefore grows Fg along this same direction and
     // transfers its stress through the ordinary MPM grid before division.
@@ -1081,7 +1098,15 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       let directionStrength = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
         * clamp(stepMode.divisionDirectionality, 0.0, 1.0);
       var centerShift = spawnDir * (0.5 * physics.splitDisplacement) * directionStrength;
-      if (!forcedLifecycle && morphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
+      // A scheduled Lab lifecycle is an axis-controlled diagnostic: keep the
+      // real conservative division path, but replace the policy's polarized
+      // placement with a pair centered on the original particle. Production
+      // divisions retain their usual divisionBias-controlled center shift.
+      if (forcedLifecycle) {
+        centerShift = vec2<f32>(0.0);
+      }
+      if ((!forcedLifecycle || forcedBoundaryTangent)
+          && morphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
         // The gradient is the boundary normal. Rotating it by +90 degrees
         // gives either representative of the tangent axis; because daughter
         // placement is symmetric, the sign of that representative is
@@ -1091,8 +1116,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
         centerShift = vec2<f32>(0.0);
       }
       let halfOffset = spawnDir * (0.5 * physics.splitDisplacement);
-      // A measurable boundary keeps the pair center fixed; the flat-field
-      // fallback retains the existing network-controlled center shift.
+      // A measurable boundary (and every scheduled Lab split) keeps the pair
+      // centered; only production's flat-field fallback retains the existing
+      // network-controlled center shift.
       positions[pi] = fract(pos - halfOffset + centerShift);
       positions[newIndex] = fract(pos + halfOffset + centerShift);
       // "A copy of itself": heading/angularVelocity copied from this
@@ -1184,15 +1210,13 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   let newHeading = headingVal + newAngularVelocity * communicationDt;
   agentState.particleMeta[pi].heading = newHeading;
   particleRest[pi].growthFrameHeading = newHeading;
-  if (forcedLifecycle) {
-    // Heading integration happens after lifecycle logic. Re-express the same
-    // forced world direction in the new local frame so the g2p pass that
-    // follows this shader still receives an exactly horizontal axis.
-    let forcedWorldAngle = atan2(
-      physics.forcedDivisionDirection.y,
-      physics.forcedDivisionDirection.x,
-    );
-    particleRest[pi].growthAngle = wrapAngle(forcedWorldAngle - newHeading);
+  if (forcedLifecycle
+      && (!forcedBoundaryTangent
+          || lifecycleMorphologyGradientMagnitude > physics.boundaryTangentMinGradient)) {
+    // Heading integration happens after lifecycle logic. Re-express the
+    // selected fixed or boundary-tangent world direction in the new local
+    // frame so the following g2p pass grows on precisely that same axis.
+    particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - newHeading);
   }
 
 }

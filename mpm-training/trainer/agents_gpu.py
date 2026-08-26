@@ -229,13 +229,13 @@ class AgentsGPU:
         self._weights_buffer = device.create_buffer(
             size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
         )
-        # 96 bytes — the original 64-byte layout plus density-resolved
+        # 112 bytes — the original 64-byte layout plus density-resolved
         # chemical-gradient state and the live boundary-tangent cutoff. The
         # cutoff occupies what was the final uniform-alignment padding word.
         # NOT written by set_physics() below; see set_spawn_center()'s own
         # docstring for why those get a separate setter into this same
         # buffer instead.
-        self._physics_uniform = device.create_buffer(size=96, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self._physics_uniform = device.create_buffer(size=112, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_physics(
             max_accel,
             max_strafe,
@@ -267,6 +267,9 @@ class AgentsGPU:
         )
         self.device.queue.write_buffer(
             self._physics_uniform, 88, np.array([1.0, 0.0], dtype=np.float32)
+        )
+        self.device.queue.write_buffer(
+            self._physics_uniform, 96, np.array([0xFFFFFFFF], dtype=np.uint32)
         )
 
         # Persistent per-particle state — owned here (not MpmCore, not
@@ -329,6 +332,16 @@ class AgentsGPU:
         # --particles is now a CAP, not a fixed starting count.
         self.set_active_count(1)
 
+        filterable_morphology = wgpu.FeatureName.float32_filterable in device.features
+        morphology_sampler = (
+            device.create_sampler(
+                address_mode_u=wgpu.AddressMode.repeat,
+                address_mode_v=wgpu.AddressMode.repeat,
+                min_filter=wgpu.FilterMode.linear,
+                mag_filter=wgpu.FilterMode.linear,
+            )
+            if filterable_morphology else None
+        )
         module = device.create_shader_module(
             code=load_core_shader(
                 "agents.wgsl",
@@ -377,6 +390,19 @@ class AgentsGPU:
                         "  }"
                     ),
                     "ELASTIC_STRAIN_INPUTS_ENABLED": "true" if elastic_strain_inputs_enabled else "false",
+                    "MORPHOLOGY_SAMPLER_DECLARATION": (
+                        "@group(0) @binding(14) var morphologySampler: sampler;"
+                        if filterable_morphology else ""
+                    ),
+                    "MORPHOLOGY_SAMPLE_BODY": (
+                        "return textureSampleLevel(morphologyTexture, morphologySampler, "
+                        "(p + vec2<f32>(0.5)) / f32(MORPHOLOGY_FIELD_N), 0.0).x;"
+                        if filterable_morphology else
+                        "let base = vec2<i32>(floor(p)); let f = fract(p); "
+                        "let a = mix(morphologyLoad(base), morphologyLoad(base + vec2<i32>(1, 0)), f.x); "
+                        "let b = mix(morphologyLoad(base + vec2<i32>(0, 1)), morphologyLoad(base + vec2<i32>(1, 1)), f.x); "
+                        "return mix(a, b, f.y);"
+                    ),
                 },
             )
         )
@@ -429,6 +455,7 @@ class AgentsGPU:
                     {"binding": 11, "resource": {"buffer": core.rest, "offset": 0, "size": core.rest.size}},
                     {"binding": 12, "resource": core.morphology_texture.create_view()},
                     {"binding": 13, "resource": {"buffer": self._step_mode_uniforms[commit_lifecycle]}},
+                    *([{"binding": 14, "resource": morphology_sampler}] if morphology_sampler is not None else []),
                 ],
             )
 

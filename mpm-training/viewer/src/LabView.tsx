@@ -1,37 +1,151 @@
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { randomWeights } from "./gpu/agents"
+import { configAtDensity } from "./gpu/density"
 import type { FieldMode, ParticleRenderMode } from "./gpu/render"
-import { physicsSettingsFromConfig } from "./gpu/types"
+import type { CellMemory, ChemicalCommunicationArchitecture, PhysicsSettings } from "./gpu/types"
+import {
+  cellMemoryFromConfig,
+  chemicalCommunicationArchitectureFromConfig,
+  hiddenLayersFromConfig,
+  physicsSettingsFromConfig,
+  policyArchitectureForCellMemory,
+} from "./gpu/types"
 import type { SimulationScenario } from "./gpu/simulation"
 import { useTrainingSocket } from "./net/trainingSocket"
 import { pickRecordingFormat } from "./render/canvasRecorder"
 import type { DeformSettings, GridCanvasHandle, Tool } from "./render/GridCanvas"
 import { GridCanvas } from "./render/GridCanvas"
 import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
+import { GrowthPanel } from "./ui/GrowthPanel"
+import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { Slider } from "./ui/Slider"
 
 const TRAIN_API_URL = "http://localhost:8003"
 const TRAIN_WS_URL = "ws://localhost:8003/ws"
 const RECORDING_FORMAT = pickRecordingFormat()
 
-const TWO_BY_FIVE_SCENARIO: SimulationScenario = {
-  initialLayout: { kind: "rows", rows: 2, columns: 5 },
-  // seedRows is bottom-to-top, left-to-right: index 7 is top-middle.
-  events: [{ step: 50, type: "split", particleIndex: 7, direction: [1, 0] }],
+function explorationBrainSeed(seed: number, variant: number): number {
+  if (variant === 0) return seed >>> 0
+  let x = ((seed >>> 0) ^ Math.imul(variant, 0x9e3779b9)) >>> 0
+  x = Math.imul(x ^ (x >>> 16), 0x7feb352d) >>> 0
+  x = Math.imul(x ^ (x >>> 15), 0x846ca68b) >>> 0
+  return (x ^ (x >>> 16)) >>> 0
+}
+
+const BOUNDARY_TANGENT_SCENARIO: SimulationScenario = {
+  initialLayout: { kind: "rows", rows: 2, columns: 9 },
+  // seedRows is bottom-to-top, left-to-right: index 13 is top-middle.
+  // Slot 13 remains the original particle's daughter after the first split,
+  // so targeting it again exercises the exact same lineage cell at step 200.
+  events: [
+    { step: 50, type: "split", particleIndex: 13 },
+    { step: 200, type: "split", particleIndex: 13 },
+  ],
   suppressNaturalGrowth: true,
 }
 
+const VERTICAL_SPLIT_SCENARIO: SimulationScenario = {
+  initialLayout: { kind: "rows", rows: 2, columns: 9 },
+  // Fixed world-up division axis. Slot 13 is retained as one daughter,
+  // allowing the second event to target the same lineage cell again.
+  events: [
+    { step: 50, type: "split", particleIndex: 13, direction: [0, 1] },
+    { step: 200, type: "split", particleIndex: 13, direction: [0, 1] },
+  ],
+  suppressNaturalGrowth: true,
+}
+
+const REPEATED_TOP_ROW_SPLIT_SCENARIO: SimulationScenario = {
+  initialLayout: { kind: "rows", rows: 2, columns: 9 },
+  // Each synchronized split creates nine children in the next contiguous
+  // range. Those upward daughters become the top row targeted next time.
+  events: Array.from({ length: 7 }, (_, cycle) => ({
+    step: (cycle + 1) * 100,
+    type: "split" as const,
+    particleIndex: 9 + cycle * 9,
+    particleCount: 9,
+    direction: [0, 1] as const,
+  })),
+  suppressNaturalGrowth: true,
+}
+
+type LabScenarioId = "boundary-tangent" | "vertical" | "repeated-top-row"
+
 export function LabView() {
   const { latest } = useTrainingSocket(TRAIN_WS_URL, TRAIN_API_URL)
-  const config = useMemo(() => latest ? {
+  const [scenarioId, setScenarioId] = useState<LabScenarioId>("boundary-tangent")
+  const scenario = scenarioId === "repeated-top-row"
+    ? REPEATED_TOP_ROW_SPLIT_SCENARIO
+    : scenarioId === "vertical"
+      ? VERTICAL_SPLIT_SCENARIO
+      : BOUNDARY_TANGENT_SCENARIO
+  const scenarioParticleCap = scenarioId === "repeated-top-row" ? 81 : 20
+  const scenarioMinimumSteps = scenarioId === "repeated-top-row" ? 750 : 240
+  const scenarioAxisLabel = scenarioId === "boundary-tangent"
+    ? "Local boundary-tangent axis"
+    : "Fixed vertical axis"
+  const baseConfig = useMemo(() => latest ? {
     ...latest,
-    particles: 11,
-    initialParticleCount: 10,
-    macroSteps: Math.max(120, latest.macroSteps),
-  } : null, [latest])
-  const physics = useMemo(
-    () => config ? physicsSettingsFromConfig(config) : null,
-    [config],
+    particles: scenarioParticleCap,
+    initialParticleCount: 18,
+    macroSteps: Math.max(scenarioMinimumSteps, latest.macroSteps),
+  } : null, [latest, scenarioParticleCap, scenarioMinimumSteps])
+  const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
+    useState<ChemicalCommunicationArchitecture | null>(null)
+  const [chiralityOverride, setChiralityOverride] = useState<boolean | null>(null)
+  const [particleDensityOverride, setParticleDensityOverride] = useState<number | null>(null)
+  const [policyExploration, setPolicyExploration] = useState<{
+    cellMemory: CellMemory
+    hiddenWidth: number
+    variant: number
+  } | null>(null)
+  const [physicsOverride, setPhysicsOverride] = useState<PhysicsSettings | null>(null)
+  useEffect(() => {
+    setChemicalArchitectureOverride(null)
+    setChiralityOverride(null)
+    setParticleDensityOverride(null)
+    setPolicyExploration(null)
+    setPhysicsOverride(null)
+  }, [latest?.generation])
+  const effectiveParticleDensity =
+    particleDensityOverride ?? baseConfig?.particleDensityMultiplier ?? 1
+  const effectiveChirality = chiralityOverride ?? baseConfig?.chirality ?? true
+  const playbackConfig = useMemo(() => {
+    if (!baseConfig) return null
+    const densityResolved = configAtDensity({
+      ...baseConfig,
+      chemicalCommunicationArchitecture:
+        chemicalArchitectureOverride ?? chemicalCommunicationArchitectureFromConfig(baseConfig),
+      chirality: effectiveChirality,
+    }, effectiveParticleDensity)
+    return { ...densityResolved, particles: scenarioParticleCap, initialParticleCount: 18 }
+  }, [baseConfig, chemicalArchitectureOverride, effectiveChirality, effectiveParticleDensity, scenarioParticleCap])
+  const config = useMemo(() => {
+    if (!playbackConfig || !policyExploration) return playbackConfig
+    const policyArchitecture = policyArchitectureForCellMemory(policyExploration.cellMemory)
+    return {
+      ...playbackConfig,
+      cellMemory: policyExploration.cellMemory,
+      hiddenDim: policyExploration.hiddenWidth,
+      hiddenLayers: [policyExploration.hiddenWidth],
+      policyArchitecture,
+      weights: randomWeights(
+        playbackConfig.channels,
+        policyExploration.hiddenWidth,
+        policyArchitecture,
+        explorationBrainSeed(playbackConfig.seed, policyExploration.variant),
+      ),
+    }
+  }, [playbackConfig, policyExploration])
+  const displayedCellMemory = policyExploration?.cellMemory
+    ?? (baseConfig ? cellMemoryFromConfig(baseConfig) : "recurrent")
+  const displayedHiddenWidth = policyExploration?.hiddenWidth
+    ?? (baseConfig ? hiddenLayersFromConfig(baseConfig)[0] : 128)
+  const trainedPhysics = useMemo(
+    () => playbackConfig ? physicsSettingsFromConfig(playbackConfig) : null,
+    [playbackConfig],
   )
+  const physics = physicsOverride ?? trainedPhysics
   const canvasRef = useRef<GridCanvasHandle>(null)
   const [paused, setPaused] = useState(false)
   const [recording, setRecording] = useState(false)
@@ -78,25 +192,146 @@ export function LabView() {
         <h1>Simulation lab</h1>
         <section>
           <h2>Scenario</h2>
-          <select className="select lab-scenario-select" value="two-rows-split" onChange={() => undefined} aria-label="Lab scenario">
-            <option value="two-rows-split">2 × 5 — middle split</option>
+          <select
+            className="select lab-scenario-select"
+            value={scenarioId}
+            onChange={(event) => {
+              setScenarioId(event.target.value as LabScenarioId)
+              setStep(0)
+              setCellCount(0)
+            }}
+            aria-label="Lab scenario"
+          >
+            <option value="boundary-tangent">2 × 9 — boundary-tangent splits</option>
+            <option value="vertical">2 × 9 — vertical splits</option>
+            <option value="repeated-top-row">2 × 9 — grow seven vertical rows</option>
           </select>
         </section>
         <section>
           <h2>Initial state</h2>
-          <div className="stat-row"><span>Cells</span><span>10</span></div>
-          <div className="stat-row"><span>Layout</span><span>2 rows × 5</span></div>
+          <div className="stat-row"><span>Cells</span><span>18</span></div>
+          <div className="stat-row"><span>Layout</span><span>2 rows × 9</span></div>
           <div className="stat-row"><span>Spacing</span><span>Split distance</span></div>
         </section>
         <section>
-          <h2>Events</h2>
-          <div className={`lab-event${step >= 50 ? " is-complete" : ""}`}>
-            <span className="lab-event-step">50</span>
-            <span>
-              Split top-middle cell
-              <small>Normal simulation division path</small>
-            </span>
+          <h2>Simulation</h2>
+          <div className="stat-row">
+            <span>Cell memory</span>
+            <select
+              className="select"
+              aria-label="Cell memory"
+              value={displayedCellMemory}
+              disabled={!baseConfig}
+              onChange={(event) => setPolicyExploration({
+                cellMemory: event.target.value as CellMemory,
+                hiddenWidth: displayedHiddenWidth,
+                variant: 0,
+              })}
+            >
+              <option value="none">None</option>
+              <option value="recurrent">Recurrent</option>
+            </select>
           </div>
+          <div className="stat-row">
+            <span>Hidden layer</span>
+            <select
+              className="select"
+              aria-label="Hidden layer width"
+              value={displayedHiddenWidth}
+              disabled={!baseConfig}
+              onChange={(event) => setPolicyExploration({
+                cellMemory: displayedCellMemory,
+                hiddenWidth: Number(event.target.value),
+                variant: 0,
+              })}
+            >
+              {[16, 32, 64, 128, 256].map((width) => (
+                <option key={width} value={width}>{width}</option>
+              ))}
+            </select>
+          </div>
+          <div className="stat-row">
+            <span>Brain source</span>
+            <button
+              className="select simulation-control-button"
+              disabled={!policyExploration}
+              onClick={() => setPolicyExploration(null)}
+              title="Restore the current generation's trained brain"
+            >
+              {policyExploration
+                ? `Seeded random #${policyExploration.variant + 1} ↺`
+                : "Trained"}
+            </button>
+          </div>
+          <div className="stat-row">
+            <span>Chemical architecture</span>
+            <select
+              className="select"
+              aria-label="Chemical architecture"
+              value={config?.chemicalCommunicationArchitecture ?? "cell-owned-projection"}
+              disabled={!baseConfig}
+              onChange={(event) => {
+                const selected = event.target.value as ChemicalCommunicationArchitecture
+                const trained = baseConfig
+                  ? chemicalCommunicationArchitectureFromConfig(baseConfig)
+                  : "cell-owned-projection"
+                setChemicalArchitectureOverride(selected === trained ? null : selected)
+              }}
+            >
+              <option value="cell-owned-projection">Cell-owned projection</option>
+              <option value="persistent-environment">Persistent environment</option>
+            </select>
+          </div>
+          <div className="stat-row">
+            <span>Particle density</span>
+            <select
+              className="select"
+              aria-label="Particle density"
+              value={effectiveParticleDensity}
+              disabled={!baseConfig}
+              onChange={(event) => {
+                const selected = Number(event.target.value)
+                const trained = baseConfig?.particleDensityMultiplier ?? 1
+                setParticleDensityOverride(selected === trained ? null : selected)
+                setPhysicsOverride(null)
+              }}
+            >
+              {Array.from(new Set([0.5, 1, 2, effectiveParticleDensity]))
+                .sort((a, b) => a - b)
+                .map((density) => (
+                  <option key={density} value={density}>{density}×</option>
+                ))}
+            </select>
+          </div>
+          <label className="checkbox-row" title="Changing chirality restarts the Lab scenario">
+            <input
+              type="checkbox"
+              checked={effectiveChirality}
+              disabled={!baseConfig}
+              onChange={(event) => {
+                const selected = event.target.checked
+                const trained = baseConfig?.chirality ?? true
+                setChiralityOverride(selected === trained ? null : selected)
+              }}
+            />
+            Chirality
+          </label>
+        </section>
+        <section>
+          <h2>Events</h2>
+          {scenario.events.map((event, eventIndex) => (
+            <div key={`${event.step}-${event.particleIndex}`} className={`lab-event${step >= event.step ? " is-complete" : ""}`}>
+              <span className="lab-event-step">{event.step}</span>
+              <span>
+                {scenarioId === "repeated-top-row"
+                  ? `Split all nine top cells — cycle ${eventIndex + 1}/7`
+                  : eventIndex === 0
+                    ? "Split top-middle cell"
+                    : "Split the same lineage cell again"}
+                <small>{scenarioAxisLabel}</small>
+              </span>
+            </div>
+          ))}
         </section>
         <section>
           <h2>Rendering</h2>
@@ -166,6 +401,24 @@ export function LabView() {
             <label className="slider-row"><span>Gradient exponent</span><Slider min={0.25} max={4} step={0.05} value={gradientExponent} onChange={setGradientExponent} /><span className="slider-value">{gradientExponent.toFixed(2)}</span></label>
           </>}
         </section>
+        {trainedPhysics && physics && (
+          <>
+            <PhysicsPanel
+              trained={trainedPhysics}
+              value={physics}
+              onChange={setPhysicsOverride}
+              isOverridden={physicsOverride !== null}
+              onReset={() => setPhysicsOverride(null)}
+            />
+            <GrowthPanel
+              trained={trainedPhysics}
+              value={physics}
+              onChange={setPhysicsOverride}
+              isOverridden={physicsOverride !== null}
+              onReset={() => setPhysicsOverride(null)}
+            />
+          </>
+        )}
         <p className="hint">
           The current training configuration supplies policy and physics. Lab
           particles and scheduled events remain isolated from training.
@@ -177,7 +430,7 @@ export function LabView() {
           <GridCanvas
             ref={canvasRef}
             config={config}
-            scenario={TWO_BY_FIVE_SCENARIO}
+            scenario={scenario}
             targetPoints={null}
             targetVisible={false}
             physics={physics}
@@ -198,8 +451,8 @@ export function LabView() {
             accent={accent}
             blur={blur}
             gradientExponent={gradientExponent}
-            particleCap={11}
-            initialParticleCount={10}
+            particleCap={scenarioParticleCap}
+            initialParticleCount={18}
             deformSettings={deformSettings}
             tool={tool}
             loopAtTrainedSteps={false}
@@ -211,7 +464,7 @@ export function LabView() {
           />
           <div className="viewport-telemetry" aria-label="Scenario status">
             <span>{config ? `${step} steps` : "Waiting for training config…"}</span>
-            <span>{config ? `${cellCount} / 11 cells` : "— cells"}</span>
+            <span>{config ? `${cellCount} / ${scenarioParticleCap} cells` : "— cells"}</span>
           </div>
         </div>
 

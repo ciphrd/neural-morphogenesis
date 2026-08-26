@@ -319,11 +319,16 @@ struct QuadOut {
   @location(0) uv: vec2<f32>,
 }
 
+// Shared with render.wgsl's particle camera. Applying zoom to this quad's
+// vertices makes every diagnostic/chemical texture rasterize through the same
+// view transform as particle geometry; it is not a post-process canvas scale.
+@group(0) @binding(22) var<uniform> fieldViewZoom: f32;
+
 @vertex
 fn fieldVertex(@builtin(vertex_index) vertexIndex: u32) -> QuadOut {
   let p = QUAD_POSITIONS[vertexIndex];
   var out: QuadOut;
-  out.position = vec4<f32>(p, 0.0, 1.0);
+  out.position = vec4<f32>(p * max(fieldViewZoom, 1e-4), 0.0, 1.0);
   out.uv = (p + vec2<f32>(1.0)) * 0.5;
   return out;
 }

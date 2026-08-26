@@ -31,7 +31,11 @@ export async function acquireGpuDevice(): Promise<GpuAcquireResult> {
     // (trainer/device.py's own pick_device()) never hit this: wgpu-native's
     // own default device limits are already higher out of the box on
     // this project's own dev machine, unlike Dawn's spec-minimum default.
+    const requiredFeatures: GPUFeatureName[] = adapter.features.has("float32-filterable")
+      ? ["float32-filterable"]
+      : [];
     device = await adapter.requestDevice({
+      requiredFeatures,
       requiredLimits: { maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage },
     });
   } catch (err) {

@@ -221,14 +221,14 @@ export class Agents {
     const layout = weightLayout(config.channels, config.hiddenDim, this.policyArchitecture);
     const { totalFloats } = layout;
     this.weightsBuffer = device.createBuffer({ size: totalFloats * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // 96 bytes — original layout plus density-resolved chemical-gradient
+    // 112 bytes — original layout plus density-resolved chemical-gradient
     // normalization and the live boundary-tangent cutoff. The cutoff occupies
     // what was previously the uniform struct's final alignment-padding word.
     // The final spawnX/spawnY/maxActiveParticles fields are
     // NOT written by setPhysics() below; see setSpawnCenter()'s own
     // docstring for why those get a separate setter into this same
     // buffer instead.
-    this.physicsUniform = device.createBuffer({ size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.physicsUniform = device.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setPhysics({
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
@@ -300,6 +300,15 @@ export class Agents {
     // a fixed starting count.
     this.setActiveCount(1);
 
+    const filterableMorphology = device.features.has("float32-filterable");
+    const morphologySampler = filterableMorphology
+      ? device.createSampler({
+          addressModeU: "repeat",
+          addressModeV: "repeat",
+          minFilter: "linear",
+          magFilter: "linear",
+        })
+      : null;
     const module = device.createShaderModule({
       code: templateShader(agentsSrc, {
         CHANNELS: config.channels,
@@ -331,6 +340,12 @@ export class Agents {
           ? "out.color = vec3<f32>(0.5); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 6u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 6u + PRIVATE_STATE_DIM + s]); }"
           : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 6u]), safeSigmoid(outVec[ENV_WRITE_DIM + 7u]), safeSigmoid(outVec[ENV_WRITE_DIM + 8u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
         ELASTIC_STRAIN_INPUTS_ENABLED: config.elasticStrainInputsEnabled ? "true" : "false",
+        MORPHOLOGY_SAMPLER_DECLARATION: filterableMorphology
+          ? "@group(0) @binding(14) var morphologySampler: sampler;"
+          : "",
+        MORPHOLOGY_SAMPLE_BODY: filterableMorphology
+          ? "return textureSampleLevel(morphologyTexture, morphologySampler, (p + vec2<f32>(0.5)) / f32(MORPHOLOGY_FIELD_N), 0.0).x;"
+          : "let base = vec2<i32>(floor(p)); let f = fract(p); let a = mix(morphologyLoad(base), morphologyLoad(base + vec2<i32>(1, 0)), f.x); let b = mix(morphologyLoad(base + vec2<i32>(0, 1)), morphologyLoad(base + vec2<i32>(1, 1)), f.x); return mix(a, b, f.y);",
       }),
     });
     this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "agentStep" } });
@@ -380,6 +395,7 @@ export class Agents {
           { binding: 11, resource: { buffer: mpmCore.rest } },
           { binding: 12, resource: mpmCore.morphologyTexture.createView() },
           { binding: 13, resource: { buffer: this.stepModeUniforms[commitLifecycle] } },
+          ...(morphologySampler ? [{ binding: 14, resource: morphologySampler }] : []),
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];
@@ -529,17 +545,24 @@ export class Agents {
   /** Controls deterministic lab admission/direction without bypassing growth. */
   setForcedDivisionControl(
     index: number | null,
-    direction: readonly [number, number],
+    direction: readonly [number, number] | null,
     admitCycle: boolean,
+    particleCount = 1,
   ): void {
     const value = index === null ? 0xffffffff : Math.max(0, Math.floor(index));
+    const endValue = index === null
+      ? 0xffffffff
+      : value + Math.max(1, Math.floor(particleCount)) - 1;
     this.device.queue.writeBuffer(this.physicsUniform, 80, new Uint32Array([value]));
     this.device.queue.writeBuffer(this.physicsUniform, 84, new Uint32Array([admitCycle ? 1 : 0]));
-    const length = Math.hypot(direction[0], direction[1]) || 1;
+    const x = direction?.[0] ?? 0;
+    const y = direction?.[1] ?? 0;
+    const length = Math.hypot(x, y) || 1;
     writeFloat32(this.device, this.physicsUniform, 88, new Float32Array([
-      direction[0] / length,
-      direction[1] / length,
+      x / length,
+      y / length,
     ]));
+    this.device.queue.writeBuffer(this.physicsUniform, 96, new Uint32Array([endValue]));
   }
 
   /** Updates this class's own agentStep() dispatch size AND growth's own

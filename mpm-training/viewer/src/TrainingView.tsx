@@ -154,6 +154,7 @@ export function TrainingView() {
   const [particleRenderMode, setParticleRenderMode] =
     useState<ParticleRenderMode>("dots-white")
   const [boundaryGradientScale, setBoundaryGradientScale] = useState(0.01)
+  const [zoom, setZoom] = useState(1)
   const [particleRadiusPx, setParticleRadiusPx] = useState(4)
   const [frontendParticleCap, setFrontendParticleCap] = useState(2)
   const [frontendInitialParticleCount, setFrontendInitialParticleCount] =
@@ -709,6 +710,17 @@ export function TrainingView() {
         <section>
           <h2>Rendering</h2>
           <label className="slider-row">
+            <span>Zoom</span>
+            <Slider
+              min={1}
+              max={8}
+              step={0.05}
+              value={zoom}
+              onChange={setZoom}
+            />
+            <span className="slider-value">{zoom.toFixed(2)}×</span>
+          </label>
+          <label className="slider-row">
             <span>Particle size</span>
             <Slider
               min={1}
@@ -1037,6 +1049,7 @@ export function TrainingView() {
             blur={blur}
             gradientExponent={gradientExponent}
             particleRenderMode={particleRenderMode}
+            zoom={zoom}
             particleRadiusPx={particleRadiusPx}
             whiteDotsAlpha={whiteDotsAlpha}
             activationAlpha={activationAlpha}

@@ -27,4 +27,8 @@ def pick_device(verbose: bool = True) -> wgpu.GPUDevice:
     info = adapter.info
     if verbose:
         print(f"[device] adapter: {info['device']!r} backend={info['backend_type']} type={info['adapter_type']}")
-    return adapter.request_device_sync()
+    float32_filterable = wgpu.FeatureName.float32_filterable
+    required_features = (
+        [float32_filterable] if float32_filterable in adapter.features else []
+    )
+    return adapter.request_device_sync(required_features=required_features)

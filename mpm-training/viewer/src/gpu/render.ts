@@ -521,6 +521,7 @@ export class Renderer {
       entries: [
         { binding: 4, resource: this.fieldTexture.createView() },
         { binding: 5, resource: fieldSampler },
+        { binding: 22, resource: { buffer: this.viewUniform } },
       ],
     });
 
@@ -540,6 +541,7 @@ export class Renderer {
       entries: [
         { binding: 6, resource: mpmCore.densityTexture.createView() },
         { binding: 13, resource: { buffer: this.accentUniform } },
+        { binding: 22, resource: { buffer: this.viewUniform } },
       ],
     });
 
@@ -555,6 +557,7 @@ export class Renderer {
         { binding: 13, resource: { buffer: this.accentUniform } },
         { binding: 19, resource: mpmCore.morphologyTexture.createView() },
         { binding: 20, resource: { buffer: this.morphologyDisplayUniform } },
+        { binding: 22, resource: { buffer: this.viewUniform } },
       ],
     });
 
@@ -603,6 +606,7 @@ export class Renderer {
       entries: [
         { binding: 5, resource: fieldSampler },
         { binding: 10, resource: this.substrateTexture.createView() },
+        { binding: 22, resource: { buffer: this.viewUniform } },
       ],
     });
 
@@ -641,6 +645,7 @@ export class Renderer {
       entries: [
         { binding: 5, resource: fieldSampler },
         { binding: 12, resource: this.growthTexture.createView() },
+        { binding: 22, resource: { buffer: this.viewUniform } },
       ],
     });
 
@@ -700,6 +705,7 @@ export class Renderer {
       entries: [
         { binding: 5, resource: fieldSampler },
         { binding: 16, resource: this.gradientTexture.createView() },
+        { binding: 22, resource: { buffer: this.viewUniform } },
       ],
     });
 

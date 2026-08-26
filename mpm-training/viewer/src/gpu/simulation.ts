@@ -60,6 +60,9 @@ export interface SimulationScenario {
     step: number;
     type: "split";
     particleIndex: number;
+    /** Number of contiguous particle slots participating in this event. */
+    particleCount?: number;
+    /** Fixed world axis. Omit to follow the local boundary tangent. */
     direction?: readonly [number, number];
   }>;
   suppressNaturalGrowth?: boolean;
@@ -540,8 +543,9 @@ export class GpuSimulation {
       : -1;
     this.agents.setForcedDivisionControl(
       forcedLifecycle?.particleIndex ?? null,
-      forcedLifecycle?.direction ?? [1, 0],
+      forcedLifecycle?.direction ?? null,
       nextStep === admissionStep,
+      forcedLifecycle?.particleCount ?? 1,
     );
     this.agents.setGrowthEnabled(
       !this.scenario?.suppressNaturalGrowth && this.growthIsEnabled(),
