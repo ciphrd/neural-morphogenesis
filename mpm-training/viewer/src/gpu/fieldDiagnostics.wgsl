@@ -92,6 +92,9 @@ struct Material {
   growthAnisotropy: f32,
   particleMass: f32,
   particleVolume: f32,
+  growthCompressionStart: f32,
+  growthCompressionStop: f32,
+  growthCompressionFeedback: f32,
 }
 @group(0) @binding(4) var<uniform> material: Material;
 @group(0) @binding(5) var<uniform> activeCount: u32;

@@ -69,7 +69,8 @@ Three signals have distinct responsibilities:
 3. **The morphoelastic law supplies the amount of growth.** Once a cell cycle
    is active, a configured duration determines approximately how many mechanical
    macro steps it takes to double stress-free area. Elastic compression
-   lengthens this duration continuously, without a hard mechanical cutoff.
+   smoothly lengthens this duration and fully pauses growth above the
+   configured arrest threshold; releasing compression resumes the cycle.
 
 The policy therefore does not directly output a scalar growth amount. It
 controls growth indirectly through the last chemical channel, reacting to all
@@ -322,9 +323,12 @@ For a particle in an active cell cycle:
 
 ```text
 log_area_per_substep = ln(2) / (growth_duration * substeps_per_macro)
+compression = max(0, -ln(Je))
+pressure_gate = 1 - smoothstep(compression_start, compression_stop, compression)
+effective_log_area = log_area_per_substep * mix(1, pressure_gate, feedback_strength)
 
 new_g = min(
-    g * exp(log_area_per_substep),
+    g * exp(effective_log_area),
     division_area
 )
 
@@ -340,6 +344,16 @@ before division. A duration of 48 gives an uncompressed particle approximately
 the backend constant `GROWTH_DURATION_MACRO_STEPS` in
 `trainer/simulation_settings.py`. The backend sends that initial value to the
 viewer, whose Growth-panel slider is a playback-only override.
+
+The default contact-inhibition thresholds are both `0.10`, selecting a hard
+cutoff at 10% elastic areal compression. Setting the start below the stop
+restores a smooth slowdown interval. The same gate suppresses new
+cycle hazard and prevents final mitosis while compressed. It never rolls back
+accumulated `Fg`: a quiescent cell continues from the same state after pressure
+release. `feedback_strength=0` is the exact pressure-independent compatibility
+and ablation mode. Since `Je` is a continuum deformation ratio rather than a
+raw neighbor count, this feedback remains meaningful across particle-density
+multipliers.
 
 With no directional signal, the rest deformation grows isotropically:
 

@@ -19,6 +19,10 @@
 const GRID_N: u32 = __GRID_N__u;
 const INV_DX: f32 = __INV_DX__;
 const DT: f32 = __DT__;
+const CHEMICAL_CHANNELS: u32 = __CHEMICAL_CHANNELS__u;
+// Channel 7 in one-based UI language: the channel immediately before the
+// final (index 7) growth-admission channel.
+const FLUIDITY_CHANNEL: u32 = 6u;
 
 @group(0) @binding(0) var<storage, read_write> particlePos: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read_write> particleVel: array<vec2<f32>>;
@@ -72,8 +76,30 @@ struct Material {
   growthAnisotropy: f32,
   particleMass: f32,
   particleVolume: f32,
+  // Dimensionless elastic areal-compression feedback. Compression is
+  // c=max(0,-log(det(Fe))); the smooth start/stop interval avoids chatter.
+  growthCompressionStart: f32,
+  growthCompressionStop: f32,
+  growthCompressionFeedback: f32,
+  // Global, per-substep shear-relaxation fraction. This is deliberately a
+  // material state control rather than velocity damping: it turns stored
+  // elastic shear into fluid-like behavior while retaining bulk response.
+  fluidity: f32,
 }
 @group(0) @binding(7) var<uniform> material: Material;
+
+// Read-only view of Agents' packed cell state. ParticleMeta begins at byte
+// 256, and its chemical state begins 72 bytes into each 112-byte record.
+struct ParticleChemical {
+  _prefix: array<u32, 18>,
+  levels: array<f32, CHEMICAL_CHANNELS>,
+  _tail: array<u32, 2>,
+}
+struct ChemicalState {
+  _header: array<u32, 64>,
+  particles: array<ParticleChemical>,
+}
+@group(0) @binding(8) var<storage, read> chemicalState: ChemicalState;
 
 fn matMul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
   return vec4<f32>(
@@ -258,6 +284,19 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let FeTrial = matMul(F, matInverse(Fg0));
   let svd = svd2(FeTrial);
+  // Relax principal stretches toward their geometric mean. Their product
+  // (elastic area) is retained while their difference (shear) decays.
+  // fluidity=0 is precisely the previous plasticity path.
+  // The seventh chemical channel selects a particle's fraction of the global
+  // fluidity maximum, using the same positive-only [0,1] convention as the
+  // final growth channel: zero/negative is solid and +1 is fully fluid.
+  var chemicalFluidity = 1.0;
+  if (CHEMICAL_CHANNELS > FLUIDITY_CHANNEL) {
+    chemicalFluidity = clamp(chemicalState.particles[pi].levels[FLUIDITY_CHANNEL], 0.0, 1.0);
+  }
+  let shearRelaxation = clamp(material.fluidity, 0.0, 1.0) * chemicalFluidity;
+  let isotropicStretch = sqrt(max(abs(matDet(FeTrial)), 1e-8));
+  let relaxedSigma = mix(svd.sigma, vec2<f32>(isotropicStretch), shearRelaxation);
   // Bounds are the world's own Material.yieldLow/yieldHigh — how much of
   // a stretch/compression the corotated elastic term is allowed to fully
   // recover from versus how much gets baked in as permanent (plastic)
@@ -271,7 +310,7 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // "elasticity fights growth" failure the whole decomposition exists to
   // eliminate.
   let sigma = clamp(
-    svd.sigma,
+    relaxedSigma,
     vec2<f32>(material.yieldLow),
     vec2<f32>(material.yieldHigh)
   );
@@ -307,8 +346,23 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
   }
   if (rest0.cycleActive > 0.5 && material.growthRate > 0.0) {
+    let compression = max(0.0, -log(max(newJe, 1e-6)));
+    var pressureGate = 0.0;
+    if (material.growthCompressionStop > material.growthCompressionStart) {
+      pressureGate = 1.0 - smoothstep(
+        material.growthCompressionStart,
+        material.growthCompressionStop,
+        compression
+      );
+    } else if (compression < material.growthCompressionStart) {
+      // Equal thresholds intentionally select a hard contact-inhibition
+      // cutoff instead of manufacturing an epsilon-wide smooth interval.
+      pressureGate = 1.0;
+    }
+    let feedback = clamp(material.growthCompressionFeedback, 0.0, 1.0);
+    let effectiveGrowthRate = material.growthRate * mix(1.0, pressureGate, feedback);
     gNew = min(
-      g0 * exp(material.growthRate * DT),
+      g0 * exp(effectiveGrowthRate * DT),
       2.0
     );
     let areaFactor = gNew / g0;

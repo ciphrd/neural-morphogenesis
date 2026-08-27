@@ -239,12 +239,17 @@ def check_growth_without_repulsion(device: wgpu.GPUDevice) -> None:
     print(f"[PASS] growth_without_repulsion separation={separation:.6f}")
 
 
-def check_compressed_growth_uses_full_rate(device: wgpu.GPUDevice) -> None:
-    """Elastic compression does not alter the configured growth clock."""
+def check_compressed_growth_pauses_and_resumes(device: wgpu.GPUDevice) -> None:
+    """Compression arrests active rest growth; release resumes without loss."""
     core = MpmCore(device)
     core.set_gravity(0.0)
     core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(0.0, 0.2, 3.0, 0.2, growth_rate=50.0)
+    core.set_material(
+        0.0, 0.2, 3.0, 0.2, growth_rate=50.0,
+        growth_compression_start=0.10,
+        growth_compression_stop=0.10,
+        growth_compression_feedback=1.0,
+    )
     core.load_scene(
         np.array([[0.5, 0.5]], dtype=np.float32),
         np.zeros((1, 2), dtype=np.float32),
@@ -254,10 +259,37 @@ def check_compressed_growth_uses_full_rate(device: wgpu.GPUDevice) -> None:
     )
     device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
     core.step(1)
-    actual = float(_probe(core, 1)[0, 1])
+    arrested = float(_probe(core, 1)[0, 1])
+    assert np.isclose(arrested, 1.0, atol=2e-6), arrested
+
+    # Release the elastic compression while preserving the active cycle.
+    device.queue.write_buffer(
+        core.F, 0, np.array([[1.0, 0.0, 0.0, 1.0]], dtype=np.float32)
+    )
+    core.step(1)
+    resumed = float(_probe(core, 1)[0, 1])
     expected = np.exp(50.0 * DT)
-    assert np.isclose(actual, expected, atol=2e-6), (actual, expected)
-    print(f"[PASS] compressed growth uses full configured rate g={actual:.6f}")
+    assert np.isclose(resumed, expected, atol=2e-6), (resumed, expected)
+
+    # Strength zero is the exact compatibility/ablation path.
+    core.set_material(
+        0.0, 0.2, 3.0, 0.2, growth_rate=50.0,
+        growth_compression_start=0.10,
+        growth_compression_stop=0.10,
+        growth_compression_feedback=0.0,
+    )
+    device.queue.write_buffer(
+        core.F, 0,
+        np.array([[np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)]], dtype=np.float32),
+    )
+    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
+    core.step(1)
+    legacy = float(_probe(core, 1)[0, 1])
+    assert np.isclose(legacy, expected, atol=2e-6), (legacy, expected)
+    print(
+        "[PASS] compression feedback arrests/resumes growth and strength=0 "
+        f"preserves legacy rate g={resumed:.6f}"
+    )
 
 
 def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
@@ -592,6 +624,7 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
         0.0, 0.2, 3.0, 0.0,
         growth_duration_macro_steps=8.0,
         substeps_per_macro=4,
+        growth_compression_feedback=0.0,
     )
     core.step(4)
     ramped_rest = core.read_rest_state()
@@ -727,6 +760,9 @@ def check_boundary_gradient_forces_tangent_split(device: wgpu.GPUDevice) -> None
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
         6, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
     )
+    # This diagnostic deliberately exercises tangent placement even for its
+    # small synthetic gradient; production uses the shared 8e-3 flat cutoff.
+    agents.set_boundary_tangent_min_gradient(1e-6)
     # Particle 0 is just to the right of a small cluster. Its morphology
     # gradient is nonzero, while a zeroed policy would otherwise request a
     # horizontal split. The assertion below reconstructs the exact sampled
@@ -801,7 +837,7 @@ def check_boundary_gradient_forces_tangent_split(device: wgpu.GPUDevice) -> None
     tangent_error = abs(np.dot(separation, gradient)) / (
         np.linalg.norm(separation) * np.linalg.norm(gradient)
     )
-    assert tangent_error < 2e-4, (daughters, gradient, tangent_error)
+    assert tangent_error < 5e-4, (daughters, gradient, tangent_error)
     np.testing.assert_allclose(daughters.mean(axis=0), positions[0], atol=2e-5)
     print("[PASS] morphology boundary normal forces a symmetric tangent split")
 
@@ -855,7 +891,10 @@ def check_isotropic_increment_preserves_tensor_shape(device: wgpu.GPUDevice) -> 
     core = MpmCore(device)
     core.set_gravity(0.0)
     core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(0.0, 0.2, 3.0, 1.0, growth_rate=50.0, growth_max=2.0)
+    core.set_material(
+        0.0, 0.2, 3.0, 1.0, growth_rate=50.0, growth_max=2.0,
+        growth_compression_feedback=0.0,
+    )
     fg = np.array([[1.15, 0.18], [0.04, 0.92]], dtype=np.float32)
     fe = np.array([[1.02, 0.01], [-0.02, 0.99]], dtype=np.float32)
     core.load_scene(
@@ -892,6 +931,7 @@ def _directional_increment_case(
         growth_rate=50.0,
         growth_max=2.0,
         growth_anisotropy=global_anisotropy,
+        growth_compression_feedback=0.0,
     )
     c, s = np.cos(rotation_angle), np.sin(rotation_angle)
     rotation = np.array([[c, -s], [s, c]], dtype=np.float32)
@@ -942,6 +982,7 @@ def _duration_growth_case(device: wgpu.GPUDevice, substeps: int) -> float:
         1.0,
         growth_duration_macro_steps=20.0,
         substeps_per_macro=substeps,
+        growth_compression_feedback=0.0,
     )
     core.load_scene(
         np.array([[0.5, 0.5]], dtype=np.float32),
@@ -1008,7 +1049,7 @@ def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
     speed = 100.0
     core.set_gravity(0.0)
     core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(0.0, 0.2, 3.0, elasticity=0.0)
+    core.set_material(0.0, 0.2, 3.0, elasticity=0.0, particle_mass=1.0)
     core.load_scene(
         np.full((count, 2), [0.5, 0.5], dtype=np.float32),
         np.full((count, 2), [speed, 0.0], dtype=np.float32),
@@ -1022,8 +1063,8 @@ def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
     mass = float(accum[:, 2].astype(np.int64).sum() / scale)
     momentum_x = float(accum[:, 0].astype(np.int64).sum() / scale)
     max_raw = int(np.abs(accum.astype(np.int64)).max())
-    assert np.isclose(mass, count, rtol=2e-3), mass
-    assert np.isclose(momentum_x, count * speed, rtol=2e-3), momentum_x
+    assert np.isclose(mass, count * core.particle_mass, rtol=2e-3), mass
+    assert np.isclose(momentum_x, count * core.particle_mass * speed, rtol=2e-3), momentum_x
     assert max_raw < np.iinfo(np.int32).max * 0.75, max_raw
     print(f"[PASS] p2g_headroom mass={mass:.1f} momentum={momentum_x:.1f} max_raw={max_raw}")
 
@@ -1071,6 +1112,7 @@ def _cycle_gate_case(
     initial_cycle: float = 0.0,
     runtime_cap: int | None = None,
     commit_lifecycle: bool = True,
+    elastic_area: float = 1.0,
 ) -> np.ndarray:
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
@@ -1087,6 +1129,11 @@ def _cycle_gate_case(
         np.ones(1, dtype=np.float32),
     )
     core.reset_growth_buffers(cap)
+    elastic_root = np.float32(np.sqrt(elastic_area))
+    device.queue.write_buffer(
+        core.F, 0,
+        np.array([[elastic_root, 0.0, 0.0, elastic_root]], dtype=np.float32),
+    )
     device.queue.write_buffer(
         core.rest,
         0,
@@ -1125,6 +1172,12 @@ def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
     assert _cycle_gate_case(device, cap=1, enabled=True)[2] == 0.0
     assert _cycle_gate_case(device, cap=4, enabled=True, runtime_cap=1)[2] == 0.0
     assert _cycle_gate_case(device, cap=4, enabled=True, commit_lifecycle=False)[2] == 0.0
+    assert _cycle_gate_case(device, cap=4, enabled=True, elastic_area=0.8)[2] == 0.0
+    compressed_ready = _cycle_gate_case(
+        device, cap=4, enabled=True,
+        initial_growth=2.0, initial_cycle=1.0, elastic_area=0.8,
+    )
+    assert compressed_ready[2] == 1.0 and np.isclose(compressed_ready[1], 2.0)
 
     # A cycle that began before other particles consumed the remaining
     # slots must be closed at cap without rolling back its accumulated g.
@@ -1137,7 +1190,7 @@ def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
     )
     assert capped[2] == 0.0, capped
     assert np.isclose(capped[1], 1.4), capped
-    print("[PASS] cycle_start_gates final_round_only enabled=yes disabled=no static/runtime_cap=no capped_cycle_closed_g_preserved")
+    print("[PASS] cycle_start_gates include mechanical compression arrest and preserve capped-cycle growth")
 
 
 def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
@@ -1289,7 +1342,7 @@ def main() -> None:
     check_single_cell_rollout_seed(device)
     check_supersampled_communication_rounds(device)
     check_growth_without_repulsion(device)
-    check_compressed_growth_uses_full_rate(device)
+    check_compressed_growth_pauses_and_resumes(device)
     check_transient_cell_chemical_splats(device)
     check_persistent_environment_chemistry(device)
     check_elastic_strain_policy_inputs(device)

@@ -36,13 +36,18 @@ from shader_template import load_core_shader
 from simulation_settings import (
     DAMPING_LOSS_FRACTION,
     DEFAULT_SUBSTEPS_PER_MACRO,
+    GROWTH_COMPRESSION_FEEDBACK,
+    GROWTH_COMPRESSION_START,
+    GROWTH_COMPRESSION_STOP,
     GROWTH_DURATION_MACRO_STEPS,
     GROWTH_ANISOTROPY_AUTHORITY,
     GROWTH_MAX,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
+    MATERIAL_FLUIDITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
+    CHEM_CHANNELS,
     MORPHOLOGY_BLUR_SIGMA,
     MORPHOLOGY_DENSITY_REFERENCE,
     REPULSION_MAX_DELTA,
@@ -181,7 +186,11 @@ class MpmCore:
             size=MAX_PARTICLES * REST_FIELDS * f32,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
         )
-
+        # Neutral fallback for g2p's packed cell-chemistry view. Training's
+        # default fluidity is zero, so this is an exact legacy no-op.
+        self.chemical_state_fallback = device.create_buffer(
+            size=256 + MAX_PARTICLES * 112, usage=wgpu.BufferUsage.STORAGE
+        )
         # COPY_SRC supports the focused stability/headroom regressions; it
         # does not add a transfer to the hot path unless a check reads it.
         self.grid_accum = device.create_buffer(
@@ -198,12 +207,12 @@ class MpmCore:
         self.gravity_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_gravity(0.0)  # not a "simulation setting" — gravity is CLI-configurable (evolve.py's --gravity)
 
-        # Material: ten floats plus uniform-struct padding = 48 bytes —
+        # Material: thirteen floats plus uniform-struct padding = 64 bytes —
         # must match p2g.wgsl's/g2p.wgsl's identical Material struct
         # declarations exactly. p2g reads the first five, g2p reads
         # yieldLow/yieldHigh plus the growth params; one shared
         # struct regardless, same convention this buffer already followed.
-        self.material_uniform = device.create_buffer(size=48, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self.material_uniform = device.create_buffer(size=64, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_material(
             MATERIAL_E,
             MATERIAL_NU,
@@ -212,13 +221,16 @@ class MpmCore:
             growth_max=GROWTH_MAX,
             growth_duration_macro_steps=GROWTH_DURATION_MACRO_STEPS,
             substeps_per_macro=DEFAULT_SUBSTEPS_PER_MACRO,
+            growth_compression_start=GROWTH_COMPRESSION_START,
+            growth_compression_stop=GROWTH_COMPRESSION_STOP,
+            growth_compression_feedback=GROWTH_COMPRESSION_FEEDBACK,
         )
 
         self.active_count_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.damping_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_damping(DAMPING_LOSS_FRACTION, SUBSTEPS_PER_DAMPING_FRAME)
 
-        template_vars = {"GRID_N": GRID_N, "DX": DX, "INV_DX": INV_DX, "DT": DT}
+        template_vars = {"GRID_N": GRID_N, "DX": DX, "INV_DX": INV_DX, "DT": DT, "CHEMICAL_CHANNELS": CHEM_CHANNELS}
 
         clear_grid_module = device.create_shader_module(code=load_core_shader("clearGrid.wgsl", {"GRID_N": GRID_N}))
         self.clear_grid_pipeline = device.create_compute_pipeline(
@@ -259,7 +271,12 @@ class MpmCore:
             ],
         )
 
-        g2p_module = device.create_shader_module(code=load_core_shader("g2p.wgsl", {"GRID_N": GRID_N, "INV_DX": INV_DX, "DT": DT}))
+        g2p_module = device.create_shader_module(
+            code=load_core_shader(
+                "g2p.wgsl",
+                {"GRID_N": GRID_N, "INV_DX": INV_DX, "DT": DT, "CHEMICAL_CHANNELS": CHEM_CHANNELS},
+            )
+        )
         self.g2p_pipeline = device.create_compute_pipeline(layout=wgpu.AutoLayoutMode.auto, compute={"module": g2p_module, "entry_point": "g2p"})
         self.g2p_bind_group = device.create_bind_group(
             layout=self.g2p_pipeline.get_bind_group_layout(0),
@@ -272,6 +289,7 @@ class MpmCore:
                 {"binding": 5, "resource": {"buffer": self.grid_vel, "offset": 0, "size": self.grid_vel.size}},
                 {"binding": 6, "resource": {"buffer": self.active_count_uniform, "offset": 0, "size": self.active_count_uniform.size}},
                 {"binding": 7, "resource": {"buffer": self.material_uniform, "offset": 0, "size": self.material_uniform.size}},
+                {"binding": 8, "resource": {"buffer": self.chemical_state_fallback, "offset": 0, "size": self.chemical_state_fallback.size}},
             ],
         )
 
@@ -527,6 +545,10 @@ class MpmCore:
         substeps_per_macro: int = DEFAULT_SUBSTEPS_PER_MACRO,
         particle_mass: float = PARTICLE_MASS,
         particle_volume: float = VOL,
+        growth_compression_start: float = GROWTH_COMPRESSION_START,
+        growth_compression_stop: float = GROWTH_COMPRESSION_STOP,
+        growth_compression_feedback: float = GROWTH_COMPRESSION_FEEDBACK,
+        fluidity: float = MATERIAL_FLUIDITY,
     ) -> None:
         """Write elastic material and the derived internal growth rate.
 
@@ -544,6 +566,12 @@ class MpmCore:
         )
         if particle_mass <= 0.0 or particle_volume <= 0.0:
             raise ValueError("particle mass and volume must be positive")
+        if not 0.0 <= growth_compression_feedback <= 1.0:
+            raise ValueError("growth compression feedback must be in [0, 1]")
+        if growth_compression_start < 0.0 or growth_compression_stop < growth_compression_start:
+            raise ValueError("growth compression thresholds require 0 <= start <= stop")
+        if not 0.0 <= fluidity <= 1.0:
+            raise ValueError("fluidity must be in [0, 1]")
         self.particle_mass = float(particle_mass)
         self.particle_volume = float(particle_volume)
         self.device.queue.write_buffer(
@@ -561,6 +589,10 @@ class MpmCore:
                     growth_anisotropy,
                     self.particle_mass,
                     self.particle_volume,
+                    growth_compression_start,
+                    growth_compression_stop,
+                    growth_compression_feedback,
+                    fluidity,
                 ],
                 dtype=np.float32,
             ),

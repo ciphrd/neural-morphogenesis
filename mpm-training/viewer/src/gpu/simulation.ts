@@ -45,6 +45,7 @@
 // shape is just a cheap loadWeights() call.
 
 import { Agents } from "./agents";
+import type { BloomSettings } from "./bloom";
 import { Deform, type DeformDirection, type DeformMode } from "./deform";
 import { NoiseDisplacement } from "./noiseDisplacement";
 import { Environment } from "./environment";
@@ -102,6 +103,7 @@ export class GpuSimulation {
   private pendingNeuralColorAlpha = 1.0;
   private pendingInternalStateAlpha = 1.0;
   private pendingInternalStateChannelStart = 0;
+  private pendingChemicalMemoryOpponentSubtraction = 0;
   private pendingBoundaryGradientScale = 0.01;
   private pendingPointRadiusPx: number | null = null;
   private pendingGrowthAxisLengthPx = 24;
@@ -144,6 +146,14 @@ export class GpuSimulation {
   // something jogs a resize" bug. null until the first report.
   private pendingCanvasSizePx: [number, number] | null = null;
   private pendingZoom = 1;
+  private pendingBloom: BloomSettings = {
+    enabled: true,
+    intensity: 0.8,
+    threshold: 0.65,
+    radiusPx: 2.5,
+    scatter: 0.8,
+    levels: 6,
+  };
 
   // Bumped by anything that invalidates in-flight GPU state (rebuild(),
   // restartRollout(), destroy()) — step() captures this at its own start
@@ -191,6 +201,11 @@ export class GpuSimulation {
   }
   async readPositions(): Promise<Float32Array> {
     return this.mpmCore ? this.mpmCore.readPositions() : new Float32Array();
+  }
+  async readPositionSamples(maxSamples: number): Promise<Float32Array> {
+    return this.mpmCore
+      ? this.mpmCore.readPositionSamples(maxSamples)
+      : new Float32Array();
   }
   private growthIsEnabled(): boolean {
     if (!this.config) return false;
@@ -289,7 +304,11 @@ export class GpuSimulation {
       chemicalProjectionWeight: config.chemicalProjectionWeight ?? 1.0,
       boundaryTangentMinGradient: config.boundaryTangentMinGradient
         ?? coreConstants.BOUNDARY_TANGENT_MIN_GRADIENT,
+      growthCompressionStart: config.growthCompressionStart ?? 0.10,
+      growthCompressionStop: config.growthCompressionStop ?? 0.10,
+      growthCompressionFeedback: config.growthCompressionFeedback ?? 0.0,
     });
+    mpmCore.setChemicalStateBuffer(agents.particleMetaState);
     agents.loadWeights(config.weights);
 
     const renderer = new Renderer(this.device, this.format, mpmCore, environment, agents.particleMetaState);
@@ -304,6 +323,7 @@ export class GpuSimulation {
     renderer.setNeuralColorAlpha(this.pendingNeuralColorAlpha);
     renderer.setInternalStateAlpha(this.pendingInternalStateAlpha);
     renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart);
+    renderer.setChemicalMemoryOpponentSubtraction(this.pendingChemicalMemoryOpponentSubtraction);
     renderer.setBoundaryGradientScale(this.pendingBoundaryGradientScale);
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
     renderer.setGrowthAxisLengthPx(this.pendingGrowthAxisLengthPx);
@@ -312,6 +332,7 @@ export class GpuSimulation {
     renderer.setBlur(this.pendingBlur);
     renderer.setGradientExponent(this.pendingGradientExponent);
     renderer.setZoom(this.pendingZoom);
+    renderer.setBloom(this.pendingBloom);
 
     const interact = new Interact(this.device, mpmCore);
     const deform = new Deform(this.device, mpmCore);
@@ -414,6 +435,14 @@ export class GpuSimulation {
       this.neuralUpdatesPerMacro,
       physics.communicationSpeed ?? 1.0,
     );
+    const growthCompressionStart = Math.max(0, physics.growthCompressionStart ?? 0.10);
+    const growthCompressionStop = Math.max(
+      growthCompressionStart,
+      physics.growthCompressionStop ?? 0.10,
+    );
+    const growthCompressionFeedback = Math.max(
+      0, Math.min(1, physics.growthCompressionFeedback ?? 1.0),
+    );
     this.mpmCore.setMaterial(
       physics.materialE,
       physics.materialNu,
@@ -427,6 +456,10 @@ export class GpuSimulation {
       this.config.substepsPerMacro,
       physics.particleMass,
       physics.particleVolume,
+      growthCompressionStart,
+      growthCompressionStop,
+      growthCompressionFeedback,
+      physics.materialFluidity,
     );
     this.growthDuration = physics.growthDuration;
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
@@ -449,6 +482,11 @@ export class GpuSimulation {
     this.agents.setChemicalGradientInputScale(physics.chemicalGradientInputScale);
     this.agents.setChemicalProjectionWeight(physics.chemicalProjectionWeight);
     this.agents.setBoundaryTangentMinGradient(physics.boundaryTangentMinGradient);
+    this.agents.setGrowthCompressionFeedback(
+      growthCompressionStart,
+      growthCompressionStop,
+      growthCompressionFeedback,
+    );
     this.agents.setPhysics({
       maxAccel: physics.maxAccel,
       maxStrafe: physics.maxStrafe,
@@ -664,6 +702,11 @@ export class GpuSimulation {
     this.renderer?.setInternalStateChannelStart(start);
   }
 
+  setChemicalMemoryOpponentSubtraction(amount: number): void {
+    this.pendingChemicalMemoryOpponentSubtraction = amount;
+    this.renderer?.setChemicalMemoryOpponentSubtraction(amount);
+  }
+
   setBoundaryGradientScale(g0: number): void {
     this.pendingBoundaryGradientScale = g0;
     this.renderer?.setBoundaryGradientScale(g0);
@@ -713,6 +756,11 @@ export class GpuSimulation {
   setZoom(zoom: number): void {
     this.pendingZoom = Math.min(8, Math.max(1, zoom));
     this.renderer?.setZoom(this.pendingZoom);
+  }
+
+  setBloom(settings: BloomSettings): void {
+    this.pendingBloom = settings;
+    this.renderer?.setBloom(settings);
   }
 
   /** "Add Particle" tool — `(x, y)`: MpmCore's own [0,1]^2 domain

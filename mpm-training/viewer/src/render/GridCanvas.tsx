@@ -1,5 +1,6 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { DeformDirection, DeformMode } from "../gpu/deform";
+import type { BloomSettings } from "../gpu/bloom";
 import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu/device";
 import type { FieldMode, ParticleRenderMode } from "../gpu/render";
 import { GpuSimulation, type SimulationScenario } from "../gpu/simulation";
@@ -31,6 +32,15 @@ export interface DeformSettings {
   strength: number;
   radius: number;
   mode: DeformMode;
+}
+
+export interface AutoZoomSettings {
+  enabled: boolean;
+  sampleEveryFrames: number;
+  maxSamples: number;
+  fitFraction: number;
+  padding: number;
+  smoothing: number;
 }
 
 interface GridCanvasProps {
@@ -68,6 +78,8 @@ interface GridCanvasProps {
   boundaryGradientScale?: number;
   /** First of three contiguous private-state channels mapped to cell RGB. */
   internalStateChannelStart?: number;
+  /** Amount of the wrapped next three private-state channels subtracted from particle RGB. */
+  chemicalMemoryOpponentSubtraction?: number;
   /** Full-strength axis length in device pixels. */
   growthAxisLengthPx?: number;
   /** [-2,2] — negative suppresses background-field contrast, 0 is
@@ -85,10 +97,15 @@ interface GridCanvasProps {
    * own colorize pass reads this. Default 1 (identity, unchanged from
    * before this knob existed). */
   gradientExponent?: number;
+  bloom?: BloomSettings;
   /** Geometry-stage camera zoom; particle rendering remains native-resolution. */
   zoom?: number;
   /** Viewer-only coherent simplex position displacement strength. */
   noiseDisplacementStrength?: number;
+  /** Periodically samples live agents and fits their bounds into the center. */
+  autoZoom?: AutoZoomSettings;
+  /** Reports the actual camera zoom while auto zoom is smoothing. */
+  onEffectiveZoomChange?: (zoom: number) => void;
   /** Which interaction tool (if any) is currently toggled on — see the
    * Tool type's own docstring. Default "none". */
   tool?: Tool;
@@ -290,14 +307,18 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     internalStateAlpha = 1,
     boundaryGradientScale = 0.01,
     internalStateChannelStart = 0,
+    chemicalMemoryOpponentSubtraction = 0,
     growthAxisLengthPx = 24,
     accent = 0,
     morphologyGradientVisible = true,
     morphologyDensityVisible = true,
     blur = 0,
     gradientExponent = 1,
+    bloom,
     zoom = 1,
     noiseDisplacementStrength = 0,
+    autoZoom,
+    onEffectiveZoomChange,
     tool = "none",
     deformSettings,
     onStep,
@@ -325,14 +346,23 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const internalStateAlphaRef = useRef(internalStateAlpha);
   const boundaryGradientScaleRef = useRef(boundaryGradientScale);
   const internalStateChannelStartRef = useRef(internalStateChannelStart);
+  const chemicalMemoryOpponentSubtractionRef = useRef(chemicalMemoryOpponentSubtraction);
   const growthAxisLengthPxRef = useRef(growthAxisLengthPx);
   const accentRef = useRef(accent);
   const morphologyGradientVisibleRef = useRef(morphologyGradientVisible);
   const morphologyDensityVisibleRef = useRef(morphologyDensityVisible);
   const blurRef = useRef(blur);
   const gradientExponentRef = useRef(gradientExponent);
+  const bloomRef = useRef(bloom);
   const zoomRef = useRef(zoom);
   const noiseDisplacementStrengthRef = useRef(noiseDisplacementStrength);
+  const effectiveZoomRef = useRef(zoom);
+  const autoZoomTargetRef = useRef(zoom);
+  const autoZoomRef = useRef(autoZoom);
+  const onEffectiveZoomChangeRef = useRef(onEffectiveZoomChange);
+  const autoZoomFrameRef = useRef(0);
+  const autoZoomReportFrameRef = useRef(0);
+  const autoZoomHardResetRef = useRef(true);
   const toolRef = useRef(tool);
   const deformSettingsRef = useRef(deformSettings);
   const onStepRef = useRef(onStep);
@@ -389,7 +419,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     const canvasRect = canvas.getBoundingClientRect();
     // Y-flip matches domainPos()'s own convention (screen is top-down,
     // the domain is bottom-up) — see that function's own comment.
-    const cameraZoom = zoomRef.current;
+    const cameraZoom = effectiveZoomRef.current;
     const screenX = 0.5 + (hover.x - 0.5) * cameraZoom;
     const screenY = 0.5 + (hover.y - 0.5) * cameraZoom;
     const px = canvasRect.left - containerRect.left + screenX * canvasRect.width;
@@ -462,12 +492,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   internalStateAlphaRef.current = internalStateAlpha;
   boundaryGradientScaleRef.current = boundaryGradientScale;
   internalStateChannelStartRef.current = internalStateChannelStart;
+  chemicalMemoryOpponentSubtractionRef.current = chemicalMemoryOpponentSubtraction;
   growthAxisLengthPxRef.current = growthAxisLengthPx;
   accentRef.current = accent;
   morphologyGradientVisibleRef.current = morphologyGradientVisible;
   morphologyDensityVisibleRef.current = morphologyDensityVisible;
   blurRef.current = blur;
   gradientExponentRef.current = gradientExponent;
+  bloomRef.current = bloom;
+  noiseDisplacementStrengthRef.current = noiseDisplacementStrength;
   toolRef.current = tool;
   deformSettingsRef.current = deformSettings;
   onStepRef.current = onStep;
@@ -481,9 +514,18 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     },
     restart: () => {
       simulationRef.current?.restartRollout();
+      autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
+      autoZoomTargetRef.current = effectiveZoomRef.current;
+      autoZoomHardResetRef.current = true;
     },
     randomizeWeights: () => {
-      return simulationRef.current?.randomizeWeights() ?? null;
+      const weights = simulationRef.current?.randomizeWeights() ?? null;
+      if (weights) {
+        autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
+        autoZoomTargetRef.current = effectiveZoomRef.current;
+        autoZoomHardResetRef.current = true;
+      }
+      return weights;
     },
     startRecording: () => {
       if (canvasRef.current) getRecorder().start(canvasRef.current);
@@ -561,6 +603,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         sim.setInitialParticleCount(restoreInitialParticleCount);
         sim.setPointRadiusPx(restoreParticleRadiusPx);
         sim.restartRollout();
+        autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
+        autoZoomHardResetRef.current = true;
         batchRunningRef.current = false;
       }
     },
@@ -628,13 +672,17 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setInternalStateAlpha(internalStateAlphaRef.current);
       simulation.setBoundaryGradientScale(boundaryGradientScaleRef.current);
       simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
+      simulation.setChemicalMemoryOpponentSubtraction(chemicalMemoryOpponentSubtractionRef.current);
       if (particleRadiusPxRef.current !== undefined) simulation.setPointRadiusPx(particleRadiusPxRef.current);
       simulation.setGrowthAxisLengthPx(growthAxisLengthPxRef.current);
       simulation.setAccent(accentRef.current);
       simulation.setMorphologyDisplay(morphologyGradientVisibleRef.current, morphologyDensityVisibleRef.current);
       simulation.setBlur(blurRef.current);
       simulation.setGradientExponent(gradientExponentRef.current);
+      if (bloomRef.current) simulation.setBloom(bloomRef.current);
       simulation.setZoom(zoomRef.current);
+      effectiveZoomRef.current = zoomRef.current;
+      autoZoomTargetRef.current = zoomRef.current;
       simulationRef.current = simulation;
       const initialConfig = configRef.current;
       const initialWeightsError = initialConfig
@@ -746,7 +794,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       const rect = canvas.getBoundingClientRect();
       const nx = (ev.clientX - rect.left) / rect.width;
       const ny = 1 - (ev.clientY - rect.top) / rect.height;
-      const cameraZoom = zoomRef.current;
+      const cameraZoom = effectiveZoomRef.current;
       const worldX = 0.5 + (nx - 0.5) / cameraZoom;
       const worldY = 0.5 + (ny - 0.5) / cameraZoom;
       return {
@@ -882,6 +930,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       }
       if (revision !== configRevisionRef.current) return;
       simulation.loadGeneration(config);
+      autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
+      autoZoomTargetRef.current = effectiveZoomRef.current;
+      autoZoomHardResetRef.current = true;
       // loadGeneration deliberately restores the run's recorded settings so
       // selecting another trained generation is reproducible. An exploration
       // brain reload uses that same path, but must then restore every current
@@ -906,12 +957,16 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     if (initialParticleCount !== undefined) {
       simulationRef.current?.setInitialParticleCount(initialParticleCount);
+      autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
+      autoZoomHardResetRef.current = true;
     }
   }, [initialParticleCount]);
 
   useEffect(() => {
     scenarioRef.current = scenario;
     simulationRef.current?.setScenario(scenario);
+    autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
+    autoZoomHardResetRef.current = true;
   }, [scenario]);
 
   useEffect(() => {
@@ -951,6 +1006,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [internalStateChannelStart]);
 
   useEffect(() => {
+    simulationRef.current?.setChemicalMemoryOpponentSubtraction(chemicalMemoryOpponentSubtraction);
+  }, [chemicalMemoryOpponentSubtraction]);
+
+  useEffect(() => {
     if (particleRadiusPx !== undefined) simulationRef.current?.setPointRadiusPx(particleRadiusPx);
   }, [particleRadiusPx]);
 
@@ -975,11 +1034,38 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [gradientExponent]);
 
   useEffect(() => {
-  zoomRef.current = zoom;
-  noiseDisplacementStrengthRef.current = noiseDisplacementStrength;
-    simulationRef.current?.setZoom(zoom);
+    if (bloom) simulationRef.current?.setBloom(bloom);
+  }, [bloom]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+    if (!autoZoomRef.current?.enabled) {
+      effectiveZoomRef.current = zoom;
+      simulationRef.current?.setZoom(zoom);
+      onEffectiveZoomChangeRef.current?.(zoom);
+    }
     syncDeformPreview();
   }, [zoom, syncDeformPreview]);
+
+  useEffect(() => {
+    autoZoomRef.current = autoZoom;
+    autoZoomFrameRef.current = 0;
+    autoZoomReportFrameRef.current = 0;
+    autoZoomTargetRef.current = effectiveZoomRef.current;
+    autoZoomHardResetRef.current = Boolean(autoZoom?.enabled);
+    if (autoZoom?.enabled) {
+      autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
+    }
+    if (!autoZoom?.enabled) {
+      effectiveZoomRef.current = zoomRef.current;
+      simulationRef.current?.setZoom(zoomRef.current);
+      onEffectiveZoomChangeRef.current?.(zoomRef.current);
+    }
+  }, [autoZoom]);
+
+  useEffect(() => {
+    onEffectiveZoomChangeRef.current = onEffectiveZoomChange;
+  }, [onEffectiveZoomChange]);
 
   // Stops any in-progress recording on unmount — a dangling
   // MediaRecorder/MediaStream left running past this component's own
@@ -1033,6 +1119,80 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
           if (cancelled) return;
           if (loopAtTrainedStepsRef.current && sim.currentStep >= sim.steps) {
             sim.restartRollout();
+            autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
+            autoZoomTargetRef.current = effectiveZoomRef.current;
+            autoZoomHardResetRef.current = true;
+          }
+        }
+        const auto = autoZoomRef.current;
+        if (auto?.enabled) {
+          autoZoomFrameRef.current += 1;
+          const cadence = Math.max(1, Math.floor(auto.sampleEveryFrames));
+          if (autoZoomFrameRef.current >= cadence) {
+            autoZoomFrameRef.current = 0;
+            try {
+              const positions = await sim.readPositionSamples(auto.maxSamples);
+              if (cancelled) return;
+              if (positions.length >= 2) {
+                let minX = positions[0];
+                let maxX = positions[0];
+                let minY = positions[1];
+                let maxY = positions[1];
+                for (let i = 2; i < positions.length; i += 2) {
+                  minX = Math.min(minX, positions[i]);
+                  maxX = Math.max(maxX, positions[i]);
+                  minY = Math.min(minY, positions[i + 1]);
+                  maxY = Math.max(maxY, positions[i + 1]);
+                }
+                // The existing camera is fixed on world center, so asymmetric
+                // drift must count toward the centered fitting square too.
+                const centeredExtent = 2 * Math.max(
+                  Math.abs(minX - 0.5),
+                  Math.abs(maxX - 0.5),
+                  Math.abs(minY - 0.5),
+                  Math.abs(maxY - 0.5),
+                  1e-4,
+                );
+                const fitFraction = Math.min(1, Math.max(0.05, auto.fitFraction));
+                const padding = Math.max(1, auto.padding);
+                const target = Math.min(
+                  8,
+                  Math.max(1, fitFraction / (centeredExtent * padding)),
+                );
+                autoZoomTargetRef.current = target;
+                if (autoZoomHardResetRef.current) {
+                  autoZoomHardResetRef.current = false;
+                  effectiveZoomRef.current = target;
+                  sim.setZoom(target);
+                  onEffectiveZoomChangeRef.current?.(target);
+                  autoZoomReportFrameRef.current = 0;
+                  syncDeformPreview();
+                }
+              }
+            } catch (err) {
+              if (!cancelled) {
+                console.error("[auto-zoom] position sampling failed", err);
+              }
+            }
+          }
+          const current = effectiveZoomRef.current;
+          const target = autoZoomTargetRef.current;
+          const smoothing = Math.min(1, Math.max(0.001, auto.smoothing));
+          const next = Math.abs(target - current) < 1e-4
+            ? target
+            : current + (target - current) * smoothing;
+          const moved = next !== current;
+          if (moved) {
+            effectiveZoomRef.current = next;
+            sim.setZoom(next);
+            syncDeformPreview();
+            // The camera moves every frame, but the numeric readout does not
+            // need to force a parent React render at full animation cadence.
+            autoZoomReportFrameRef.current += 1;
+            if (autoZoomReportFrameRef.current >= 6 || next === target) {
+              autoZoomReportFrameRef.current = 0;
+              onEffectiveZoomChangeRef.current?.(next);
+            }
           }
         }
         // Re-pins the dragged particle every frame, not just on

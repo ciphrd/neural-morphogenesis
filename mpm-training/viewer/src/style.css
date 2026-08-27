@@ -202,6 +202,28 @@ body {
   margin-top: 8px;
 }
 
+.settings-category {
+  margin-top: 10px;
+  border-top: 1px solid #2a2a2a;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.settings-category > summary {
+  padding: 8px 0;
+  color: #9a9a9a;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.settings-category[open] {
+  padding-bottom: 10px;
+}
+
+.settings-category[open] > summary {
+  border-bottom: 1px solid #202020;
+}
+
 .slider-row {
   display: flex;
   align-items: center;
@@ -221,6 +243,16 @@ body {
 
 .slider-row .slider {
   flex: 1;
+}
+
+.auto-zoom-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  color: #9a9a9a;
+  font-size: 11px;
+  cursor: pointer;
 }
 
 /* ui/Slider.tsx's own custom track/fill/thumb — purely structural

@@ -32,6 +32,7 @@
 import fieldSrc from "./field.wgsl?raw";
 import fieldDiagnosticsSrc from "./fieldDiagnostics.wgsl?raw";
 import renderSrc from "./render.wgsl?raw";
+import { BLOOM_SCENE_FORMAT, BloomPostProcess, type BloomSettings } from "./bloom";
 import { writeFloat32, ceilDiv } from "./gpuUtil";
 import { PARTICLE_META_BUFFER_OFFSET } from "./agents";
 import type { Environment } from "./environment";
@@ -77,6 +78,7 @@ function alphaBlend(): GPUBlendState {
 
 export class Renderer {
   private readonly device: GPUDevice;
+  private readonly bloom: BloomPostProcess;
 
   // --- particles/target (render.wgsl) ---
   private readonly pointLayout: GPUBindGroupLayout;
@@ -221,6 +223,7 @@ export class Renderer {
   constructor(device: GPUDevice, format: GPUTextureFormat, mpmCore: MpmCore, environment: Environment, particleMetaState: GPUBuffer) {
     this.device = device;
     this.environment = environment;
+    this.bloom = new BloomPostProcess(device, format);
     const renderModule = device.createShaderModule({ code: renderSrc });
 
     // --- particles/target ---
@@ -245,7 +248,7 @@ export class Renderer {
     this.circlePipeline = device.createRenderPipeline({
       layout: pointLayoutPipeline,
       vertex: { module: renderModule, entryPoint: "targetVertex" },
-      fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format, blend: alphaBlend() }] },
+      fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
 
@@ -260,7 +263,7 @@ export class Renderer {
     this.particleCirclePipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [particlePointLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "particleVertex" },
-      fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format, blend: alphaBlend() }] },
+      fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
 
@@ -287,7 +290,7 @@ export class Renderer {
     this.activationParticlePipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [activationLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "activationParticleVertex" },
-      fragment: { module: renderModule, entryPoint: "activationParticleFragment", targets: [{ format, blend: alphaBlend() }] },
+      fragment: { module: renderModule, entryPoint: "activationParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
     this.activationAlphaUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -314,7 +317,7 @@ export class Renderer {
     this.neuralColorParticlePipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [neuralColorLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "neuralColorParticleVertex" },
-      fragment: { module: renderModule, entryPoint: "neuralColorParticleFragment", targets: [{ format, blend: alphaBlend() }] },
+      fragment: { module: renderModule, entryPoint: "neuralColorParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
     this.neuralColorStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -343,13 +346,13 @@ export class Renderer {
     this.internalStateParticlePipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [internalStateLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "internalStateParticleVertex" },
-      fragment: { module: renderModule, entryPoint: "internalStateParticleFragment", targets: [{ format, blend: alphaBlend() }] },
+      fragment: { module: renderModule, entryPoint: "internalStateParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
     this.chemicalLevelsParticlePipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [internalStateLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "chemicalLevelsParticleVertex" },
-      fragment: { module: renderModule, entryPoint: "internalStateParticleFragment", targets: [{ format, blend: alphaBlend() }] },
+      fragment: { module: renderModule, entryPoint: "internalStateParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
     this.internalStateStyleUniform = device.createBuffer({
@@ -381,7 +384,7 @@ export class Renderer {
     this.boundaryValueParticlePipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [boundaryValueLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "boundaryValueParticleVertex" },
-      fragment: { module: renderModule, entryPoint: "boundaryValueParticleFragment", targets: [{ format, blend: alphaBlend() }] },
+      fragment: { module: renderModule, entryPoint: "boundaryValueParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
     this.boundaryGradientScaleUniform = device.createBuffer({
@@ -415,7 +418,7 @@ export class Renderer {
     this.growthAxisPipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [growthAxisLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "growthAxisVertex" },
-      fragment: { module: renderModule, entryPoint: "growthAxisFragment", targets: [{ format, blend: alphaBlend() }] },
+      fragment: { module: renderModule, entryPoint: "growthAxisFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
     this.growthAxisStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -513,7 +516,7 @@ export class Renderer {
     this.fieldPresentPipeline = device.createRenderPipeline({
       layout: "auto",
       vertex: { module: fieldModule, entryPoint: "fieldVertex" },
-      fragment: { module: fieldModule, entryPoint: "fieldFragment", targets: [{ format }] },
+      fragment: { module: fieldModule, entryPoint: "fieldFragment", targets: [{ format: BLOOM_SCENE_FORMAT }] },
       primitive: { topology: "triangle-list" },
     });
     this.fieldPresentBindGroup = device.createBindGroup({
@@ -528,7 +531,7 @@ export class Renderer {
     this.repulsionPresentPipeline = device.createRenderPipeline({
       layout: "auto",
       vertex: { module: fieldModule, entryPoint: "fieldVertex" },
-      fragment: { module: fieldModule, entryPoint: "repulsionFragment", targets: [{ format }] },
+      fragment: { module: fieldModule, entryPoint: "repulsionFragment", targets: [{ format: BLOOM_SCENE_FORMAT }] },
       primitive: { topology: "triangle-list" },
     });
     this.repulsionPresentBindGroup = device.createBindGroup({
@@ -548,7 +551,7 @@ export class Renderer {
     this.morphologyPresentPipeline = device.createRenderPipeline({
       layout: "auto",
       vertex: { module: fieldModule, entryPoint: "fieldVertex" },
-      fragment: { module: fieldModule, entryPoint: "morphologyFragment", targets: [{ format }] },
+      fragment: { module: fieldModule, entryPoint: "morphologyFragment", targets: [{ format: BLOOM_SCENE_FORMAT }] },
       primitive: { topology: "triangle-list" },
     });
     this.morphologyPresentBindGroup = device.createBindGroup({
@@ -592,7 +595,7 @@ export class Renderer {
     this.substratePresentPipeline = device.createRenderPipeline({
       layout: "auto",
       vertex: { module: fieldModule, entryPoint: "fieldVertex" },
-      fragment: { module: fieldModule, entryPoint: "substrateFragment", targets: [{ format }] },
+      fragment: { module: fieldModule, entryPoint: "substrateFragment", targets: [{ format: BLOOM_SCENE_FORMAT }] },
       primitive: { topology: "triangle-list" },
     });
     this.substratePresentBindGroup = device.createBindGroup({
@@ -634,7 +637,7 @@ export class Renderer {
     this.growthPresentPipeline = device.createRenderPipeline({
       layout: "auto",
       vertex: { module: fieldModule, entryPoint: "fieldVertex" },
-      fragment: { module: fieldModule, entryPoint: "growthFragment", targets: [{ format }] },
+      fragment: { module: fieldModule, entryPoint: "growthFragment", targets: [{ format: BLOOM_SCENE_FORMAT }] },
       primitive: { topology: "triangle-list" },
     });
     this.growthPresentBindGroup = device.createBindGroup({
@@ -694,7 +697,7 @@ export class Renderer {
     this.gradientPresentPipeline = device.createRenderPipeline({
       layout: "auto",
       vertex: { module: fieldModule, entryPoint: "fieldVertex" },
-      fragment: { module: fieldModule, entryPoint: "gradientFragment", targets: [{ format }] },
+      fragment: { module: fieldModule, entryPoint: "gradientFragment", targets: [{ format: BLOOM_SCENE_FORMAT }] },
       primitive: { topology: "triangle-list" },
     });
     this.gradientPresentBindGroup = device.createBindGroup({
@@ -824,6 +827,12 @@ export class Renderer {
     writeFloat32(this.device, this.internalStateStyleUniform, 0, new Uint32Array([clamped, clamped + 1, clamped + 2, 0]));
   }
 
+  /** Strength of the wrapped +3/+4/+5 private-state opponent triplet. */
+  setChemicalMemoryOpponentSubtraction(amount: number): void {
+    const clamped = Math.min(1, Math.max(0, amount));
+    writeFloat32(this.device, this.internalStateStyleUniform, 20, new Float32Array([clamped]));
+  }
+
   /** Device-pixel scale of a full-strength signed growth-polarity triangle. */
   setGrowthAxisLengthPx(px: number): void {
     this.growthAxisLengthPx = px;
@@ -841,9 +850,14 @@ export class Renderer {
 
   setCanvasSizePx(widthPx: number, heightPx: number): void {
     this.canvasMinDimPx = Math.max(1, Math.min(widthPx, heightPx));
+    this.bloom.resize(widthPx, heightPx);
     this.writeParticleRadius();
     this.writeGrowthAxisStyle();
     writeFloat32(this.device, this.targetRadiusUniform, 0, new Float32Array([(TARGET_RADIUS_PX * 2) / this.canvasMinDimPx]));
+  }
+
+  setBloom(settings: BloomSettings): void {
+    this.bloom.setSettings(settings);
   }
 
   private writeParticleRadius(): void {
@@ -894,6 +908,7 @@ export class Renderer {
 
   render(context: GPUCanvasContext, activeCount: number): void {
     const encoder = this.device.createCommandEncoder();
+    const destinationView = context.getCurrentTexture().createView();
 
     if (GRID_FIELD_MODES.has(this.fieldMode)) {
       if (DIAGNOSTIC_MODES.has(this.fieldMode)) {
@@ -950,7 +965,7 @@ export class Renderer {
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: context.getCurrentTexture().createView(),
+          view: this.bloom.sceneView,
           clearValue: { r: 0.02, g: 0.02, b: 0.02, a: 1 },
           loadOp: "clear",
           storeOp: "store",
@@ -1025,6 +1040,7 @@ export class Renderer {
     }
 
     pass.end();
+    this.bloom.encode(encoder, destinationView);
     this.device.queue.submit([encoder.finish()]);
   }
 
@@ -1053,5 +1069,6 @@ export class Renderer {
     this.blurSigmaUniform.destroy();
     this.gradientTexture.destroy();
     this.gradientExponentUniform.destroy();
+    this.bloom.destroy();
   }
 }

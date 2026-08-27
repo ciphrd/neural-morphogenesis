@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthAnisotropy" | "divisionDirectionality" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  "growthDuration" | "growthAnisotropy" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "divisionDirectionality" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 export interface GrowthSliderSpec {
@@ -79,6 +79,33 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
     max: 1,
     step: 0.01,
     format: (v) => `${v.toFixed(2)}×`,
+  },
+  {
+    key: "growthCompressionFeedback",
+    label: "Compression feedback",
+    hint: "Strength of physical contact inhibition. 1× fully applies the compression gate; 0 restores pressure-independent growth.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => `${v.toFixed(2)}×`,
+  },
+  {
+    key: "growthCompressionStart",
+    label: "Compression slowdown",
+    hint: "Elastic areal compression at which proliferation starts slowing. When equal to the arrest threshold, this becomes a hard cutoff.",
+    min: 0,
+    max: 0.2,
+    step: 0.002,
+    format: (v) => `${(100 * v).toFixed(1)}%`,
+  },
+  {
+    key: "growthCompressionStop",
+    label: "Compression arrest",
+    hint: "Elastic areal compression at which proliferation is fully paused. Growth resumes smoothly after pressure releases.",
+    min: 0.002,
+    max: 0.3,
+    step: 0.002,
+    format: (v) => `${(100 * v).toFixed(1)}%`,
   },
   {
     key: "divisionDirectionality",

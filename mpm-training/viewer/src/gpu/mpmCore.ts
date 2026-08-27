@@ -170,7 +170,8 @@ export class MpmCore {
   private readonly gridUpdatePipeline: GPUComputePipeline;
   private readonly gridUpdateBindGroup: GPUBindGroup;
   private readonly g2pPipeline: GPUComputePipeline;
-  private readonly g2pBindGroup: GPUBindGroup;
+  private g2pBindGroup: GPUBindGroup;
+  private readonly chemicalStateFallback: GPUBuffer;
 
   private readonly clearDensityPipeline: GPUComputePipeline;
   private readonly clearDensityBindGroup: GPUBindGroup;
@@ -204,18 +205,22 @@ export class MpmCore {
     this.F = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.C = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.rest = device.createBuffer({ size: MAX_PARTICLES * REST_FIELDS * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.chemicalStateFallback = device.createBuffer({
+      size: 256 + MAX_PARTICLES * 112,
+      usage: GPUBufferUsage.STORAGE,
+    });
 
     this.gridAccum = device.createBuffer({ size: NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage: GPUBufferUsage.STORAGE });
     this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
 
     this.gravityUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    // 48 bytes — nine material/growth floats plus uniform-struct padding,
+    // 64 bytes — fourteen material/growth/fluidity floats plus padding,
     // matching ../../../core/p2g.wgsl's and g2p.wgsl's identical Material.
-    this.materialUniform = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.materialUniform = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.activeCountUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.dampingUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    const templateVars = { GRID_N, DX, INV_DX, DT };
+    const templateVars = { GRID_N, DX, INV_DX, DT, CHEMICAL_CHANNELS: 8 };
 
     const clearGridModule = device.createShaderModule({ code: templateShader(clearGridSrc, { GRID_N }) });
     this.clearGridPipeline = device.createComputePipeline({ layout: "auto", compute: { module: clearGridModule, entryPoint: "clearGrid" } });
@@ -252,7 +257,9 @@ export class MpmCore {
       ],
     });
 
-    const g2pModule = device.createShaderModule({ code: templateShader(g2pSrc, { GRID_N, INV_DX, DT }) });
+    const g2pModule = device.createShaderModule({
+      code: templateShader(g2pSrc, { GRID_N, INV_DX, DT, CHEMICAL_CHANNELS: 8 }),
+    });
     this.g2pPipeline = device.createComputePipeline({ layout: "auto", compute: { module: g2pModule, entryPoint: "g2p" } });
     this.g2pBindGroup = device.createBindGroup({
       layout: this.g2pPipeline.getBindGroupLayout(0),
@@ -265,6 +272,7 @@ export class MpmCore {
         { binding: 5, resource: { buffer: this.gridVel } },
         { binding: 6, resource: { buffer: this.activeCountUniform } },
         { binding: 7, resource: { buffer: this.materialUniform } },
+        { binding: 8, resource: { buffer: this.chemicalStateFallback } },
       ],
     });
 
@@ -408,6 +416,39 @@ export class MpmCore {
     return result;
   }
 
+  /** Read an evenly distributed subset of active positions for inexpensive
+   * viewer diagnostics such as auto-framing. */
+  async readPositionSamples(maxSamples: number): Promise<Float32Array> {
+    const activeCount = this._activeCount;
+    const sampleCount = Math.min(activeCount, Math.max(1, Math.floor(maxSamples)));
+    if (sampleCount === 0) return new Float32Array();
+
+    const bytesPerPosition = 2 * 4;
+    const staging = this.device.createBuffer({
+      size: sampleCount * bytesPerPosition,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder();
+    for (let sample = 0; sample < sampleCount; sample += 1) {
+      const particleIndex = sampleCount === 1
+        ? 0
+        : Math.round((sample * (activeCount - 1)) / (sampleCount - 1));
+      encoder.copyBufferToBuffer(
+        this.positions,
+        particleIndex * bytesPerPosition,
+        staging,
+        sample * bytesPerPosition,
+        bytesPerPosition,
+      );
+    }
+    this.device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(staging.getMappedRange().slice(0));
+    staging.unmap();
+    staging.destroy();
+    return result;
+  }
+
   /** Zero/identity-fills velocities/F/C/ParticleRest for [0, maxActive) — call once
    * per rollout, after loadScene(). Slots beyond this rollout's own
    * particle count are destined to become real particles via growth
@@ -484,9 +525,19 @@ export class MpmCore {
     substepsPerMacro: number,
     particleMass: number = PARTICLE_MASS,
     particleVolume: number = PARTICLE_VOLUME,
+    growthCompressionStart: number = 0.10,
+    growthCompressionStop: number = 0.10,
+    growthCompressionFeedback: number = 1.0,
+    fluidity: number = 0,
   ): void {
     if (!(particleMass > 0) || !(particleVolume > 0)) {
       throw new Error("particle mass and volume must be positive");
+    }
+    if (!(growthCompressionStart >= 0) || !(growthCompressionStop >= growthCompressionStart)) {
+      throw new Error("growth compression thresholds require 0 <= start <= stop");
+    }
+    if (!(growthCompressionFeedback >= 0 && growthCompressionFeedback <= 1)) {
+      throw new Error("growth compression feedback must be in [0, 1]");
     }
     const [mu0, lambda0] = lameParams(e, nu);
     const [yieldLow, yieldHigh] = yieldBounds(elasticity);
@@ -504,8 +555,28 @@ export class MpmCore {
         mu0, lambda0, hardening, yieldLow,
         yieldHigh, growthRate, growthMax, growthAnisotropy,
         particleMass, particleVolume,
+        growthCompressionStart, growthCompressionStop, growthCompressionFeedback,
+        fluidity,
       ])
     );
+  }
+
+  /** Supplies the persistent per-cell chemistry used by fluidity. */
+  setChemicalStateBuffer(buffer: GPUBuffer): void {
+    this.g2pBindGroup = this.device.createBindGroup({
+      layout: this.g2pPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.positions } },
+        { binding: 1, resource: { buffer: this.velocities } },
+        { binding: 2, resource: { buffer: this.F } },
+        { binding: 3, resource: { buffer: this.C } },
+        { binding: 4, resource: { buffer: this.rest } },
+        { binding: 5, resource: { buffer: this.gridVel } },
+        { binding: 6, resource: { buffer: this.activeCountUniform } },
+        { binding: 7, resource: { buffer: this.materialUniform } },
+        { binding: 8, resource: { buffer } },
+      ],
+    });
   }
 
   setSplatRadius(sigma: number): void {

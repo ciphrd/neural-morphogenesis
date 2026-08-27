@@ -100,6 +100,12 @@ export function physicsSliderSpecsFor(
       format: (v) => v.toFixed(2),
     },
     {
+      key: "materialFluidity",
+      label: "Fluidity (shear relaxation)",
+      ...FRACTION_RANGE,
+      format: (v) => v.toFixed(3),
+    },
+    {
       key: "decay",
       label: "Substrate decay",
       ...FRACTION_RANGE,
