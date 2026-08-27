@@ -46,6 +46,7 @@
 
 import { Agents } from "./agents";
 import { Deform, type DeformDirection, type DeformMode } from "./deform";
+import { NoiseDisplacement } from "./noiseDisplacement";
 import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
@@ -83,6 +84,7 @@ export class GpuSimulation {
   // "Deform" tool's own one-shot direction-injection (gpu/deform.ts) —
   // same "fresh instance per rebuild()" reasoning as interact above.
   private deform: Deform | null = null;
+  private noiseDisplacement: NoiseDisplacement | null = null;
 
   private config: SimulationConfig | null = null;
   private resetKey: string | null = null;
@@ -313,6 +315,7 @@ export class GpuSimulation {
 
     const interact = new Interact(this.device, mpmCore);
     const deform = new Deform(this.device, mpmCore);
+    const noiseDisplacement = new NoiseDisplacement(this.device, mpmCore);
 
     this.mpmCore = mpmCore;
     this.environment = environment;
@@ -320,6 +323,7 @@ export class GpuSimulation {
     this.renderer = renderer;
     this.interact = interact;
     this.deform = deform;
+    this.noiseDisplacement = noiseDisplacement;
     this.config = config;
     this.applyPhysics(physicsSettingsFromConfig(config));
   }
@@ -759,6 +763,11 @@ export class GpuSimulation {
     this.deform?.inject(x, y, direction, strength, radius, mode);
   }
 
+  /** Applies one frame of viewer-only coherent simplex displacement. */
+  displaceWithNoise(strength: number, timeSeconds: number): void {
+    this.noiseDisplacement?.apply(strength, timeSeconds);
+  }
+
   /** Replaces the live update rule with a fresh random init (see
    * Agents.randomizeWeights()'s own docstring) and restarts the rollout —
    * without the restart, whatever's already grown stays governed by the
@@ -782,12 +791,14 @@ export class GpuSimulation {
     this.renderer?.destroy();
     this.interact?.destroy();
     this.deform?.destroy();
+    this.noiseDisplacement?.destroy();
     this.mpmCore = null;
     this.environment = null;
     this.agents = null;
     this.renderer = null;
     this.interact = null;
     this.deform = null;
+    this.noiseDisplacement = null;
   }
 
   destroy(): void {

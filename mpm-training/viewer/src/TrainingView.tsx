@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import coreConstants from "../../core/constants.json"
 import { FitnessChart } from "./charts/FitnessChart"
 import { randomWeights } from "./gpu/agents"
@@ -21,6 +21,7 @@ import { generationImageUrl } from "./net/images"
 import { fetchRunState } from "./net/runs"
 import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
+import type { PerformanceSnapshot } from "./performance/types"
 import { pickRecordingFormat } from "./render/canvasRecorder"
 import { createSampleAtlas } from "./render/sampleAtlas"
 import type {
@@ -31,8 +32,10 @@ import type {
 import { GridCanvas } from "./render/GridCanvas"
 import { createZip, downloadBlob } from "./render/zip"
 import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
+import { AudioReactivityPanel } from "./ui/AudioReactivityPanel"
 import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
+import { PerformancePanel } from "./ui/PerformancePanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { RunPicker } from "./ui/RunPicker"
 import type {
@@ -40,6 +43,10 @@ import type {
   SweepParameterKey,
 } from "./ui/SampleSweepModal"
 import { SampleSweepModal, sweepValues } from "./ui/SampleSweepModal"
+import {
+  SimulationPresetPanel,
+  type SimulationPresetValue,
+} from "./ui/SimulationPresetPanel"
 import { Slider } from "./ui/Slider"
 
 const TRAIN_API_URL = "http://localhost:8003"
@@ -66,7 +73,11 @@ function explorationBrainSeed(seed: number, variant: number): number {
  * mirrors mls-mpm's own Field-mode/particle-size controls — see
  * gpu/render.ts's own module docstring for exactly which of mls-mpm's
  * field modes are portable without extending core/'s shared physics. */
-export function TrainingView() {
+interface TrainingViewProps {
+  performanceMode?: boolean
+}
+
+export function TrainingView({ performanceMode = false }: TrainingViewProps) {
   const liveState = useTrainingSocket(TRAIN_WS_URL, TRAIN_API_URL)
   // null = following the live/current run. Anything else is an archived
   // run's own id (net/runs.ts's RunSummary) — see the RunPicker below.
@@ -318,10 +329,130 @@ export function TrainingView() {
   useEffect(() => {
     setPhysicsOverride(null)
   }, [viewingRunId, activeConfig?.generation])
-  const trainedPhysics = playbackConfig
-    ? physicsSettingsFromConfig(playbackConfig)
-    : null
+  const trainedPhysics = useMemo(
+    () => playbackConfig ? physicsSettingsFromConfig(playbackConfig) : null,
+    [playbackConfig]
+  )
   const physicsValues = physicsOverride ?? trainedPhysics
+  const [audioPhysics, setAudioPhysics] = useState<PhysicsSettings | null>(null)
+  const simulationPhysics = audioPhysics ?? physicsValues
+  const [performanceBlackout, setPerformanceBlackout] = useState(false)
+  const [noiseDisplacementStrength, setNoiseDisplacementStrength] = useState(0)
+  const performanceSnapshot = useMemo<PerformanceSnapshot>(() => ({
+    physics: simulationPhysics,
+    render: {
+      zoom,
+      particleRadiusPx,
+      particleRenderMode,
+      fieldMode,
+      substrateChannelStart,
+      accent,
+      blur,
+      gradientExponent,
+      whiteDotsAlpha,
+      activationAlpha,
+      neuralColorAlpha,
+      internalStateAlpha,
+      internalStateChannelStart,
+      boundaryGradientScale,
+      growthAxisLengthPx,
+      morphologyGradientVisible,
+      morphologyDensityVisible,
+    },
+    particleCap: frontendParticleCap,
+    initialParticleCount: frontendInitialParticleCount,
+    noiseDisplacementStrength,
+    paused,
+    loopAtTrainedSteps,
+    blackout: performanceBlackout,
+  }), [
+    accent,
+    activationAlpha,
+    blur,
+    boundaryGradientScale,
+    fieldMode,
+    frontendInitialParticleCount,
+    frontendParticleCap,
+    gradientExponent,
+    growthAxisLengthPx,
+    internalStateAlpha,
+    internalStateChannelStart,
+    loopAtTrainedSteps,
+    morphologyDensityVisible,
+    morphologyGradientVisible,
+    neuralColorAlpha,
+    noiseDisplacementStrength,
+    particleRadiusPx,
+    particleRenderMode,
+    paused,
+    performanceBlackout,
+    simulationPhysics,
+    substrateChannelStart,
+    whiteDotsAlpha,
+    zoom,
+  ])
+  const applyPerformanceSnapshot = useCallback((next: PerformanceSnapshot) => {
+    setPhysicsOverride(next.physics)
+    setZoom(next.render.zoom)
+    setParticleRadiusPx(next.render.particleRadiusPx)
+    setParticleRenderMode(next.render.particleRenderMode)
+    setFieldMode(next.render.fieldMode)
+    setSubstrateChannelStart(next.render.substrateChannelStart)
+    setAccent(next.render.accent)
+    setBlur(next.render.blur)
+    setGradientExponent(next.render.gradientExponent)
+    setWhiteDotsAlpha(next.render.whiteDotsAlpha)
+    setActivationAlpha(next.render.activationAlpha)
+    setNeuralColorAlpha(next.render.neuralColorAlpha)
+    setInternalStateAlpha(next.render.internalStateAlpha)
+    setInternalStateChannelStart(next.render.internalStateChannelStart)
+    setBoundaryGradientScale(next.render.boundaryGradientScale)
+    setGrowthAxisLengthPx(next.render.growthAxisLengthPx)
+    setMorphologyGradientVisible(next.render.morphologyGradientVisible)
+    setMorphologyDensityVisible(next.render.morphologyDensityVisible)
+    setFrontendParticleCap(next.particleCap)
+    setFrontendInitialParticleCount(next.initialParticleCount)
+    setFrontendInitialParticleCountInput(String(next.initialParticleCount))
+    setNoiseDisplacementStrength(next.noiseDisplacementStrength ?? 0)
+    setPaused(next.paused)
+    setLoopAtTrainedSteps(next.loopAtTrainedSteps)
+    setPerformanceBlackout(next.blackout)
+  }, [])
+  const simulationPresetValue = useMemo<SimulationPresetValue | null>(() => {
+    if (!physicsValues || !activeConfig) return null
+    return {
+      physics: physicsValues,
+      particleCap: frontendParticleCap,
+      initialParticleCount: frontendInitialParticleCount,
+      noiseDisplacementStrength,
+      particleDensityMultiplier: effectiveParticleDensity,
+      chirality: effectiveChirality,
+      chemicalArchitecture:
+        chemicalArchitectureOverride ?? chemicalCommunicationArchitectureFromConfig(activeConfig),
+      policyExploration,
+    }
+  }, [
+    activeConfig,
+    chemicalArchitectureOverride,
+    effectiveChirality,
+    effectiveParticleDensity,
+    frontendInitialParticleCount,
+    frontendParticleCap,
+    noiseDisplacementStrength,
+    physicsValues,
+    policyExploration,
+  ])
+  const applySimulationPreset = useCallback((preset: SimulationPresetValue) => {
+    setPhysicsOverride(preset.physics)
+    setFrontendParticleCap(preset.particleCap)
+    setFrontendInitialParticleCount(preset.initialParticleCount)
+    setFrontendInitialParticleCountInput(String(preset.initialParticleCount))
+    setNoiseDisplacementStrength(preset.noiseDisplacementStrength ?? 0)
+    setParticleDensityOverride(preset.particleDensityMultiplier)
+    setChiralityOverride(preset.chirality)
+    setChemicalArchitectureOverride(preset.chemicalArchitecture)
+    setPolicyExploration(preset.policyExploration)
+  }, [])
   const activeStat =
     selectedGeneration !== null
       ? (history.find((h) => h.generation === selectedGeneration) ?? null)
@@ -486,6 +617,174 @@ export function TrainingView() {
       sampleAbortRef.current = null
       setSampleRunning(false)
     }
+  }
+
+  if (performanceMode) {
+    return (
+      <div className="performance-mode-layout">
+        <aside className="performance-simulation-sidebar">
+          <div className="performance-sidebar-title">
+            <span>Simulation</span>
+            <strong>Gen {activeConfig?.generation ?? "—"}</strong>
+          </div>
+          <section>
+            <h2>Policy</h2>
+            <label className="performance-setting-row">
+              <span>Cell memory</span>
+              <select
+                className="select"
+                value={displayedCellMemory}
+                disabled={!activeConfig}
+                onChange={(event) => setPolicyExploration({
+                  cellMemory: event.target.value as CellMemory,
+                  hiddenWidth: displayedHiddenWidth,
+                  variant: 0,
+                })}
+              >
+                <option value="none">None</option>
+                <option value="recurrent">Recurrent</option>
+              </select>
+            </label>
+            <label className="performance-setting-row">
+              <span>Hidden width</span>
+              <select
+                className="select"
+                value={displayedHiddenWidth}
+                disabled={!activeConfig}
+                onChange={(event) => setPolicyExploration({
+                  cellMemory: displayedCellMemory,
+                  hiddenWidth: Number(event.target.value),
+                  variant: 0,
+                })}
+              >
+                {[16, 32, 64, 128, 256].map((width) => (
+                  <option key={width} value={width}>{width}</option>
+                ))}
+              </select>
+            </label>
+            <label className="performance-setting-row">
+              <span>Chemistry</span>
+              <select
+                className="select"
+                value={previewConfig?.chemicalCommunicationArchitecture ?? "cell-owned-projection"}
+                disabled={!activeConfig}
+                onChange={(event) => setChemicalArchitectureOverride(
+                  event.target.value as ChemicalCommunicationArchitecture
+                )}
+              >
+                <option value="cell-owned-projection">Cell owned</option>
+                <option value="persistent-environment">Environment</option>
+              </select>
+            </label>
+          </section>
+          <section>
+            <h2>Playback</h2>
+            <label className="slider-row">
+              <span>Density</span>
+              <Slider min={0.5} max={2} step={0.5} value={effectiveParticleDensity} onChange={setParticleDensityOverride} />
+              <span className="slider-value">{effectiveParticleDensity.toFixed(1)}×</span>
+            </label>
+            <label className="slider-row" title="Animated coherent simplex-noise displacement applied after each simulation step">
+              <span>Noise displacement</span>
+              <Slider
+                min={0}
+                max={2}
+                step={0.01}
+                value={noiseDisplacementStrength}
+                onChange={setNoiseDisplacementStrength}
+              />
+              <span className="slider-value">{noiseDisplacementStrength.toFixed(2)}</span>
+            </label>
+            <label className="slider-row">
+              <span>Particle cap</span>
+              <Slider
+                min={2}
+                max={MAX_PARTICLES}
+                step={1}
+                value={frontendParticleCap}
+                onChange={(value) => {
+                  const cap = Math.floor(value)
+                  setFrontendParticleCap(cap)
+                  if (frontendInitialParticleCount > cap) {
+                    setFrontendInitialParticleCount(cap)
+                    setFrontendInitialParticleCountInput(String(cap))
+                  }
+                }}
+              />
+              <span className="slider-value">{frontendParticleCap}</span>
+            </label>
+            <label className="performance-setting-row">
+              <span>Initial cells</span>
+              <input
+                className="number-input"
+                type="number"
+                min={1}
+                max={frontendParticleCap}
+                value={frontendInitialParticleCountInput}
+                onChange={(event) => {
+                  setFrontendInitialParticleCountInput(event.target.value)
+                  const count = Number(event.target.value)
+                  if (Number.isFinite(count)) {
+                    setFrontendInitialParticleCount(Math.max(1, Math.min(frontendParticleCap, Math.floor(count))))
+                  }
+                }}
+              />
+            </label>
+            <label className="checkbox-row">
+              <input type="checkbox" checked={effectiveChirality} onChange={(event) => setChiralityOverride(event.target.checked)} />
+              Chirality
+            </label>
+          </section>
+          <SimulationPresetPanel value={simulationPresetValue} onLoad={applySimulationPreset} />
+          {trainedPhysics && physicsValues && (
+            <>
+              <PhysicsPanel
+                trained={trainedPhysics}
+                value={physicsValues}
+                onChange={setPhysicsOverride}
+                isOverridden={physicsOverride !== null}
+                onReset={() => setPhysicsOverride(null)}
+              />
+              <GrowthPanel
+                trained={trainedPhysics}
+                value={physicsValues}
+                onChange={setPhysicsOverride}
+                isOverridden={physicsOverride !== null}
+                onReset={() => setPhysicsOverride(null)}
+              />
+            </>
+          )}
+        </aside>
+        <main className="performance-mode">
+          <header className="performance-mode-header">
+            <div>
+              <span className="performance-eyebrow">LIVE CONTROL</span>
+              <h1>Performance session</h1>
+            </div>
+          </header>
+          <div className="performance-dashboard-grid">
+            <div className="performance-dashboard-card performance-master-card">
+              <PerformancePanel
+                config={previewConfig}
+                snapshot={performanceSnapshot}
+                onApplySnapshot={applyPerformanceSnapshot}
+                onRestart={() => gridCanvasRef.current?.restart()}
+              />
+            </div>
+            <div className="performance-dashboard-card performance-audio-card">
+              {physicsValues ? (
+                <AudioReactivityPanel
+                  basePhysics={physicsValues}
+                  onOutputChange={setAudioPhysics}
+                />
+              ) : (
+                <p className="hint">Waiting for simulation settings…</p>
+              )}
+            </div>
+          </div>
+        </main>
+      </div>
+    )
   }
 
   return (
@@ -1038,9 +1337,10 @@ export function TrainingView() {
             config={previewConfig}
             targetPoints={targetPoints}
             targetVisible={targetVisible}
-            physics={physicsValues}
+            physics={simulationPhysics}
             particleCap={frontendParticleCap}
             initialParticleCount={frontendInitialParticleCount}
+            noiseDisplacementStrength={noiseDisplacementStrength}
             fieldMode={fieldMode}
             substrateChannelStart={substrateChannelStart}
             accent={accent}
@@ -1374,7 +1674,7 @@ export function TrainingView() {
           )}
         </section>
 
-        <NetworkPanel config={previewConfig} physics={physicsValues} />
+        <NetworkPanel config={previewConfig} physics={simulationPhysics} />
       </div>
       {sampleModalOpen && physicsValues && (
         <SampleSweepModal

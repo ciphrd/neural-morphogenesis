@@ -87,6 +87,8 @@ interface GridCanvasProps {
   gradientExponent?: number;
   /** Geometry-stage camera zoom; particle rendering remains native-resolution. */
   zoom?: number;
+  /** Viewer-only coherent simplex position displacement strength. */
+  noiseDisplacementStrength?: number;
   /** Which interaction tool (if any) is currently toggled on — see the
    * Tool type's own docstring. Default "none". */
   tool?: Tool;
@@ -117,6 +119,9 @@ interface GridCanvasProps {
 }
 
 export interface GridCanvasHandle {
+  /** Applies high-frequency live modulation without routing every update
+   * through React. Used by the dedicated performance output transport. */
+  setPhysics(physics: PhysicsSettings): void;
   /** Restarts the currently-active generation from macro step 0 — since
    * loadGeneration()/restartRollout() always re-seed with config.seed
    * (the winning rollout's own seed), this is a literal, deterministic
@@ -292,6 +297,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     blur = 0,
     gradientExponent = 1,
     zoom = 1,
+    noiseDisplacementStrength = 0,
     tool = "none",
     deformSettings,
     onStep,
@@ -326,6 +332,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const blurRef = useRef(blur);
   const gradientExponentRef = useRef(gradientExponent);
   const zoomRef = useRef(zoom);
+  const noiseDisplacementStrengthRef = useRef(noiseDisplacementStrength);
   const toolRef = useRef(tool);
   const deformSettingsRef = useRef(deformSettings);
   const onStepRef = useRef(onStep);
@@ -468,6 +475,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   pausedRef.current = paused;
 
   useImperativeHandle(ref, () => ({
+    setPhysics: (nextPhysics) => {
+      physicsRef.current = nextPhysics;
+      simulationRef.current?.setPhysics(nextPhysics);
+    },
     restart: () => {
       simulationRef.current?.restartRollout();
     },
@@ -964,7 +975,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [gradientExponent]);
 
   useEffect(() => {
-    zoomRef.current = zoom;
+  zoomRef.current = zoom;
+  noiseDisplacementStrengthRef.current = noiseDisplacementStrength;
     simulationRef.current?.setZoom(zoom);
     syncDeformPreview();
   }, [zoom, syncDeformPreview]);
@@ -1041,6 +1053,12 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         if (deformingRef.current && deformHoverRef.current) {
           const { direction, strength, radius, mode } = deformSettingsRef.current;
           sim.injectDeform(deformHoverRef.current.x, deformHoverRef.current.y, direction, strength, radius, mode);
+        }
+        if (!pausedRef.current && noiseDisplacementStrengthRef.current > 0) {
+          sim.displaceWithNoise(
+            noiseDisplacementStrengthRef.current,
+            performance.now() * 0.001,
+          );
         }
         sim.render(context);
         onStepRef.current?.(sim.currentStep, sim.particleCount);
