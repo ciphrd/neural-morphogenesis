@@ -30,6 +30,7 @@ from simulation_settings import (
     DAMPING_LOSS_FRACTION, DECAY, DEPOSIT_DISTANCE, DEPOSIT_RATE,
     DEPOSIT_SIGMA, DIVISION_COOLDOWN, DIVISION_DIRECTIONALITY, ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE, FIELD_N, FRICTION, GROWTH_DURATION_MACRO_STEPS,
+    GROWTH_COMPRESSION_START, GROWTH_COMPRESSION_STOP,
     GROWTH_ANISOTROPY_AUTHORITY, GROWTH_MAX, INITIAL_PARTICLE_COUNT,
     INTERNAL_STATE_SPEED,
     MATERIAL_E, MATERIAL_ELASTICITY, MATERIAL_HARDENING, MATERIAL_NU,
@@ -358,6 +359,9 @@ def main() -> int:
         growth_anisotropy=meta.get(
             "growth_anisotropy_authority", GROWTH_ANISOTROPY_AUTHORITY
         ),
+        growth_compression_start=meta.get("growth_compression_start", GROWTH_COMPRESSION_START),
+        growth_compression_stop=meta.get("growth_compression_stop", GROWTH_COMPRESSION_STOP),
+        growth_compression_feedback=meta.get("growth_compression_feedback", 0.0),
         substeps_per_macro=substeps,
         particle_mass=density.particle_mass,
         particle_volume=density.particle_volume,
@@ -390,6 +394,9 @@ def main() -> int:
         internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
         division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
         chemical_communication_architecture=chemical_architecture,
+        growth_compression_start=meta.get("growth_compression_start", GROWTH_COMPRESSION_START),
+        growth_compression_stop=meta.get("growth_compression_stop", GROWTH_COMPRESSION_STOP),
+        growth_compression_feedback=meta.get("growth_compression_feedback", 0.0),
     )
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
     agents.set_chemical_projection_weight(density.chemical_projection_weight)

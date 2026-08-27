@@ -116,6 +116,12 @@ struct Material {
   // pipelines; both scale together so physical material density is fixed.
   particleMass: f32,
   particleVolume: f32,
+  growthCompressionStart: f32,
+  growthCompressionStop: f32,
+  growthCompressionFeedback: f32,
+  // Per-physics-substep fraction of elastic shear that relaxes. 0 retains
+  // the legacy solid response exactly; 1 removes all deviatoric strain.
+  fluidity: f32,
 }
 @group(0) @binding(6) var<uniform> material: Material;
 
@@ -228,7 +234,6 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   let e = exp(material.hardening * (1.0 - Jp));
   let mu = material.mu0 * e;
   let lambda = material.lambda0 * e;
-
   // MULTIPLICATIVE GROWTH DECOMPOSITION: F = Fe*Fg, where Fg is a
   // stress-free change of this particle's own REST configuration and Fe
   // is the only part elasticity is allowed to see. Fg is stored as a full

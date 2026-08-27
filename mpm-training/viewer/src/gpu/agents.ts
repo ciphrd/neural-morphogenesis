@@ -84,6 +84,9 @@ export interface AgentsConfig {
   chemicalGradientInputScale?: number;
   chemicalProjectionWeight?: number;
   boundaryTangentMinGradient?: number;
+  growthCompressionStart?: number;
+  growthCompressionStop?: number;
+  growthCompressionFeedback?: number;
 }
 
 function weightLayout(channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128") {
@@ -251,6 +254,11 @@ export class Agents {
     this.setRolloutSeed(0);
     this.setBoundaryTangentMinGradient(
       config.boundaryTangentMinGradient ?? coreConstants.BOUNDARY_TANGENT_MIN_GRADIENT,
+    );
+    this.setGrowthCompressionFeedback(
+      config.growthCompressionStart ?? 0.10,
+      config.growthCompressionStop ?? 0.10,
+      config.growthCompressionFeedback ?? 1.0,
     );
     this.setForcedDivisionControl(null, [1, 0], false);
 
@@ -539,6 +547,22 @@ export class Agents {
       this.physicsUniform,
       76,
       new Float32Array([Math.max(0, threshold)]),
+    );
+  }
+
+  /** Contact inhibition from dimensionless elastic areal compression. */
+  setGrowthCompressionFeedback(start: number, stop: number, strength: number): void {
+    if (!(start >= 0) || !(stop >= start)) {
+      throw new Error("growth compression thresholds require 0 <= start <= stop");
+    }
+    if (!(strength >= 0 && strength <= 1)) {
+      throw new Error("growth compression feedback must be in [0, 1]");
+    }
+    writeFloat32(
+      this.device,
+      this.physicsUniform,
+      100,
+      new Float32Array([start, stop, strength]),
     );
   }
 

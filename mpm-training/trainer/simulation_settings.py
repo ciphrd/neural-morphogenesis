@@ -29,6 +29,9 @@ _GRID_N: int = _CORE_CONSTANTS["GRID_N"]
 # --- Policy architecture (UpdateRule) ---
 HIDDEN_DIM = 128
 CHEM_CHANNELS = 8  # last channel is always growth's own split-probability field
+# Per-physics-substep elastic-shear relaxation. Zero preserves the legacy
+# solid-like material response exactly.
+MATERIAL_FLUIDITY = 0.0
 # Default number of genuinely seeded cells before any policy-driven division.
 # Shared with the browser through core/constants.json; individual runs and
 # historical checkpoint metadata can still override it.
@@ -142,6 +145,14 @@ GROWTH_DURATION_MACRO_STEPS = 48.0
 # and rest area to two g=1 daughters.
 GROWTH_MAX = 2.0
 GROWTH_ANISOTROPY_AUTHORITY = 1.0
+# Mechanical contact inhibition. Elastic areal compression is measured as
+# c=max(0,-log(det(Fe))). Growth is unaffected below the start threshold,
+# smoothly suppressed between distinct thresholds, and fully paused at/above
+# the stop threshold. Equal thresholds select a hard cutoff. Strength 0 is an
+# exact legacy-mode escape hatch.
+GROWTH_COMPRESSION_START = 0.10
+GROWTH_COMPRESSION_STOP = 0.10
+GROWTH_COMPRESSION_FEEDBACK = 1.0
 
 # CLI default shared with MpmCore's construction-time material initialization.
 # Individual runs still override it through --substeps-per-macro.

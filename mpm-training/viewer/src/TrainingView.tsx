@@ -41,6 +41,7 @@ import type {
 } from "./ui/SampleSweepModal"
 import { SampleSweepModal, sweepValues } from "./ui/SampleSweepModal"
 import { Slider } from "./ui/Slider"
+import { VIEWER_DEFAULTS } from "./viewerConfig"
 
 const TRAIN_API_URL = "http://localhost:8003"
 const TRAIN_WS_URL = "ws://localhost:8003/ws"
@@ -110,8 +111,10 @@ export function TrainingView() {
   // Unchecking lets a rollout run straight past that count instead —
   // there's no hard simulation limit at macroSteps, just the point
   // training stopped scoring it.
-  const [loopAtTrainedSteps, setLoopAtTrainedSteps] = useState(true)
-  const [paused, setPaused] = useState(false)
+  const [loopAtTrainedSteps, setLoopAtTrainedSteps] = useState(
+    VIEWER_DEFAULTS.playback.loopAtTrainedSteps
+  )
+  const [paused, setPaused] = useState(VIEWER_DEFAULTS.playback.paused)
   // Whether the Record button currently reads "● REC" — GridCanvas's own
   // CanvasRecorder (render/canvasRecorder.ts) owns the actual
   // MediaRecorder/download lifecycle, this is just the button's own
@@ -129,64 +132,107 @@ export function TrainingView() {
 
   // View-only rendering options (gpu/render.ts) — not simulation state,
   // so plain component state, never reset by a run/generation change.
-  const [fieldMode, setFieldMode] = useState<FieldMode>("none")
+  const [fieldMode, setFieldMode] = useState<FieldMode>(
+    VIEWER_DEFAULTS.rendering.fieldMode
+  )
   // First channel in the contiguous substrate RGB window. The renderer maps
   // start/start+1/start+2 to red/green/blue respectively.
-  const [substrateChannelStart, setSubstrateChannelStart] = useState(0)
+  const [substrateChannelStart, setSubstrateChannelStart] = useState(
+    VIEWER_DEFAULTS.rendering.substrateChannelStart
+  )
   const [morphologyGradientVisible, setMorphologyGradientVisible] =
-    useState(true)
-  const [morphologyDensityVisible, setMorphologyDensityVisible] = useState(true)
+    useState(VIEWER_DEFAULTS.rendering.morphologyGradientVisible)
+  const [morphologyDensityVisible, setMorphologyDensityVisible] = useState(
+    VIEWER_DEFAULTS.rendering.morphologyDensityVisible
+  )
   // [-2,2] exponential background contrast. Negative suppresses submaximal
   // field values, 0 is identity, positive accentuates faint values.
-  const [accent, setAccent] = useState(0)
+  const [accent, setAccent] = useState(VIEWER_DEFAULTS.rendering.accent)
   // [0,2] — Gaussian sigma, in repulsion-field texels, for the "gradient"
   // mode's own blur pass (see gpu/render.ts's own setBlur()/field.wgsl's
   // own blurDensity() comment for why: raw per-particle density is too
   // grainy for a clean shape-boundary gradient). 0 = no blur, unchanged
   // from before this knob existed; only read by that one background mode.
-  const [blur, setBlur] = useState(0)
+  const [blur, setBlur] = useState(VIEWER_DEFAULTS.rendering.blur)
   // [~0.25,4] — power curve on the "gradient" mode's own gradient
   // MAGNITUDE (direction preserved — see gpu/render.ts's own
   // setGradientExponent()/field.wgsl's own colorizeGradient() comment).
   // 1 = identity, unchanged from before this knob existed; only read by
   // that one background mode.
-  const [gradientExponent, setGradientExponent] = useState(1)
+  const [gradientExponent, setGradientExponent] = useState(
+    VIEWER_DEFAULTS.rendering.gradientExponent
+  )
   const [particleRenderMode, setParticleRenderMode] =
-    useState<ParticleRenderMode>("dots-white")
-  const [boundaryGradientScale, setBoundaryGradientScale] = useState(0.01)
-  const [zoom, setZoom] = useState(1)
-  const [particleRadiusPx, setParticleRadiusPx] = useState(4)
-  const [frontendParticleCap, setFrontendParticleCap] = useState(2)
+    useState<ParticleRenderMode>(VIEWER_DEFAULTS.rendering.particleRenderMode)
+  const [boundaryGradientScale, setBoundaryGradientScale] = useState(
+    VIEWER_DEFAULTS.rendering.boundaryGradientScale
+  )
+  const [zoom, setZoom] = useState(VIEWER_DEFAULTS.rendering.zoom)
+  const [autoZoomEnabled, setAutoZoomEnabled] = useState(
+    VIEWER_DEFAULTS.rendering.autoZoom.enabled
+  )
+  const [effectiveZoom, setEffectiveZoom] = useState(
+    VIEWER_DEFAULTS.rendering.zoom
+  )
+  const autoZoomSettings = useMemo(
+    () => ({
+      ...VIEWER_DEFAULTS.rendering.autoZoom,
+      enabled: autoZoomEnabled,
+    }),
+    [autoZoomEnabled]
+  )
+  const [bloom, setBloom] = useState(() => ({
+    ...VIEWER_DEFAULTS.rendering.bloom,
+  }))
+  const [particleRadiusPx, setParticleRadiusPx] = useState(
+    VIEWER_DEFAULTS.rendering.particleRadiusPx
+  )
+  const [frontendParticleCap, setFrontendParticleCap] = useState(
+    VIEWER_DEFAULTS.playback.particleCap ?? 2
+  )
   const [frontendInitialParticleCount, setFrontendInitialParticleCount] =
-    useState(1)
+    useState(VIEWER_DEFAULTS.playback.initialParticleCount ?? 1)
   const [
     frontendInitialParticleCountInput,
     setFrontendInitialParticleCountInput,
-  ] = useState("1")
+  ] = useState(String(VIEWER_DEFAULTS.playback.initialParticleCount ?? 1))
   const particleCapRunRef = useRef<string | null>(null)
-  const [targetVisible, setTargetVisible] = useState(true)
-  const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(1)
-  const [activationAlpha, setActivationAlpha] = useState(0.2)
-  const [neuralColorAlpha, setNeuralColorAlpha] = useState(1)
-  const [internalStateAlpha, setInternalStateAlpha] = useState(1)
-  const [internalStateChannelStart, setInternalStateChannelStart] = useState(0)
-  const [growthAxisLengthPx, setGrowthAxisLengthPx] = useState(28)
+  const [targetVisible, setTargetVisible] = useState(
+    VIEWER_DEFAULTS.rendering.targetVisible
+  )
+  const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(
+    VIEWER_DEFAULTS.rendering.whiteDotsAlpha
+  )
+  const [activationAlpha, setActivationAlpha] = useState(
+    VIEWER_DEFAULTS.rendering.activationAlpha
+  )
+  const [neuralColorAlpha, setNeuralColorAlpha] = useState(
+    VIEWER_DEFAULTS.rendering.neuralColorAlpha
+  )
+  const [internalStateAlpha, setInternalStateAlpha] = useState(
+    VIEWER_DEFAULTS.rendering.internalStateAlpha
+  )
+  const [internalStateChannelStart, setInternalStateChannelStart] = useState(
+    VIEWER_DEFAULTS.rendering.internalStateChannelStart
+  )
+  const [chemicalMemoryOpponentSubtraction, setChemicalMemoryOpponentSubtraction] =
+    useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
+  const [growthAxisLengthPx, setGrowthAxisLengthPx] = useState(
+    VIEWER_DEFAULTS.rendering.growthAxisLengthPx
+  )
   // "Add"/"Move"/"Deform" interaction tools (render/GridCanvas.tsx's own
   // Tool type) — toggled on/off by clicking their own icon button again
   // (see the Tools section below), not reset by a run/generation change
   // either, same reasoning as the rendering options above.
-  const [tool, setTool] = useState<Tool>("none")
+  const [tool, setTool] = useState<Tool>(VIEWER_DEFAULTS.tools.selected)
   // "Deform" tool's own live settings (direction/strength/radius/mode) —
   // owned here (this component's own small panel below), read by
   // GridCanvas at click/hover time (see that component's own
   // DeformSettings docstring). direction/strength/radius/mode defaults
   // mirror gpu/deform.wgsl's own starting-guess scale comments.
-  const [deformSettings, setDeformSettings] = useState<DeformSettings>({
-    direction: "outward",
-    strength: 1,
-    radius: 0.08,
-    mode: "velocity",
-  })
+  const [deformSettings, setDeformSettings] = useState<DeformSettings>(() => ({
+    ...VIEWER_DEFAULTS.tools.deform,
+  }))
 
   // null selection = follow whatever's newest; otherwise replay whichever
   // past generation was scrubbed to. configByGeneration and history are
@@ -209,8 +255,12 @@ export function TrainingView() {
     setChiralityOverride(null)
     setParticleDensityOverride(null)
   }, [viewingRunId, activeConfig?.generation])
+  const defaultParticleDensity =
+    VIEWER_DEFAULTS.playback.particleDensityMultiplier ??
+    activeConfig?.particleDensityMultiplier ??
+    1
   const effectiveParticleDensity =
-    particleDensityOverride ?? activeConfig?.particleDensityMultiplier ?? 1
+    particleDensityOverride ?? defaultParticleDensity
   const effectiveChirality =
     chiralityOverride ?? activeConfig?.chirality ?? true
   const playbackConfig = useMemo(
@@ -294,13 +344,19 @@ export function TrainingView() {
     const runKey = viewingRunId ?? "current"
     if (particleCapRunRef.current === runKey) return
     particleCapRunRef.current = runKey
-    setFrontendParticleCap(activeConfig.particles)
+    const configuredCap = VIEWER_DEFAULTS.playback.particleCap
+    const particleCap = Math.min(
+      MAX_PARTICLES,
+      Math.max(2, Math.floor(configuredCap ?? activeConfig.particles))
+    )
+    setFrontendParticleCap(particleCap)
     const initialCount = Math.min(
-      activeConfig.particles,
+      particleCap,
       Math.max(
         1,
         Math.floor(
-          activeConfig.initialParticleCount ??
+          VIEWER_DEFAULTS.playback.initialParticleCount ??
+            activeConfig.initialParticleCount ??
             coreConstants.INITIAL_PARTICLE_COUNT
         )
       )
@@ -457,18 +513,21 @@ export function TrainingView() {
         setSampleCompleted,
         controller.signal
       )
-      if (request.axes.length === 2) {
+      if (request.axes.length === 1 || request.axes.length === 2) {
+        const [firstAxis, secondAxis] = request.axes
         captures.push({
           filename: "atlas.png",
           blob: await createSampleAtlas({
             images: captures.filter((capture) => capture.filename.endsWith(".png")),
-            rows: {
-              label: request.axes[0].label,
-              values: sweepValues(request.axes[0]),
-            },
+            rows: secondAxis
+              ? {
+                  label: firstAxis.label,
+                  values: sweepValues(firstAxis),
+                }
+              : undefined,
             columns: {
-              label: request.axes[1].label,
-              values: sweepValues(request.axes[1]),
+              label: (secondAxis ?? firstAxis).label,
+              values: sweepValues(secondAxis ?? firstAxis),
             },
             signal: controller.signal,
           }),
@@ -616,9 +675,8 @@ export function TrainingView() {
               disabled={!activeConfig}
               onChange={(event) => {
                 const selected = Number(event.target.value)
-                const trained = activeConfig?.particleDensityMultiplier ?? 1
                 setParticleDensityOverride(
-                  selected === trained ? null : selected
+                  selected === defaultParticleDensity ? null : selected
                 )
                 setPhysicsOverride(null)
               }}
@@ -709,17 +767,103 @@ export function TrainingView() {
 
         <section>
           <h2>Rendering</h2>
-          <label className="slider-row">
+          <div className="slider-row">
             <span>Zoom</span>
+            <label className="auto-zoom-toggle">
+              <input
+                type="checkbox"
+                checked={autoZoomEnabled}
+                onChange={(event) => setAutoZoomEnabled(event.target.checked)}
+              />
+              Auto
+            </label>
             <Slider
               min={1}
               max={8}
               step={0.05}
               value={zoom}
-              onChange={setZoom}
+              disabled={autoZoomEnabled}
+              onChange={(value) => {
+                setZoom(value)
+                setEffectiveZoom(value)
+              }}
             />
-            <span className="slider-value">{zoom.toFixed(2)}×</span>
-          </label>
+            <span className="slider-value">
+              {(autoZoomEnabled ? effectiveZoom : zoom).toFixed(2)}×
+            </span>
+          </div>
+          <details className="settings-category">
+            <summary>Post-processing</summary>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={bloom.enabled}
+                onChange={(event) =>
+                  setBloom((value) => ({ ...value, enabled: event.target.checked }))
+                }
+              />
+              Bloom
+            </label>
+            {bloom.enabled && (
+              <>
+                <label className="slider-row">
+                  <span>Bloom intensity</span>
+                  <Slider
+                    min={0}
+                    max={3}
+                    step={0.05}
+                    value={bloom.intensity}
+                    onChange={(intensity) => setBloom((value) => ({ ...value, intensity }))}
+                  />
+                  <span className="slider-value">{bloom.intensity.toFixed(2)}</span>
+                </label>
+                <label className="slider-row">
+                  <span>Bloom threshold</span>
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={bloom.threshold}
+                    onChange={(threshold) => setBloom((value) => ({ ...value, threshold }))}
+                  />
+                  <span className="slider-value">{bloom.threshold.toFixed(2)}</span>
+                </label>
+                <label className="slider-row">
+                  <span>Bloom radius</span>
+                  <Slider
+                    min={0.25}
+                    max={8}
+                    step={0.25}
+                    value={bloom.radiusPx}
+                    onChange={(radiusPx) => setBloom((value) => ({ ...value, radiusPx }))}
+                  />
+                  <span className="slider-value">{bloom.radiusPx.toFixed(2)}px</span>
+                </label>
+                <label className="slider-row">
+                  <span>Bloom levels</span>
+                  <Slider
+                    min={2}
+                    max={10}
+                    step={1}
+                    value={bloom.levels}
+                    onChange={(levels) => setBloom((value) => ({ ...value, levels }))}
+                  />
+                  <span className="slider-value">{bloom.levels}</span>
+                </label>
+                <label className="slider-row">
+                  <span>Bloom scatter</span>
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={bloom.scatter}
+                    onChange={(scatter) => setBloom((value) => ({ ...value, scatter }))}
+                  />
+                  <span className="slider-value">{bloom.scatter.toFixed(2)}</span>
+                </label>
+              </>
+            )}
+          </details>
           <label className="slider-row">
             <span>Particle size</span>
             <Slider
@@ -822,6 +966,21 @@ export function TrainingView() {
                   }
                 />
               </div>
+              {particleRenderMode === "dots-internal-state" && (
+                <label className="slider-row">
+                  <span>Opponent subtraction</span>
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={chemicalMemoryOpponentSubtraction}
+                    onChange={setChemicalMemoryOpponentSubtraction}
+                  />
+                  <span className="slider-value">
+                    {chemicalMemoryOpponentSubtraction.toFixed(2)}
+                  </span>
+                </label>
+              )}
               {particleRenderMode === "dots-internal-state" &&
                 previewConfig &&
                 cellMemoryFromConfig(previewConfig) !== "recurrent" && (
@@ -1050,6 +1209,9 @@ export function TrainingView() {
             gradientExponent={gradientExponent}
             particleRenderMode={particleRenderMode}
             zoom={zoom}
+            autoZoom={autoZoomSettings}
+            onEffectiveZoomChange={setEffectiveZoom}
+            bloom={bloom}
             particleRadiusPx={particleRadiusPx}
             whiteDotsAlpha={whiteDotsAlpha}
             activationAlpha={activationAlpha}
@@ -1057,6 +1219,7 @@ export function TrainingView() {
             internalStateAlpha={internalStateAlpha}
             boundaryGradientScale={boundaryGradientScale}
             internalStateChannelStart={internalStateChannelStart}
+            chemicalMemoryOpponentSubtraction={chemicalMemoryOpponentSubtraction}
             growthAxisLengthPx={growthAxisLengthPx}
             tool={tool}
             deformSettings={deformSettings}

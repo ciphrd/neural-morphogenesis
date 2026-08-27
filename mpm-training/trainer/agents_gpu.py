@@ -30,6 +30,9 @@ from simulation_settings import (
     ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE,
     GROWTH_ANISOTROPY_RESPONSE_RATE,
+    GROWTH_COMPRESSION_FEEDBACK,
+    GROWTH_COMPRESSION_START,
+    GROWTH_COMPRESSION_STOP,
     GROWTH_DIRECTION_RESPONSE_RATE,
     INTERNAL_STATE_SPEED,
     MORPHOLOGY_GRADIENT_INPUT_SCALE,
@@ -207,6 +210,9 @@ class AgentsGPU:
         internal_state_speed: float = INTERNAL_STATE_SPEED,
         division_directionality: float = DIVISION_DIRECTIONALITY,
         chemical_communication_architecture: str = CELL_OWNED_PROJECTION_ARCHITECTURE,
+        growth_compression_start: float = GROWTH_COMPRESSION_START,
+        growth_compression_stop: float = GROWTH_COMPRESSION_STOP,
+        growth_compression_feedback: float = GROWTH_COMPRESSION_FEEDBACK,
     ) -> None:
         self.device = device
         self.channels = channels
@@ -257,6 +263,11 @@ class AgentsGPU:
         self.set_chemical_projection_weight(1.0)
         self.set_rollout_seed(0)
         self.set_boundary_tangent_min_gradient(BOUNDARY_TANGENT_MIN_GRADIENT)
+        self.set_growth_compression_feedback(
+            growth_compression_start,
+            growth_compression_stop,
+            growth_compression_feedback,
+        )
         # Lab-only override is disabled during training. This trailing ABI
         # slot is shared with the browser's scheduled-scenario support.
         self.device.queue.write_buffer(
@@ -640,6 +651,20 @@ class AgentsGPU:
             self._physics_uniform,
             76,
             np.array([max(0.0, float(threshold))], dtype=np.float32),
+        )
+
+    def set_growth_compression_feedback(
+        self, start: float, stop: float, strength: float
+    ) -> None:
+        """Write contact-inhibition controls into trailing AgentPhysics ABI slots."""
+        if start < 0.0 or stop < start:
+            raise ValueError("growth compression thresholds require 0 <= start <= stop")
+        if not 0.0 <= strength <= 1.0:
+            raise ValueError("growth compression feedback must be in [0, 1]")
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            100,
+            np.array([start, stop, strength], dtype=np.float32),
         )
 
     def set_active_count(self, active_count: int) -> None:

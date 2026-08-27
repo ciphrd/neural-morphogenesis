@@ -185,9 +185,9 @@ struct ParticleMeta {
 struct InternalStateStyle {
   channels: vec4<u32>,
   alpha: f32,
+  opponentSubtraction: f32,
   // Scalars deliberately keep this uniform at 32 bytes. A vec3 here would
   // align to the next 16-byte boundary and inflate the required binding to 48.
-  _padding0: f32,
   _padding1: f32,
   _padding2: f32,
 }
@@ -195,6 +195,22 @@ struct InternalStateStyle {
 
 fn stateSigmoid(x: f32) -> f32 {
   return 1.0 / (1.0 + exp(-clamp(x, -20.0, 20.0)));
+}
+
+fn privateStateDisplayColor(rawState: vec3<f32>) -> vec3<f32> {
+  var normalized = rawState;
+  // Preserve relative channel strengths instead of letting a large positive
+  // state drive one or more sigmoid-mapped RGB components into saturation.
+  // Values already within the display range retain the previous mapping.
+  let maxComponent = max(normalized.x, max(normalized.y, normalized.z));
+  if (maxComponent > 1.0) {
+    normalized = normalized / vec3<f32>(maxComponent);
+  }
+  return vec3<f32>(
+    stateSigmoid(normalized.x),
+    stateSigmoid(normalized.y),
+    stateSigmoid(normalized.z),
+  );
 }
 
 // --- neural RGB dots --------------------------------------------------------
@@ -249,22 +265,26 @@ fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
     0.0, 1.0
   );
   out.uv = offset;
-  var colorState = vec3<f32>(
+  let colorState = vec3<f32>(
     state[internalStateStyle.channels.x],
     state[internalStateStyle.channels.y],
     state[internalStateStyle.channels.z],
   );
-  // Preserve relative channel strengths instead of letting a large positive
-  // state drive one or more sigmoid-mapped RGB components into saturation.
-  // Values already within the display range retain the previous mapping.
-  let maxComponent = max(colorState.x, max(colorState.y, colorState.z));
-  if (maxComponent > 1.0) {
-    colorState = colorState / vec3<f32>(maxComponent);
-  }
-  out.color = vec3<f32>(
-    stateSigmoid(colorState.x),
-    stateSigmoid(colorState.y),
-    stateSigmoid(colorState.z),
+  // The next triplet acts as opponent color channels. Wrap across the eight
+  // private-state slots so every selectable RGB window has a valid opponent.
+  let opponentState = vec3<f32>(
+    state[(internalStateStyle.channels.x + 3u) % 8u],
+    state[(internalStateStyle.channels.y + 3u) % 8u],
+    state[(internalStateStyle.channels.z + 3u) % 8u],
+  );
+  // Transform both triplets into the particle display color space first;
+  // opponent subtraction is intentionally a color operation, not a mutation
+  // or comparison of the underlying chemical-memory values.
+  out.color = clamp(
+    privateStateDisplayColor(colorState)
+      - privateStateDisplayColor(opponentState) * internalStateStyle.opponentSubtraction,
+    vec3<f32>(0.0),
+    vec3<f32>(1.0),
   );
   return out;
 }
@@ -287,7 +307,12 @@ fn chemicalLevelsParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builti
     levels[internalStateStyle.channels.y],
     levels[internalStateStyle.channels.z],
   );
-  out.color = clamp(raw / vec3<f32>(2.0), vec3<f32>(-1.0), vec3<f32>(1.0)) * 0.5 + 0.5;
+  var color: vec3<f32> = clamp(raw + 1.0, vec3<f32>(0.0), vec3<f32>(1.0));
+  let maxComponent = max(color.x, max(color.y, color.z));
+  if (maxComponent > 1.0) {
+    color = color / vec3<f32>(maxComponent);
+  }
+  out.color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
   return out;
 }
 

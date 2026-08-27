@@ -157,6 +157,7 @@ def main() -> None:
             substeps_per_macro=1,
             particle_mass=case.particle_mass,
             particle_volume=case.particle_volume,
+            growth_compression_feedback=0.0,
         )
         agents.set_density_geometry(case.spacing, case.deposit_sigma)
         agents.set_chemical_gradient_input_scale(case.chemical_gradient_input_scale)

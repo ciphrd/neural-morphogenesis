@@ -10,7 +10,7 @@ interface AtlasImage {
 
 interface SampleAtlasOptions {
   images: readonly AtlasImage[]
-  rows: AtlasAxis
+  rows?: AtlasAxis
   columns: AtlasAxis
   signal: AbortSignal
 }
@@ -43,7 +43,7 @@ function canvasBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   })
 }
 
-/** Builds a labelled row/column contact sheet from a two-axis sweep.
+/** Builds a labelled contact sheet from a one- or two-axis sweep.
  * Images must be in row-major order: every column of row 0, then row 1. */
 export async function createSampleAtlas({
   images,
@@ -51,7 +51,9 @@ export async function createSampleAtlas({
   columns,
   signal,
 }: SampleAtlasOptions): Promise<Blob> {
-  const expected = rows.values.length * columns.values.length
+  const rowCount = rows?.values.length ?? 1
+  const leftGutter = rows ? LEFT_GUTTER : 0
+  const expected = rowCount * columns.values.length
   if (images.length !== expected || expected === 0) {
     throw new Error(
       `Cannot build sample atlas: expected ${expected} PNGs, received ${images.length}.`
@@ -66,9 +68,9 @@ export async function createSampleAtlas({
     1,
     MAX_TILE_EDGE / sourceWidth,
     MAX_TILE_EDGE / sourceHeight,
-    (MAX_ATLAS_EDGE - LEFT_GUTTER) /
+    (MAX_ATLAS_EDGE - leftGutter) /
       (columns.values.length * sourceWidth),
-    (MAX_ATLAS_EDGE - TOP_GUTTER) / (rows.values.length * sourceHeight),
+    (MAX_ATLAS_EDGE - TOP_GUTTER) / (rowCount * sourceHeight),
     Math.sqrt(
       MAX_ATLAS_PIXELS /
         (expected * sourceWidth * sourceHeight)
@@ -77,8 +79,8 @@ export async function createSampleAtlas({
   const tileWidth = Math.max(1, Math.floor(sourceWidth * scale))
   const tileHeight = Math.max(1, Math.floor(sourceHeight * scale))
   const canvas = document.createElement("canvas")
-  canvas.width = LEFT_GUTTER + columns.values.length * tileWidth
-  canvas.height = TOP_GUTTER + rows.values.length * tileHeight
+  canvas.width = leftGutter + columns.values.length * tileWidth
+  canvas.height = TOP_GUTTER + rowCount * tileHeight
   const context = canvas.getContext("2d")
   if (!context) {
     bitmap.close()
@@ -93,7 +95,7 @@ export async function createSampleAtlas({
   context.textAlign = "center"
   context.fillText(
     columns.label,
-    LEFT_GUTTER + (columns.values.length * tileWidth) / 2,
+    leftGutter + (columns.values.length * tileWidth) / 2,
     14
   )
   context.fillStyle = "#aaa"
@@ -101,36 +103,38 @@ export async function createSampleAtlas({
   for (let column = 0; column < columns.values.length; column += 1) {
     context.fillText(
       valueLabel(columns.values[column]),
-      LEFT_GUTTER + (column + 0.5) * tileWidth,
+      leftGutter + (column + 0.5) * tileWidth,
       39
     )
   }
   context.textAlign = "right"
-  for (let row = 0; row < rows.values.length; row += 1) {
-    context.fillText(
-      valueLabel(rows.values[row]),
-      LEFT_GUTTER - 10,
-      TOP_GUTTER + (row + 0.5) * tileHeight
+  if (rows) {
+    for (let row = 0; row < rows.values.length; row += 1) {
+      context.fillText(
+        valueLabel(rows.values[row]),
+        leftGutter - 10,
+        TOP_GUTTER + (row + 0.5) * tileHeight
+      )
+    }
+    context.save()
+    context.translate(
+      18,
+      TOP_GUTTER + (rowCount * tileHeight) / 2
     )
+    context.rotate(-Math.PI / 2)
+    context.fillStyle = "#e8e8e8"
+    context.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    context.textAlign = "center"
+    context.fillText(rows.label, 0, 0)
+    context.restore()
   }
-  context.save()
-  context.translate(
-    18,
-    TOP_GUTTER + (rows.values.length * tileHeight) / 2
-  )
-  context.rotate(-Math.PI / 2)
-  context.fillStyle = "#e8e8e8"
-  context.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
-  context.textAlign = "center"
-  context.fillText(rows.label, 0, 0)
-  context.restore()
 
   for (let index = 0; index < images.length; index += 1) {
     abortIfRequested(signal)
     if (index > 0) bitmap = await createImageBitmap(images[index].blob)
     const row = Math.floor(index / columns.values.length)
     const column = index % columns.values.length
-    const x = LEFT_GUTTER + column * tileWidth
+    const x = leftGutter + column * tileWidth
     const y = TOP_GUTTER + row * tileHeight
     context.drawImage(bitmap, x, y, tileWidth, tileHeight)
     bitmap.close()

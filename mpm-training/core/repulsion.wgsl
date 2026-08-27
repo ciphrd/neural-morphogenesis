@@ -264,6 +264,7 @@ struct RepulsionParams {
 @group(0) @binding(5) var densityTexSampled: texture_2d<f32>;
 @group(0) @binding(7) var<uniform> repulsionParams: RepulsionParams;
 
+
 // r32float textures are "unfilterable-float" by default in core WebGPU
 // (no sampler/textureSample against them without the optional
 // float32-filterable feature) — textureLoad below reads exact texels by

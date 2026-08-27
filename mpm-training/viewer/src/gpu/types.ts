@@ -103,6 +103,11 @@ export interface RunSettings {
   growthMax: number;
   /** Cap on policy-directed rest-growth anisotropy. */
   growthAnisotropy?: number;
+  /** Elastic areal-compression interval that smoothly suppresses growth. */
+  growthCompressionStart?: number;
+  growthCompressionStop?: number;
+  /** 0 disables mechanical feedback; 1 applies the full compression gate. */
+  growthCompressionFeedback?: number;
   // Debug/testing toggle — off skips MpmCore's own physics substeps
   // entirely each macro step (gpu/simulation.ts's own step(), see that
   // method's own comment for exactly what stays running regardless:
@@ -136,6 +141,8 @@ export interface RunSettings {
   materialNu: number;
   materialHardening: number;
   materialElasticity: number;
+  /** Per-substep elastic-shear relaxation; 0 is the legacy solid response. */
+  materialFluidity?: number;
   splatRadius: number;
   repulsionStrength: number;
   // Hard cap on the magnitude of one physics substep's own repulsion
@@ -235,6 +242,7 @@ export interface PhysicsSettings {
   materialNu: number;
   materialHardening: number;
   materialElasticity: number;
+  materialFluidity: number;
   particleMass: number;
   particleVolume: number;
   chemicalGradientInputScale: number;
@@ -261,6 +269,9 @@ export interface PhysicsSettings {
   growthMax: number;
   // Global cap on the neural per-particle anisotropy output.
   growthAnisotropy: number;
+  growthCompressionStart: number;
+  growthCompressionStop: number;
+  growthCompressionFeedback: number;
   /** Gaussian sigma of the raw particle-density splat, in domain units. */
   splatRadius: number;
   /** Gaussian sigma of the policy morphology blur, in domain units. */
@@ -285,6 +296,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     materialNu: config.materialNu,
     materialHardening: config.materialHardening,
     materialElasticity: config.materialElasticity,
+    materialFluidity: Math.max(0, Math.min(1, config.materialFluidity ?? 0)),
     particleMass: config.particleMass ?? coreConstants.PARTICLE_MASS,
     particleVolume: config.particleVolume ?? coreConstants.VOL,
     chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
@@ -326,6 +338,14 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     divisionDirectionality: Math.max(0, Math.min(1, config.divisionDirectionality ?? 1.0)),
     growthMax: config.growthMax ?? 2.0,
     growthAnisotropy: Math.max(0, Math.min(1, config.growthAnisotropy ?? 1.0)),
+    growthCompressionStart: Math.max(0, config.growthCompressionStart ?? 0.10),
+    growthCompressionStop: Math.max(
+      Math.max(0, config.growthCompressionStart ?? 0.10),
+      config.growthCompressionStop ?? 0.10,
+    ),
+    growthCompressionFeedback: Math.max(
+      0, Math.min(1, config.growthCompressionFeedback ?? 0.0),
+    ),
     splatRadius: config.splatRadius,
     morphologyBlurSigma: config.morphologyBlurSigma ?? 0.01,
     morphologyDensityReference: config.morphologyDensityReference ?? 1.0,

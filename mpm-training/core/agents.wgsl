@@ -269,6 +269,11 @@ struct AgentPhysics {
   // Inclusive end of a contiguous Lab-controlled particle range. Equal to
   // forcedLifecycleIndex for the existing single-particle scenarios.
   forcedLifecycleEndIndex: u32,
+  // Mechanical contact-inhibition controls. Compression is the positive
+  // elastic areal Hencky strain max(0,-log(det(Fe))).
+  growthCompressionStart: f32,
+  growthCompressionStop: f32,
+  growthCompressionFeedback: f32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -513,6 +518,22 @@ fn elasticStrainInput(F: vec4<f32>, Fg: vec4<f32>, forward: vec2<f32>, lateral: 
     safeTanh((h00 - h11) * invScale),
     safeTanh((2.0 * h01) * invScale),
   );
+}
+
+fn mechanicalGrowthGate(F: vec4<f32>, Fg: vec4<f32>) -> f32 {
+  let Fe = matMul(F, matInverse(Fg));
+  let compression = max(0.0, -log(max(matDet(Fe), 1e-6)));
+  var pressureGate = 0.0;
+  if (physics.growthCompressionStop > physics.growthCompressionStart) {
+    pressureGate = 1.0 - smoothstep(
+      physics.growthCompressionStart,
+      physics.growthCompressionStop,
+      compression
+    );
+  } else if (compression < physics.growthCompressionStart) {
+    pressureGate = 1.0;
+  }
+  return mix(1.0, pressureGate, clamp(physics.growthCompressionFeedback, 0.0, 1.0));
 }
 
 // Portable integer hash shared conceptually with trainer/agents_gpu.py and
@@ -1007,6 +1028,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Lifecycle semantics remain in raw substrate units. Input normalization is
   // exclusively a neural-sensing transform and must not accelerate division.
   let splitProb = clamp(rawGrowthSignal, 0.0, 1.0);
+  let mechanicalGate = mechanicalGrowthGate(particleF[pi], particleRest[pi].growthF);
   // Division cooldown — counted down every step regardless of whether
   // the division clock would otherwise cross (so it's a clean
   // macro-step countdown, independent of the stochastic threshold),
@@ -1063,7 +1085,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       hazardIncrement = agentState.particleMeta[pi].divisionThreshold + 1.0;
     }
     agentState.particleMeta[pi].divisionHazard =
-      agentState.particleMeta[pi].divisionHazard + hazardIncrement;
+      agentState.particleMeta[pi].divisionHazard + hazardIncrement * mechanicalGate;
     if (agentState.particleMeta[pi].divisionHazard >= agentState.particleMeta[pi].divisionThreshold) {
       particleRest[pi].cycleActive = 1.0;
       agentState.particleMeta[pi].divisionHazard = 0.0;
@@ -1075,6 +1097,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (
     activeCount < physics.maxActiveParticles &&
     particleRest[pi].cycleActive > 0.5 &&
+    mechanicalGate > 1e-4 &&
     matDet(particleRest[pi].growthF) >= divisionTarget * 0.9999
   ) {
     // atomicAdd returns the OLD value — the slot THIS particle just
