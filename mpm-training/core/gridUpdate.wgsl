@@ -24,6 +24,17 @@ fn gridUpdate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let momX = f32(atomicLoad(&gridAccum[base + CH_MOM_X])) / SCALE;
   let momY = f32(atomicLoad(&gridAccum[base + CH_MOM_Y])) / SCALE;
   var v = (vec2<f32>(momX, momY) / mass) * damping;
-  v.y = v.y - DT * gravity;
+  // `gravity` is a center-seeking acceleration magnitude. Grid nodes use the
+  // same [0,1]^2 coordinates as particles, so applying the radial direction
+  // here gives every particle a consistent pull toward the domain center via
+  // the ordinary G2P gather. The epsilon avoids an undefined normalization at
+  // the exact center node, where the desired acceleration is simply zero.
+  let rowWidth = GRID_N + 1u;
+  let node = vec2<f32>(f32(idx / rowWidth), f32(idx % rowWidth)) / f32(GRID_N);
+  let towardCenter = vec2<f32>(0.5, 0.5) - node;
+  let centerDistance = length(towardCenter);
+  if (centerDistance > 1e-6) {
+    v = v + DT * gravity * towardCenter / centerDistance;
+  }
   gridVel[idx] = v;
 }

@@ -37,7 +37,7 @@ GROWN_COLOR = (255, 255, 255)
 
 def rasterize(grown: np.ndarray, target: np.ndarray, size: int = IMG_SIZE) -> Image.Image:
     """Both point clouds share MpmCore's own [0,1]^2 domain convention
-    (y-up, gravity pulls toward y=0) — flipped to image space (y-down)
+    (y-up) — flipped to image space (y-down)
     for display only, not touched anywhere else in this project."""
     img = np.zeros((size, size, 3), dtype=np.uint8)
 
@@ -73,7 +73,7 @@ def save_raster_image(raster: np.ndarray, path: Path) -> None:
     debug_images.py's own save_raster_image(): raster.py's own
     rasterize_points()/rasterize_points_sum() map row index directly
     from domain-y (row 0 = y=0), but this project's domain is y-*up*
-    (gravity pulls toward y=0 — see rasterize()'s own comment above),
+    (see rasterize()'s own comment above),
     so row 0 unflipped would put the domain's bottom at the image's top,
     upside-down relative to save_grown_image()'s own explicit y-flip.
     Flipping here keeps every image this module produces in the same

@@ -17,7 +17,18 @@ interface GrowthPanelProps {
 
 export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthAnisotropy" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "divisionDirectionality" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  | "growthDuration"
+  | "growthAnisotropy"
+  | "growthCompressionStart"
+  | "growthCompressionStop"
+  | "growthCompressionFeedback"
+  | "divisionDirectionality"
+  | "boundaryTangentMinGradient"
+  | "neuralUpdatesPerMacro"
+  | "communicationSpeed"
+  | "internalStateSpeed"
+  | "deathRate"
+  | "growthDrive"
 >
 
 export interface GrowthSliderSpec {
@@ -36,13 +47,34 @@ export interface GrowthSliderSpec {
 // run happened to be trained with.
 export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
+    key: "growthDrive",
+    label: "Growth drive",
+    hint: "Master growth control. 0 pauses growth, 0.5 preserves the native neural and mechanical behavior, and 1 forces every eligible particle to grow while bypassing contact inhibition.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => v.toFixed(2),
+  },
+  {
+    key: "deathRate",
+    label: "Death rate",
+    hint: "Fraction of live particles replaced per mechanical tick. Every death immediately forces one surviving particle to split, preserving the live population while continually renewing it.",
+    min: 0,
+    max: 0.2,
+    step: 0.0001,
+    format: (v) => `${(100 * v).toFixed(1)}% / tick`,
+  },
+  {
     key: "neuralUpdatesPerMacro",
     label: "Neural updates / tick",
     hint: "Neural evaluations before one MLS-MPM update. Chemical and turning dynamics are timestep-scaled, so this raises temporal resolution rather than raw speed. Lifecycle and division commit only on the final round.",
     min: 1,
     max: 16,
     step: 1,
-    format: (v) => `${Math.round(v)} rounds`,
+    format: (v) => {
+      const rounds = Math.round(v)
+      return `${rounds} ${rounds === 1 ? "round" : "rounds"}`
+    },
   },
   {
     key: "communicationSpeed",

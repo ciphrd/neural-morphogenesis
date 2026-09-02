@@ -19,7 +19,7 @@ import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
 import { GrowthPanel } from "./ui/GrowthPanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { Slider } from "./ui/Slider"
-import { VIEWER_DEFAULTS } from "./viewerConfig"
+import { applyViewerPhysicsOverrides, VIEWER_DEFAULTS } from "./viewerConfig"
 
 const TRAIN_API_URL = "http://localhost:8003"
 const TRAIN_WS_URL = "ws://localhost:8003/ws"
@@ -149,7 +149,9 @@ export function LabView() {
   const displayedHiddenWidth = policyExploration?.hiddenWidth
     ?? (baseConfig ? hiddenLayersFromConfig(baseConfig)[0] : 128)
   const trainedPhysics = useMemo(
-    () => playbackConfig ? physicsSettingsFromConfig(playbackConfig) : null,
+    () => playbackConfig
+      ? applyViewerPhysicsOverrides(physicsSettingsFromConfig(playbackConfig))
+      : null,
     [playbackConfig],
   )
   const physics = physicsOverride ?? trainedPhysics

@@ -145,8 +145,8 @@ export interface GridCanvasHandle {
    * replay of the exact same rollout from the start. */
   restart(): void;
   /** Overwrites the update rule's own weights/biases with a fresh random
-   * init and restarts the rollout under it — see
-   * GpuSimulation.randomizeWeights()'s own docstring. A later "Restart"
+   * init. Restarts the rollout by default; pass false to preserve the current
+   * rollout — see GpuSimulation.randomizeWeights()'s own docstring. A later "Restart"
    * click, or a new generation loading, both leave the randomized
    * weights in place until the next config change actually reloads
    * config.weights (loadGeneration() always does — see its own effect
@@ -154,7 +154,9 @@ export interface GridCanvasHandle {
    * (e.g. the Physics panel's own overrides). */
   /** Returns the exact randomized weights loaded into the GPU so callers can
    * display the same policy instead of the selected generation's weights. */
-  randomizeWeights(): UpdateRuleWeights | null;
+  randomizeWeights(restart?: boolean): UpdateRuleWeights | null;
+  /** Immediately retires a fraction of live agents without replacement. */
+  killFraction(fraction: number): number;
   /** Starts capturing the canvas's own rendered output — see
    * canvasRecorder.ts's own CanvasRecorder.start() docstring. Throws if
    * this browser has no MediaRecorder at all — TrainingView checks
@@ -518,8 +520,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       autoZoomTargetRef.current = effectiveZoomRef.current;
       autoZoomHardResetRef.current = true;
     },
-    randomizeWeights: () => {
-      const weights = simulationRef.current?.randomizeWeights() ?? null;
+    randomizeWeights: (restart = true) => {
+      const weights = simulationRef.current?.randomizeWeights(restart) ?? null;
       if (weights) {
         autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
         autoZoomTargetRef.current = effectiveZoomRef.current;
@@ -527,6 +529,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       }
       return weights;
     },
+    killFraction: (fraction) => simulationRef.current?.killFraction(fraction) ?? 0,
     startRecording: () => {
       if (canvasRef.current) getRecorder().start(canvasRef.current);
     },
@@ -784,9 +787,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     if (!canvas) return;
 
     // Screen pixel -> MpmCore's own [0,1]^2 domain coords. Y is flipped
-    // (screen is top-down, the domain is bottom-up — gravity pulls
-    // toward y=0, same convention render.wgsl's own particleVertex uses,
-    // see that file's own comment) and both axes are clamped so a drag
+    // (screen is top-down, the domain is bottom-up — the same convention
+    // render.wgsl's own particleVertex uses, see that file's own comment)
+    // and both axes are clamped so a drag
     // that strays outside the canvas (legitimate, once captured) still
     // resolves to a position on the domain's own edge rather than
     // outside [0,1]^2.

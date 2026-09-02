@@ -9,8 +9,8 @@
 // draws both the grown particles and the target point cloud overlay,
 // just with a different positions buffer/color/radius bound in.
 //
-// Domain is [0,1]^2, +Y-up (core/gridUpdate.wgsl's own convention,
-// gravity pulls toward y=0) — same as WebGPU's own NDC, so `pos*2-1` is
+// Domain is [0,1]^2, +Y-up (core/gridUpdate.wgsl's own convention) —
+// same as WebGPU's own NDC, so `pos*2-1` is
 // the entire mapping, no Y-flip needed (matches mls-mpm/src/gpu/render.wgsl's
 // own comment on this exact point).
 

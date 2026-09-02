@@ -1,7 +1,7 @@
 export interface UpdateRuleWeights {
   fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6 [+ 8 private state])
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // stateless: channels+9; stateful: channels+22
+  fc2w: number[][]; // stateless: channels+11; stateful: channels+24
   fc2b: number[];
 }
 export type PolicyArchitecture = "stateless-128" | "stateful-64" | "stateful-128";
@@ -74,6 +74,8 @@ export interface RunSettings {
   depositRate: number;
   maxAccel: number;
   maxStrafe: number;
+  /** Strength of the NN's signed local XY steering output. */
+  steeringStrength?: number;
   maxEnvWrite: number;
   maxAngularAccel: number;
   angularDamping: number;
@@ -88,6 +90,8 @@ export interface RunSettings {
   depositSigma: number;
   splitDisplacement: number;
   divisionCooldown: number;
+  /** Playback mortality fraction per macro step. Absent in legacy runs. */
+  deathRate?: number;
   friction: number;
   // Legacy ABI/configuration field. Split mass is immediately conservative;
   // the newborn's visual size instead follows growthDuration.
@@ -108,6 +112,8 @@ export interface RunSettings {
   growthCompressionStop?: number;
   /** 0 disables mechanical feedback; 1 applies the full compression gate. */
   growthCompressionFeedback?: number;
+  /** Playback master growth bias: 0 off, 0.5 native policy, 1 forced. */
+  growthDrive?: number;
   // Debug/testing toggle — off skips MpmCore's own physics substeps
   // entirely each macro step (gpu/simulation.ts's own step(), see that
   // method's own comment for exactly what stays running regardless:
@@ -251,6 +257,8 @@ export interface PhysicsSettings {
   depositRate: number;
   maxAccel: number;
   maxStrafe: number;
+  /** Strength of the NN's signed local XY steering output. */
+  steeringStrength: number;
   maxEnvWrite: number;
   maxAngularAccel: number;
   angularDamping: number;
@@ -259,6 +267,8 @@ export interface PhysicsSettings {
   depositSigma: number;
   splitDisplacement: number;
   divisionCooldown: number;
+  /** Fraction of the live population retired before each macro step. */
+  deathRate: number;
   friction: number;
   massRampMacroSteps: number;
   growthDuration: number;
@@ -272,6 +282,8 @@ export interface PhysicsSettings {
   growthCompressionStart: number;
   growthCompressionStop: number;
   growthCompressionFeedback: number;
+  /** Master growth-probability bias: 0 off, 0.5 native, 1 forced. */
+  growthDrive: number;
   /** Gaussian sigma of the raw particle-density splat, in domain units. */
   splatRadius: number;
   /** Gaussian sigma of the policy morphology blur, in domain units. */
@@ -311,6 +323,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     depositRate: config.depositRate ?? 1.0,
     maxAccel: config.maxAccel,
     maxStrafe: config.maxStrafe,
+    steeringStrength: Math.max(0, Math.min(1, config.steeringStrength ?? 0)),
     maxEnvWrite: config.maxEnvWrite,
     maxAngularAccel: config.maxAngularAccel,
     angularDamping: config.angularDamping,
@@ -324,6 +337,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     depositSigma: config.depositSigma ?? 0.6,
     splitDisplacement: config.splitDisplacement,
     divisionCooldown: config.divisionCooldown,
+    deathRate: Math.max(0, Math.min(1, config.deathRate ?? 0)),
     friction: config.friction,
     // Falls back to 1.0 (= disabled, this project's own behavior before
     // this knob existed) for a `generation` message from a
@@ -346,6 +360,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     growthCompressionFeedback: Math.max(
       0, Math.min(1, config.growthCompressionFeedback ?? 0.0),
     ),
+    growthDrive: Math.max(0, Math.min(1, config.growthDrive ?? 1.0)),
     splatRadius: config.splatRadius,
     morphologyBlurSigma: config.morphologyBlurSigma ?? 0.01,
     morphologyDensityReference: config.morphologyDensityReference ?? 1.0,

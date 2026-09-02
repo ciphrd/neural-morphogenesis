@@ -43,8 +43,8 @@ Exit code is 0 iff no check FAILed (a SKIP is not a failure).
   unvalidated bet this whole approach rested on. Confirmed via the
   standalone atomics check, before touching the real pipeline.
 - The extracted physics produces qualitatively correct behavior: a
-  gravity-free blob barely drifts; a `blocks.ts`-style blob under
-  gravity=200 falls and its *position* settles and plateaus.
+  gravity-free blob barely drifts; a blob under center gravity remains
+  bounded around the middle of the domain.
 
 ## Two real, load-bearing findings from building this (not hypothetical)
 

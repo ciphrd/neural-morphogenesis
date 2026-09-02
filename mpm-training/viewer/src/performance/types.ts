@@ -1,6 +1,24 @@
 import type { FieldMode, ParticleRenderMode } from "../gpu/render"
 import type { PhysicsSettings, SimulationConfig } from "../gpu/types"
 
+export interface PerformanceAutoZoomSettings {
+  enabled: boolean
+  sampleEveryFrames: number
+  maxSamples: number
+  fitFraction: number
+  padding: number
+  smoothing: number
+}
+
+export interface PerformanceBloomSettings {
+  enabled: boolean
+  intensity: number
+  threshold: number
+  radiusPx: number
+  scatter: number
+  levels: number
+}
+
 export interface PerformanceRenderSettings {
   zoom: number
   particleRadiusPx: number
@@ -16,9 +34,12 @@ export interface PerformanceRenderSettings {
   internalStateAlpha: number
   internalStateChannelStart: number
   boundaryGradientScale: number
+  chemicalMemoryOpponentSubtraction: number
   growthAxisLengthPx: number
   morphologyGradientVisible: boolean
   morphologyDensityVisible: boolean
+  autoZoom: PerformanceAutoZoomSettings
+  bloom: PerformanceBloomSettings
 }
 
 export interface PerformanceSnapshot {
@@ -48,7 +69,13 @@ export interface ProjectionTelemetry {
 export type ControllerToProjectionMessage =
   | { type: "config"; config: SimulationConfig | null }
   | { type: "snapshot"; snapshot: PerformanceSnapshot }
-  | { type: "command"; command: "restart" }
+  | { type: "auto-prune"; fraction: number | null; delayMs: number }
+  | { type: "auto-randomize"; intervalMs: number | null }
+  | { type: "auto-reset"; intervalMs: number | null }
+  | {
+      type: "command"
+      command: "restart" | "randomize" | "randomize-and-restart" | "kill-20-percent" | "kill-80-percent"
+    }
 
 export type ProjectionToControllerMessage =
   | { type: "hello" }

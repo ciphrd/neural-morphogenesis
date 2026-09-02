@@ -24,6 +24,8 @@ export interface PolicyOutput {
   anisotropy: number;
   divisionBias: number;
   direction: [number, number];
+  /** Signed forward/lateral steering in the particle's local frame. */
+  steering: [number, number];
   color: [number, number, number];
   stateDelta: Float32Array;
   stateGate: Float32Array;
@@ -40,7 +42,8 @@ export function policyWeightsShapeError(
 ): string | null {
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  const outDim = channels + (stateful ? 22 : 9);
+  const outDim = channels + (stateful ? 24 : 11);
+  const legacyOutDim = outDim - 2;
   const fc1w = weights?.fc1w;
   const fc1b = weights?.fc1b;
   const fc2w = weights?.fc2w;
@@ -52,17 +55,17 @@ export function policyWeightsShapeError(
     Array.isArray(fc1b) &&
     fc1b.length === hiddenDim &&
     Array.isArray(fc2w) &&
-    fc2w.length === outDim &&
+    (fc2w.length === outDim || fc2w.length === legacyOutDim) &&
     fc2w.every((row) => Array.isArray(row) && row.length === hiddenDim) &&
     Array.isArray(fc2b) &&
-    fc2b.length === outDim;
+    fc2b.length === fc2w.length;
   if (valid) return null;
 
   const receivedIn = Array.isArray(fc1w) && Array.isArray(fc1w[0]) ? fc1w[0].length : "missing";
   const receivedOut = Array.isArray(fc2w) ? fc2w.length : "missing";
   return (
-    `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
-    `(one chemical-state delta per channel plus growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
+    `Incompatible policy weights: expected ${inDim} inputs and either ${outDim} outputs ` +
+    `(${legacyOutDim} for a legacy brain without steering), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
     "The current first layer includes three elastic Hencky-strain inputs; restart the training backend and retrain older checkpoints."
   );
 }
@@ -79,7 +82,7 @@ function safeSigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
 }
 
-/** One Dense(hiddenDim) -> tanh -> Dense(channels+9) forward pass,
+/** One Dense(hiddenDim) -> tanh -> Dense(channels+11) forward pass,
  * squashed exactly like agents.wgsl's own evalPolicy() — see that
  * function's own comment for the exact math this mirrors, and this
  * file's own module docstring for why CHIRALITY's mirror-averaging is
@@ -108,13 +111,21 @@ export function evalPolicy(
   }
 
   const stateful = policyHasRecurrence(architecture);
-  const outDim = channels + (stateful ? 22 : 9);
+  const outDim = channels + (stateful ? 24 : 11);
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
-    let acc = weights.fc2b[j];
+    let acc = weights.fc2b[j] ?? 0;
     const row = weights.fc2w[j];
-    for (let i = 0; i < hiddenDim; i++) acc += hidden[i] * row[i];
+    if (row) {
+      for (let i = 0; i < hiddenDim; i++) acc += hidden[i] * row[i];
+    }
     outVec[j] = acc;
+  }
+  if (weights.fc2w.length === outDim - 2) {
+    // Match Agents.flattenWeights(): legacy brains steer from their existing
+    // local growth-direction logits when steering is explicitly enabled.
+    outVec[outDim - 2] = outVec[channels + 4];
+    outVec[outDim - 1] = outVec[channels + 5];
   }
 
   const envWriteDim = channels;
@@ -157,5 +168,9 @@ export function evalPolicy(
       safeSigmoid(outVec[envWriteDim + 8]),
     ];
   }
-  return { envWrite, headingDirection, angularAccel, anisotropy, divisionBias, direction, color, stateDelta, stateGate };
+  const steering: [number, number] = [
+    safeTanh(outVec[outDim - 2]),
+    safeTanh(outVec[outDim - 1]),
+  ];
+  return { envWrite, headingDirection, angularAccel, anisotropy, divisionBias, direction, steering, color, stateDelta, stateGate };
 }

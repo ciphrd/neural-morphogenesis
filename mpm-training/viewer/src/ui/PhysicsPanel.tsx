@@ -57,7 +57,7 @@ export function physicsSliderSpecsFor(
   return [
     {
       key: "gravity",
-      label: "Gravity",
+      label: "Center gravity",
       ...scaledRange(trained.gravity, 3),
       format: (v) => v.toFixed(1),
     },
@@ -122,6 +122,14 @@ export function physicsSliderSpecsFor(
       label: "Physical strafe scale",
       ...scaledRange(trained.maxStrafe, 3),
       format: (v) => v.toFixed(3),
+    },
+    {
+      key: "steeringStrength",
+      label: "Steering strength",
+      min: 0,
+      max: 1,
+      step: 0.01,
+      format: (v) => v.toFixed(2),
     },
     {
       key: "friction",

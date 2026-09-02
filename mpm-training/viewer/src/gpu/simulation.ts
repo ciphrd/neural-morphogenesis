@@ -127,6 +127,10 @@ export class GpuSimulation {
   private pendingTargetVisible = true;
   private neuralUpdatesPerMacro = 1;
   private growthDuration = 0;
+  // Low rates still retire particles predictably: fractional expected deaths
+  // carry across macro steps until they add up to one whole particle.
+  private deathRate = 0;
+  private deathAccumulator = 0;
   private scenario: SimulationScenario | null = null;
   // The canvas's own backing-store size in DEVICE pixels, as last
   // reported by GridCanvas's own applySquareSize()/ResizeObserver.
@@ -278,6 +282,7 @@ export class GpuSimulation {
       chemicalCommunicationArchitecture: chemicalCommunicationArchitectureFromConfig(config),
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
+      steeringStrength: config.steeringStrength ?? 0,
       maxEnvWrite: config.maxEnvWrite,
       maxAngularAccel: config.maxAngularAccel,
       angularDamping: config.angularDamping,
@@ -403,6 +408,7 @@ export class GpuSimulation {
     // for why they're safe to derive from the identical raw seed
     // without correlating) — see Agents.resetHeading()'s own docstring.
     this.agents.resetHeading(this.config.seed, scene.positions);
+    this.deathAccumulator = 0;
     this._currentStep = 0;
   }
 
@@ -443,6 +449,17 @@ export class GpuSimulation {
     const growthCompressionFeedback = Math.max(
       0, Math.min(1, physics.growthCompressionFeedback ?? 1.0),
     );
+    const growthDrive = Math.max(0, Math.min(1, physics.growthDrive ?? 0.5));
+    // 0 pauses even already-active morphoelastic cycles; 0.5 preserves the
+    // configured rate. Values above the midpoint keep the native mechanical
+    // rate while progressively bypassing compression feedback, matching the
+    // admission-side override in agents.wgsl.
+    const nativeGrowthWeight = Math.min(1, growthDrive * 2);
+    const drivenGrowthDuration = nativeGrowthWeight > 0
+      ? physics.growthDuration / nativeGrowthWeight
+      : 0;
+    const forcedGrowthBias = Math.max(0, (growthDrive - 0.5) * 2);
+    const drivenCompressionFeedback = growthCompressionFeedback * (1 - forcedGrowthBias);
     this.mpmCore.setMaterial(
       physics.materialE,
       physics.materialNu,
@@ -450,7 +467,7 @@ export class GpuSimulation {
       physics.materialElasticity,
       // Controller ticks per uncompressed area doubling. MpmCore derives
       // the shader's internal per-substep rate from this and the run cadence.
-      physics.growthDuration,
+      drivenGrowthDuration,
       physics.growthMax ?? 2.0,
       physics.growthAnisotropy ?? 1.0,
       this.config.substepsPerMacro,
@@ -458,10 +475,12 @@ export class GpuSimulation {
       physics.particleVolume,
       growthCompressionStart,
       growthCompressionStop,
-      growthCompressionFeedback,
+      drivenCompressionFeedback,
       physics.materialFluidity,
     );
     this.growthDuration = physics.growthDuration;
+    this.deathRate = Math.max(0, Math.min(1, physics.deathRate ?? 0));
+    if (this.deathRate === 0) this.deathAccumulator = 0;
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
     this.mpmCore.setSplatRadius(physics.splatRadius);
     this.mpmCore.setMorphology(
@@ -479,16 +498,18 @@ export class GpuSimulation {
     this.agents.setCommunicationTimestep(communicationDt);
     this.agents.setInternalStateSpeed(physics.internalStateSpeed ?? 1.0);
     this.agents.setDivisionDirectionality(physics.divisionDirectionality ?? 1.0);
+    this.agents.setGrowthDrive(growthDrive);
     this.agents.setChemicalGradientInputScale(physics.chemicalGradientInputScale);
     this.agents.setChemicalProjectionWeight(physics.chemicalProjectionWeight);
     this.agents.setBoundaryTangentMinGradient(physics.boundaryTangentMinGradient);
     this.agents.setGrowthCompressionFeedback(
       growthCompressionStart,
       growthCompressionStop,
-      growthCompressionFeedback,
+      drivenCompressionFeedback,
     );
     this.agents.setPhysics({
       maxAccel: physics.maxAccel,
+      steeringStrength: physics.steeringStrength ?? 0,
       maxStrafe: physics.maxStrafe,
       maxEnvWrite: physics.maxEnvWrite,
       maxAngularAccel: physics.maxAngularAccel,
@@ -516,6 +537,33 @@ export class GpuSimulation {
     this.applyPhysics(physics);
   }
 
+  /** Retires tail slots and returns the number of same-frame replacement
+   * divisions to force. The temporary growth ceiling is the pre-death count,
+   * so natural and forced divisions together can refill, but never exceed,
+   * the population that entered this macro step. */
+  private applyDeaths(): number {
+    if (!this.mpmCore || !this.agents || this.deathRate <= 0) return 0;
+    const availableToRetire = Math.max(0, this.mpmCore.activeCount - 1);
+    if (availableToRetire === 0) {
+      this.deathAccumulator = 0;
+      return 0;
+    }
+    this.deathAccumulator += this.mpmCore.activeCount * this.deathRate;
+    // One surviving invocation can create one replacement in this pass.
+    // Capping turnover at half guarantees there are enough parents; any
+    // fractional remainder stays queued for a later macro step.
+    const maxReplaceable = Math.floor(this.mpmCore.activeCount / 2);
+    const deaths = Math.min(availableToRetire, maxReplaceable, Math.floor(this.deathAccumulator));
+    if (deaths === 0) return 0;
+    this.deathAccumulator -= deaths;
+    const populationBeforeDeaths = this.mpmCore.activeCount;
+    const survivors = populationBeforeDeaths - deaths;
+    this.agents.setMaxActiveParticles(populationBeforeDeaths);
+    this.mpmCore.setActiveCount(survivors);
+    this.agents.setActiveCount(survivors);
+    return deaths;
+  }
+
   /** Playback-only live growth cap. Lowering it below the current count
    * restarts the rollout instead of deleting already-materialized mass. */
   setParticleCap(maxParticles: number): void {
@@ -538,6 +586,30 @@ export class GpuSimulation {
     if (this.pendingInitialParticleCount === count) return;
     this.pendingInitialParticleCount = count;
     if (this.mpmCore) this.restartRollout();
+  }
+
+  /** Randomly retires a fraction of the live population. Agents compacts
+   * randomly-selected victim holes with complete tail-agent copies before
+   * this lowers the live prefix, so the newest agents are preserved rather
+   * than being systematically discarded. Unlike deathRate this does not
+   * issue replacement splits; vacated slots remain available to growth. */
+  killFraction(fraction: number): number {
+    if (!this.mpmCore || !this.agents) return 0;
+    const activeCount = this.mpmCore.activeCount;
+    if (activeCount <= 1) return 0;
+    const clampedFraction = Math.max(0, Math.min(1, fraction));
+    const killed = Math.min(
+      activeCount - 1,
+      Math.max(1, Math.floor(activeCount * clampedFraction)),
+    );
+    const survivors = activeCount - killed;
+    // Invalidate an async step that may currently be awaiting growth-count
+    // readback, preventing it from restoring the pre-kill population.
+    this.epoch++;
+    this.agents.compactRandomCull(activeCount, killed);
+    this.mpmCore.setActiveCount(survivors);
+    this.agents.setActiveCount(survivors);
+    return killed;
   }
 
   /** `points`: flat [x0,y0,x1,y1,...] in MpmCore's own [0,1]^2 domain.
@@ -574,6 +646,10 @@ export class GpuSimulation {
    * for the exact restart-vs-in-flight-step race this prevents. */
   async step(): Promise<void> {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
+    const deathReplacements = this.applyDeaths();
+    const populationCeiling = deathReplacements > 0
+      ? this.mpmCore.activeCount + deathReplacements
+      : this.particleCap;
     const stepEpoch = this.epoch;
     const nextStep = this._currentStep + 1;
     const forcedLifecycle = this.scenario?.events.find((event) => {
@@ -588,6 +664,7 @@ export class GpuSimulation {
       forcedLifecycle?.direction ?? null,
       nextStep === admissionStep,
       forcedLifecycle?.particleCount ?? 1,
+      deathReplacements,
     );
     this.agents.setGrowthEnabled(
       !this.scenario?.suppressNaturalGrowth && this.growthIsEnabled(),
@@ -619,7 +696,9 @@ export class GpuSimulation {
     // slot past that either way. A plain != check below, not
     // unconditional writes, so a macro step where nothing actually split
     // costs one 4-byte readback and nothing else.
-    const grown = Math.min(await this.agents.readGrownCount(), this.particleCap);
+    const grown = Math.min(await this.agents.readGrownCount(), populationCeiling);
+    // Death replacement only narrows the cap for this one policy pass.
+    this.agents.setMaxActiveParticles(this.particleCap);
     if (this.epoch !== stepEpoch) return;
     if (!this.mpmCore || !this.agents || !this.config) return;
     if (grown !== this.mpmCore.activeCount) {
@@ -817,18 +896,14 @@ export class GpuSimulation {
   }
 
   /** Replaces the live update rule with a fresh random init (see
-   * Agents.randomizeWeights()'s own docstring) and restarts the rollout —
-   * without the restart, whatever's already grown stays governed by the
-   * OLD weights forever (a rollout only ever consults the update rule at
-   * the moment a particle senses/acts, not retroactively), so the new
-   * policy would only visibly affect brand-new growth from here, which
-   * reads as broken rather than "randomized." Silently does nothing
-   * before the first rebuild(), same stance every other tool method here
-   * takes. */
-  randomizeWeights(): UpdateRuleWeights | null {
+   * Agents.randomizeWeights()'s own docstring). Existing callers retain the
+   * historical restart behavior by default; performance controls can opt out
+   * to swap brains during the current rollout. Silently does nothing before
+   * the first rebuild(), same stance every other tool method here takes. */
+  randomizeWeights(restart = true): UpdateRuleWeights | null {
     if (!this.agents) return null;
     const weights = this.agents.randomizeWeights();
-    this.restartRollout();
+    if (restart) this.restartRollout();
     return weights;
   }
 

@@ -190,7 +190,9 @@ const SPATIAL_RANDOM_CELLS: u32 = __SPATIAL_RANDOM_CELLS__u;
 @group(0) @binding(5) var<storage, read_write> depositScratch: array<atomic<i32>>;
 
 struct AgentPhysics {
-  maxAccel: f32,
+  // Viewer-only steering scale. Occupies the legacy maxAccel slot, which no
+  // current policy path consumes; this preserves the shared 112-byte ABI.
+  steeringStrength: f32,
   maxStrafe: f32,
   maxEnvWrite: f32,
   maxAngularAccel: f32,
@@ -259,10 +261,12 @@ struct AgentPhysics {
   // Below this morphology-gradient magnitude, the boundary tangent is treated
   // as undefined and division falls back to the network growth direction.
   boundaryTangentMinGradient: f32,
-  // Lab-only lifecycle control. 0xffffffff disables it. Admission latches a
-  // normal cycle once; the index/direction can remain active afterward to
-  // keep the morphoelastic growth and eventual division axis deterministic.
-  // A zero direction selects the local morphology-boundary tangent instead.
+  // Lifecycle control. 0xffffffff disables the Lab-controlled range.
+  // forcedCycleAdmission bit 0 latches a normal Lab cycle once; viewer
+  // playback packs its same-frame death-replacement count into the remaining
+  // bits. The index/direction can remain active afterward to keep Lab growth
+  // and division deterministic. A zero direction selects the local
+  // morphology-boundary tangent instead.
   forcedLifecycleIndex: u32,
   forcedCycleAdmission: u32,
   forcedDivisionDirection: vec2<f32>,
@@ -410,7 +414,11 @@ struct StepMode {
   // Global cap on the policy's polarized daughter placement. 0 restores
   // center-preserving symmetric division; 1 grants full policy authority.
   divisionDirectionality: f32,
-  _padding0: f32,
+  // Viewer master control for the neural growth probability: 0 blocks new
+  // cycles, 0.5 preserves the native signal, and 1 forces every eligible
+  // particle to enter a cycle. Stored in an existing padding lane so the
+  // shared 32-byte uniform ABI remains unchanged.
+  growthDrive: f32,
   _padding1: f32,
   _padding2: f32,
 }
@@ -723,6 +731,7 @@ struct PolicyOutput {
   anisotropyTarget: f32,
   divisionBias: f32,
   growthTargetLocal: vec2<f32>,
+  steeringLocal: vec2<f32>,
   color: vec3<f32>,
   stateDelta: array<f32, PRIVATE_STATE_DIM>,
   stateGate: array<f32, PRIVATE_STATE_DIM>,
@@ -790,6 +799,11 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
     safeTanh(outVec[ENV_WRITE_DIM + 4u]), safeTanh(outVec[ENV_WRITE_DIM + 5u])
   );
   __POLICY_TAIL_DECODE__
+  // Steering is deliberately appended after the architecture-specific tail,
+  // keeping every historical output row at its original index.
+  out.steeringLocal = vec2<f32>(
+    safeTanh(outVec[OUT_DIM - 2u]), safeTanh(outVec[OUT_DIM - 1u])
+  );
   return out;
 }
 
@@ -893,6 +907,10 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       (result.growthTargetLocal.x + mirrored.growthTargetLocal.x) * 0.5,
       (result.growthTargetLocal.y - mirrored.growthTargetLocal.y) * 0.5
     );
+    result.steeringLocal = vec2<f32>(
+      (result.steeringLocal.x + mirrored.steeringLocal.x) * 0.5,
+      (result.steeringLocal.y - mirrored.steeringLocal.y) * 0.5
+    );
     result.color = (result.color + mirrored.color) * 0.5;
     for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
       result.stateDelta[s] = (result.stateDelta[s] + mirrored.stateDelta[s]) * 0.5;
@@ -977,6 +995,12 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   particleRest[pi].divisionBias = result.divisionBias;
   particleRest[pi].growthFrameHeading = headingVal;
 
+  // Bit 0 remains Lab cycle admission. Viewer playback packs the number of
+  // same-frame death replacements into the upper bits without changing the
+  // shared AgentPhysics layout used by existing sessions.
+  let forcedCycleAdmission = (physics.forcedCycleAdmission & 1u) != 0u;
+  let deathReplacementCount = physics.forcedCycleAdmission >> 1u;
+  let deathReplacementSplit = pi < deathReplacementCount;
   let forcedLifecycle = pi >= physics.forcedLifecycleIndex
     && pi <= physics.forcedLifecycleEndIndex;
   let forcedBoundaryTangent = forcedLifecycle
@@ -1017,7 +1041,12 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // during this macro step's own physics substeps (see
   // training_sim.py's/simulation.ts's own step ordering: agentStep()
   // always runs before those substeps).
-  velocities[pi] = (velocities[pi] + growthDirectionWorld * physics.maxStrafe) * physics.friction;
+  let steeringWorld = forward * result.steeringLocal.x + lateral * result.steeringLocal.y;
+  velocities[pi] = (
+    velocities[pi]
+    + growthDirectionWorld * physics.maxStrafe
+    + steeringWorld * clamp(physics.steeringStrength, 0.0, 1.0)
+  ) * physics.friction;
 
   // Grow-then-divide cell cycle. The last substrate channel supplies a
   // bounded per-macro-step growth probability. Convert it to cumulative
@@ -1027,8 +1056,22 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // replaced by two baseline daughters.
   // Lifecycle semantics remain in raw substrate units. Input normalization is
   // exclusively a neural-sensing transform and must not accelerate division.
-  let splitProb = clamp(rawGrowthSignal, 0.0, 1.0);
+  let nativeSplitProb = clamp(rawGrowthSignal, 0.0, 1.0);
+  let growthDrive = clamp(stepMode.growthDrive, 0.0, 1.0);
+  let forcedGrowthBias = clamp((growthDrive - 0.5) * 2.0, 0.0, 1.0);
+  // The midpoint is transparent. The lower half scales the native signal
+  // toward zero; the upper half fills its remaining headroom toward one.
+  // This keeps the policy's spatial/temporal structure at ordinary values
+  // while guaranteeing the two useful performance endpoints.
+  var splitProb = nativeSplitProb * growthDrive * 2.0;
+  if (growthDrive > 0.5) {
+    splitProb = mix(nativeSplitProb, 1.0, forcedGrowthBias);
+  }
   let mechanicalGate = mechanicalGrowthGate(particleF[pi], particleRest[pi].growthF);
+  // Above the native midpoint, the super-parameter progressively overrides
+  // contact inhibition too. At 1, every otherwise eligible particle is
+  // admitted even under compression.
+  let drivenMechanicalGate = mix(mechanicalGate, 1.0, forcedGrowthBias);
   // Division cooldown — counted down every step regardless of whether
   // the division clock would otherwise cross (so it's a clean
   // macro-step countdown, independent of the stochastic threshold),
@@ -1058,7 +1101,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     cooldownNow <= 0.0;
   if (
     forcedLifecycle &&
-    physics.forcedCycleAdmission != 0u &&
+    forcedCycleAdmission &&
     activeCount < physics.maxActiveParticles &&
     particleRest[pi].cycleActive < 0.5 &&
     cooldownNow <= 0.0
@@ -1085,7 +1128,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       hazardIncrement = agentState.particleMeta[pi].divisionThreshold + 1.0;
     }
     agentState.particleMeta[pi].divisionHazard =
-      agentState.particleMeta[pi].divisionHazard + hazardIncrement * mechanicalGate;
+      agentState.particleMeta[pi].divisionHazard + hazardIncrement * drivenMechanicalGate;
     if (agentState.particleMeta[pi].divisionHazard >= agentState.particleMeta[pi].divisionThreshold) {
       particleRest[pi].cycleActive = 1.0;
       agentState.particleMeta[pi].divisionHazard = 0.0;
@@ -1096,9 +1139,12 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   let divisionTarget = 2.0;
   if (
     activeCount < physics.maxActiveParticles &&
-    particleRest[pi].cycleActive > 0.5 &&
-    mechanicalGate > 1e-4 &&
-    matDet(particleRest[pi].growthF) >= divisionTarget * 0.9999
+    (deathReplacementSplit || (
+      growthDrive > 0.0 &&
+      particleRest[pi].cycleActive > 0.5 &&
+      drivenMechanicalGate > 1e-4 &&
+      matDet(particleRest[pi].growthF) >= divisionTarget * 0.9999
+    ))
   ) {
     // atomicAdd returns the OLD value — the slot THIS particle just
     // claimed. Never gated before the add (that would need a compare-

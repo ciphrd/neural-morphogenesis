@@ -26,7 +26,7 @@ export function interpolateSnapshot(
   const physics = from.physics && to.physics
     ? interpolateNumericObject<PhysicsSettings>(from.physics, to.physics, clamped)
     : (clamped < 1 ? from.physics : to.physics)
-  return {
+  const next: PerformanceSnapshot = {
     ...(clamped < 1 ? from : to),
     physics,
     noiseDisplacementStrength: lerp(
@@ -40,4 +40,20 @@ export function interpolateSnapshot(
       clamped,
     ),
   }
+
+  if (from.render.autoZoom && to.render.autoZoom) {
+    next.render.autoZoom = interpolateNumericObject(
+      from.render.autoZoom,
+      to.render.autoZoom,
+      clamped,
+    )
+  }
+  if (from.render.bloom && to.render.bloom) {
+    next.render.bloom = interpolateNumericObject(
+      from.render.bloom,
+      to.render.bloom,
+      clamped,
+    )
+  }
+  return next
 }

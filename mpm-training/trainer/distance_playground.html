@@ -188,8 +188,8 @@ const outsideWeightValue = document.getElementById("outsideWeightValue");
 const particleCountEl = document.getElementById("particleCount");
 const showAlignedInput = document.getElementById("showAligned");
 
-// Domain [0,1]^2, y-up (MpmCore's own convention — gravity pulls toward
-// y=0) <-> canvas pixels, y-down. Mirrors mpm-training/viewer's own
+// Domain [0,1]^2, y-up (MpmCore's own convention) <-> canvas pixels,
+// y-down. Mirrors mpm-training/viewer's own
 // render/GridCanvas.tsx domainPos() flip, same reasoning.
 function domainToCanvas(x, y) {
   return [x * SIZE, (1 - y) * SIZE];

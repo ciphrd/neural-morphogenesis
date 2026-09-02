@@ -123,21 +123,12 @@ def check_no_gravity_drift(device: wgpu.GPUDevice) -> bool:
     return ok
 
 
-# --- Check 3: settling under gravity ------------------------------------
+# --- Check 3: settling under center gravity -----------------------------
 
 
 def check_settle(device: wgpu.GPUDevice) -> bool:
-    # KNOWN, EXPECTED TO NOW FAIL: this check's whole premise (a blob
-    # falling under gravity settles onto a floor and stays put) no
-    # longer holds — core/gridUpdate.wgsl's own domain is toroidal now,
-    # there is no floor, so a blob under nonzero gravity just falls
-    # forever, wrapping through the bottom edge and reappearing at the
-    # top on an endless cycle. `decreased`/`settled` below will very
-    # likely both fail at gravity=200.0 (mean_y cycles rather than
-    # settling) — left as-is rather than silently redesigned, since what
-    # this check *should* verify in a toroidal world (gravity=0 instead?
-    # a wraparound-specific scenario entirely?) is a real design decision,
-    # not one to make unilaterally while porting the physics itself.
+    # Start above center and verify the radial gravity field draws the blob
+    # inward, then remains bounded rather than drifting around the torus.
     core = MpmCore(device)
     core.set_gravity(200.0)
     core.set_material(MATERIAL_E, MATERIAL_NU, MATERIAL_HARDENING, elasticity=0.0)
@@ -154,7 +145,7 @@ def check_settle(device: wgpu.GPUDevice) -> bool:
     batch = SUBSTEPS_PER_DAMPING_FRAME * 25  # 200 substeps/batch at SUBSTEPS_PER_DAMPING_FRAME=8
     batches = total_substeps // batch
 
-    mean_ys: list[float] = []
+    mean_radii: list[float] = []
     positions_by_batch: list[np.ndarray] = []
     all_finite = True
     all_in_bounds = True
@@ -167,14 +158,14 @@ def check_settle(device: wgpu.GPUDevice) -> bool:
         vel = core.read_velocities()
         all_finite = all_finite and bool(np.isfinite(pos).all()) and bool(np.isfinite(vel).all())
         all_in_bounds = all_in_bounds and bool(np.all((pos >= min_pos - 1e-6) & (pos <= max_pos + 1e-6)))
-        mean_y = float(np.mean(pos[:, 1]))
-        mean_ys.append(mean_y)
+        mean_radius = float(np.mean(np.linalg.norm(pos - 0.5, axis=1)))
+        mean_radii.append(mean_radius)
         positions_by_batch.append(pos)
         if i % 4 == 0 or i == batches - 1:
-            print(f"    step {(i + 1) * batch:5d}  mean_y={mean_y:.4f}  mean_speed={float(np.mean(np.linalg.norm(vel, axis=1))):.5f}")
+            print(f"    step {(i + 1) * batch:5d}  mean_radius={mean_radius:.4f}  mean_speed={float(np.mean(np.linalg.norm(vel, axis=1))):.5f}")
 
     # NOTE on the criterion below: raw velocity magnitude does NOT settle
-    # to near-zero here even once the blob has visibly stopped falling —
+    # to near-zero here even once the blob is visibly center-bounded —
     # confirmed by direct investigation (see mpm_core.py's own repulsion
     # comment): repulsion.wgsl's direct-position-write push has no decay
     # mechanism, so it keeps nudging already-settled particles back and
@@ -185,21 +176,21 @@ def check_settle(device: wgpu.GPUDevice) -> bool:
     # a trailing window — checked directly below — not an absolute
     # low-velocity threshold, which would be the wrong signal here and
     # was confirmed to be by testing (an earlier version of this check
-    # used speed < 0.01 and failed despite mean_y being flat to
+    # used speed < 0.01 and failed despite position being flat to
     # within 0.002 over the same window).
     tail_disp = np.linalg.norm(positions_by_batch[-1] - positions_by_batch[-5], axis=1)
     mean_tail_disp = float(np.mean(tail_disp))
     max_speed = float(np.max(np.linalg.norm(core.read_velocities(), axis=1)))
 
-    decreased = mean_ys[-1] < mean_ys[0]
+    decreased = mean_radii[-1] < mean_radii[0]
     settled = mean_tail_disp < 0.02  # over the last 4 batches (800 substeps)
     not_exploding = max_speed < 20.0  # loose sanity bound, not a "calm" threshold — see note above
 
     ok = all_finite and all_in_bounds and decreased and settled and not_exploding
     record(
-        "settle_under_gravity",
+        "settle_under_center_gravity",
         ok,
-        f"finite={all_finite} in_bounds={all_in_bounds} y_decreased={decreased} "
+        f"finite={all_finite} in_bounds={all_in_bounds} radius_decreased={decreased} "
         f"mean_tail_displacement={mean_tail_disp:.5f} (threshold 0.02) max_speed={max_speed:.3f} (sanity bound 20.0)",
     )
     return ok

@@ -1,4 +1,5 @@
 import type { FieldMode, ParticleRenderMode } from "./gpu/render"
+import type { PhysicsSettings } from "./gpu/types"
 import type { DeformSettings, Tool } from "./render/GridCanvas"
 
 interface ViewerDefaults {
@@ -11,6 +12,8 @@ interface ViewerDefaults {
     initialParticleCount: number | null
     /** null follows the density stored in the selected training run. */
     particleDensityMultiplier: number | null
+    /** Values that replace the selected run's physics settings in playback. */
+    physicsOverrides: Partial<PhysicsSettings>
   }
   rendering: {
     fieldMode: FieldMode
@@ -75,6 +78,12 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
     particleCap: 170_000,
     initialParticleCount: 100,
     particleDensityMultiplier: 2,
+    physicsOverrides: {
+      communicationSpeed: 3,
+      internalStateSpeed: 3,
+      neuralUpdatesPerMacro: 1,
+      steeringStrength: 0,
+    },
   },
   rendering: {
     fieldMode: "none",
@@ -125,4 +134,12 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
   lab: {
     scenario: "boundary-tangent",
   },
+}
+
+/** Applies viewer-only playback defaults without changing serialized runs or
+ * backend/training settings. The merged result is the UI reset baseline. */
+export function applyViewerPhysicsOverrides(
+  physics: PhysicsSettings,
+): PhysicsSettings {
+  return { ...physics, ...VIEWER_DEFAULTS.playback.physicsOverrides }
 }

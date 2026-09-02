@@ -19,6 +19,25 @@ body {
   background: #000000;
 }
 
+:root {
+  --button-bg: #151515;
+  --button-bg-hover: #242424;
+  --button-border: #303030;
+  --button-border-hover: #5aa7ff;
+  --button-text: #b8b8b8;
+  --button-text-hover: #ffffff;
+}
+
+button {
+  transition: background-color 100ms ease, border-color 100ms ease,
+    color 100ms ease, transform 100ms ease;
+}
+
+button:focus-visible {
+  outline: 2px solid #5aa7ff;
+  outline-offset: 2px;
+}
+
 .app-shell {
   height: 100%;
   display: flex;
@@ -49,7 +68,10 @@ body {
   cursor: pointer;
 }
 
-.app-nav button:hover { color: #e8e8e8; }
+.app-nav button:hover {
+  background: #1b1b1b;
+  color: #ffffff;
+}
 .app-nav button.is-active { color: #e8e8e8; border-bottom-color: #3987e5; }
 .app-view { flex: 1; min-height: 0; }
 
@@ -120,12 +142,28 @@ body {
 .select {
   flex: 1;
   padding: 4px 8px;
-  border: 1px solid #2a2a2a;
-  border-radius: 6px;
-  background: #1a1a1a;
-  color: #e8e8e8;
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  color: var(--button-text);
   font-size: 13px;
   cursor: pointer;
+}
+
+button.select:hover:not(:disabled) {
+  border-color: var(--button-border-hover);
+  background: var(--button-bg-hover);
+  color: var(--button-text-hover);
+  transform: translateY(-1px);
+}
+
+button.select:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+button.select:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .number-input {
@@ -819,16 +857,19 @@ body {
 
 .fitness-chart-live-button {
   padding: 4px 10px;
-  border: 1px solid #2a2a2a;
-  border-radius: 6px;
-  background: #1a1a1a;
-  color: #e8e8e8;
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  color: var(--button-text);
   font-size: 12px;
   cursor: pointer;
 }
 
 .fitness-chart-live-button:hover {
-  filter: brightness(1.3);
+  border-color: var(--button-border-hover);
+  background: var(--button-bg-hover);
+  color: var(--button-text-hover);
+  transform: translateY(-1px);
 }
 
 /* Only RunPicker's own "Run: …" dropdown toggle uses this now —
@@ -837,16 +878,19 @@ body {
 .playback-button {
   flex: 1;
   padding: 6px 10px;
-  border: 1px solid #2a2a2a;
-  border-radius: 6px;
-  background: #1a1a1a;
-  color: #e8e8e8;
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  color: var(--button-text);
   font-size: 13px;
   cursor: pointer;
 }
 
-.playback-button:hover {
-  filter: brightness(1.3);
+.playback-button:hover:not(:disabled) {
+  border-color: var(--button-border-hover);
+  background: var(--button-bg-hover);
+  color: var(--button-text-hover);
+  transform: translateY(-1px);
 }
 
 .playback-button:disabled {
@@ -1133,7 +1177,7 @@ body {
   padding: 6px;
   margin-top: 0;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: 4px;
   background: transparent;
   color: #e8e8e8;
   text-align: left;
@@ -1145,7 +1189,10 @@ body {
 }
 
 .run-picker-item:hover {
-  background: #1a1a1a;
+  border-color: var(--button-border-hover);
+  background: var(--button-bg-hover);
+  color: var(--button-text-hover);
+  transform: translateY(-1px);
 }
 
 .run-picker-item.is-active {
@@ -1215,6 +1262,11 @@ body {
   border: none;
   background: transparent;
   cursor: pointer;
+}
+
+.physics-panel-toggle:hover h2,
+.physics-panel-toggle:hover .physics-panel-chevron {
+  color: #ffffff;
 }
 
 .physics-panel-toggle h2 {
@@ -1321,6 +1373,40 @@ body {
   background: #131313;
 }
 
+.audio-mapping-top-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.audio-mapping-enable {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #d4d4d4;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.audio-mapping-enable input { margin: 0; }
+
+.audio-mapping.is-disabled {
+  border-color: #242424;
+}
+
+.audio-mapping.is-disabled .audio-mapping-top-row .select,
+.audio-mapping.is-disabled .audio-range {
+  opacity: 0.45;
+}
+
+.audio-mapping.is-disabled .audio-mapping-enable {
+  color: #777;
+}
+
 .audio-range {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
@@ -1366,6 +1452,18 @@ body {
   gap: 10px;
 }
 
+.performance-rendering-panel {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid #292b2d;
+}
+
+.performance-rendering-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .performance-actions {
   display: grid;
   grid-template-columns: 1.4fr 1fr 1fr;
@@ -1382,6 +1480,55 @@ body {
   border-color: #ef4444;
   background: #3a1111;
   color: #fecaca;
+}
+
+
+.performance-blackout.is-active:hover:not(:disabled) {
+  border-color: #f87171;
+  background: #4b1515;
+  color: #ffffff;
+}
+
+.performance-kill:hover:not(:disabled) {
+  border-color: #f87171;
+  background: #351818;
+  color: #fecaca;
+}
+
+.performance-auto-prune.is-active {
+  border-color: #d97706;
+  background: #35230f;
+  color: #fde68a;
+}
+
+.performance-auto-prune:hover:not(:disabled) {
+  border-color: #f59e0b;
+  background: #402914;
+  color: #fef3c7;
+}
+
+.performance-auto-randomize.is-active {
+  border-color: #6366f1;
+  background: #202044;
+  color: #c7d2fe;
+}
+
+.performance-auto-randomize:hover:not(:disabled) {
+  border-color: #818cf8;
+  background: #292956;
+  color: #e0e7ff;
+}
+
+.performance-auto-reset.is-active {
+  border-color: #0d9488;
+  background: #123633;
+  color: #99f6e4;
+}
+
+.performance-auto-reset:hover:not(:disabled) {
+  border-color: #14b8a6;
+  background: #17443f;
+  color: #ccfbf1;
 }
 
 .performance-telemetry {
@@ -1416,17 +1563,22 @@ body {
   gap: 8px;
   min-width: 0;
   padding: 6px 8px;
-  border: 1px solid #2a2a2a;
-  border-radius: 6px;
-  background: #171717;
-  color: #d4d4d4;
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  color: var(--button-text);
   font: inherit;
   font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
 
-.performance-scene > button:first-child:hover { border-color: #3987e5; }
+.performance-scene > button:first-child:hover {
+  border-color: var(--button-border-hover);
+  background: var(--button-bg-hover);
+  color: var(--button-text-hover);
+  transform: translateY(-1px);
+}
 
 .performance-scene > button:first-child span {
   display: inline-flex;
@@ -1526,10 +1678,10 @@ body {
   flex: 1;
   padding: 6px 8px;
   overflow: hidden;
-  border: 1px solid #292b2d;
-  border-radius: 5px;
-  background: #151617;
-  color: #c5c7c8;
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  color: var(--button-text);
   font: inherit;
   font-size: 11px;
   text-align: left;
@@ -1538,7 +1690,12 @@ body {
   cursor: pointer;
 }
 
-.simulation-preset > button:first-child:hover { border-color: #4a5256; }
+.simulation-preset > button:first-child:hover {
+  border-color: var(--button-border-hover);
+  background: var(--button-bg-hover);
+  color: var(--button-text-hover);
+  transform: translateY(-1px);
+}
 
 .performance-mode-header {
   width: min(1400px, 100%);
@@ -1710,18 +1867,20 @@ body {
   height: 26px;
   flex-shrink: 0;
   padding: 0;
-  border: 1px solid #2a2a2a;
-  border-radius: 6px;
-  background: #1a1a1a;
-  color: #9a9a9a;
+  border: 1px solid var(--button-border);
+  border-radius: 4px;
+  background: var(--button-bg);
+  color: var(--button-text);
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
 }
 
 .icon-button:hover:not(:disabled) {
-  color: #e8e8e8;
-  border-color: #3a3a3a;
+  color: var(--button-text-hover);
+  border-color: var(--button-border-hover);
+  background: var(--button-bg-hover);
+  transform: translateY(-1px);
 }
 
 .icon-button:disabled {

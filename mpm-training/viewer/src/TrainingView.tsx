@@ -23,16 +23,16 @@ import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
 import type { PerformanceSnapshot } from "./performance/types"
 import { pickRecordingFormat } from "./render/canvasRecorder"
-import { createSampleAtlas } from "./render/sampleAtlas"
 import type {
   DeformSettings,
   GridCanvasHandle,
   Tool,
 } from "./render/GridCanvas"
 import { GridCanvas } from "./render/GridCanvas"
+import { createSampleAtlas } from "./render/sampleAtlas"
 import { createZip, downloadBlob } from "./render/zip"
-import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
 import { AudioReactivityPanel } from "./ui/AudioReactivityPanel"
+import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
 import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
 import { PerformancePanel } from "./ui/PerformancePanel"
@@ -48,7 +48,7 @@ import {
   type SimulationPresetValue,
 } from "./ui/SimulationPresetPanel"
 import { Slider } from "./ui/Slider"
-import { VIEWER_DEFAULTS } from "./viewerConfig"
+import { applyViewerPhysicsOverrides, VIEWER_DEFAULTS } from "./viewerConfig"
 
 const TRAIN_API_URL = "http://localhost:8003"
 const TRAIN_WS_URL = "ws://localhost:8003/ws"
@@ -151,8 +151,9 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
   const [substrateChannelStart, setSubstrateChannelStart] = useState(
     VIEWER_DEFAULTS.rendering.substrateChannelStart
   )
-  const [morphologyGradientVisible, setMorphologyGradientVisible] =
-    useState(VIEWER_DEFAULTS.rendering.morphologyGradientVisible)
+  const [morphologyGradientVisible, setMorphologyGradientVisible] = useState(
+    VIEWER_DEFAULTS.rendering.morphologyGradientVisible
+  )
   const [morphologyDensityVisible, setMorphologyDensityVisible] = useState(
     VIEWER_DEFAULTS.rendering.morphologyDensityVisible
   )
@@ -179,18 +180,12 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
     VIEWER_DEFAULTS.rendering.boundaryGradientScale
   )
   const [zoom, setZoom] = useState(VIEWER_DEFAULTS.rendering.zoom)
-  const [autoZoomEnabled, setAutoZoomEnabled] = useState(
-    VIEWER_DEFAULTS.rendering.autoZoom.enabled
-  )
+  const [autoZoomSettings, setAutoZoomSettings] = useState(() => ({
+    ...VIEWER_DEFAULTS.rendering.autoZoom,
+  }))
+  const autoZoomEnabled = autoZoomSettings.enabled
   const [effectiveZoom, setEffectiveZoom] = useState(
     VIEWER_DEFAULTS.rendering.zoom
-  )
-  const autoZoomSettings = useMemo(
-    () => ({
-      ...VIEWER_DEFAULTS.rendering.autoZoom,
-      enabled: autoZoomEnabled,
-    }),
-    [autoZoomEnabled]
   )
   const [bloom, setBloom] = useState(() => ({
     ...VIEWER_DEFAULTS.rendering.bloom,
@@ -226,8 +221,10 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(
     VIEWER_DEFAULTS.rendering.internalStateChannelStart
   )
-  const [chemicalMemoryOpponentSubtraction, setChemicalMemoryOpponentSubtraction] =
-    useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
+  const [
+    chemicalMemoryOpponentSubtraction,
+    setChemicalMemoryOpponentSubtraction,
+  ] = useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
   const [growthAxisLengthPx, setGrowthAxisLengthPx] = useState(
     VIEWER_DEFAULTS.rendering.growthAxisLengthPx
   )
@@ -274,34 +271,31 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
     particleDensityOverride ?? defaultParticleDensity
   const effectiveChirality =
     chiralityOverride ?? activeConfig?.chirality ?? true
-  const playbackConfig = useMemo(
-    () => {
-      if (!activeConfig) return null
-      const densityResolved = configAtDensity(
-        {
-          ...activeConfig,
-          chemicalCommunicationArchitecture:
-            chemicalArchitectureOverride ??
-            chemicalCommunicationArchitectureFromConfig(activeConfig),
-          chirality: effectiveChirality,
-        },
-        effectiveParticleDensity
-      )
-      // Playback population is an explicit viewer control. Density currently
-      // changes numerical physics/chemistry only, never count or seed count.
-      return {
-        ...densityResolved,
-        particles: activeConfig.particles,
-        initialParticleCount: activeConfig.initialParticleCount,
-      }
-    },
-    [
-      activeConfig,
-      chemicalArchitectureOverride,
-      effectiveChirality,
-      effectiveParticleDensity,
-    ]
-  )
+  const playbackConfig = useMemo(() => {
+    if (!activeConfig) return null
+    const densityResolved = configAtDensity(
+      {
+        ...activeConfig,
+        chemicalCommunicationArchitecture:
+          chemicalArchitectureOverride ??
+          chemicalCommunicationArchitectureFromConfig(activeConfig),
+        chirality: effectiveChirality,
+      },
+      effectiveParticleDensity
+    )
+    // Playback population is an explicit viewer control. Density currently
+    // changes numerical physics/chemistry only, never count or seed count.
+    return {
+      ...densityResolved,
+      particles: activeConfig.particles,
+      initialParticleCount: activeConfig.initialParticleCount,
+    }
+  }, [
+    activeConfig,
+    chemicalArchitectureOverride,
+    effectiveChirality,
+    effectiveParticleDensity,
+  ])
   useEffect(() => {
     const maxStart = Math.max(0, (activeConfig?.channels ?? 3) - 3)
     setSubstrateChannelStart((start) => Math.min(start, maxStart))
@@ -386,69 +380,97 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
     setPhysicsOverride(null)
   }, [viewingRunId, activeConfig?.generation])
   const trainedPhysics = useMemo(
-    () => playbackConfig ? physicsSettingsFromConfig(playbackConfig) : null,
+    () => playbackConfig
+      ? applyViewerPhysicsOverrides(physicsSettingsFromConfig(playbackConfig))
+      : null,
     [playbackConfig]
   )
   const physicsValues = physicsOverride ?? trainedPhysics
-  const [audioPhysics, setAudioPhysics] = useState<PhysicsSettings | null>(null)
-  const simulationPhysics = audioPhysics ?? physicsValues
+  const [audioPerformanceSnapshot, setAudioPerformanceSnapshot] =
+    useState<PerformanceSnapshot | null>(null)
   const [performanceBlackout, setPerformanceBlackout] = useState(false)
   const [noiseDisplacementStrength, setNoiseDisplacementStrength] = useState(0)
-  const performanceSnapshot = useMemo<PerformanceSnapshot>(() => ({
-    physics: simulationPhysics,
-    render: {
-      zoom,
-      particleRadiusPx,
-      particleRenderMode,
-      fieldMode,
-      substrateChannelStart,
+  const basePerformanceSnapshot = useMemo<PerformanceSnapshot>(
+    () => ({
+      physics: physicsValues,
+      render: {
+        zoom,
+        particleRadiusPx,
+        particleRenderMode,
+        fieldMode,
+        substrateChannelStart,
+        accent,
+        blur,
+        gradientExponent,
+        whiteDotsAlpha,
+        activationAlpha,
+        neuralColorAlpha,
+        internalStateAlpha,
+        internalStateChannelStart,
+        boundaryGradientScale,
+        chemicalMemoryOpponentSubtraction,
+        growthAxisLengthPx,
+        morphologyGradientVisible,
+        morphologyDensityVisible,
+        autoZoom: autoZoomSettings,
+        bloom,
+      },
+      particleCap: frontendParticleCap,
+      initialParticleCount: frontendInitialParticleCount,
+      noiseDisplacementStrength,
+      paused,
+      loopAtTrainedSteps,
+      blackout: performanceBlackout,
+    }),
+    [
       accent,
-      blur,
-      gradientExponent,
-      whiteDotsAlpha,
       activationAlpha,
-      neuralColorAlpha,
+      autoZoomSettings,
+      bloom,
+      blur,
+      boundaryGradientScale,
+      chemicalMemoryOpponentSubtraction,
+      fieldMode,
+      frontendInitialParticleCount,
+      frontendParticleCap,
+      gradientExponent,
+      growthAxisLengthPx,
       internalStateAlpha,
       internalStateChannelStart,
-      boundaryGradientScale,
-      growthAxisLengthPx,
-      morphologyGradientVisible,
+      loopAtTrainedSteps,
       morphologyDensityVisible,
-    },
-    particleCap: frontendParticleCap,
-    initialParticleCount: frontendInitialParticleCount,
-    noiseDisplacementStrength,
-    paused,
-    loopAtTrainedSteps,
-    blackout: performanceBlackout,
-  }), [
-    accent,
-    activationAlpha,
-    blur,
-    boundaryGradientScale,
-    fieldMode,
-    frontendInitialParticleCount,
-    frontendParticleCap,
-    gradientExponent,
-    growthAxisLengthPx,
-    internalStateAlpha,
-    internalStateChannelStart,
-    loopAtTrainedSteps,
-    morphologyDensityVisible,
-    morphologyGradientVisible,
-    neuralColorAlpha,
-    noiseDisplacementStrength,
-    particleRadiusPx,
-    particleRenderMode,
-    paused,
-    performanceBlackout,
-    simulationPhysics,
-    substrateChannelStart,
-    whiteDotsAlpha,
-    zoom,
-  ])
+      morphologyGradientVisible,
+      neuralColorAlpha,
+      noiseDisplacementStrength,
+      particleRadiusPx,
+      particleRenderMode,
+      paused,
+      performanceBlackout,
+      physicsValues,
+      substrateChannelStart,
+      whiteDotsAlpha,
+      zoom,
+    ]
+  )
+  const performanceSnapshot =
+    audioPerformanceSnapshot ?? basePerformanceSnapshot
+  const simulationPhysics = performanceMode
+    ? performanceSnapshot.physics
+    : physicsValues
+  useEffect(() => {
+    if (!performanceMode) setAudioPerformanceSnapshot(null)
+  }, [performanceMode])
   const applyPerformanceSnapshot = useCallback((next: PerformanceSnapshot) => {
-    setPhysicsOverride(next.physics)
+    setPhysicsOverride(
+      next.physics
+        ? {
+						...next.physics,
+						deathRate: next.physics.deathRate ?? 0,
+						steeringStrength: next.physics.steeringStrength ?? 0,
+            growthDrive: next.physics.growthDrive ?? 0.5,
+          }
+        : null
+    )
     setZoom(next.render.zoom)
     setParticleRadiusPx(next.render.particleRadiusPx)
     setParticleRenderMode(next.render.particleRenderMode)
@@ -463,9 +485,17 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
     setInternalStateAlpha(next.render.internalStateAlpha)
     setInternalStateChannelStart(next.render.internalStateChannelStart)
     setBoundaryGradientScale(next.render.boundaryGradientScale)
+    setChemicalMemoryOpponentSubtraction(
+      next.render.chemicalMemoryOpponentSubtraction ??
+        VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction
+    )
     setGrowthAxisLengthPx(next.render.growthAxisLengthPx)
     setMorphologyGradientVisible(next.render.morphologyGradientVisible)
     setMorphologyDensityVisible(next.render.morphologyDensityVisible)
+    if (next.render.autoZoom) {
+      setAutoZoomSettings(next.render.autoZoom)
+    }
+    if (next.render.bloom) setBloom(next.render.bloom)
     setFrontendParticleCap(next.particleCap)
     setFrontendInitialParticleCount(next.initialParticleCount)
     setFrontendInitialParticleCountInput(String(next.initialParticleCount))
@@ -484,7 +514,8 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
       particleDensityMultiplier: effectiveParticleDensity,
       chirality: effectiveChirality,
       chemicalArchitecture:
-        chemicalArchitectureOverride ?? chemicalCommunicationArchitectureFromConfig(activeConfig),
+        chemicalArchitectureOverride ??
+        chemicalCommunicationArchitectureFromConfig(activeConfig),
       policyExploration,
     }
   }, [
@@ -499,7 +530,12 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
     policyExploration,
   ])
   const applySimulationPreset = useCallback((preset: SimulationPresetValue) => {
-    setPhysicsOverride(preset.physics)
+    setPhysicsOverride({
+			...preset.physics,
+			deathRate: preset.physics.deathRate ?? 0,
+			steeringStrength: preset.physics.steeringStrength ?? 0,
+      growthDrive: preset.physics.growthDrive ?? 0.5,
+    })
     setFrontendParticleCap(preset.particleCap)
     setFrontendInitialParticleCount(preset.initialParticleCount)
     setFrontendInitialParticleCountInput(String(preset.initialParticleCount))
@@ -649,7 +685,9 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
         captures.push({
           filename: "atlas.png",
           blob: await createSampleAtlas({
-            images: captures.filter((capture) => capture.filename.endsWith(".png")),
+            images: captures.filter((capture) =>
+              capture.filename.endsWith(".png")
+            ),
             rows: secondAxis
               ? {
                   label: firstAxis.label,
@@ -694,11 +732,13 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                 className="select"
                 value={displayedCellMemory}
                 disabled={!activeConfig}
-                onChange={(event) => setPolicyExploration({
-                  cellMemory: event.target.value as CellMemory,
-                  hiddenWidth: displayedHiddenWidth,
-                  variant: 0,
-                })}
+                onChange={(event) =>
+                  setPolicyExploration({
+                    cellMemory: event.target.value as CellMemory,
+                    hiddenWidth: displayedHiddenWidth,
+                    variant: 0,
+                  })
+                }
               >
                 <option value="none">None</option>
                 <option value="recurrent">Recurrent</option>
@@ -710,14 +750,18 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                 className="select"
                 value={displayedHiddenWidth}
                 disabled={!activeConfig}
-                onChange={(event) => setPolicyExploration({
-                  cellMemory: displayedCellMemory,
-                  hiddenWidth: Number(event.target.value),
-                  variant: 0,
-                })}
+                onChange={(event) =>
+                  setPolicyExploration({
+                    cellMemory: displayedCellMemory,
+                    hiddenWidth: Number(event.target.value),
+                    variant: 0,
+                  })
+                }
               >
                 {[16, 32, 64, 128, 256].map((width) => (
-                  <option key={width} value={width}>{width}</option>
+                  <option key={width} value={width}>
+                    {width}
+                  </option>
                 ))}
               </select>
             </label>
@@ -725,11 +769,16 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
               <span>Chemistry</span>
               <select
                 className="select"
-                value={previewConfig?.chemicalCommunicationArchitecture ?? "cell-owned-projection"}
+                value={
+                  previewConfig?.chemicalCommunicationArchitecture ??
+                  "cell-owned-projection"
+                }
                 disabled={!activeConfig}
-                onChange={(event) => setChemicalArchitectureOverride(
-                  event.target.value as ChemicalCommunicationArchitecture
-                )}
+                onChange={(event) =>
+                  setChemicalArchitectureOverride(
+                    event.target.value as ChemicalCommunicationArchitecture
+                  )
+                }
               >
                 <option value="cell-owned-projection">Cell owned</option>
                 <option value="persistent-environment">Environment</option>
@@ -740,10 +789,21 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
             <h2>Playback</h2>
             <label className="slider-row">
               <span>Density</span>
-              <Slider min={0.5} max={2} step={0.5} value={effectiveParticleDensity} onChange={setParticleDensityOverride} />
-              <span className="slider-value">{effectiveParticleDensity.toFixed(1)}×</span>
+              <Slider
+                min={0.5}
+                max={2}
+                step={0.5}
+                value={effectiveParticleDensity}
+                onChange={setParticleDensityOverride}
+              />
+              <span className="slider-value">
+                {effectiveParticleDensity.toFixed(1)}×
+              </span>
             </label>
-            <label className="slider-row" title="Animated coherent simplex-noise displacement applied after each simulation step">
+            <label
+              className="slider-row"
+              title="Animated coherent simplex-noise displacement applied after each simulation step"
+            >
               <span>Noise displacement</span>
               <Slider
                 min={0}
@@ -752,7 +812,29 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                 value={noiseDisplacementStrength}
                 onChange={setNoiseDisplacementStrength}
               />
-              <span className="slider-value">{noiseDisplacementStrength.toFixed(2)}</span>
+              <span className="slider-value">
+                {noiseDisplacementStrength.toFixed(2)}
+              </span>
+            </label>
+            <label
+              className="slider-row"
+              title="Scales the neural network's signed forward/lateral steering impulse"
+            >
+              <span>Steering strength</span>
+              <Slider
+                min={0}
+                max={1}
+                step={0.01}
+                value={performanceSnapshot.physics?.steeringStrength ?? 0}
+                disabled={!physicsValues}
+                onChange={(steeringStrength) => {
+                  if (!physicsValues) return
+                  setPhysicsOverride({ ...physicsValues, steeringStrength })
+                }}
+              />
+              <span className="slider-value">
+                {(performanceSnapshot.physics?.steeringStrength ?? 0).toFixed(2)}
+              </span>
             </label>
             <label className="slider-row">
               <span>Particle cap</span>
@@ -784,17 +866,29 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                   setFrontendInitialParticleCountInput(event.target.value)
                   const count = Number(event.target.value)
                   if (Number.isFinite(count)) {
-                    setFrontendInitialParticleCount(Math.max(1, Math.min(frontendParticleCap, Math.floor(count))))
+                    setFrontendInitialParticleCount(
+                      Math.max(
+                        1,
+                        Math.min(frontendParticleCap, Math.floor(count))
+                      )
+                    )
                   }
                 }}
               />
             </label>
             <label className="checkbox-row">
-              <input type="checkbox" checked={effectiveChirality} onChange={(event) => setChiralityOverride(event.target.checked)} />
+              <input
+                type="checkbox"
+                checked={effectiveChirality}
+                onChange={(event) => setChiralityOverride(event.target.checked)}
+              />
               Chirality
             </label>
           </section>
-          <SimulationPresetPanel value={simulationPresetValue} onLoad={applySimulationPreset} />
+          <SimulationPresetPanel
+            value={simulationPresetValue}
+            onLoad={applySimulationPreset}
+          />
           {trainedPhysics && physicsValues && (
             <>
               <PhysicsPanel
@@ -815,12 +909,6 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
           )}
         </aside>
         <main className="performance-mode">
-          <header className="performance-mode-header">
-            <div>
-              <span className="performance-eyebrow">LIVE CONTROL</span>
-              <h1>Performance session</h1>
-            </div>
-          </header>
           <div className="performance-dashboard-grid">
             <div className="performance-dashboard-card performance-master-card">
               <PerformancePanel
@@ -828,13 +916,19 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                 snapshot={performanceSnapshot}
                 onApplySnapshot={applyPerformanceSnapshot}
                 onRestart={() => gridCanvasRef.current?.restart()}
+                onRandomize={(restart) =>
+                  gridCanvasRef.current?.randomizeWeights(restart)
+                }
+                onKillFraction={(fraction) =>
+                  gridCanvasRef.current?.killFraction(fraction)
+                }
               />
             </div>
             <div className="performance-dashboard-card performance-audio-card">
               {physicsValues ? (
                 <AudioReactivityPanel
-                  basePhysics={physicsValues}
-                  onOutputChange={setAudioPhysics}
+                  baseSnapshot={basePerformanceSnapshot}
+                  onOutputChange={setAudioPerformanceSnapshot}
                 />
               ) : (
                 <p className="hint">Waiting for simulation settings…</p>
@@ -1072,7 +1166,12 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
               <input
                 type="checkbox"
                 checked={autoZoomEnabled}
-                onChange={(event) => setAutoZoomEnabled(event.target.checked)}
+                onChange={(event) =>
+                  setAutoZoomSettings((value) => ({
+                    ...value,
+                    enabled: event.target.checked,
+                  }))
+                }
               />
               Auto
             </label>
@@ -1098,7 +1197,10 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                 type="checkbox"
                 checked={bloom.enabled}
                 onChange={(event) =>
-                  setBloom((value) => ({ ...value, enabled: event.target.checked }))
+                  setBloom((value) => ({
+                    ...value,
+                    enabled: event.target.checked,
+                  }))
                 }
               />
               Bloom
@@ -1112,9 +1214,13 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                     max={3}
                     step={0.05}
                     value={bloom.intensity}
-                    onChange={(intensity) => setBloom((value) => ({ ...value, intensity }))}
+                    onChange={(intensity) =>
+                      setBloom((value) => ({ ...value, intensity }))
+                    }
                   />
-                  <span className="slider-value">{bloom.intensity.toFixed(2)}</span>
+                  <span className="slider-value">
+                    {bloom.intensity.toFixed(2)}
+                  </span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom threshold</span>
@@ -1123,9 +1229,13 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                     max={1}
                     step={0.01}
                     value={bloom.threshold}
-                    onChange={(threshold) => setBloom((value) => ({ ...value, threshold }))}
+                    onChange={(threshold) =>
+                      setBloom((value) => ({ ...value, threshold }))
+                    }
                   />
-                  <span className="slider-value">{bloom.threshold.toFixed(2)}</span>
+                  <span className="slider-value">
+                    {bloom.threshold.toFixed(2)}
+                  </span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom radius</span>
@@ -1134,9 +1244,13 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                     max={8}
                     step={0.25}
                     value={bloom.radiusPx}
-                    onChange={(radiusPx) => setBloom((value) => ({ ...value, radiusPx }))}
+                    onChange={(radiusPx) =>
+                      setBloom((value) => ({ ...value, radiusPx }))
+                    }
                   />
-                  <span className="slider-value">{bloom.radiusPx.toFixed(2)}px</span>
+                  <span className="slider-value">
+                    {bloom.radiusPx.toFixed(2)}px
+                  </span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom levels</span>
@@ -1145,7 +1259,9 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                     max={10}
                     step={1}
                     value={bloom.levels}
-                    onChange={(levels) => setBloom((value) => ({ ...value, levels }))}
+                    onChange={(levels) =>
+                      setBloom((value) => ({ ...value, levels }))
+                    }
                   />
                   <span className="slider-value">{bloom.levels}</span>
                 </label>
@@ -1156,9 +1272,13 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                     max={1}
                     step={0.01}
                     value={bloom.scatter}
-                    onChange={(scatter) => setBloom((value) => ({ ...value, scatter }))}
+                    onChange={(scatter) =>
+                      setBloom((value) => ({ ...value, scatter }))
+                    }
                   />
-                  <span className="slider-value">{bloom.scatter.toFixed(2)}</span>
+                  <span className="slider-value">
+                    {bloom.scatter.toFixed(2)}
+                  </span>
                 </label>
               </>
             )}
@@ -1519,7 +1639,9 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
             internalStateAlpha={internalStateAlpha}
             boundaryGradientScale={boundaryGradientScale}
             internalStateChannelStart={internalStateChannelStart}
-            chemicalMemoryOpponentSubtraction={chemicalMemoryOpponentSubtraction}
+            chemicalMemoryOpponentSubtraction={
+              chemicalMemoryOpponentSubtraction
+            }
             growthAxisLengthPx={growthAxisLengthPx}
             tool={tool}
             deformSettings={deformSettings}

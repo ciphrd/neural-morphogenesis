@@ -1,24 +1,80 @@
 import { useEffect, useMemo, useState } from "react"
 import {
-  AUDIO_TARGETS,
   applyAudioMappings,
+  audioTargetSpecsFor,
   type AudioMapping,
   type AudioTarget,
+  type AudioTargetGroup,
 } from "../audio/audioReactivity"
 import { useAudioInput } from "../audio/useAudioInput"
-import type { PhysicsSettings } from "../gpu/types"
+import type { PerformanceSnapshot } from "../performance/types"
 import { AudioSignalVisualizer } from "./AudioSignalVisualizer"
 import { Slider } from "./Slider"
 
 interface AudioReactivityPanelProps {
-  basePhysics: PhysicsSettings | null
-  onOutputChange: (physics: PhysicsSettings | null) => void
+  baseSnapshot: PerformanceSnapshot
+  onOutputChange: (snapshot: PerformanceSnapshot | null) => void
 }
 
 let nextMappingId = 1
+const TARGET_GROUPS: AudioTargetGroup[] = [
+  "Simulation",
+  "Rendering",
+  "Auto zoom",
+  "Bloom",
+  "Displacement",
+]
+
+interface DecimalInputProps {
+  label: string
+  value: number
+  onChange: (value: number) => void
+}
+
+/** Keeps intermediate decimal text ("0.", "-", etc.) intact while the
+ * controlled mapping value continues to update whenever the draft is a valid
+ * number. Without a local draft, React immediately rewrites "0." as "0" and
+ * makes typing fractional ranges impossible. */
+function DecimalInput({ label, value, onChange }: DecimalInputProps) {
+  const [draft, setDraft] = useState(String(value))
+  const [editing, setEditing] = useState(false)
+
+  useEffect(() => {
+    if (!editing) setDraft(String(value))
+  }, [editing, value])
+
+  return (
+    <input
+      className="number-input"
+      type="text"
+      inputMode="decimal"
+      autoComplete="off"
+      spellCheck={false}
+      aria-label={label}
+      value={draft}
+      onFocus={() => setEditing(true)}
+      onChange={(event) => {
+        const nextDraft = event.target.value
+        setDraft(nextDraft)
+        const parsed = Number(nextDraft)
+        if (nextDraft.trim() !== "" && Number.isFinite(parsed)) onChange(parsed)
+      }}
+      onBlur={() => {
+        setEditing(false)
+        const parsed = Number(draft)
+        if (draft.trim() !== "" && Number.isFinite(parsed)) {
+          onChange(parsed)
+          setDraft(String(parsed))
+        } else {
+          setDraft(String(value))
+        }
+      }}
+    />
+  )
+}
 
 export function AudioReactivityPanel({
-  basePhysics,
+  baseSnapshot,
   onOutputChange,
 }: AudioReactivityPanelProps) {
   const [open, setOpen] = useState(true)
@@ -37,20 +93,22 @@ export function AudioReactivityPanel({
   })
 
   const active = enabled && status === "active"
+  const targets = useMemo(() => audioTargetSpecsFor(baseSnapshot), [baseSnapshot])
   const output = useMemo(
-    () => applyAudioMappings(basePhysics, mappings, energy, active),
-    [active, basePhysics, energy, mappings],
+    () => active ? applyAudioMappings(baseSnapshot, mappings, energy, true) : null,
+    [active, baseSnapshot, energy, mappings],
   )
   useEffect(() => {
     onOutputChange(output)
   }, [onOutputChange, output])
 
   const addMapping = () => {
-    const spec = AUDIO_TARGETS.find(({ key }) => !mappings.some((mapping) => mapping.target === key))
-      ?? AUDIO_TARGETS[0]
+    const spec = targets.find(({ key }) => !mappings.some((mapping) => mapping.target === key))
+      ?? targets[0]
+    if (!spec) return
     setMappings((current) => [
       ...current,
-      { id: nextMappingId++, target: spec.key, min: spec.min, max: spec.max },
+      { id: nextMappingId++, enabled: true, target: spec.key, min: spec.min, max: spec.max },
     ])
   }
 
@@ -130,25 +188,54 @@ export function AudioReactivityPanel({
           </div>
           {mappings.length === 0 && <p className="hint">Add a mapping to drive a simulation parameter.</p>}
           {mappings.map((mapping) => (
-            <div className="audio-mapping" key={mapping.id}>
-              <select
-                className="select"
-                value={mapping.target}
-                aria-label="Mapped simulation parameter"
-                onChange={(event) => {
-                  const target = event.target.value as AudioTarget
-                  const spec = AUDIO_TARGETS.find((candidate) => candidate.key === target)!
-                  updateMapping(mapping.id, { target, min: spec.min, max: spec.max })
-                }}
-              >
-                {AUDIO_TARGETS.map((target) => (
-                  <option key={target.key} value={target.key}>{target.label}</option>
-                ))}
-              </select>
+            <div className={"audio-mapping" + (mapping.enabled === false ? " is-disabled" : "")} key={mapping.id}>
+              <div className="audio-mapping-top-row">
+                <label className="audio-mapping-enable" title="Enable or disable this mapping">
+                  <input
+                    type="checkbox"
+                    checked={mapping.enabled !== false}
+                    aria-label="Enable audio mapping"
+                    onChange={(event) => updateMapping(mapping.id, { enabled: event.target.checked })}
+                  />
+                  <span>{mapping.enabled === false ? "Off" : "On"}</span>
+                </label>
+                <select
+                  className="select"
+                  value={mapping.target}
+                  aria-label="Mapped simulation parameter"
+                  onChange={(event) => {
+                    const target = event.target.value as AudioTarget
+                    const spec = targets.find((candidate) => candidate.key === target)!
+                    updateMapping(mapping.id, { target, min: spec.min, max: spec.max })
+                  }}
+                >
+                  {TARGET_GROUPS.map((group) => (
+                    <optgroup key={group} label={group}>
+                      {targets.filter((target) => target.group === group).map((target) => (
+                        <option key={target.key} value={target.key}>{target.label}</option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
               <div className="audio-range">
-                <label>Quiet <input className="number-input" type="number" value={mapping.min} onChange={(event) => updateMapping(mapping.id, { min: Number(event.target.value) })} /></label>
+                <label>
+                  Quiet
+                  <DecimalInput
+                    label="Quiet mapping value"
+                    value={mapping.min}
+                    onChange={(min) => updateMapping(mapping.id, { min })}
+                  />
+                </label>
                 <span>→</span>
-                <label>Loud <input className="number-input" type="number" value={mapping.max} onChange={(event) => updateMapping(mapping.id, { max: Number(event.target.value) })} /></label>
+                <label>
+                  Loud
+                  <DecimalInput
+                    label="Loud mapping value"
+                    value={mapping.max}
+                    onChange={(max) => updateMapping(mapping.id, { max })}
+                  />
+                </label>
               </div>
               <button className="audio-remove" onClick={() => setMappings((current) => current.filter(({ id }) => id !== mapping.id))} aria-label="Remove audio mapping">Remove</button>
             </div>

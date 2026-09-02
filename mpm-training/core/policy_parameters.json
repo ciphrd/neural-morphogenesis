@@ -52,6 +52,12 @@
       "biasCenter": [-2.0],
       "biasJitter": 0.25,
       "mutationScale": 0.15
+    },
+    "steering": {
+      "weightGain": 0.25,
+      "biasCenter": [0.0, 0.0],
+      "biasJitter": 0.1,
+      "mutationScale": 0.2
     }
   }
 }

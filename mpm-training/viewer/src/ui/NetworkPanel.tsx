@@ -578,6 +578,8 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
                 value={output.divisionBias}
                 domain={1}
               />
+              <ActivationBar label="steering x (forward)" value={output.steering[0]} domain={1} />
+              <ActivationBar label="steering y (lateral)" value={output.steering[1]} domain={1} />
             </div>
           </div>
 

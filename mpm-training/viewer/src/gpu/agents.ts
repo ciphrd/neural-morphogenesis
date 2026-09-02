@@ -1,5 +1,5 @@
 // TS wrapper around agents.wgsl — owns the flattened NN weights buffer,
-// the AgentPhysics uniform (maxAccel/maxStrafe/maxEnvWrite/
+// the AgentPhysics uniform (steeringStrength/maxStrafe/maxEnvWrite/
 // maxAngularAccel/angularDamping/maxAngularVelocity/depositDistance/
 // splitDisplacement/divisionCooldown/friction), and the persistent
 // per-particle ParticleMeta state buffer (owned here, not MpmCore, not
@@ -32,6 +32,7 @@
 // parent-state inheritance) needed those 2 slots freed to fit at all.
 
 import agentsSrc from "../../../core/agents.wgsl?raw";
+import randomCullSrc from "./randomCull.wgsl?raw";
 import coreConstants from "../../../core/constants.json";
 import densityModel from "../../../core/density.json";
 import { templateShader } from "./shaderTemplate";
@@ -65,6 +66,7 @@ export interface AgentsConfig {
   chemicalCommunicationArchitecture?: ChemicalCommunicationArchitecture;
   maxAccel: number;
   maxStrafe: number;
+  steeringStrength?: number;
   maxEnvWrite: number;
   maxAngularAccel: number;
   angularDamping: number;
@@ -94,9 +96,8 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
   // gradient per channel, with no positional inputs.
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  // One centered env_write per channel + desired heading(2) + ACCEL_DIM(2)
-  // + STRAFE_DIM(2) + RGB_DIM(3).
-  const outDim = channels + (stateful ? 22 : 9);
+  // Existing architecture output followed by the appended steering XY head.
+  const outDim = channels + (stateful ? 24 : 11);
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -110,7 +111,7 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
  * the fc1w/fc1b/fc2w/fc2b order agents.wgsl's own FC1W_OFFSET/etc.
  * consts expect. */
 function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim: number, architecture: PolicyArchitecture): Float32Array {
-  const { totalFloats } = weightLayout(channels, hiddenDim, architecture);
+  const { totalFloats, outDim, fc2wOffset, fc2bOffset } = weightLayout(channels, hiddenDim, architecture);
   const shapeError = policyWeightsShapeError(weights, channels, hiddenDim, architecture);
   if (shapeError) throw new Error(shapeError);
   const out = new Float32Array(totalFloats);
@@ -118,7 +119,24 @@ function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim:
   for (const row of weights.fc1w) for (const v of row) out[i++] = v;
   for (const v of weights.fc1b) out[i++] = v;
   for (const row of weights.fc2w) for (const v of row) out[i++] = v;
+  if (weights.fc2w.length === outDim - 2) i += 2 * hiddenDim;
   for (const v of weights.fc2b) out[i++] = v;
+  if (weights.fc2w.length === outDim - 2) {
+    // Legacy brains predate the dedicated steering head. Reuse their learned
+    // local growth-direction logits as a deterministic compatibility head so
+    // enabling steering has an immediate, meaningful effect instead of
+    // multiplying two permanently-zero padded rows. Strength still defaults
+    // to zero, preserving legacy playback until the user enables it.
+    const legacyGrowthRow = channels + 4;
+    for (let axis = 0; axis < 2; axis++) {
+      const sourceRow = legacyGrowthRow + axis;
+      const targetRow = outDim - 2 + axis;
+      for (let column = 0; column < hiddenDim; column++) {
+        out[fc2wOffset + targetRow * hiddenDim + column] = weights.fc2w[sourceRow][column];
+      }
+      out[fc2bOffset + targetRow] = weights.fc2b[sourceRow];
+    }
+  }
   return out;
 }
 
@@ -181,8 +199,8 @@ export function randomWeights(
     [2, policyParameters.heads.growthDirection],
   ] as const;
   const specs = policyHasRecurrence(architecture)
-    ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const]
-    : [...common, [3, policyParameters.heads.color] as const];
+    ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const, [2, policyParameters.heads.steering] as const]
+    : [...common, [3, policyParameters.heads.color] as const, [2, policyParameters.heads.steering] as const];
   const initialized = specs.map(([size, config]) => randomHead(size, hiddenDim, config, random));
   return {
     fc1w,
@@ -209,6 +227,10 @@ export class Agents {
   private readonly communicationBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly commitBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly stepModeUniforms: [GPUBuffer, GPUBuffer];
+  private readonly randomCullPipeline: GPUComputePipeline;
+  private readonly randomCullBindGroup: GPUBindGroup;
+  private readonly randomCullVictims: GPUBuffer;
+  private readonly randomCullParams: GPUBuffer;
   // Assigned via setActiveCount() in the constructor (also growth's own
   // baseline write), not directly — `!` tells TS's definite-assignment
   // check that's fine, it just can't see through the method call itself.
@@ -234,6 +256,7 @@ export class Agents {
     this.physicsUniform = device.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setPhysics({
       maxAccel: config.maxAccel,
+      steeringStrength: config.steeringStrength ?? 0,
       maxStrafe: config.maxStrafe,
       maxEnvWrite: config.maxEnvWrite,
       maxAngularAccel: config.maxAngularAccel,
@@ -375,6 +398,7 @@ export class Agents {
       writeFloat32(device, buffer, 4, new Float32Array([1.0]));
       writeFloat32(device, buffer, 8, new Float32Array([1.0]));
       writeFloat32(device, buffer, 12, new Float32Array([1.0]));
+      writeFloat32(device, buffer, 16, new Float32Array([0.5]));
       return buffer;
     }) as [GPUBuffer, GPUBuffer];
 
@@ -409,6 +433,35 @@ export class Agents {
     ) as [GPUBindGroup, GPUBindGroup];
     this.communicationBindGroups = bindGroups(0);
     this.commitBindGroups = bindGroups(1);
+
+    this.randomCullVictims = device.createBuffer({
+      size: MAX_PARTICLES * 2 * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.randomCullParams = device.createBuffer({
+      size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const randomCullModule = device.createShaderModule({
+      code: templateShader(randomCullSrc, { CHANNELS: config.channels }),
+    });
+    this.randomCullPipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: randomCullModule, entryPoint: "compactRandomCull" },
+    });
+    this.randomCullBindGroup = device.createBindGroup({
+      layout: this.randomCullPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: mpmCore.positions } },
+        { binding: 1, resource: { buffer: mpmCore.velocities } },
+        { binding: 2, resource: { buffer: mpmCore.F } },
+        { binding: 3, resource: { buffer: mpmCore.C } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
+        { binding: 5, resource: { buffer: this.agentStateBuffer } },
+        { binding: 6, resource: { buffer: this.randomCullVictims } },
+        { binding: 7, resource: { buffer: this.randomCullParams } },
+      ],
+    });
   }
 
   /** Exposed so Renderer's own triangle-shape pipeline can point each
@@ -439,6 +492,7 @@ export class Agents {
 
   setPhysics(settings: {
     maxAccel: number;
+    steeringStrength: number;
     maxStrafe: number;
     maxEnvWrite: number;
     maxAngularAccel: number;
@@ -456,7 +510,7 @@ export class Agents {
       this.physicsUniform,
       0,
       new Float32Array([
-        settings.maxAccel,
+        settings.steeringStrength,
         settings.maxStrafe,
         settings.maxEnvWrite,
         settings.maxAngularAccel,
@@ -504,6 +558,14 @@ export class Agents {
     const value = new Float32Array([Math.max(0, Math.min(1, strength))]);
     for (const buffer of this.stepModeUniforms) {
       writeFloat32(this.device, buffer, 12, value);
+    }
+  }
+
+  /** Master neural growth-probability bias: 0 off, 0.5 native, 1 forced. */
+  setGrowthDrive(drive: number): void {
+    const value = new Float32Array([Math.max(0, Math.min(1, drive))]);
+    for (const buffer of this.stepModeUniforms) {
+      writeFloat32(this.device, buffer, 16, value);
     }
   }
 
@@ -566,19 +628,34 @@ export class Agents {
     );
   }
 
-  /** Controls deterministic lab admission/direction without bypassing growth. */
+  /** Viewer steering scale in AgentPhysics's legacy maxAccel slot. */
+  setSteeringStrength(strength: number): void {
+    writeFloat32(
+      this.device,
+      this.physicsUniform,
+      0,
+      new Float32Array([Math.max(0, Math.min(1, strength))]),
+    );
+  }
+
+  /** Controls deterministic lab admission/direction and packs the viewer-only
+   * death-replacement count into the unused upper bits of the admission word.
+   * Bit 0 remains the Lab admission flag, preserving the shared uniform ABI. */
   setForcedDivisionControl(
     index: number | null,
     direction: readonly [number, number] | null,
     admitCycle: boolean,
     particleCount = 1,
+    deathReplacementCount = 0,
   ): void {
     const value = index === null ? 0xffffffff : Math.max(0, Math.floor(index));
     const endValue = index === null
       ? 0xffffffff
       : value + Math.max(1, Math.floor(particleCount)) - 1;
     this.device.queue.writeBuffer(this.physicsUniform, 80, new Uint32Array([value]));
-    this.device.queue.writeBuffer(this.physicsUniform, 84, new Uint32Array([admitCycle ? 1 : 0]));
+    const replacementCount = Math.min(0x7fffffff, Math.max(0, Math.floor(deathReplacementCount)));
+    const packedAdmission = (replacementCount * 2 + (admitCycle ? 1 : 0)) >>> 0;
+    this.device.queue.writeBuffer(this.physicsUniform, 84, new Uint32Array([packedAdmission]));
     const x = direction?.[0] ?? 0;
     const y = direction?.[1] ?? 0;
     const length = Math.hypot(x, y) || 1;
@@ -603,6 +680,58 @@ export class Agents {
   setActiveCount(activeCount: number): void {
     this.dispatch = ceilDiv(activeCount, WORKGROUP);
     writeFloat32(this.device, this.agentStateBuffer, 0, new Uint32Array([activeCount]));
+  }
+
+  /** Samples `killCount` victims uniformly across the complete live
+   * population. Victims below the survivor boundary are replaced by the
+   * surviving tail agents, while victims already in the tail disappear when
+   * the caller lowers both active-count owners. Sources and destinations are
+   * disjoint, so all state copies are race-free in one GPU pass. */
+  compactRandomCull(activeCount: number, killCount: number): void {
+    const killed = Math.min(activeCount - 1, Math.max(0, Math.floor(killCount)));
+    if (killed === 0) return;
+    const survivorCount = activeCount - killed;
+    const candidates = new Uint32Array(activeCount);
+    for (let index = 0; index < activeCount; index++) candidates[index] = index;
+    const victimMask = new Uint8Array(activeCount);
+    for (let index = 0; index < killed; index++) {
+      const selected = index + Math.floor(Math.random() * (activeCount - index));
+      const victim = candidates[selected];
+      candidates[selected] = candidates[index];
+      candidates[index] = victim;
+      victimMask[victim] = 1;
+    }
+    const replacementPairs = new Uint32Array(Math.min(killed, survivorCount) * 2);
+    let pairCount = 0;
+    let survivingTail = survivorCount;
+    for (let destination = 0; destination < survivorCount; destination++) {
+      if (victimMask[destination] === 0) continue;
+      while (survivingTail < activeCount && victimMask[survivingTail] !== 0) {
+        survivingTail++;
+      }
+      replacementPairs[pairCount * 2] = destination;
+      replacementPairs[pairCount * 2 + 1] = survivingTail;
+      pairCount++;
+      survivingTail++;
+    }
+    if (pairCount === 0) return;
+    this.device.queue.writeBuffer(
+      this.randomCullVictims,
+      0,
+      replacementPairs.subarray(0, pairCount * 2),
+    );
+    this.device.queue.writeBuffer(
+      this.randomCullParams,
+      0,
+      new Uint32Array([pairCount, 0, 0, 0]),
+    );
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.randomCullPipeline);
+    pass.setBindGroup(0, this.randomCullBindGroup);
+    pass.dispatchWorkgroups(ceilDiv(pairCount, 64));
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
   }
 
   /** Encodes the copy of growth's own atomic counter into a mappable
@@ -746,6 +875,8 @@ export class Agents {
   destroy(): void {
     this.weightsBuffer.destroy();
     this.physicsUniform.destroy();
+    this.randomCullVictims.destroy();
+    this.randomCullParams.destroy();
     this.agentStateBuffer.destroy();
     this.grownCountStaging.destroy();
     this.stepModeUniforms[0].destroy();

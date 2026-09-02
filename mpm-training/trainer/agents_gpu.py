@@ -223,6 +223,9 @@ class AgentsGPU:
         )
         self._internal_state_speed = max(0.0, float(internal_state_speed))
         self._division_directionality = max(0.0, min(1.0, float(division_directionality)))
+        # The viewer's growth-drive super-parameter occupies StepMode's former
+        # padding lane. Training stays at 0.5, the transparent/native value.
+        self._growth_drive = 0.5
         self._particle_capacity = max(1, int(max_active_particles))
         self._max_active_particles = self._particle_capacity
         # Public rollout geometry setting: TrainingRollout uses the same
@@ -560,6 +563,7 @@ class AgentsGPU:
             data.view(np.float32)[1] = max(0.0, float(dt))
             data.view(np.float32)[2] = self._internal_state_speed
             data.view(np.float32)[3] = self._division_directionality
+            data.view(np.float32)[4] = self._growth_drive
             self.device.queue.write_buffer(buffer, 0, data)
 
     def set_internal_state_speed(self, speed: float) -> None:

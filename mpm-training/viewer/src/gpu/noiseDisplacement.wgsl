@@ -13,6 +13,12 @@ struct NoiseParams {
 }
 @group(0) @binding(2) var<uniform> params: NoiseParams;
 
+// Noise-space units per real second. Keep this deliberately slow: the field
+// should read as a continuous, drifting flow during a performance rather than
+// as rapidly changing jitter. At this rate a major feature takes roughly
+// 25 seconds to travel by one noise-space unit.
+const TEMPORAL_SPEED: f32 = 0.04;
+
 fn mod289_2(value: vec2<f32>) -> vec2<f32> {
   return value - floor(value * (1.0 / 289.0)) * 289.0;
 }
@@ -80,9 +86,11 @@ fn displaceWithNoise(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let position = particlePos[particleIndex];
   let domain = position * params.spatialScale;
-  let first = simplexNoise(domain + vec2<f32>(params.time * 0.17, -params.time * 0.11));
+  let animatedTime = params.time * TEMPORAL_SPEED;
+  let first = simplexNoise(domain + vec2<f32>(animatedTime, -animatedTime * 0.65));
   let second = simplexNoise(
-    domain + vec2<f32>(31.416, 17.903) + vec2<f32>(-params.time * 0.13, params.time * 0.19),
+    domain + vec2<f32>(31.416, 17.903)
+      + vec2<f32>(-animatedTime * 0.76, animatedTime * 1.12),
   );
   let displacement = vec2<f32>(first, second) * params.strength * 0.00075;
   particlePos[particleIndex] = fract(position + displacement);
