@@ -69,6 +69,8 @@ from simulation_settings import (
     DECAY,
     DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
+    NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
+    DEPOSIT_DENSITY_REFERENCE,
     DEPOSIT_SIGMA,
     DIVISION_COOLDOWN,
     DIVISION_DIRECTIONALITY,
@@ -372,6 +374,9 @@ async def _training_loop_body() -> None:
     environment = EnvironmentGPU(
         wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE,
         args.chemical_communication_architecture,
+        NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
+        DEPOSIT_DENSITY_REFERENCE,
+        grid_velocity=core.grid_vel,
     )
     agents = AgentsGPU(
         wgpu_device,
@@ -458,6 +463,8 @@ async def _training_loop_body() -> None:
         "chemicalCommunicationArchitecture": args.chemical_communication_architecture,
         "decay": DECAY,
         "depositRate": DEPOSIT_RATE,
+        "normalizeDepositsByLocalDensity": NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
+        "depositDensityReference": DEPOSIT_DENSITY_REFERENCE,
         "maxAccel": MAX_ACCEL,
         "maxStrafe": MAX_STRAFE,
         "maxEnvWrite": MAX_ENV_WRITE,
@@ -651,6 +658,8 @@ async def _training_loop_body() -> None:
                         # even though every message already carries them.
                         "decay": DECAY,
                         "deposit_rate": DEPOSIT_RATE,
+                        "normalize_deposits_by_local_density": NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
+                        "deposit_density_reference": DEPOSIT_DENSITY_REFERENCE,
                         "max_accel": MAX_ACCEL,
                         "max_strafe": MAX_STRAFE,
                         "max_env_write": MAX_ENV_WRITE,

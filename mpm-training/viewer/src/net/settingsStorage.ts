@@ -38,6 +38,8 @@ export const DEFAULT_RUN_SETTINGS: RunSettings = {
   chemicalCommunicationArchitecture: "persistent-environment",
   decay: 0.91,
   depositRate: 1,
+  normalizeDepositsByLocalDensity: false,
+  depositDensityReference: 1,
   maxAccel: 0,
   maxStrafe: 0,
   maxEnvWrite: 1,

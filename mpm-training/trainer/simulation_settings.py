@@ -103,6 +103,11 @@ ELASTIC_STRAIN_INPUTS_ENABLED = True
 
 # Deposit
 DEPOSIT_RATE = 1.0
+# Optional normalized-convolution deposit mode. Off preserves existing
+# checkpoints; when enabled, chemical sums are divided by a matching local
+# density splat plus this soft reference floor.
+NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY = False
+DEPOSIT_DENSITY_REFERENCE = 1.0
 # Retained in the AgentPhysics/settings ABI for checkpoint compatibility.
 # Single deposits are always centered underneath the particle.
 DEPOSIT_DISTANCE = 0.0

@@ -10,7 +10,7 @@ import wgpu
 from agents_gpu import PARTICLE_META_BUFFER_OFFSET, AgentsGPU, weight_layout
 from device import pick_device
 from environment_gpu import EnvironmentGPU
-from mpm_core import DT, MpmCore, ceil_div
+from mpm_core import DT, GRID_N, MpmCore, ceil_div
 from policy_parameters import PERSISTENT_ENVIRONMENT_ARCHITECTURE, STATEFUL_128_ARCHITECTURE
 from training_sim import TrainingRollout
 
@@ -323,8 +323,8 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     for channel in range(4):
         weights[layout["fc2b_offset"] + channel] = 20.0
     env_write_dim = channels
-    weights[layout["fc2b_offset"] + env_write_dim + 6] = 20.0
-    weights[layout["fc2b_offset"] + env_write_dim + 7] = -20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 8] = 20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 9] = -20.0
     # Blue stays at logit 0 -> sigmoid 0.5.
     agents.load_weights(weights)
 
@@ -496,6 +496,7 @@ def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
         communication_dt = environment.set_communication_timestep(rounds, 1.0)
         agents.set_communication_timestep(communication_dt)
         encoder = device.create_command_encoder()
+        environment.encode_prepare_persistent(encoder)
         for communication_round in range(rounds):
             final_round = communication_round == rounds - 1
             if final_round:
@@ -504,7 +505,7 @@ def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
             agents.encode_step(
                 encoder, environment.parity, commit_lifecycle=final_round
             )
-        environment.encode_advance_persistent(encoder)
+        environment.encode_merge_persistent(encoder)
         device.queue.submit([encoder.finish()])
         return np.frombuffer(
             device.queue.read_buffer(environment.buffers[environment.parity]), np.float32
@@ -525,6 +526,36 @@ def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
     np.testing.assert_allclose(aged.sum(), deposited_four.sum() * decay, rtol=2e-5, atol=2e-5)
     assert aged.max() < deposited_four.max(), (aged.max(), deposited_four.max())
     print("[PASS] persistent environment holds a frozen field, deposits the final NN output once, then diffuses/decays once")
+
+
+def check_persistent_substrate_advection(device: wgpu.GPUDevice) -> None:
+    """A uniform MPM velocity translates persistent chemistry one texel."""
+    width = height = 16
+    core = MpmCore(device)
+    environment = EnvironmentGPU(
+        device, 1, width, height, 1.0, 1.0,
+        PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+        grid_velocity=core.grid_vel,
+    )
+    # Disable diffusion and decay to isolate semi-Lagrangian transport.
+    environment.set_communication_timestep(1, 0.0)
+    environment.set_advection_timestep(1.0)
+    substrate = np.zeros((height, width), dtype=np.float32)
+    substrate[8, 4] = 1.0
+    device.queue.write_buffer(environment.buffers[0], 0, substrate)
+    velocity = np.zeros(((GRID_N + 1) * (GRID_N + 1), 2), dtype=np.float32)
+    velocity[:, 0] = 1.0 / width
+    device.queue.write_buffer(core.grid_vel, 0, velocity)
+
+    encoder = device.create_command_encoder()
+    environment.encode_prepare_persistent(encoder)
+    device.queue.submit([encoder.finish()])
+    moved = np.frombuffer(
+        device.queue.read_buffer(environment.buffers[environment.parity]), np.float32
+    ).reshape(height, width)
+    assert np.isclose(moved[8, 5], 1.0, atol=2e-5), moved[8]
+    assert np.isclose(moved.sum(), 1.0, atol=2e-5), moved.sum()
+    print("[PASS] persistent substrate is advected with the MPM velocity field")
 
 
 def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
@@ -1327,8 +1358,8 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     agents.reset_heading(31)
     layout = weight_layout(1, 128, STATEFUL_128_ARCHITECTURE)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Common outputs occupy C+6 rows. Drive private channel 0 positively and
-    # open its corresponding gate; all other private channels remain still.
+    # Common motion/growth outputs occupy C+6 rows. Drive private channel 0
+    # positively and open its gate; all other private channels remain still.
     weights[layout["fc2b_offset"] + 7] = 1.0
     weights[layout["fc2b_offset"] + 15] = 20.0
     agents.load_weights(weights)
@@ -1373,7 +1404,7 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     )
     daughters = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=2)
     np.testing.assert_allclose(daughters[0]["privateState"], daughters[1]["privateState"], atol=1e-7)
-    print("[PASS] recurrent-128 policy applies speed-scaled gated memory, freezes at 0x, derives RGB, and inherits state at division")
+    print("[PASS] recurrent-128 policy updates memory and daughters inherit private state")
 
 
 def main() -> None:
@@ -1385,6 +1416,7 @@ def main() -> None:
     check_compressed_growth_pauses_and_resumes(device)
     check_transient_cell_chemical_splats(device)
     check_persistent_environment_chemistry(device)
+    check_persistent_substrate_advection(device)
     check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
     check_desired_heading_derives_angular_acceleration(device)

@@ -397,7 +397,7 @@ export class Agents {
           // ../../../core/agents.wgsl's own module docstring for why
           // agentStep() now needs them too (a freshly-claimed particle
           // inherits its parent's CURRENT deformation state at split
-          // time, not a fresh identity/zero rest state). mpmCore.C is
+          // time, rather than starting undeformed with zero rest history). mpmCore.C is
           // binding 8 so the split preserves the complete APIC state.
           { binding: 10, resource: { buffer: mpmCore.F } },
           { binding: 11, resource: { buffer: mpmCore.rest } },

@@ -57,7 +57,7 @@ def main() -> None:
     assert q1.spacing == 0.0027
     assert q1.deposit_sigma == 0.324
     assert q1.splat_radius == 0.004
-    for invalid in (0.0, -1.0, float("nan"), float("inf"), 0.25, 4.0):
+    for invalid in (0.0, -1.0, float("nan"), float("inf"), 0.25, 8.0):
         try:
             validate_multiplier(invalid)
         except ValueError:

@@ -21,7 +21,10 @@ interface PhysicsPanelProps {
 
 // Excludes mpmEnabled — the one boolean field in PhysicsSettings, its own
 // checkbox row below rather than a numeric-range SliderSpec.
-export type PhysicsSliderKey = Exclude<keyof PhysicsSettings, "mpmEnabled">
+export type PhysicsSliderKey = Exclude<
+  keyof PhysicsSettings,
+  "mpmEnabled" | "normalizeDepositsByLocalDensity"
+>
 
 export interface PhysicsSliderSpec {
   key: PhysicsSliderKey
@@ -110,6 +113,20 @@ export function physicsSliderSpecsFor(
       label: "Substrate decay",
       ...FRACTION_RANGE,
       format: (v) => v.toFixed(3),
+    },
+    {
+      key: "depositRate",
+      label: "Deposit rate",
+      ...scaledRange(trained.depositRate, 4),
+      format: (v) => v.toFixed(3),
+    },
+    {
+      key: "depositDensityReference",
+      label: "Deposit density reference",
+      min: 0,
+      max: Math.max(4, trained.depositDensityReference * 4),
+      step: 0.01,
+      format: (v) => v.toFixed(2),
     },
     {
       key: "maxAccel",
@@ -222,7 +239,7 @@ export function physicsSliderSpecsFor(
 
 /** Collapsible "Physics" section (default closed) exposing every
  * live-adjustable simulation setting as a slider — gravity, damping, MPM
- * material (E/nu/hardening/elasticity), persistent substrate decay,
+ * material (E/nu/hardening/elasticity), persistent substrate decay and deposit rate,
  * cell-chemical delta magnitude,
  * strafe's own maxAccel/maxStrafe/friction (strafe
  * drives MpmCore's own velocity directly — an acceleration, damped by
@@ -299,6 +316,20 @@ export function PhysicsPanel({
               }
             />
             MPM physics
+          </label>
+          <label
+            className="checkbox-row"
+            title="Divide chemical splats by a matching local-density splat so crowded regions approach the average cell signal instead of summing without bound."
+          >
+            <input
+              type="checkbox"
+              checked={value.normalizeDepositsByLocalDensity}
+              onChange={(e) => onChange({
+                ...value,
+                normalizeDepositsByLocalDensity: e.target.checked,
+              })}
+            />
+            Normalize deposits by local density
           </label>
           {specs.map((spec) => (
             <label key={spec.key} className="slider-row">

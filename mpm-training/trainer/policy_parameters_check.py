@@ -38,7 +38,7 @@ def main() -> None:
     clone = UpdateRule(CHEM_CHANNELS)
     set_weights(clone, flat)
     np.testing.assert_array_equal(get_weights(clone), flat)
-    print(f"[PASS] six logical heads round-trip through the {flat.size}-float GPU/checkpoint layout")
+    print(f"[PASS] logical heads round-trip through the {flat.size}-float GPU/checkpoint layout")
 
     initialized = random_flat_policy_weights(CHEM_CHANNELS, HIDDEN_DIM, np.random.default_rng(11))
     assert initialized.shape == flat.shape and initialized.dtype == np.float32

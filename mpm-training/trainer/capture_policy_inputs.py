@@ -28,6 +28,7 @@ from simulation_settings import (
     ANGULAR_DAMPING, CHEM_CHANNELS, CHIRALITY, COMMUNICATION_SPEED,
     CHEMICAL_GRADIENT_INPUT_SCALE, CHEMICAL_VALUE_INPUT_SCALE,
     DAMPING_LOSS_FRACTION, DECAY, DEPOSIT_DISTANCE, DEPOSIT_RATE,
+    NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY, DEPOSIT_DENSITY_REFERENCE,
     DEPOSIT_SIGMA, DIVISION_COOLDOWN, DIVISION_DIRECTIONALITY, ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE, FIELD_N, FRICTION, GROWTH_DURATION_MACRO_STEPS,
     GROWTH_COMPRESSION_START, GROWTH_COMPRESSION_STOP,
@@ -74,7 +75,7 @@ def random_policy_weights(
     architecture: str = STATELESS_ARCHITECTURE,
 ) -> np.ndarray:
     """Use the same logical-head initialization as training and the viewer."""
-    channels = (layout["in_dim"] - 6) // 3
+    channels = (layout["in_dim"] - 6 - (8 if policy_has_recurrence(architecture) else 0)) // 3
     out = random_flat_policy_weights(channels, hidden_dim, rng, architecture)
     if out.size != layout["total_floats"]:
         raise ValueError(f"policy initializer produced {out.size} values, expected {layout['total_floats']}")
@@ -377,6 +378,9 @@ def main() -> int:
     environment = EnvironmentGPU(
         device, channels, field_n, field_n, meta.get("decay", DECAY),
         meta.get("deposit_rate", DEPOSIT_RATE), chemical_architecture,
+        meta.get("normalize_deposits_by_local_density", NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY),
+        meta.get("deposit_density_reference", DEPOSIT_DENSITY_REFERENCE),
+        grid_velocity=core.grid_vel,
     )
     agents = AgentsGPU(
         device, core, environment, channels, hidden,

@@ -72,6 +72,8 @@ export interface RunSettings {
   decay: number;
   /** Used by persistent-environment; ignored by cell-owned-projection. */
   depositRate: number;
+  normalizeDepositsByLocalDensity?: boolean;
+  depositDensityReference?: number;
   maxAccel: number;
   maxStrafe: number;
   maxEnvWrite: number;
@@ -249,6 +251,8 @@ export interface PhysicsSettings {
   chemicalProjectionWeight: number;
   decay: number;
   depositRate: number;
+  normalizeDepositsByLocalDensity: boolean;
+  depositDensityReference: number;
   maxAccel: number;
   maxStrafe: number;
   maxEnvWrite: number;
@@ -309,6 +313,8 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     // PhysicsPanel slider doesn't crash on `undefined.toFixed()` before a
     // restart picks up the new field.
     depositRate: config.depositRate ?? 1.0,
+    normalizeDepositsByLocalDensity: config.normalizeDepositsByLocalDensity ?? false,
+    depositDensityReference: Math.max(0, config.depositDensityReference ?? 1.0),
     maxAccel: config.maxAccel,
     maxStrafe: config.maxStrafe,
     maxEnvWrite: config.maxEnvWrite,

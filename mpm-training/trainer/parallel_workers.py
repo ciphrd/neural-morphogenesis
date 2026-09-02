@@ -46,6 +46,8 @@ from simulation_settings import (
     DECAY,
     DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
+    NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
+    DEPOSIT_DENSITY_REFERENCE,
     DEPOSIT_SIGMA,
     DIVISION_COOLDOWN,
     FIELD_N,
@@ -98,6 +100,9 @@ def _worker_init(
     _environment = EnvironmentGPU(
         wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE,
         args.chemical_communication_architecture,
+        NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
+        DEPOSIT_DENSITY_REFERENCE,
+        grid_velocity=_core.grid_vel,
     )
     _agents = AgentsGPU(
         wgpu_device,

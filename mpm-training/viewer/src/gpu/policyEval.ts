@@ -79,7 +79,7 @@ function safeSigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
 }
 
-/** One Dense(hiddenDim) -> tanh -> Dense(channels+9) forward pass,
+/** One Dense(hiddenDim) -> tanh -> Dense(policy output width) forward pass,
  * squashed exactly like agents.wgsl's own evalPolicy() — see that
  * function's own comment for the exact math this mirrors, and this
  * file's own module docstring for why CHIRALITY's mirror-averaging is

@@ -459,8 +459,8 @@ class AgentsGPU:
                     # — see core/agents.wgsl's own module docstring for why
                     # agentStep() now needs them too (a freshly-claimed
                     # particle inherits its parent's CURRENT deformation
-                    # state at split time, not a fresh identity/zero rest
-                    # state). core.C is binding 8, completing APIC-state
+                    # state at split time rather than starting undeformed
+                    # with zero rest history). core.C is binding 8, completing APIC-state
                     # inheritance across division.
                     {"binding": 10, "resource": {"buffer": core.F, "offset": 0, "size": core.F.size}},
                     {"binding": 11, "resource": {"buffer": core.rest, "offset": 0, "size": core.rest.size}},

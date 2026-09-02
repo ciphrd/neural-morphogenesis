@@ -52,6 +52,20 @@
       "chemicalGradientInputScale": 0.045,
       "repulsionStrength": 0.0,
       "repulsionMaxDelta": 28.2842712474619
+    },
+    {
+      "multiplier": 4.0,
+      "spacing": 0.00135,
+      "initialParticles": 20,
+      "particleCap": 1600,
+      "particleMass": 0.25,
+      "particleVolume": 0.25,
+      "depositSigma": 0.324,
+      "chemicalProjectionWeight": 0.25,
+      "splatRadius": 0.002,
+      "chemicalGradientInputScale": 0.045,
+      "repulsionStrength": 0.0,
+      "repulsionMaxDelta": 20.0
     }
   ]
 }

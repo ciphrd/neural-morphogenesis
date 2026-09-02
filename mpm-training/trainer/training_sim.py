@@ -95,7 +95,7 @@ from simulation_settings import COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, NEU
 from agents_gpu import AgentsGPU, _spawn_uniform01
 from density import INITIAL_PACKING_SPACING_SCALE
 from environment_gpu import EnvironmentGPU
-from mpm_core import MpmCore
+from mpm_core import DT, MpmCore
 
 
 def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int) -> tuple[np.ndarray, ...]:
@@ -249,6 +249,12 @@ class TrainingRollout:
         # only complicate it for no benefit.
         encoder = core.device.create_command_encoder()
         core.encode_morphology(encoder)
+        self.environment.set_advection_timestep(
+            substeps_per_macro * DT if self.mpm_enabled else 0.0
+        )
+        # Transport the old persistent substrate through the preceding MPM
+        # motion before the first neural read of this tick.
+        self.environment.encode_prepare_persistent(encoder)
         for communication_round in range(self.neural_updates_per_macro):
             final_round = communication_round == self.neural_updates_per_macro - 1
             if (
@@ -264,9 +270,9 @@ class TrainingRollout:
                 self.environment.parity,
                 commit_lifecycle=final_round,
             )
-        # Persistent mode evolves the frozen field once and merges only the
-        # final neural round's direct deposits.
-        self.environment.encode_advance_persistent(encoder)
+        # Persistent mode merges only the final neural round's direct deposits
+        # after the transported field has been sensed.
+        self.environment.encode_merge_persistent(encoder)
         core.device.queue.submit([encoder.finish()])
 
         # Growth's own readback — see this module's own module docstring

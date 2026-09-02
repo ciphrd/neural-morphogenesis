@@ -36,6 +36,13 @@ export interface GrowthSliderSpec {
 // without requiring another GPU-uniform field.
 const TANGENT_DISABLED_THRESHOLD = 1
 const TANGENT_SLIDER_MAX = 0.05
+const DEFAULT_ACTIVE_TANGENT_THRESHOLD = 0.008
+
+function activeTangentThreshold(value: number): number {
+  return value < TANGENT_DISABLED_THRESHOLD
+    ? Math.min(value, TANGENT_SLIDER_MAX)
+    : DEFAULT_ACTIVE_TANGENT_THRESHOLD
+}
 
 // All absolute ranges, deliberately NOT PhysicsPanel's own
 // scaledRange(trained, N): every knob here is bounded by real physics or
@@ -160,21 +167,17 @@ export function GrowthPanel({
 }: GrowthPanelProps) {
   const [open, setOpen] = useState(false)
   const [rememberedTangentThreshold, setRememberedTangentThreshold] = useState(
-    Math.min(
+    activeTangentThreshold(
       value.boundaryTangentMinGradient < TANGENT_DISABLED_THRESHOLD
         ? value.boundaryTangentMinGradient
-        : trained.boundaryTangentMinGradient,
-      TANGENT_SLIDER_MAX
+        : trained.boundaryTangentMinGradient
     )
   )
   const tangentEnabled = value.boundaryTangentMinGradient < TANGENT_DISABLED_THRESHOLD
 
   const setTangentEnabled = (enabled: boolean) => {
     if (enabled) {
-      const trainedThreshold = Math.min(
-        trained.boundaryTangentMinGradient,
-        TANGENT_SLIDER_MAX
-      )
+      const trainedThreshold = activeTangentThreshold(trained.boundaryTangentMinGradient)
       const restoredThreshold = Number.isFinite(rememberedTangentThreshold)
         ? rememberedTangentThreshold
         : trainedThreshold

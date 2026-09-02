@@ -266,8 +266,11 @@ export class GpuSimulation {
       // see types.ts's own physicsSettingsFromConfig() for the matching
       // guard on the PhysicsPanel's own read of this same field.
       depositRate: config.depositRate ?? 1.0,
+      normalizeDepositsByLocalDensity: config.normalizeDepositsByLocalDensity ?? false,
+      depositDensityReference: config.depositDensityReference ?? 1.0,
+      advectionDt: config.substepsPerMacro * coreConstants.DT,
       chemicalCommunicationArchitecture: chemicalCommunicationArchitectureFromConfig(config),
-    });
+    }, mpmCore.gridVel);
 
     const agents = new Agents(this.device, mpmCore, environment, {
       channels: config.channels,
@@ -430,6 +433,8 @@ export class GpuSimulation {
       physics.depositRate,
       this.neuralUpdatesPerMacro,
       physics.communicationSpeed ?? 1.0,
+      physics.normalizeDepositsByLocalDensity ?? false,
+      physics.depositDensityReference ?? 1.0,
     );
     const growthCompressionStart = Math.max(0, physics.growthCompressionStart ?? 0.10);
     const growthCompressionStop = Math.max(
@@ -506,6 +511,9 @@ export class GpuSimulation {
     // to skip mpmCore.encodeSteps() at all (see that method's own
     // comment).
     this.mpmEnabled = physics.mpmEnabled ?? true;
+    this.environment.setAdvectionTimestep(
+      this.mpmEnabled ? this.config.substepsPerMacro * coreConstants.DT : 0,
+    );
   }
 
   setPhysics(physics: PhysicsSettings): void {
@@ -590,6 +598,10 @@ export class GpuSimulation {
     );
     const encoder = this.device.createCommandEncoder();
     this.mpmCore.encodeMorphology(encoder);
+    // Carry the persistent substrate through the preceding MPM motion before
+    // this tick's first policy read. Divergent growth flow therefore expands
+    // the substrate together with the material rather than leaving it behind.
+    this.environment.encodePreparePersistent(encoder);
     for (let communicationRound = 0; communicationRound < this.neuralUpdatesPerMacro; communicationRound++) {
       const finalRound = communicationRound === this.neuralUpdatesPerMacro - 1;
       // Cell-owned chemistry rebuilds its projection every round. Persistent
@@ -608,9 +620,9 @@ export class GpuSimulation {
         finalRound
       );
     }
-    // Persistent mode consumes only the last NN output: diffuse/decay the
-    // frozen snapshot once, then add that final deposit once.
-    this.environment.encodeAdvancePersistent(encoder);
+    // Persistent mode consumes only the last NN output, merging it after the
+    // transported field has been sensed for this tick.
+    this.environment.encodeMergePersistent(encoder);
     this.agents.encodeReadGrownCount(encoder);
     this.device.queue.submit([encoder.finish()]);
 

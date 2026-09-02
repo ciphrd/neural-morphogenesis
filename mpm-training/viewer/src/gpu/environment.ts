@@ -7,6 +7,7 @@ import environmentSrc from "../../../core/environment.wgsl?raw";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
 import type { ChemicalCommunicationArchitecture } from "./types";
+import { GRID_N } from "./mpmCore";
 
 export interface EnvironmentConfig {
   channels: number;
@@ -15,6 +16,9 @@ export interface EnvironmentConfig {
   // Legacy run-metadata fields; transient fields do not use either value.
   decay: number;
   depositRate: number;
+  normalizeDepositsByLocalDensity?: boolean;
+  depositDensityReference?: number;
+  advectionDt?: number;
   chemicalCommunicationArchitecture?: ChemicalCommunicationArchitecture;
 }
 
@@ -36,6 +40,9 @@ export class Environment {
   private readonly device: GPUDevice;
   private baseDecay: number;
   private baseDepositRate: number;
+  private normalizeDepositsByLocalDensity: boolean;
+  private depositDensityReference: number;
+  private advectionDt: number;
   private readonly physicsUniform: GPUBuffer;
 
   private readonly clearScratchPipeline: GPUComputePipeline;
@@ -57,7 +64,7 @@ export class Environment {
     return this._parity;
   }
 
-  constructor(device: GPUDevice, config: EnvironmentConfig) {
+  constructor(device: GPUDevice, config: EnvironmentConfig, mpmGridVelocity: GPUBuffer) {
     this.device = device;
     this.channels = config.channels;
     this.width = config.width;
@@ -65,8 +72,12 @@ export class Environment {
     this.chemicalCommunicationArchitecture = config.chemicalCommunicationArchitecture ?? "cell-owned-projection";
     this.baseDecay = config.decay;
     this.baseDepositRate = config.depositRate;
+    this.normalizeDepositsByLocalDensity = config.normalizeDepositsByLocalDensity ?? false;
+    this.depositDensityReference = Math.max(0, config.depositDensityReference ?? 1.0);
+    this.advectionDt = Math.max(0, config.advectionDt ?? 0);
 
     const total = config.width * config.height * config.channels;
+    const scratchTotal = total + config.width * config.height;
     const f32 = 4;
 
     this.buffers = [
@@ -74,12 +85,17 @@ export class Environment {
       device.createBuffer({ size: total * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     ];
     this.gradient = device.createBuffer({ size: total * 2 * f32, usage: GPUBufferUsage.STORAGE });
-    this.depositScratch = device.createBuffer({ size: total * f32, usage: GPUBufferUsage.STORAGE });
-    this.physicsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.depositScratch = device.createBuffer({ size: scratchTotal * f32, usage: GPUBufferUsage.STORAGE });
+    this.physicsUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setCommunicationTimestep(1, 1);
 
     const module = device.createShaderModule({
-      code: templateShader(environmentSrc, { CHANNELS: config.channels, WIDTH: config.width, HEIGHT: config.height }),
+      code: templateShader(environmentSrc, {
+        CHANNELS: config.channels,
+        WIDTH: config.width,
+        HEIGHT: config.height,
+        GRID_N,
+      }),
     });
 
     this.clearScratchPipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "clearScratch" } });
@@ -94,6 +110,7 @@ export class Environment {
       entries: [
         { binding: 0, resource: { buffer: this.buffers[0] } },
         { binding: 2, resource: { buffer: this.depositScratch } },
+        { binding: 4, resource: { buffer: this.physicsUniform } },
       ],
     });
 
@@ -127,12 +144,13 @@ export class Environment {
           { binding: 0, resource: { buffer: this.buffers[p] } },
           { binding: 3, resource: { buffer: this.buffers[1 - p] } },
           { binding: 4, resource: { buffer: this.physicsUniform } },
+          { binding: 5, resource: { buffer: mpmGridVelocity } },
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];
 
     this.clearDispatch = flatDispatch2D(
-      total,
+      scratchTotal,
       CLEAR_WORKGROUP,
       device.limits.maxComputeWorkgroupsPerDimension,
     );
@@ -149,15 +167,32 @@ export class Environment {
       decay,
       this.baseDepositRate * macroDt,
       Math.min(macroDt, 1),
-      0,
+      this.normalizeDepositsByLocalDensity ? 1 : 0,
+      this.depositDensityReference,
+      this.advectionDt,
+      0, 0,
     ]));
     return neuralDt;
   }
 
-  setPhysics(decay: number, depositRate: number, rounds: number, speed: number): number {
+  setPhysics(
+    decay: number,
+    depositRate: number,
+    rounds: number,
+    speed: number,
+    normalizeDepositsByLocalDensity = false,
+    depositDensityReference = 1.0,
+  ): number {
     this.baseDecay = decay;
     this.baseDepositRate = depositRate;
+    this.normalizeDepositsByLocalDensity = normalizeDepositsByLocalDensity;
+    this.depositDensityReference = Math.max(0, depositDensityReference);
     return this.setCommunicationTimestep(rounds, speed);
+  }
+
+  setAdvectionTimestep(dt: number): void {
+    this.advectionDt = Math.max(0, dt);
+    writeFloat32(this.device, this.physicsUniform, 5 * 4, new Float32Array([this.advectionDt]));
   }
 
   /** Zeroes both grid buffers and resets parity to 0 — call at the start
@@ -200,23 +235,26 @@ export class Environment {
     pass.end();
   }
 
-  /** Persistent-environment post-policy lifecycle, called once after all
-   * neural rounds: diffuse/decay the old field, add the final round's direct
-   * writes, and make that result current for the next macro tick. */
-  encodeAdvancePersistent(encoder: GPUCommandEncoder): void {
+  /** Bring persistent substrate forward through the previous MPM motion
+   * before the policy senses it, including divergent growth flow. */
+  encodePreparePersistent(encoder: GPUCommandEncoder): void {
     if (this.chemicalCommunicationArchitecture !== "persistent-environment") return;
     let pass = encoder.beginComputePass();
     pass.setPipeline(this.diffuseDecayPipeline);
     pass.setBindGroup(0, this.diffuseDecayBindGroups[this._parity]);
     pass.dispatchWorkgroups(...this.gridDispatch);
     pass.end();
+    this._parity = 1 - this._parity;
+  }
 
-    pass = encoder.beginComputePass();
+  /** Add the final neural round's direct writes to the prepared field. */
+  encodeMergePersistent(encoder: GPUCommandEncoder): void {
+    if (this.chemicalCommunicationArchitecture !== "persistent-environment") return;
+    const pass = encoder.beginComputePass();
     pass.setPipeline(this.mergeDepositPipeline);
-    pass.setBindGroup(0, this.mergeDepositBindGroups[1 - this._parity]);
+    pass.setBindGroup(0, this.mergeDepositBindGroups[this._parity]);
     pass.dispatchWorkgroups(...this.clearDispatch);
     pass.end();
-    this._parity = 1 - this._parity;
   }
 
   destroy(): void {

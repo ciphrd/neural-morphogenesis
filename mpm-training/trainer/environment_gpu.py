@@ -23,7 +23,7 @@ from __future__ import annotations
 import numpy as np
 import wgpu
 
-from mpm_core import ceil_div, flat_dispatch_2d
+from mpm_core import GRID_N, ceil_div, flat_dispatch_2d
 from policy_parameters import (
     CELL_OWNED_PROJECTION_ARCHITECTURE,
     PERSISTENT_ENVIRONMENT_ARCHITECTURE,
@@ -43,6 +43,11 @@ class EnvironmentGPU:
         self, device: wgpu.GPUDevice, channels: int, width: int, height: int,
         decay: float, deposit_rate: float,
         chemical_communication_architecture: str = CELL_OWNED_PROJECTION_ARCHITECTURE,
+        normalize_deposits_by_local_density: bool = False,
+        deposit_density_reference: float = 1.0,
+        *,
+        grid_velocity: wgpu.GPUBuffer | None = None,
+        advection_dt: float = 0.0,
     ) -> None:
         self.device = device
         self.channels = channels
@@ -53,8 +58,19 @@ class EnvironmentGPU:
         )
         self.base_decay = float(decay)
         self.base_deposit_rate = float(deposit_rate)
+        self.normalize_deposits_by_local_density = bool(normalize_deposits_by_local_density)
+        self.deposit_density_reference = max(0.0, float(deposit_density_reference))
+        self.advection_dt = max(0.0, float(advection_dt))
+        # Small standalone shader checks do not always construct an MpmCore.
+        # A zero fallback retains their old diffusion-only behavior.
+        self._owns_grid_velocity = grid_velocity is None
+        self.grid_velocity = grid_velocity if grid_velocity is not None else device.create_buffer(
+            size=(GRID_N + 1) * (GRID_N + 1) * 2 * 4,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+        )
 
         total = width * height * channels
+        scratch_total = total + width * height
         f32 = 4
 
         self.buffers = [
@@ -68,13 +84,16 @@ class EnvironmentGPU:
             ),
         ]
         self.gradient = device.create_buffer(size=total * 2 * f32, usage=wgpu.BufferUsage.STORAGE)
-        self.deposit_scratch = device.create_buffer(size=total * f32, usage=wgpu.BufferUsage.STORAGE)
+        self.deposit_scratch = device.create_buffer(size=scratch_total * f32, usage=wgpu.BufferUsage.STORAGE)
         self._physics_uniform = device.create_buffer(
-            size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+            size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
         )
         self.set_communication_timestep(1, 1.0)
 
-        module = device.create_shader_module(code=load_core_shader("environment.wgsl", {"CHANNELS": channels, "WIDTH": width, "HEIGHT": height}))
+        module = device.create_shader_module(code=load_core_shader(
+            "environment.wgsl",
+            {"CHANNELS": channels, "WIDTH": width, "HEIGHT": height, "GRID_N": GRID_N},
+        ))
 
         self._clear_scratch_pipeline = device.create_compute_pipeline(
             layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "clearScratch"}
@@ -91,6 +110,7 @@ class EnvironmentGPU:
             entries=[
                 {"binding": 0, "resource": {"buffer": self.buffers[0], "offset": 0, "size": self.buffers[0].size}},
                 {"binding": 2, "resource": {"buffer": self.deposit_scratch, "offset": 0, "size": self.deposit_scratch.size}},
+                {"binding": 4, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
             ],
         )
 
@@ -132,12 +152,13 @@ class EnvironmentGPU:
                     {"binding": 0, "resource": {"buffer": self.buffers[p], "offset": 0, "size": self.buffers[p].size}},
                     {"binding": 3, "resource": {"buffer": self.buffers[1 - p], "offset": 0, "size": self.buffers[1 - p].size}},
                     {"binding": 4, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
+                    {"binding": 5, "resource": {"buffer": self.grid_velocity, "offset": 0, "size": self.grid_velocity.size}},
                 ],
             )
             for p in (0, 1)
         ]
 
-        self._clear_dispatch = flat_dispatch_2d(total, CLEAR_WORKGROUP)
+        self._clear_dispatch = flat_dispatch_2d(scratch_total, CLEAR_WORKGROUP)
         self._grid_dispatch = (ceil_div(width, GRID_WORKGROUP), ceil_div(height, GRID_WORKGROUP), channels)
 
         self._parity = 0
@@ -155,11 +176,31 @@ class EnvironmentGPU:
             self._physics_uniform,
             0,
             np.array(
-                [decay, self.base_deposit_rate * macro_dt, min(macro_dt, 1.0), 0.0],
+                [
+                    decay,
+                    self.base_deposit_rate * macro_dt,
+                    min(macro_dt, 1.0),
+                    1.0 if self.normalize_deposits_by_local_density else 0.0,
+                    self.deposit_density_reference,
+                    self.advection_dt, 0.0, 0.0,
+                ],
                 dtype=np.float32,
             ),
         )
         return neural_dt
+
+    def set_deposit_normalization(self, enabled: bool, density_reference: float) -> None:
+        """Configure matching-kernel local-density normalization."""
+        self.normalize_deposits_by_local_density = bool(enabled)
+        self.deposit_density_reference = max(0.0, float(density_reference))
+
+    def set_advection_timestep(self, dt: float) -> None:
+        """Set the elapsed mechanical time represented by the velocity grid."""
+        self.advection_dt = max(0.0, float(dt))
+        self.device.queue.write_buffer(
+            self._physics_uniform, 5 * 4,
+            np.array([self.advection_dt], dtype=np.float32),
+        )
 
     def reset(self) -> None:
         """Zeroes both grid buffers and resets parity to 0 — call at the
@@ -196,7 +237,8 @@ class EnvironmentGPU:
         p.dispatch_workgroups(*self._grid_dispatch)
         p.end()
 
-    def encode_advance_persistent(self, encoder: wgpu.GPUCommandEncoder) -> None:
+    def encode_prepare_persistent(self, encoder: wgpu.GPUCommandEncoder) -> None:
+        """Advect/diffuse/decay the field before the policy senses it."""
         if self.chemical_communication_architecture != PERSISTENT_ENVIRONMENT_ARCHITECTURE:
             return
         p = encoder.begin_compute_pass()
@@ -204,10 +246,14 @@ class EnvironmentGPU:
         p.set_bind_group(0, self._diffuse_decay_bind_groups[self._parity])
         p.dispatch_workgroups(*self._grid_dispatch)
         p.end()
+        self._parity = 1 - self._parity
 
+    def encode_merge_persistent(self, encoder: wgpu.GPUCommandEncoder) -> None:
+        """Merge this tick's final direct deposits into the prepared field."""
+        if self.chemical_communication_architecture != PERSISTENT_ENVIRONMENT_ARCHITECTURE:
+            return
         p = encoder.begin_compute_pass()
         p.set_pipeline(self._merge_deposit_pipeline)
-        p.set_bind_group(0, self._merge_deposit_bind_groups[1 - self._parity])
+        p.set_bind_group(0, self._merge_deposit_bind_groups[self._parity])
         p.dispatch_workgroups(*self._clear_dispatch)
         p.end()
-        self._parity = 1 - self._parity

@@ -5,7 +5,7 @@ import { GROWTH_SLIDER_SPECS } from "./GrowthPanel"
 import { physicsSliderSpecsFor } from "./PhysicsPanel"
 
 export type SweepParameterKey =
-  | Exclude<keyof PhysicsSettings, "mpmEnabled">
+  | Exclude<keyof PhysicsSettings, "mpmEnabled" | "normalizeDepositsByLocalDensity">
   | "particleDensityMultiplier"
   | "substrateResolution"
 

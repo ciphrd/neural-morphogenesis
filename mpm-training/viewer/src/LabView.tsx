@@ -314,7 +314,7 @@ export function LabView() {
                 setPhysicsOverride(null)
               }}
             >
-              {Array.from(new Set([0.5, 1, 2, effectiveParticleDensity]))
+              {Array.from(new Set([0.5, 1, 2, 4, effectiveParticleDensity]))
                 .sort((a, b) => a - b)
                 .map((density) => (
                   <option key={density} value={density}>{density}×</option>

@@ -76,7 +76,7 @@ def main() -> None:
         repulsion_strength=REPULSION_STRENGTH,
         repulsion_max_delta=REPULSION_MAX_DELTA,
     )
-    cases = [resolve_density(reference, q) for q in (0.5, 1.0, 2.0)]
+    cases = [resolve_density(reference, q) for q in (0.5, 1.0, 2.0, 4.0)]
     device = pick_device()
     core = MpmCore(device)
     environment = EnvironmentGPU(

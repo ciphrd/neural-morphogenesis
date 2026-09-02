@@ -338,8 +338,8 @@ struct AgentState {
 // core/p2g.wgsl and core/g2p.wgsl read/write every physics substep) —
 // what the heading/angularVelocity merge above bought room for: a
 // freshly-claimed particle can now inherit its parent's CURRENT
-// deformation state at split time instead of starting from a fresh
-// identity/zero rest state (see this file's own module docstring for why
+// deformation state at split time instead of starting undeformed with zero
+// rest-state history (see this file's own module docstring for why
 // that reversal matters). The counter/metadata packing above also makes
 // room for particleC, so daughters inherit the complete current MPM state
 // rather than losing affine momentum for their first physics substep.
@@ -711,11 +711,17 @@ fn depositGaussian(
 
       let wx = u32(wrapDepositIndex(ti, FIELD_WIDTH));
       let wy = u32(wrapDepositIndex(tj, FIELD_HEIGHT));
+      let projectionWeight = weight * physics.chemicalProjectionWeight;
       for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-        let scaled = envWrite[c] * weight
-          * physics.chemicalProjectionWeight * DEPOSIT_SCALE;
+        let scaled = envWrite[c] * projectionWeight * DEPOSIT_SCALE;
         atomicAdd(&depositScratch[fieldIndex(c, wy, wx)], i32(round(scaled)));
       }
+      // One extra scratch plane carries the exact matching denominator for
+      // optional local-density normalization in environment.wgsl.
+      atomicAdd(
+        &depositScratch[FIELD_TOTAL + wy * FIELD_WIDTH + wx],
+        i32(round(projectionWeight * DEPOSIT_SCALE)),
+      );
     }
   }
 }
