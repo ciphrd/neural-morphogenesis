@@ -65,7 +65,7 @@ Three signals have distinct responsibilities:
 2. **Neural targets control persistent growth geometry.** Two bounded outputs
    propose a local growth direction, while a sigmoid proposes anisotropy; the
    stored angle and anisotropy relax smoothly toward them. Another sigmoid
-   selects signed division-placement bias.
+   selects how strongly rear-facing division is polarized versus centered.
 3. **The morphoelastic law supplies the amount of growth.** Once a cell cycle
    is active, a configured duration determines approximately how many mechanical
    macro steps it takes to double stress-free area. Elastic compression
@@ -161,7 +161,7 @@ Chemical memory is an independent run-level architecture selected with
 
 | Variant | Memory owner | Chemical-head meaning | Field lifecycle |
 | --- | --- | --- | --- |
-| `persistent-environment` | spatial environment | direct Gaussian deposit | sense current field, then diffuse/decay and merge fresh writes |
+| `persistent-environment` | spatial environment | final-round Gaussian deposit | hold the field fixed through all neural rounds, then diffuse/decay once and add the last output |
 | `cell-owned-projection` | each cell | delta to persistent cell chemistry | clear and rebuild the sensed field from cell states every round |
 
 The cell-memory axis is selected independently with `--cell-memory`.
@@ -201,9 +201,10 @@ morphology = blur_and_normalize(particle_density)
 communication_dt = communication_speed / neural_updates_per_macro
 
 repeat neural_updates_per_macro communication rounds:
-  clear the transient substrate
-  for each active particle:
-    gaussian-splat particle.chemical_state into every substrate channel
+  if cell-owned projection:
+    clear the transient substrate
+    for each active particle:
+      growth-deformed gaussian-splat particle.chemical_state into every substrate channel
   compute substrate gradients
 
   for each active particle:
@@ -243,6 +244,8 @@ repeat neural_updates_per_macro communication rounds:
     particle.color = sigmoid(red_output, green_output, blue_output)
 
     if this is the final communication round:
+      if persistent environment:
+        growth-deformed gaussian-splat the final chemical output
       growth_probability = clamp(last_substrate_value, 0, 1)
       decrement division cooldown
 
@@ -252,6 +255,10 @@ repeat neural_updates_per_macro communication rounds:
        and its cooldown is finished
        and division_hazard crosses its persistent random threshold:
           particle.cell_cycle_active = true
+
+if persistent environment:
+  diffuse and decay the frozen substrate once
+  add the final neural round's deposits
 
 propagate any newly divided particle count to the simulation
 
@@ -264,11 +271,13 @@ repeat MLS-MPM physics substeps:
     update position, velocity, deformation, and stress-free growth
 ```
 
-`neural_updates_per_macro` therefore controls temporal resolution, not raw
-communication speed. `communication_speed` controls how much chemical and
-orientation time elapses before one mechanical tick. With speed 1, raising the
-round count lets particles sense and react more frequently without multiplying
-cell-state integration or turning by that round count.
+`neural_updates_per_macro` controls agent-state deliberation resolution, not
+raw communication speed. `communication_speed` controls how much chemical,
+memory, orientation, and persistent-field time elapses before one mechanical
+tick. In persistent-environment mode every neural round sees the same frozen
+spatial field and only the final output is deposited; in cell-owned mode the
+projected chemistry can evolve between rounds. Raising the round count never
+multiplies the total integration time.
 
 A daughter created during the agent pass participates in that macro step's
 physics. It begins running its own neural policy on the following macro step.
@@ -393,17 +402,12 @@ Division occurs when the parent's stress-free area reaches
 determinant(Fg) = 2
 ```
 
-The most recent signed neural growth direction determines placement. For split
-distance `d`:
+Daughter placement always uses the direction behind the parent's current
+heading. The policy has no spawn-direction control. For split distance `d`:
 
 ```text
-q = world_growth_direction
+n = -agent_forward
 bias = division_bias * division_directionality
-
-if length(q) is nonzero:
-    n = normalize(q)
-else:
-    n = random_unit_direction()
 
 half_offset = n * d / 2
 center_shift = bias * half_offset
@@ -412,17 +416,17 @@ parent_position   = old_position - half_offset + center_shift
 daughter_position = old_position + half_offset + center_shift
 ```
 
-With no direction, the split is symmetric around the old position and uses a
-random axis; the bias is ignored. With a direction and zero bias, the split is
-symmetric along that axis. With full bias, the parent remains at the old
-position and the daughter is placed one split distance along `+n`. Intermediate
-values smoothly interpolate between those cases. Positions wrap around the
-toroidal simulation domain.
+With zero bias, the split is symmetric along the forward/rear axis. With full
+bias, the parent remains at the old position and the daughter is placed one
+split distance behind it. Intermediate values smoothly interpolate between
+those cases. Positions wrap around the toroidal simulation domain. The neural
+growth direction controls only the stress-free growth tensor and optional
+strafe acceleration.
 
 The viewer's Growth panel exposes `division_directionality` from 0 to 1 as a
-playback-only cap: 0 forces center-preserving symmetric splits even when the
-policy requests full bias, while 1 preserves the policy's complete placement
-authority.
+playback-only polarization cap: 0 makes each rear-facing split center-preserving
+and symmetric, while 1 permits the policy's division bias to keep the parent in
+place and put the daughter the full split distance behind it.
 
 Division conserves mass and rest area:
 
@@ -448,11 +452,15 @@ daughter emerges from zero size. Its visible area follows the same exponential
 curve as stress-free volume growth, reaching full
 size after one `growth_duration`. The renderer applies the square root of that
 area fraction to particle radius. This appearance ramp does not alter physical
-mass, deformation, stress, or the conservative split described above. Seeded
-and manually placed particles start at full size. A cell's transient chemical
-substrate deposit is multiplied by the same area fraction, so its communication
-strength rises in step with its visible size. Its persistent internal chemical
-state is not scaled.
+mass, deformation, stress, chemistry, or the conservative split described
+above. Seeded and manually placed particles start at full size.
+
+A cell's transient chemical substrate footprint is deformed by its stress-free
+growth tensor `Fg`. Its projected area therefore expands continuously with the
+represented material (and along the same axis for anisotropic growth). At
+division the area-2 parent projection becomes two area-1 daughter projections;
+the rendering-only newborn fade does not temporarily remove the daughter's
+chemistry. Persistent internal chemical state remains unscaled.
 
 
 ## What determines the final morphology
@@ -462,7 +470,8 @@ The visible organism is an emergent result of:
 - **spatial growth admission:** which particles encounter growth substrate;
 - **chemical feedback:** where particles write signals and how neighbors react;
 - **directional rest growth:** the accumulated tensor `Fg` of each particle;
-- **signed division polarity:** where daughters are placed;
+- **rear-facing division polarity:** whether the parent stays fixed or the
+  daughter pair remains centered;
 - **elastic relaxation:** how neighboring material accommodates new rest area;
 - **plasticity:** which sufficiently large elastic deformations become
   permanent;
@@ -475,8 +484,9 @@ therefore retain residual elastic stress when their growth tensors or local
 rest configurations are incompatible.
 
 The growth direction is recomputed every macro step. A particle can grow along
-different axes during one cell cycle; `Fg` accumulates that history, while the
-eventual daughter placement uses the latest signed direction.
+different axes during one cell cycle, and `Fg` accumulates that history.
+Daughter placement is independent: it always uses the rear of the parent's
+current heading.
 
 ## Manual particle insertion
 
@@ -499,7 +509,7 @@ cap.
 ## Relevant implementation files
 
 - [`core/agents.wgsl`](core/agents.wgsl) — sensing, neural policy, chemical
-  writes, cell-cycle admission, signed division, and daughter initialization.
+  writes, cell-cycle admission, rear-facing division, and daughter initialization.
 - [`core/g2p.wgsl`](core/g2p.wgsl) — deformation update, plastic clamp, and
   tensor-valued `Fg` growth law.
 - [`core/p2g.wgsl`](core/p2g.wgsl) — effective grown mass/volume and elastic

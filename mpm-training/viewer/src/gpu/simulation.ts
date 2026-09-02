@@ -104,7 +104,7 @@ export class GpuSimulation {
   private pendingChemicalMemoryOpponentSubtraction = 0;
   private pendingBoundaryGradientScale = 0.01;
   private pendingPointRadiusPx: number | null = null;
-  private pendingGrowthAxisLengthPx = 24;
+  private pendingGrowthAxisLengthPx = 6;
   // 0 = identity — see gpu/render.ts's own setAccent()/field.wgsl's own
   // accent uniform comment. Same "view-only, survives rebuild()" reasoning
   // pendingFieldMode above already has.
@@ -591,7 +591,13 @@ export class GpuSimulation {
     const encoder = this.device.createCommandEncoder();
     this.mpmCore.encodeMorphology(encoder);
     for (let communicationRound = 0; communicationRound < this.neuralUpdatesPerMacro; communicationRound++) {
-      this.environment.encodeClear(encoder);
+      const finalRound = communicationRound === this.neuralUpdatesPerMacro - 1;
+      // Cell-owned chemistry rebuilds its projection every round. Persistent
+      // chemistry keeps one frozen sensed field through the deliberation loop;
+      // only the final round needs a clean scratch buffer for its output.
+      if (this.environment.chemicalCommunicationArchitecture === "cell-owned-projection" || finalRound) {
+        this.environment.encodeClear(encoder);
+      }
       if (this.environment.chemicalCommunicationArchitecture === "cell-owned-projection") {
         this.agents.encodeSplatChemicalState(encoder);
       }
@@ -599,10 +605,12 @@ export class GpuSimulation {
       this.agents.encodeStep(
         encoder,
         this.environment.parity,
-        communicationRound === this.neuralUpdatesPerMacro - 1
+        finalRound
       );
-      this.environment.encodeAdvancePersistent(encoder);
     }
+    // Persistent mode consumes only the last NN output: diffuse/decay the
+    // frozen snapshot once, then add that final deposit once.
+    this.environment.encodeAdvancePersistent(encoder);
     this.agents.encodeReadGrownCount(encoder);
     this.device.queue.submit([encoder.finish()]);
 

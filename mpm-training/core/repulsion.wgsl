@@ -117,6 +117,7 @@
 const FIELD_N: u32 = __FIELD_N__u;
 const TEXELS: u32 = FIELD_N * FIELD_N;
 const DT: f32 = __DT__;
+const CLEAR_WORKGROUP_SIZE: u32 = 64u;
 
 // Fixed-point scale for the atomic scatter — same trick as p2g.wgsl's
 // own SCALE (see that file's header). Splat weights are a Gaussian in
@@ -142,8 +143,11 @@ const MAX_KERNEL_RADIUS_TEXELS: i32 = 5;
 @group(0) @binding(0) var<storage, read_write> densityAccum: array<atomic<i32>>;
 
 @compute @workgroup_size(64)
-fn clearDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let idx = gid.x;
+fn clearDensity(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(num_workgroups) workgroups: vec3<u32>,
+) {
+  let idx = gid.x + gid.y * workgroups.x * CLEAR_WORKGROUP_SIZE;
   if (idx >= TEXELS) { return; }
   atomicStore(&densityAccum[idx], 0);
 }

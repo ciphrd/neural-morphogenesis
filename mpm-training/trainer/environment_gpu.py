@@ -23,7 +23,7 @@ from __future__ import annotations
 import numpy as np
 import wgpu
 
-from mpm_core import ceil_div
+from mpm_core import ceil_div, flat_dispatch_2d
 from policy_parameters import (
     CELL_OWNED_PROJECTION_ARCHITECTURE,
     PERSISTENT_ENVIRONMENT_ARCHITECTURE,
@@ -33,8 +33,6 @@ from shader_template import load_core_shader
 
 CLEAR_WORKGROUP = 256
 GRID_WORKGROUP = 16
-
-
 class EnvironmentGPU:
     """Public buffers (`buffers`, `gradient`, `deposit_scratch`) mirror
     environment.ts's own public surface — agents_gpu.py's own AgentsGPU
@@ -139,7 +137,7 @@ class EnvironmentGPU:
             for p in (0, 1)
         ]
 
-        self._clear_dispatch = ceil_div(total, CLEAR_WORKGROUP)
+        self._clear_dispatch = flat_dispatch_2d(total, CLEAR_WORKGROUP)
         self._grid_dispatch = (ceil_div(width, GRID_WORKGROUP), ceil_div(height, GRID_WORKGROUP), channels)
 
         self._parity = 0
@@ -149,15 +147,19 @@ class EnvironmentGPU:
         return self._parity
 
     def set_communication_timestep(self, rounds: int, speed: float) -> float:
-        """Configure timestep-invariant persistent-field dynamics."""
-        dt = max(0.0, float(speed)) / max(1, int(rounds))
-        decay = max(0.0, min(1.0, self.base_decay)) ** dt
+        """Configure one field evolution and return each neural round's dt."""
+        macro_dt = max(0.0, float(speed))
+        neural_dt = macro_dt / max(1, int(rounds))
+        decay = max(0.0, min(1.0, self.base_decay)) ** macro_dt
         self.device.queue.write_buffer(
             self._physics_uniform,
             0,
-            np.array([decay, self.base_deposit_rate * dt, min(dt, 1.0), 0.0], dtype=np.float32),
+            np.array(
+                [decay, self.base_deposit_rate * macro_dt, min(macro_dt, 1.0), 0.0],
+                dtype=np.float32,
+            ),
         )
-        return dt
+        return neural_dt
 
     def reset(self) -> None:
         """Zeroes both grid buffers and resets parity to 0 — call at the
@@ -176,7 +178,7 @@ class EnvironmentGPU:
         p = encoder.begin_compute_pass()
         p.set_pipeline(self._clear_scratch_pipeline)
         p.set_bind_group(0, self._clear_scratch_bind_group)
-        p.dispatch_workgroups(self._clear_dispatch)
+        p.dispatch_workgroups(*self._clear_dispatch)
         p.end()
 
     def encode_sense(self, encoder: wgpu.GPUCommandEncoder) -> None:
@@ -185,7 +187,7 @@ class EnvironmentGPU:
             p = encoder.begin_compute_pass()
             p.set_pipeline(self._materialize_splat_pipeline)
             p.set_bind_group(0, self._materialize_splat_bind_group)
-            p.dispatch_workgroups(self._clear_dispatch)
+            p.dispatch_workgroups(*self._clear_dispatch)
             p.end()
 
         p = encoder.begin_compute_pass()
@@ -206,6 +208,6 @@ class EnvironmentGPU:
         p = encoder.begin_compute_pass()
         p.set_pipeline(self._merge_deposit_pipeline)
         p.set_bind_group(0, self._merge_deposit_bind_groups[1 - self._parity])
-        p.dispatch_workgroups(self._clear_dispatch)
+        p.dispatch_workgroups(*self._clear_dispatch)
         p.end()
         self._parity = 1 - self._parity

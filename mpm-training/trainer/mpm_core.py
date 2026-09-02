@@ -125,6 +125,24 @@ def ceil_div(a: int, b: int) -> int:
     return -(-a // b)
 
 
+def flat_dispatch_2d(
+    total_threads: int,
+    workgroup_size: int,
+    max_dimension: int = 65535,
+) -> tuple[int, int]:
+    """Map a flat workload onto a legal one- or two-dimensional dispatch."""
+    groups = ceil_div(total_threads, workgroup_size)
+    if groups <= max_dimension:
+        return groups, 1
+    x = min(max_dimension, math.ceil(math.sqrt(groups)))
+    y = ceil_div(groups, x)
+    if y > max_dimension:
+        raise ValueError(
+            f"workload requires {groups} workgroups, exceeding 2D dispatch capacity"
+        )
+    return x, y
+
+
 def per_substep_damping(loss_fraction: float, substeps: int) -> float:
     """Port of mpm.ts's perSubstepDamping() — verbatim, not
     reimplemented from description: converts a per-rendered-frame loss
@@ -375,7 +393,7 @@ class MpmCore:
             ],
         )
 
-        self.density_clear_dispatch = ceil_div(texel_count, WORKGROUP)
+        self.density_clear_dispatch = flat_dispatch_2d(texel_count, WORKGROUP)
         self.density_texture_dispatch = (ceil_div(REPULSION_FIELD_N, FIELD_WORKGROUP), ceil_div(REPULSION_FIELD_N, FIELD_WORKGROUP))
 
         morphology_module = device.create_shader_module(
@@ -425,7 +443,7 @@ class MpmCore:
         """
         particle_dispatch = ceil_div(self._active_count, WORKGROUP)
         for pipeline, bind_group, dispatch in (
-            (self.clear_density_pipeline, self.clear_density_bind_group, (self.density_clear_dispatch,)),
+            (self.clear_density_pipeline, self.clear_density_bind_group, self.density_clear_dispatch),
             (self.splat_density_pipeline, self.splat_density_bind_group, (particle_dispatch,)),
             (self.density_to_texture_pipeline, self.density_to_texture_bind_group, self.density_texture_dispatch),
             (self.morphology_horizontal_pipeline, self.morphology_horizontal_bind_group, self.density_texture_dispatch),
@@ -673,7 +691,7 @@ class MpmCore:
                 p = encoder.begin_compute_pass()
                 p.set_pipeline(self.clear_density_pipeline)
                 p.set_bind_group(0, self.clear_density_bind_group)
-                p.dispatch_workgroups(self.density_clear_dispatch)
+                p.dispatch_workgroups(*self.density_clear_dispatch)
                 p.end()
 
                 p = encoder.begin_compute_pass()

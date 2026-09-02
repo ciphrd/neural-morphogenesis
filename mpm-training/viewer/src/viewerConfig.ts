@@ -11,6 +11,8 @@ interface ViewerDefaults {
     initialParticleCount: number | null
     /** null follows the density stored in the selected training run. */
     particleDensityMultiplier: number | null
+    /** null follows the chemical-substrate resolution stored in the run. */
+    substrateResolution: number | null
   }
   rendering: {
     fieldMode: FieldMode
@@ -75,6 +77,7 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
     particleCap: 170_000,
     initialParticleCount: 100,
     particleDensityMultiplier: 2,
+    substrateResolution: null,
   },
   rendering: {
     fieldMode: "none",
@@ -111,7 +114,7 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
     internalStateAlpha: 0.4,
     internalStateChannelStart: 0,
     chemicalMemoryOpponentSubtraction: 0,
-    growthAxisLengthPx: 28,
+    growthAxisLengthPx: 6,
   },
   tools: {
     selected: "none",

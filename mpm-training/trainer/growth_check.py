@@ -377,9 +377,8 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
         assert scratch[channel, max_y, max_x] > 0
     assert not np.any(scratch[4:]), "one output channel leaked into another"
 
-    # The transient substrate contribution follows newborn visible area while
-    # the cell-owned chemical state remains unchanged. Fixed-point rounding can
-    # differ by one unit between scaling before and after quantization.
+    # Newborn appearance is rendering-only: a physically present daughter must
+    # publish its full baseline chemistry immediately after division.
     device.queue.write_buffer(
         core.rest,
         0,
@@ -394,11 +393,39 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     compute.dispatch_workgroups((count + 63) // 64)
     compute.end()
     device.queue.submit([encoder.finish()])
-    quarter_scratch = np.frombuffer(
+    faded_scratch = np.frombuffer(
         device.queue.read_buffer(readback), np.int32
     ).reshape(channels, height, width)
-    assert np.max(np.abs(quarter_scratch[:4] - np.rint(scratch[:4] * 0.25))) <= 1
-    assert not np.any(quarter_scratch[4:])
+    np.testing.assert_array_equal(faded_scratch, scratch)
+
+    # The substrate footprint follows stress-free material growth. Isotropic
+    # area doubling must retain the peak while increasing the projected area,
+    # even when the renderer is still fading the particle in.
+    root2 = np.float32(np.sqrt(2.0))
+    device.queue.write_buffer(
+        core.rest,
+        0,
+        _rest_state(
+            np.ones(1), np.array([2.0]), np.ones(1),
+            growth_f=np.array([[root2, 0.0, 0.0, root2]], dtype=np.float32),
+            appearance_scale=np.array([0.25]),
+        ),
+    )
+    encoder = device.create_command_encoder()
+    environment.encode_clear(encoder)
+    agents.encode_splat_chemical_state(encoder)
+    compute = encoder.begin_compute_pass()
+    compute.set_pipeline(pipeline)
+    compute.set_bind_group(0, bind_group)
+    compute.dispatch_workgroups((count + 63) // 64)
+    compute.end()
+    device.queue.submit([encoder.finish()])
+    grown_scratch = np.frombuffer(
+        device.queue.read_buffer(readback), np.int32
+    ).reshape(channels, height, width)
+    assert grown_scratch[0, target[1], target[0]] >= scratch[0, target[1], target[0]]
+    assert grown_scratch[0].sum() > scratch[0].sum() * 1.5
+    assert not np.any(grown_scratch[4:])
 
     meta = np.frombuffer(
         device.queue.read_buffer(
@@ -421,7 +448,7 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     device.queue.submit([encoder.finish()])
     cleared = np.frombuffer(device.queue.read_buffer(readback), np.int32)
     assert not np.any(cleared), "transient field retained a prior round's splat"
-    print("[PASS] cell chemical state persists locally; transient splats scale with newborn area and discard old writes")
+    print("[PASS] cell chemistry persists locally; substrate follows material growth, ignores visual fade, and discards old writes")
 
     meta_raw = device.queue.read_buffer(
         agents._agent_state_buffer,
@@ -435,7 +462,7 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
 
 
 def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
-    """Direct policy writes survive spatially, then diffuse and decay."""
+    """Only the final NN output is deposited before one field evolution."""
     channels = 1
     width = height = 16
     decay = 0.81
@@ -465,24 +492,39 @@ def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
     weights[layout["fc2b_offset"]] = 20.0
     agents.load_weights(weights)
 
-    def communication_round() -> np.ndarray:
+    def macro_tick(rounds: int) -> np.ndarray:
+        communication_dt = environment.set_communication_timestep(rounds, 1.0)
+        agents.set_communication_timestep(communication_dt)
         encoder = device.create_command_encoder()
-        environment.encode_clear(encoder)
-        environment.encode_sense(encoder)
-        agents.encode_step(encoder, environment.parity)
+        for communication_round in range(rounds):
+            final_round = communication_round == rounds - 1
+            if final_round:
+                environment.encode_clear(encoder)
+            environment.encode_sense(encoder)
+            agents.encode_step(
+                encoder, environment.parity, commit_lifecycle=final_round
+            )
         environment.encode_advance_persistent(encoder)
         device.queue.submit([encoder.finish()])
         return np.frombuffer(
             device.queue.read_buffer(environment.buffers[environment.parity]), np.float32
         ).copy()
 
-    deposited = communication_round()
-    assert deposited.max() > 0.0 and deposited.sum() > 0.0, deposited
+    environment.reset()
+    deposited_once = macro_tick(1)
+    assert deposited_once.max() > 0.0 and deposited_once.sum() > 0.0, deposited_once
+
+    # Four deliberation rounds must still produce exactly one deposit from the
+    # final output, not four accumulated writes or four diffusion/decay steps.
+    environment.reset()
+    deposited_four = macro_tick(4)
+    np.testing.assert_allclose(deposited_four, deposited_once, rtol=2e-5, atol=2e-5)
+
     agents.load_weights(np.zeros_like(weights))
-    aged = communication_round()
-    np.testing.assert_allclose(aged.sum(), deposited.sum() * decay, rtol=2e-5, atol=2e-5)
-    assert aged.max() < deposited.max(), (aged.max(), deposited.max())
-    print("[PASS] persistent-environment direct writes survive, diffuse, and decay")
+    aged = macro_tick(4)
+    np.testing.assert_allclose(aged.sum(), deposited_four.sum() * decay, rtol=2e-5, atol=2e-5)
+    assert aged.max() < deposited_four.max(), (aged.max(), deposited_four.max())
+    print("[PASS] persistent environment holds a frozen field, deposits the final NN output once, then diffuses/decays once")
 
 
 def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
@@ -685,7 +727,7 @@ def check_desired_heading_derives_angular_acceleration(device: wgpu.GPUDevice) -
 
 def _polarized_split_case(
     device: wgpu.GPUDevice,
-    signed_bias: float,
+    growth_direction_bias: float,
     polarity_bias: float = 20.0,
     directionality: float = 1.0,
 ) -> np.ndarray:
@@ -718,7 +760,7 @@ def _polarized_split_case(
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     # Division-bias target plus desired local growth direction.
     weights[layout["fc2b_offset"] + 8 + 3] = polarity_bias
-    weights[layout["fc2b_offset"] + 8 + 4] = signed_bias
+    weights[layout["fc2b_offset"] + 8 + 4] = growth_direction_bias
     agents.load_weights(weights)
     # Let the persistent growth-angle state settle before the division event.
     for _ in range(16):
@@ -736,23 +778,23 @@ def _polarized_split_case(
     return core.read_positions()
 
 
-def check_polarized_division_uses_signed_growth_direction(device: wgpu.GPUDevice) -> None:
+def check_division_always_uses_rear_facing_direction(device: wgpu.GPUDevice) -> None:
     positive = _polarized_split_case(device, 20.0)
     negative = _polarized_split_case(device, -20.0)
     unbiased = _polarized_split_case(device, 20.0, -20.0)
     globally_symmetric = _polarized_split_case(device, 20.0, directionality=0.0)
-    expected_positive = np.array([[0.5, 0.5], [0.51, 0.5]], dtype=np.float32)
-    expected_negative = np.array([[0.5, 0.5], [0.49, 0.5]], dtype=np.float32)
-    assert np.allclose(positive, expected_positive, atol=2e-6), positive
-    assert np.allclose(negative, expected_negative, atol=2e-6), negative
-    assert np.allclose(unbiased, [[0.495, 0.5], [0.505, 0.5]], atol=2e-6), unbiased
-    assert np.allclose(globally_symmetric, [[0.495, 0.5], [0.505, 0.5]], atol=2e-6), globally_symmetric
-    assert positive[:, 0].mean() > 0.5 and negative[:, 0].mean() < 0.5
-    print("[PASS] signed growth direction places child; global directionality can restore symmetric division")
+    expected_rear_biased = np.array([[0.5, 0.5], [0.49, 0.5]], dtype=np.float32)
+    expected_symmetric = np.array([[0.505, 0.5], [0.495, 0.5]], dtype=np.float32)
+    assert np.allclose(positive, expected_rear_biased, atol=2e-6), positive
+    assert np.allclose(negative, expected_rear_biased, atol=2e-6), negative
+    assert np.allclose(unbiased, expected_symmetric, atol=2e-6), unbiased
+    assert np.allclose(globally_symmetric, expected_symmetric, atol=2e-6), globally_symmetric
+    assert positive[1, 0] < positive[0, 0] and negative[1, 0] < negative[0, 0]
+    print("[PASS] division places the daughter behind its parent's facing direction")
 
 
-def check_boundary_gradient_forces_tangent_split(device: wgpu.GPUDevice) -> None:
-    """The daughter axis must be perpendicular to the sampled morphology gradient."""
+def check_boundary_gradient_does_not_change_rear_split(device: wgpu.GPUDevice) -> None:
+    """Boundary-tangent growth must not change rear-facing placement."""
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
     agents = AgentsGPU(
@@ -760,8 +802,8 @@ def check_boundary_gradient_forces_tangent_split(device: wgpu.GPUDevice) -> None
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
         6, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
     )
-    # This diagnostic deliberately exercises tangent placement even for its
-    # small synthetic gradient; production uses the shared 8e-3 flat cutoff.
+    # This diagnostic deliberately exercises tangent-directed growth even for
+    # its small synthetic gradient; rear-facing placement must remain fixed.
     agents.set_boundary_tangent_min_gradient(1e-6)
     # Particle 0 is just to the right of a small cluster. Its morphology
     # gradient is nonzero, while a zeroed policy would otherwise request a
@@ -834,12 +876,10 @@ def check_boundary_gradient_forces_tangent_split(device: wgpu.GPUDevice) -> None
     separation = daughters[1] - daughters[0]
     separation = (separation + 0.5) % 1.0 - 0.5
     assert np.isclose(np.linalg.norm(separation), 0.01, atol=2e-5), daughters
-    tangent_error = abs(np.dot(separation, gradient)) / (
-        np.linalg.norm(separation) * np.linalg.norm(gradient)
+    np.testing.assert_allclose(
+        separation / np.linalg.norm(separation), [-1.0, 0.0], atol=2e-5
     )
-    assert tangent_error < 5e-4, (daughters, gradient, tangent_error)
-    np.testing.assert_allclose(daughters.mean(axis=0), positions[0], atol=2e-5)
-    print("[PASS] morphology boundary normal forces a symmetric tangent split")
+    print("[PASS] morphology-tangent growth leaves rear-facing placement unchanged")
 
 
 def check_anisotropic_tensor_split(device: wgpu.GPUDevice) -> None:
@@ -1348,8 +1388,8 @@ def main() -> None:
     check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
     check_desired_heading_derives_angular_acceleration(device)
-    check_polarized_division_uses_signed_growth_direction(device)
-    check_boundary_gradient_forces_tangent_split(device)
+    check_division_always_uses_rear_facing_direction(device)
+    check_boundary_gradient_does_not_change_rear_split(device)
     check_anisotropic_tensor_split(device)
     check_isotropic_increment_preserves_tensor_shape(device)
     check_directional_increment_and_objectivity(device)

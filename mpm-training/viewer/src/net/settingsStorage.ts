@@ -1,6 +1,10 @@
-import { cellMemoryFromConfig, chemicalCommunicationArchitectureFromConfig, type RunSettings } from "../gpu/types";
+import {
+  cellMemoryFromConfig,
+  chemicalCommunicationArchitectureFromConfig,
+  type RunSettings,
+} from "../gpu/types"
 
-const STORAGE_KEY = "mpm-training:last-run-settings:v1";
+const STORAGE_KEY = "mpm-training:last-run-settings:v1"
 
 // First-ever offline visits have no browser cache to restore. These mirror the
 // trainer's ordinary CLI/simulation defaults closely enough to build a valid
@@ -31,15 +35,15 @@ export const DEFAULT_RUN_SETTINGS: RunSettings = {
   hiddenLayers: [128],
   cellMemory: "recurrent",
   policyArchitecture: "stateful-128",
-  chemicalCommunicationArchitecture: "cell-owned-projection",
+  chemicalCommunicationArchitecture: "persistent-environment",
   decay: 0.91,
   depositRate: 1,
   maxAccel: 0,
   maxStrafe: 0,
   maxEnvWrite: 1,
-  maxAngularAccel: 1.4,
-  angularDamping: 0.8,
-  maxAngularVelocity: 0.1,
+  maxAngularAccel: 10,
+  angularDamping: 0.276,
+  maxAngularVelocity: 1.03,
   depositDistance: 0,
   depositSigma: 0.4,
   splitDisplacement: 0.0027,
@@ -49,8 +53,8 @@ export const DEFAULT_RUN_SETTINGS: RunSettings = {
   growthDuration: 48,
   growthMax: 2,
   growthAnisotropy: 1,
-  growthCompressionStart: 0.10,
-  growthCompressionStop: 0.10,
+  growthCompressionStart: 0.1,
+  growthCompressionStop: 0.1,
   growthCompressionFeedback: 1,
   mpmEnabled: true,
   chirality: true,
@@ -68,18 +72,22 @@ export const DEFAULT_RUN_SETTINGS: RunSettings = {
   runSeed: 0,
   totalGenerations: 50,
   checkpointEvery: 5,
-};
+}
 
 function looksLikeSettings(value: unknown): value is Partial<RunSettings> {
-  if (!value || typeof value !== "object") return false;
-  const settings = value as Record<string, unknown>;
+  if (!value || typeof value !== "object") return false
+  const settings = value as Record<string, unknown>
   return (
     typeof settings.target === "string" &&
-    typeof settings.particles === "number" && settings.particles > 0 &&
-    typeof settings.channels === "number" && settings.channels > 0 &&
-    typeof settings.hiddenDim === "number" && settings.hiddenDim > 0 &&
-    typeof settings.fieldN === "number" && settings.fieldN > 0
-  );
+    typeof settings.particles === "number" &&
+    settings.particles > 0 &&
+    typeof settings.channels === "number" &&
+    settings.channels > 0 &&
+    typeof settings.hiddenDim === "number" &&
+    settings.hiddenDim > 0 &&
+    typeof settings.fieldN === "number" &&
+    settings.fieldN > 0
+  )
 }
 
 /** Returns the last backend-provided settings, or a valid first-run fallback.
@@ -87,24 +95,28 @@ function looksLikeSettings(value: unknown): value is Partial<RunSettings> {
  * newly-added settings fields without making an offline startup invalid. */
 export function loadDefaultRunSettings(): RunSettings {
   try {
-    const serialized = window.localStorage.getItem(STORAGE_KEY);
-    if (!serialized) return DEFAULT_RUN_SETTINGS;
-    const cached: unknown = JSON.parse(serialized);
-    if (!looksLikeSettings(cached)) return DEFAULT_RUN_SETTINGS;
-    const merged = { ...DEFAULT_RUN_SETTINGS, ...cached };
+    const serialized = window.localStorage.getItem(STORAGE_KEY)
+    if (!serialized) return DEFAULT_RUN_SETTINGS
+    const cached: unknown = JSON.parse(serialized)
+    if (!looksLikeSettings(cached)) return DEFAULT_RUN_SETTINGS
+    const merged = { ...DEFAULT_RUN_SETTINGS, ...cached }
     if (!("chemicalCommunicationArchitecture" in cached)) {
-      merged.chemicalCommunicationArchitecture = chemicalCommunicationArchitectureFromConfig({
-        decay: typeof cached.decay === "number" ? cached.decay : 0,
-      });
+      merged.chemicalCommunicationArchitecture =
+        chemicalCommunicationArchitectureFromConfig({
+          decay: typeof cached.decay === "number" ? cached.decay : 0,
+        })
     }
-    if (!("hiddenLayers" in cached)) merged.hiddenLayers = [cached.hiddenDim ?? merged.hiddenDim];
+    if (!("hiddenLayers" in cached))
+      merged.hiddenLayers = [cached.hiddenDim ?? merged.hiddenDim]
     if (!("cellMemory" in cached)) {
-      merged.cellMemory = cellMemoryFromConfig({ policyArchitecture: cached.policyArchitecture });
+      merged.cellMemory = cellMemoryFromConfig({
+        policyArchitecture: cached.policyArchitecture,
+      })
     }
-    return merged;
+    return merged
   } catch {
     // localStorage may be unavailable (privacy/security policy) or corrupt.
-    return DEFAULT_RUN_SETTINGS;
+    return DEFAULT_RUN_SETTINGS
   }
 }
 
@@ -112,7 +124,7 @@ export function loadDefaultRunSettings(): RunSettings {
  * backend response from loading into the viewer. */
 export function storeRunSettings(settings: RunSettings): void {
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings))
   } catch {
     // Continue with in-memory settings when storage is unavailable/full.
   }

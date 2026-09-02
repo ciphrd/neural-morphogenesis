@@ -139,8 +139,8 @@ export function physicsSliderSpecsFor(
       key: "maxAngularAccel",
       label: "Max angular accel",
       min: 0,
-      max: 1.8,
-      step: 0.0001,
+      max: 10,
+      step: 0.001,
       format: (v) => v.toFixed(3),
     },
     {
@@ -152,7 +152,9 @@ export function physicsSliderSpecsFor(
     {
       key: "maxAngularVelocity",
       label: "Max angular velocity",
-      ...scaledRange(trained.maxAngularVelocity, 3),
+      min: 0,
+      max: 2,
+      step: 0.001,
       format: (v) => v.toFixed(3),
     },
     {
@@ -229,8 +231,7 @@ export function physicsSliderSpecsFor(
  * maxAngularVelocity, and depositSigma (the cell-state Gaussian splat radius — see
  * agents.wgsl's own depositGaussian() for the exact kernel this drives,
  * replacing that shader's old flat 4-corner bilinear scatter),
- * growth's own splitDisplacement (daughter separation; the signed growth
- * vector biases the new daughter and pair center toward +n) and
+ * growth's own splitDisplacement (rear-facing daughter separation) and
  * divisionCooldown (macro steps a particle refuses
  * to split again for, right after splitting, whether as parent or child
  * — see agents.wgsl's own module docstring for the full growth design;

@@ -935,6 +935,18 @@ body {
   font-size: 11px;
 }
 
+.sample-values-row {
+  display: grid;
+  gap: 5px;
+  margin-top: 10px;
+  color: #8d8d8d;
+  font-size: 11px;
+}
+
+.sample-values-row .number-input {
+  width: 100%;
+}
+
 .sample-link-button,
 .sample-add-button {
   padding: 0;

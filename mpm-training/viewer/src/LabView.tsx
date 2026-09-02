@@ -97,6 +97,7 @@ export function LabView() {
     useState<ChemicalCommunicationArchitecture | null>(null)
   const [chiralityOverride, setChiralityOverride] = useState<boolean | null>(null)
   const [particleDensityOverride, setParticleDensityOverride] = useState<number | null>(null)
+  const [substrateResolutionOverride, setSubstrateResolutionOverride] = useState<number | null>(null)
   const [policyExploration, setPolicyExploration] = useState<{
     cellMemory: CellMemory
     hiddenWidth: number
@@ -107,6 +108,7 @@ export function LabView() {
     setChemicalArchitectureOverride(null)
     setChiralityOverride(null)
     setParticleDensityOverride(null)
+    setSubstrateResolutionOverride(null)
     setPolicyExploration(null)
     setPhysicsOverride(null)
   }, [latest?.generation])
@@ -116,17 +118,22 @@ export function LabView() {
     1
   const effectiveParticleDensity =
     particleDensityOverride ?? defaultParticleDensity
+  const defaultSubstrateResolution =
+    VIEWER_DEFAULTS.playback.substrateResolution ?? baseConfig?.fieldN ?? 256
+  const effectiveSubstrateResolution =
+    substrateResolutionOverride ?? defaultSubstrateResolution
   const effectiveChirality = chiralityOverride ?? baseConfig?.chirality ?? true
   const playbackConfig = useMemo(() => {
     if (!baseConfig) return null
     const densityResolved = configAtDensity({
       ...baseConfig,
+      fieldN: effectiveSubstrateResolution,
       chemicalCommunicationArchitecture:
         chemicalArchitectureOverride ?? chemicalCommunicationArchitectureFromConfig(baseConfig),
       chirality: effectiveChirality,
     }, effectiveParticleDensity)
     return { ...densityResolved, particles: scenarioParticleCap, initialParticleCount: 18 }
-  }, [baseConfig, chemicalArchitectureOverride, effectiveChirality, effectiveParticleDensity, scenarioParticleCap])
+  }, [baseConfig, chemicalArchitectureOverride, effectiveChirality, effectiveParticleDensity, effectiveSubstrateResolution, scenarioParticleCap])
   const config = useMemo(() => {
     if (!playbackConfig || !policyExploration) return playbackConfig
     const policyArchitecture = policyArchitectureForCellMemory(policyExploration.cellMemory)
@@ -314,6 +321,28 @@ export function LabView() {
                 ))}
             </select>
           </div>
+          <div className="stat-row">
+            <span>Substrate resolution</span>
+            <select
+              className="select"
+              aria-label="Substrate resolution"
+              value={effectiveSubstrateResolution}
+              disabled={!baseConfig}
+              title="Changing substrate resolution rebuilds and restarts the Lab scenario"
+              onChange={(event) => {
+                const selected = Number(event.target.value)
+                setSubstrateResolutionOverride(
+                  selected === defaultSubstrateResolution ? null : selected
+                )
+              }}
+            >
+              {Array.from(new Set([64, 128, 256, 512, 1024, 2048, effectiveSubstrateResolution]))
+                .sort((a, b) => a - b)
+                .map((resolution) => (
+                  <option key={resolution} value={resolution}>{resolution}×{resolution}</option>
+                ))}
+            </select>
+          </div>
           <label className="checkbox-row" title="Changing chirality restarts the Lab scenario">
             <input
               type="checkbox"
@@ -406,7 +435,7 @@ export function LabView() {
             <label className="slider-row"><span>Activation alpha</span><Slider min={0} max={1} step={0.01} value={activationAlpha} onChange={setActivationAlpha} /><span className="slider-value">{activationAlpha.toFixed(2)}</span></label>
           )}
           {particleRenderMode === "directional-arrows" && (
-            <label className="slider-row"><span>Triangle size</span><Slider min={8} max={80} step={1} value={growthAxisLengthPx} onChange={setGrowthAxisLengthPx} /><span className="slider-value">{growthAxisLengthPx}px</span></label>
+            <label className="slider-row"><span>Triangle size</span><Slider min={1} max={20} step={1} value={growthAxisLengthPx} onChange={setGrowthAxisLengthPx} /><span className="slider-value">{growthAxisLengthPx}px</span></label>
           )}
           <label className="slider-row">
             <span>Background</span>

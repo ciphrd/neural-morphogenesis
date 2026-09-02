@@ -48,7 +48,7 @@ import repulsionSrc from "../../../core/repulsion.wgsl?raw";
 import morphologySrc from "../../../core/morphology.wgsl?raw";
 import coreConstants from "../../../core/constants.json";
 import { templateShader } from "./shaderTemplate";
-import { ceilDiv, writeFloat32 } from "./gpuUtil";
+import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
 import type { SceneData } from "./types";
 
 export const GRID_N: number = coreConstants.GRID_N;
@@ -187,7 +187,7 @@ export class MpmCore {
   private readonly morphologyVerticalBindGroup: GPUBindGroup;
 
   private readonly gridDispatch: number;
-  private readonly densityClearDispatch: number;
+  private readonly densityClearDispatch: [number, number];
   private readonly densityTextureDispatch: [number, number];
 
   private _activeCount = 0;
@@ -343,7 +343,11 @@ export class MpmCore {
       ],
     });
 
-    this.densityClearDispatch = ceilDiv(texelCount, WORKGROUP);
+    this.densityClearDispatch = flatDispatch2D(
+      texelCount,
+      WORKGROUP,
+      device.limits.maxComputeWorkgroupsPerDimension,
+    );
     this.densityTextureDispatch = [ceilDiv(REPULSION_FIELD_N, FIELD_WORKGROUP), ceilDiv(REPULSION_FIELD_N, FIELD_WORKGROUP)];
 
     const morphologyModule = device.createShaderModule({ code: templateShader(morphologySrc, { FIELD_N: REPULSION_FIELD_N }) });
@@ -599,7 +603,7 @@ export class MpmCore {
   encodeMorphology(encoder: GPUCommandEncoder): void {
     const particleDispatch = ceilDiv(this._activeCount, WORKGROUP);
     const passes: [GPUComputePipeline, GPUBindGroup, [number, number?]][] = [
-      [this.clearDensityPipeline, this.clearDensityBindGroup, [this.densityClearDispatch]],
+      [this.clearDensityPipeline, this.clearDensityBindGroup, this.densityClearDispatch],
       [this.splatDensityPipeline, this.splatDensityBindGroup, [particleDispatch]],
       [this.densityToTexturePipeline, this.densityToTextureBindGroup, this.densityTextureDispatch],
       [this.morphologyHorizontalPipeline, this.morphologyHorizontalBindGroup, this.densityTextureDispatch],
@@ -624,7 +628,7 @@ export class MpmCore {
       let pass = encoder.beginComputePass();
       pass.setPipeline(this.clearDensityPipeline);
       pass.setBindGroup(0, this.clearDensityBindGroup);
-      pass.dispatchWorkgroups(this.densityClearDispatch);
+      pass.dispatchWorkgroups(...this.densityClearDispatch);
       pass.end();
 
       pass = encoder.beginComputePass();

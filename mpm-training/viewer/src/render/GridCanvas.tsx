@@ -165,6 +165,7 @@ export interface GridCanvasHandle {
    * the rendered final frame of each settings combination as a PNG. */
   collectSamples(
     samples: Array<{
+      config: SimulationConfig;
       physics: PhysicsSettings;
       particleCap: number;
       initialParticleCount: number;
@@ -303,7 +304,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     boundaryGradientScale = 0.01,
     internalStateChannelStart = 0,
     chemicalMemoryOpponentSubtraction = 0,
-    growthAxisLengthPx = 24,
+    growthAxisLengthPx = 6,
     accent = 0,
     morphologyGradientVisible = true,
     morphologyDensityVisible = true,
@@ -537,6 +538,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       if (!sim?.ready || !context || !canvas || !device) {
         throw new Error("The simulation is not ready yet.");
       }
+      const restoreConfig = configRef.current;
+      if (!restoreConfig) throw new Error("No simulation configuration is loaded.");
       batchRunningRef.current = true;
       const captures: Array<{ filename: string; blob: Blob }> = [];
       try {
@@ -546,6 +549,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += 1) {
           const sample = samples[sampleIndex];
           if (signal.aborted) throw new DOMException("Sample collection cancelled", "AbortError");
+          // Substrate resolution is baked into buffer sizes and shader
+          // constants, so a resolution sweep must go through loadGeneration
+          // rather than the live-uniform physics path.
+          sim.loadGeneration(sample.config);
           sim.setPhysics(sample.physics);
           sim.setParticleCap(sample.particleCap);
           sim.setInitialParticleCount(sample.initialParticleCount);
@@ -568,6 +575,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
             const spatial = spatialMetrics(positions);
             const metadata = {
               particleDensityMultiplier: sample.particleDensityMultiplier,
+              substrateResolution: sample.config.fieldN,
               particleCap: sample.particleCap,
               initialParticleCount: sample.initialParticleCount,
               finalParticleCount: sim.particleCount,
@@ -586,6 +594,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         }
         return captures;
       } finally {
+        sim.loadGeneration(restoreConfig);
         sim.setPhysics(restorePhysics);
         sim.setParticleCap(restoreParticleCap);
         sim.setInitialParticleCount(restoreInitialParticleCount);

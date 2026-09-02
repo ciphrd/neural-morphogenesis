@@ -1,8 +1,9 @@
 // GPU-resident chemical communication field. The host selects one of two
 // lifecycles without changing its storage interface: cell-owned-projection
 // replaces gridCurrent from persistent per-cell chemistry every brain round;
-// persistent-environment keeps a ping-pong spatial field, diffuses/decays its
-// old contents, then merges the policy's fresh deposits. TOROIDAL, matching
+// persistent-environment keeps a ping-pong spatial field fixed throughout a
+// macro tick's neural rounds, then diffuses/decays it once and adds only the
+// final policy output. TOROIDAL, matching
 // envnca's own version exactly: MpmCore's own MLS-MPM domain has no
 // walls either now (gridUpdate.wgsl's own module docstring — a
 // particle's 3x3 P2G/G2P stencil wraps at the domain edge, not clamps),
@@ -33,6 +34,7 @@ const WIDTH: u32 = __WIDTH__u;
 const HEIGHT: u32 = __HEIGHT__u;
 const PLANE_SIZE: u32 = WIDTH * HEIGHT;
 const TOTAL: u32 = PLANE_SIZE * CHANNELS;
+const CLEAR_WORKGROUP_SIZE: u32 = 256u;
 
 // Must match agents.wgsl's own copy of this constant — the fixed-point
 // scale cell-state splats are encoded at before landing in depositScratch.
@@ -63,9 +65,19 @@ struct EnvPhysics {
 }
 @group(0) @binding(4) var<uniform> physics: EnvPhysics;
 
+// The host may split the flat field across both dispatch X and Y to stay
+// below maxComputeWorkgroupsPerDimension. Since workgroup Y is one, each Y
+// row contains numWorkgroups.x consecutive 256-thread workgroups.
+fn flatDispatchIndex(gid: vec3<u32>, workgroups: vec3<u32>) -> u32 {
+  return gid.x + gid.y * workgroups.x * CLEAR_WORKGROUP_SIZE;
+}
+
 @compute @workgroup_size(256)
-fn clearScratch(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
+fn clearScratch(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(num_workgroups) workgroups: vec3<u32>,
+) {
+  let i = flatDispatchIndex(gid, workgroups);
   if (i >= TOTAL) { return; }
   atomicStore(&depositScratch[i], 0);
 }
@@ -75,18 +87,25 @@ fn clearScratch(@builtin(global_invocation_id) gid: vec3<u32>) {
 // field has no memory of a previous round; persistence belongs exclusively to
 // each cell's chemicalState in agents.wgsl.
 @compute @workgroup_size(256)
-fn materializeSplat(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
+fn materializeSplat(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(num_workgroups) workgroups: vec3<u32>,
+) {
+  let i = flatDispatchIndex(gid, workgroups);
   if (i >= TOTAL) { return; }
   gridCurrent[i] = f32(atomicLoad(&depositScratch[i])) / DEPOSIT_SCALE;
 }
 
-// Persistent-environment only: add this round's policy writes after the old
-// field has diffused and decayed, so a new write is sensed once at full
-// depositRate before it begins aging on the following round.
+// Persistent-environment only: add the final neural round's policy writes
+// after the old field has diffused and decayed. "Merge" here is just this
+// pointwise addition into the newly evolved field; it is not another blend or
+// neural operation. The result is sensed on the following macro tick.
 @compute @workgroup_size(256)
-fn mergeDeposit(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
+fn mergeDeposit(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(num_workgroups) workgroups: vec3<u32>,
+) {
+  let i = flatDispatchIndex(gid, workgroups);
   if (i >= TOTAL) { return; }
   gridCurrent[i] = gridCurrent[i]
     + (f32(atomicLoad(&depositScratch[i])) / DEPOSIT_SCALE) * physics.depositRate;
@@ -98,9 +117,9 @@ fn blurWeight(dy: i32, dx: i32) -> f32 {
   return 0.125;
 }
 
-// Persistent-environment only: a mass-preserving 3x3 binomial blur blended
-// by the communication timestep, followed by exponential timestep-scaled
-// decay. Ping-pong binding selection is owned by the host wrappers.
+// Persistent-environment only: one mass-preserving 3x3 binomial blur per macro
+// tick, blended by total communication time, followed by exponential decay.
+// Ping-pong binding selection is owned by the host wrappers.
 @compute @workgroup_size(16, 16, 1)
 fn diffuseDecay(@builtin(global_invocation_id) gid: vec3<u32>) {
   let x = gid.x;

@@ -250,10 +250,14 @@ export function TrainingView() {
   const [particleDensityOverride, setParticleDensityOverride] = useState<
     number | null
   >(null)
+  const [substrateResolutionOverride, setSubstrateResolutionOverride] = useState<
+    number | null
+  >(null)
   useEffect(() => {
     setChemicalArchitectureOverride(null)
     setChiralityOverride(null)
     setParticleDensityOverride(null)
+    setSubstrateResolutionOverride(null)
   }, [viewingRunId, activeConfig?.generation])
   const defaultParticleDensity =
     VIEWER_DEFAULTS.playback.particleDensityMultiplier ??
@@ -261,6 +265,10 @@ export function TrainingView() {
     1
   const effectiveParticleDensity =
     particleDensityOverride ?? defaultParticleDensity
+  const defaultSubstrateResolution =
+    VIEWER_DEFAULTS.playback.substrateResolution ?? activeConfig?.fieldN ?? 256
+  const effectiveSubstrateResolution =
+    substrateResolutionOverride ?? defaultSubstrateResolution
   const effectiveChirality =
     chiralityOverride ?? activeConfig?.chirality ?? true
   const playbackConfig = useMemo(
@@ -269,6 +277,7 @@ export function TrainingView() {
       const densityResolved = configAtDensity(
         {
           ...activeConfig,
+          fieldN: effectiveSubstrateResolution,
           chemicalCommunicationArchitecture:
             chemicalArchitectureOverride ??
             chemicalCommunicationArchitectureFromConfig(activeConfig),
@@ -289,6 +298,7 @@ export function TrainingView() {
       chemicalArchitectureOverride,
       effectiveChirality,
       effectiveParticleDensity,
+      effectiveSubstrateResolution,
     ]
   )
   useEffect(() => {
@@ -435,7 +445,7 @@ export function TrainingView() {
 
   const handleSampleSweep = async (request: SampleSweepRequest) => {
     const canvas = gridCanvasRef.current
-    if (!canvas || !physicsValues || !activeConfig) return
+    if (!canvas || !physicsValues || !activeConfig || !previewConfig) return
     const combinations: Array<Partial<Record<SweepParameterKey, number>>> = []
     const visit = (
       axisIndex: number,
@@ -479,26 +489,35 @@ export function TrainingView() {
       ] as const satisfies readonly (keyof PhysicsSettings)[]
       const samples = combinations.map((combination) => {
         const density = combination.particleDensityMultiplier
-        const resolvedConfig =
-          density === undefined ? null : configAtDensity(activeConfig, density)
+          ?? effectiveParticleDensity
+        const substrateResolution = combination.substrateResolution
+          ?? effectiveSubstrateResolution
+        const resolvedConfig = configAtDensity(
+          { ...previewConfig, fieldN: substrateResolution },
+          density,
+        )
         const physics = { ...basePhysics }
-        if (resolvedConfig) {
+        if (combination.particleDensityMultiplier !== undefined) {
           const resolvedPhysics = physicsSettingsFromConfig(resolvedConfig)
           for (const key of densityPhysicsKeys)
             physics[key] = resolvedPhysics[key]
         }
         for (const axis of request.axes) {
-          if (axis.key !== "particleDensityMultiplier") {
+          if (
+            axis.key !== "particleDensityMultiplier"
+            && axis.key !== "substrateResolution"
+          ) {
             physics[axis.key] = combination[axis.key]!
           }
         }
         return {
+          config: resolvedConfig,
           physics,
           particleCap: frontendParticleCap,
           initialParticleCount: frontendInitialParticleCount,
-          particleDensityMultiplier: density ?? effectiveParticleDensity,
+          particleDensityMultiplier: density,
           particleRadiusPx:
-            particleRadiusPx / Math.sqrt(density ?? effectiveParticleDensity),
+            particleRadiusPx / Math.sqrt(density),
           filename: `${request.axes.map((axis) => `${keyLabel(axis.key)}=${valueLabel(combination[axis.key]!)}`).join(",")}.png`,
         }
       })
@@ -686,6 +705,30 @@ export function TrainingView() {
                 .map((density) => (
                   <option key={density} value={density}>
                     {density}×
+                  </option>
+                ))}
+            </select>
+          </div>
+          <div className="stat-row">
+            <span>Substrate resolution</span>
+            <select
+              className="select"
+              aria-label="Substrate resolution"
+              value={effectiveSubstrateResolution}
+              disabled={!activeConfig}
+              title="Changing substrate resolution rebuilds and restarts playback"
+              onChange={(event) => {
+                const selected = Number(event.target.value)
+                setSubstrateResolutionOverride(
+                  selected === defaultSubstrateResolution ? null : selected
+                )
+              }}
+            >
+              {Array.from(new Set([64, 128, 256, 512, 1024, 2048, effectiveSubstrateResolution]))
+                .sort((a, b) => a - b)
+                .map((resolution) => (
+                  <option key={resolution} value={resolution}>
+                    {resolution}×{resolution}
                   </option>
                 ))}
             </select>
@@ -1038,8 +1081,8 @@ export function TrainingView() {
               <label className="slider-row">
                 <span>Triangle size</span>
                 <Slider
-                  min={8}
-                  max={80}
+                  min={1}
+                  max={20}
                   step={1}
                   value={growthAxisLengthPx}
                   onChange={setGrowthAxisLengthPx}
@@ -1047,7 +1090,7 @@ export function TrainingView() {
                 <span className="slider-value">{growthAxisLengthPx}px</span>
               </label>
               <p className="hint">
-                X-squashed cyan triangles point toward +n division polarity;
+                Compact white triangles point toward +n division polarity;
                 size and opacity show signal strength.
               </p>
             </>
@@ -1543,6 +1586,7 @@ export function TrainingView() {
         <SampleSweepModal
           current={physicsValues}
           currentDensity={effectiveParticleDensity}
+          currentSubstrateResolution={effectiveSubstrateResolution}
           defaultSteps={activeConfig?.macroSteps ?? 1}
           running={sampleRunning}
           completed={sampleCompleted}

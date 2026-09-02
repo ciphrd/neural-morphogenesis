@@ -30,6 +30,13 @@ export interface GrowthSliderSpec {
   format: (v: number) => string
 }
 
+// Morphology occupancy is clamped to [0,1] before its centered finite
+// difference is measured, so its gradient magnitude cannot reach 1. Using 1
+// as the live threshold therefore disables every boundary-tangent branch
+// without requiring another GPU-uniform field.
+const TANGENT_DISABLED_THRESHOLD = 1
+const TANGENT_SLIDER_MAX = 0.05
+
 // All absolute ranges, deliberately NOT PhysicsPanel's own
 // scaledRange(trained, N): every knob here is bounded by real physics or
 // real semantics, none of which depend on whatever value the
@@ -38,7 +45,7 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
     key: "neuralUpdatesPerMacro",
     label: "Neural updates / tick",
-    hint: "Neural evaluations before one MLS-MPM update. Chemical and turning dynamics are timestep-scaled, so this raises temporal resolution rather than raw speed. Lifecycle and division commit only on the final round.",
+    hint: "Neural evaluations before one MLS-MPM update. Memory and turning are timestep-scaled. Persistent substrate stays frozen and uses only the final output; cell-owned chemistry can evolve between rounds. Lifecycle and division commit only on the final round.",
     min: 1,
     max: 16,
     step: 1,
@@ -47,7 +54,7 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
     key: "communicationSpeed",
     label: "Communication speed",
-    hint: "Cell-chemical updates and orientation time per mechanical tick. Neural updates control resolution; this controls elapsed communication time.",
+    hint: "Communication time per mechanical tick. It scales cell-owned chemistry, memory, turning, and the one end-of-tick persistent-field evolution; neural updates only divide the agent-state timestep.",
     min: 0,
     max: 4,
     step: 0.05,
@@ -109,8 +116,8 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   },
   {
     key: "divisionDirectionality",
-    label: "Division directionality",
-    hint: "Caps one-sided daughter placement. 1× grants full policy authority; 0 keeps every split center-preserving and symmetric.",
+    label: "Division polarization",
+    hint: "Controls rearward one-sided placement. 1× can keep the parent fixed and place the daughter fully behind it; 0 keeps the rear-facing pair centered and symmetric.",
     min: 0,
     max: 1,
     step: 0.01,
@@ -119,9 +126,9 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
     key: "boundaryTangentMinGradient",
     label: "Tangent flat-gradient threshold",
-    hint: "Morphology-gradient magnitudes at or below this value are treated as flat interiors and fall back to the neural division direction. 0 uses the tangent for every nonzero gradient.",
+    hint: "For Lab tangent-growth scenarios, morphology gradients at or below this value are treated as flat. This affects the growth tensor, not rear-facing spawn placement.",
     min: 0,
-    max: 0.05,
+    max: TANGENT_SLIDER_MAX,
     step: 0.000001,
     format: (v) => v.toExponential(2),
   },
@@ -137,9 +144,9 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
  * flat list because these controls behave as a group:
  * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
  * growthDuration controls the substrate-driven cell cycle;
- * growthAnisotropy and divisionDirectionality cap directional authority;
- * boundaryTangentMinGradient controls where the hardcoded tangent rule yields
- * back to neural division orientation.
+ * growthAnisotropy controls tensor directionality and divisionDirectionality
+ * controls how strongly rear-facing splits are polarized;
+ * boundaryTangentMinGradient controls Lab tangent-growth diagnostics.
  * Same live-uniform-write path as every
  * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
  * any of these never disturbs the rollout in flight and never affects
@@ -152,7 +159,39 @@ export function GrowthPanel({
   onReset,
 }: GrowthPanelProps) {
   const [open, setOpen] = useState(false)
-  void trained
+  const [rememberedTangentThreshold, setRememberedTangentThreshold] = useState(
+    Math.min(
+      value.boundaryTangentMinGradient < TANGENT_DISABLED_THRESHOLD
+        ? value.boundaryTangentMinGradient
+        : trained.boundaryTangentMinGradient,
+      TANGENT_SLIDER_MAX
+    )
+  )
+  const tangentEnabled = value.boundaryTangentMinGradient < TANGENT_DISABLED_THRESHOLD
+
+  const setTangentEnabled = (enabled: boolean) => {
+    if (enabled) {
+      const trainedThreshold = Math.min(
+        trained.boundaryTangentMinGradient,
+        TANGENT_SLIDER_MAX
+      )
+      const restoredThreshold = Number.isFinite(rememberedTangentThreshold)
+        ? rememberedTangentThreshold
+        : trainedThreshold
+      onChange({
+        ...value,
+        boundaryTangentMinGradient: restoredThreshold,
+      })
+      return
+    }
+    if (tangentEnabled) {
+      setRememberedTangentThreshold(value.boundaryTangentMinGradient)
+    }
+    onChange({
+      ...value,
+      boundaryTangentMinGradient: TANGENT_DISABLED_THRESHOLD,
+    })
+  }
 
   return (
     <section>
@@ -178,21 +217,48 @@ export function GrowthPanel({
       </div>
       {open && (
         <div className="physics-panel-body">
-          {GROWTH_SLIDER_SPECS.map((spec) => (
-            <label key={spec.key} className="slider-row" title={spec.hint}>
-              <span>{spec.label}</span>
-              <Slider
-                min={spec.min}
-                max={spec.max}
-                step={spec.step}
-                value={value[spec.key]}
-                onChange={(v) => onChange({ ...value, [spec.key]: v })}
-              />
-              <span className="slider-value">
-                {spec.format(value[spec.key])}
-              </span>
-            </label>
-          ))}
+          {GROWTH_SLIDER_SPECS.map((spec) => {
+            const isTangentThreshold = spec.key === "boundaryTangentMinGradient"
+            const displayedValue = isTangentThreshold && !tangentEnabled
+              ? rememberedTangentThreshold
+              : value[spec.key]
+            return (
+              <div key={spec.key}>
+                {isTangentThreshold && (
+                  <label
+                    className="checkbox-row"
+                    title="When disabled, diagnostic growth uses the neural growth axis instead of the morphology-boundary tangent. Rear-facing spawning is unchanged."
+                  >
+                    <input
+                      type="checkbox"
+                      checked={tangentEnabled}
+                      onChange={(event) => setTangentEnabled(event.target.checked)}
+                    />
+                    Use boundary-tangent direction
+                  </label>
+                )}
+                <label className="slider-row" title={spec.hint}>
+                  <span>{spec.label}</span>
+                  <Slider
+                    min={spec.min}
+                    max={spec.max}
+                    step={spec.step}
+                    value={displayedValue}
+                    disabled={isTangentThreshold && !tangentEnabled}
+                    onChange={(v) => {
+                      if (isTangentThreshold) setRememberedTangentThreshold(v)
+                      onChange({ ...value, [spec.key]: v })
+                    }}
+                  />
+                  <span className="slider-value">
+                    {isTangentThreshold && !tangentEnabled
+                      ? "Disabled"
+                      : spec.format(displayedValue)}
+                  </span>
+                </label>
+              </div>
+            )
+          })}
         </div>
       )}
     </section>

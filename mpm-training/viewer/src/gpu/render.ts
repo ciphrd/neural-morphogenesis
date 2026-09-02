@@ -60,7 +60,9 @@ const GRID_FIELD_MODES: ReadonlySet<FieldMode> = new Set(["density", "speed", "d
 
 const PARTICLE_COLOR = [1, 1, 1, 1]; // white — matches debug_images.py's GROWN_COLOR
 const TARGET_COLOR = [0.95, 0.4, 0.25, 0.8]; // warm accent, alpha-blended under the particles
-const GROWTH_AXIS_COLOR = [0.2, 0.95, 0.85, 0.95]; // cyan-green, distinct from particles/target
+const GROWTH_AXIS_COLOR = [1, 1, 1, 1]; // white for legibility at dense particle counts
+const HEADING_LINE_COLOR = [1, 0, 0, 1];
+const HEADING_LINE_LENGTH_PX = 4;
 
 // mls-mpm/src/gpu/render.ts's own DEFAULT_POINT_RADIUS_PX is 1 — this
 // project's particle counts run smaller by default (hundreds, not
@@ -107,6 +109,9 @@ export class Renderer {
   private readonly growthAxisBindGroup: GPUBindGroup;
   private readonly growthAxisStyleUniform: GPUBuffer;
   private readonly growthAxisColorUniform: GPUBuffer;
+  private readonly headingLinePipeline: GPURenderPipeline;
+  private readonly headingLineBindGroup: GPUBindGroup;
+  private readonly headingLineColorUniform: GPUBuffer;
 
   private readonly targetRadiusUniform: GPUBuffer;
   private readonly targetColorUniform: GPUBuffer;
@@ -121,7 +126,7 @@ export class Renderer {
   private neuralColorAlpha = 1.0;
   private internalStateAlpha = 1.0;
   private particleRadiusPx = DEFAULT_PARTICLE_RADIUS_PX;
-  private growthAxisLengthPx = 24;
+  private growthAxisLengthPx = 6;
   private canvasMinDimPx = 512;
 
   // --- field-visualize background (field.wgsl) ---
@@ -411,6 +416,7 @@ export class Renderer {
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 5, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
       ],
@@ -421,14 +427,34 @@ export class Renderer {
       fragment: { module: renderModule, entryPoint: "growthAxisFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
+    this.headingLinePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [growthAxisLayout, viewLayout] }),
+      vertex: { module: renderModule, entryPoint: "headingLineVertex" },
+      fragment: { module: renderModule, entryPoint: "headingLineFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
+      // WebGPU line-list rasterization is one device pixel wide.
+      primitive: { topology: "line-list" },
+    });
     this.growthAxisStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.growthAxisColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.headingLineColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     writeFloat32(device, this.growthAxisColorUniform, 0, new Float32Array(GROWTH_AXIS_COLOR));
+    writeFloat32(device, this.headingLineColorUniform, 0, new Float32Array(HEADING_LINE_COLOR));
     this.growthAxisBindGroup = device.createBindGroup({
       layout: growthAxisLayout,
       entries: [
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 2, resource: { buffer: this.growthAxisColorUniform } },
+        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
+        { binding: 5, resource: { buffer: this.growthAxisStyleUniform } },
+      ],
+    });
+    this.headingLineBindGroup = device.createBindGroup({
+      layout: growthAxisLayout,
+      entries: [
+        { binding: 0, resource: { buffer: mpmCore.positions } },
+        { binding: 2, resource: { buffer: this.headingLineColorUniform } },
+        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
         { binding: 4, resource: { buffer: mpmCore.rest } },
         { binding: 5, resource: { buffer: this.growthAxisStyleUniform } },
       ],
@@ -868,7 +894,7 @@ export class Renderer {
     const pxToNdc = 2 / this.canvasMinDimPx;
     writeFloat32(this.device, this.growthAxisStyleUniform, 0, new Float32Array([
       this.growthAxisLengthPx * 0.5 * pxToNdc,
-      0.8 * pxToNdc,
+      HEADING_LINE_LENGTH_PX * pxToNdc,
       4.0 * pxToNdc,
       2.7 * pxToNdc,
     ]));
@@ -1036,6 +1062,9 @@ export class Renderer {
         pass.setPipeline(this.growthAxisPipeline);
         pass.setBindGroup(0, this.growthAxisBindGroup);
         pass.draw(3, activeCount);
+        pass.setPipeline(this.headingLinePipeline);
+        pass.setBindGroup(0, this.headingLineBindGroup);
+        pass.draw(2, activeCount);
       }
     }
 
@@ -1053,6 +1082,7 @@ export class Renderer {
     this.boundaryGradientScaleUniform.destroy();
     this.growthAxisStyleUniform.destroy();
     this.growthAxisColorUniform.destroy();
+    this.headingLineColorUniform.destroy();
     this.targetRadiusUniform.destroy();
     this.targetColorUniform.destroy();
     this.targetPositions?.destroy();

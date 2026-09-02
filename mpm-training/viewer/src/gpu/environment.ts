@@ -5,7 +5,7 @@
 
 import environmentSrc from "../../../core/environment.wgsl?raw";
 import { templateShader } from "./shaderTemplate";
-import { ceilDiv, writeFloat32 } from "./gpuUtil";
+import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
 import type { ChemicalCommunicationArchitecture } from "./types";
 
 export interface EnvironmentConfig {
@@ -49,7 +49,7 @@ export class Environment {
   private readonly mergeDepositBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly diffuseDecayBindGroups: [GPUBindGroup, GPUBindGroup];
 
-  private readonly clearDispatch: number;
+  private readonly clearDispatch: [number, number];
   private readonly gridDispatch: [number, number, number];
 
   private _parity = 0;
@@ -131,22 +131,27 @@ export class Environment {
       })
     ) as [GPUBindGroup, GPUBindGroup];
 
-    this.clearDispatch = ceilDiv(total, CLEAR_WORKGROUP);
+    this.clearDispatch = flatDispatch2D(
+      total,
+      CLEAR_WORKGROUP,
+      device.limits.maxComputeWorkgroupsPerDimension,
+    );
     this.gridDispatch = [ceilDiv(config.width, GRID_WORKGROUP), ceilDiv(config.height, GRID_WORKGROUP), config.channels];
   }
 
-  /** Applies one communication substep while preserving a macro-step's total
-   * decay, deposit strength, and diffusion as evaluation resolution changes. */
+  /** Configure one persistent-field evolution per macro tick, while returning
+   * the smaller dt used by each of that tick's neural deliberation rounds. */
   setCommunicationTimestep(rounds: number, speed: number): number {
-    const dt = Math.max(0, speed) / Math.max(1, Math.round(rounds));
-    const decay = Math.pow(Math.max(0, Math.min(1, this.baseDecay)), dt);
+    const macroDt = Math.max(0, speed);
+    const neuralDt = macroDt / Math.max(1, Math.round(rounds));
+    const decay = Math.pow(Math.max(0, Math.min(1, this.baseDecay)), macroDt);
     writeFloat32(this.device, this.physicsUniform, 0, new Float32Array([
       decay,
-      this.baseDepositRate * dt,
-      Math.min(dt, 1),
+      this.baseDepositRate * macroDt,
+      Math.min(macroDt, 1),
       0,
     ]));
-    return dt;
+    return neuralDt;
   }
 
   setPhysics(decay: number, depositRate: number, rounds: number, speed: number): number {
@@ -172,7 +177,7 @@ export class Environment {
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.clearScratchPipeline);
     pass.setBindGroup(0, this.clearScratchBindGroup);
-    pass.dispatchWorkgroups(this.clearDispatch);
+    pass.dispatchWorkgroups(...this.clearDispatch);
     pass.end();
   }
 
@@ -184,7 +189,7 @@ export class Environment {
       pass = encoder.beginComputePass();
       pass.setPipeline(this.materializeSplatPipeline);
       pass.setBindGroup(0, this.materializeSplatBindGroup);
-      pass.dispatchWorkgroups(this.clearDispatch);
+      pass.dispatchWorkgroups(...this.clearDispatch);
       pass.end();
     }
 
@@ -195,8 +200,9 @@ export class Environment {
     pass.end();
   }
 
-  /** Persistent-environment post-policy lifecycle: age the previous field,
-   * merge fresh direct writes, and make the result current for the next round. */
+  /** Persistent-environment post-policy lifecycle, called once after all
+   * neural rounds: diffuse/decay the old field, add the final round's direct
+   * writes, and make that result current for the next macro tick. */
   encodeAdvancePersistent(encoder: GPUCommandEncoder): void {
     if (this.chemicalCommunicationArchitecture !== "persistent-environment") return;
     let pass = encoder.beginComputePass();
@@ -208,7 +214,7 @@ export class Environment {
     pass = encoder.beginComputePass();
     pass.setPipeline(this.mergeDepositPipeline);
     pass.setBindGroup(0, this.mergeDepositBindGroups[1 - this._parity]);
-    pass.dispatchWorkgroups(this.clearDispatch);
+    pass.dispatchWorkgroups(...this.clearDispatch);
     pass.end();
     this._parity = 1 - this._parity;
   }

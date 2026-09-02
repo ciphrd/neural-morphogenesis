@@ -90,9 +90,9 @@ MAX_ACCEL = 0.0 # 0.1 # not used rn
 # remains active when this is zero.
 MAX_STRAFE = 0.0 # 5.3
 FRICTION = 0.9
-MAX_ANGULAR_ACCEL = 1.4
-ANGULAR_DAMPING = 0.8
-MAX_ANGULAR_VELOCITY = 0.1
+MAX_ANGULAR_ACCEL = 10.0
+ANGULAR_DAMPING = 0.276
+MAX_ANGULAR_VELOCITY = 1.03
 # Heading-relative Hencky strain is divided by this before tanh enters the
 # policy. Approximately 15% logarithmic strain therefore produces a strong,
 # still-unsaturated mechanosensory signal.
@@ -110,7 +110,7 @@ DEPOSIT_SIGMA = 0.324
 MAX_ENV_WRITE = 1.0
 
 # Behavior
-CHIRALITY = True
+CHIRALITY = False
 MPM_ENABLED = True
 MATERIAL_E = 1e4
 MATERIAL_NU = 0.2

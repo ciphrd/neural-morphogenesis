@@ -461,14 +461,14 @@ fn growthAxisVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_i
   let normal = vec2<f32>(-axis.y, axis.x);
 
   let size = growthAxisStyle.x * sqrt(strength) * appearanceRadiusScale(instanceIndex);
-  // Local +X points toward +n. Along-axis extent is deliberately smaller
-  // than the perpendicular extent: an X-squashed isosceles triangle.
+  // Local +X points toward +n. Keep the glyph compact and narrow enough that
+  // adjacent particles retain individually readable directions.
   var along = 0.0;
   var across = 0.0;
   switch vertexIndex {
-    case 0u: { along =  0.55 * size; across = 0.0; }
-    case 1u: { along = -0.55 * size; across = -size; }
-    default: { along = -0.55 * size; across = size; }
+    case 0u: { along =  0.35 * size; across = 0.0; }
+    case 1u: { along = -0.35 * size; across = -0.5 * size; }
+    default: { along = -0.35 * size; across = 0.5 * size; }
   }
 
   var out: GrowthAxisOut;
@@ -483,4 +483,24 @@ fn growthAxisFragment(in: GrowthAxisOut) -> @location(0) vec4<f32> {
     discard;
   }
   return vec4<f32>(pointColor.rgb, pointColor.a * (0.35 + 0.65 * in.strength));
+}
+
+// One-pixel red heading indicator drawn on top of the white growth triangle.
+// The triangle follows growth/division polarity; this line deliberately reads
+// ParticleMeta.heading so facing direction remains independently visible.
+@vertex
+fn headingLineVertex(
+  @builtin(vertex_index) vertexIndex: u32,
+  @builtin(instance_index) instanceIndex: u32,
+) -> @builtin(position) vec4<f32> {
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
+  let heading = particleMeta[instanceIndex].heading;
+  let direction = vec2<f32>(cos(heading), sin(heading));
+  let offset = select(vec2<f32>(0.0), direction * growthAxisStyle.y, vertexIndex == 1u);
+  return vec4<f32>(center + offset * viewZoom, 0.0, 1.0);
+}
+
+@fragment
+fn headingLineFragment() -> @location(0) vec4<f32> {
+  return pointColor;
 }

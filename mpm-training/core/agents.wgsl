@@ -51,11 +51,10 @@
 // delta. No post-brain value is written to persistent environmental state.
 //
 // Growth — each particle may spawn a copy of itself after completing its
-// tensor-growth cycle. As a first boundary-tangent experiment, division uses
-// the tangent perpendicular to the local morphology-density gradient and
-// places the daughters symmetrically along that axis. A locally flat field has
-// no defined tangent, so it falls back to the signed network growth direction.
-// Growth admission integrates persistent
+// tensor-growth cycle. Division always places the new daughter directly behind
+// the parent's current heading. The policy's growth-direction output belongs
+// exclusively to the morphoelastic growth tensor; it no longer participates in
+// daughter placement. Growth admission integrates persistent
 // hazard from the LAST channel's sensed VALUE (inputVec[CHANNELS-1u] — the same
 // value already fed into this step's own NN input, clamped to [0,1];
 // NOT a network output, so CHIRALITY's mirror-averaging never touches
@@ -128,10 +127,10 @@
 // buffers (see simulation.ts/agents_gpu.py).
 //
 // The policy proposes a local growth direction and anisotropy target;
-// agentStep() relaxes persistent angle/anisotropy states toward them. A
-// separate sigmoid controls signed division placement. Fg sees an axis, but
-// division uses its sign to place the daughter toward +n. physics.maxStrafe
-// remains an optional scale for also applying the direction as physical
+// agentStep() relaxes persistent angle/anisotropy states toward them. These
+// affect Fg (and optional strafe) only. A separate sigmoid controls how far the
+// rear-facing daughter pair's center shifts, but not its axis. physics.maxStrafe
+// remains an optional scale for applying the growth direction as physical
 // acceleration; it is zero by default and does not scale growth geometry.
 
 // Chirality — see simulation_settings.py's own CHIRALITY for the full
@@ -256,12 +255,12 @@ struct AgentPhysics {
   // Seed for a fixed world-space lifecycle random field. Nearby numerical
   // samples share thresholds regardless of particle slot or density.
   rolloutSeed: u32,
-  // Below this morphology-gradient magnitude, the boundary tangent is treated
-  // as undefined and division falls back to the network growth direction.
+  // Below this morphology-gradient magnitude, the Lab's optional
+  // boundary-tangent growth axis is treated as undefined.
   boundaryTangentMinGradient: f32,
   // Lab-only lifecycle control. 0xffffffff disables it. Admission latches a
   // normal cycle once; the index/direction can remain active afterward to
-  // keep the morphoelastic growth and eventual division axis deterministic.
+  // keep the morphoelastic growth axis deterministic.
   // A zero direction selects the local morphology-boundary tangent instead.
   forcedLifecycleIndex: u32,
   forcedCycleAdmission: u32,
@@ -650,26 +649,43 @@ fn wrapDepositIndex(i: i32, size: u32) -> i32 {
 //
 // UNLIKE the old bilinear scatter, this is NOT mass-normalized — each
 // tap's weight peaks at 1.0 (not 1/(2*pi*sigma^2)), matching
-// splatDensity()'s own convention. That means the TOTAL deposited mass
-// from one particle now grows with depositSigma (more full-weight taps
-// stacking up), not just its spread — a real, visible behavior change
-// worth knowing while testing this slider, not merely a smoother-
-// looking version of the old, mass-conserving 4-corner deposit.
+// splatDensity()'s own convention. The kernel is evaluated in the particle's
+// stress-free reference frame, so growthF deforms its footprint along with
+// the material. Its integrated projection therefore grows approximately as
+// det(growthF), matching the represented rest area, while the peak chemical
+// level stays stable. At conservative division one area-2 footprint becomes
+// two area-1 footprints instead of the substrate briefly collapsing to one
+// baseline particle and leaving fast growth behind.
 fn depositGaussian(
   envWrite: array<f32, ENV_WRITE_DIM>,
   centerFieldPos: vec2<f32>,
-  contributionScale: f32,
+  growthF: vec4<f32>,
 ) {
   let baseI = i32(floor(centerFieldPos.x));
   let baseJ = i32(floor(centerFieldPos.y));
 
   let sigmaTexels = max(physics.depositSigma, 1e-3);
   let sigma2 = sigmaTexels * sigmaTexels;
+  let growthDet = max(abs(matDet(growthF)), 1e-6);
+  let inverseGrowth = matInverse(growthF);
+  // Largest singular value of growthF. It bounds the deformed Gaussian in
+  // every direction, while the inverse transform below supplies the exact
+  // anisotropic weight within that conservative square footprint.
+  let frobenius2 = dot(growthF, growthF);
+  let largestStretch = sqrt(max(
+    0.5 * (frobenius2 + sqrt(max(frobenius2 * frobenius2
+      - 4.0 * growthDet * growthDet, 0.0))),
+    1e-6,
+  ));
   // 3-sigma is where a Gaussian's own contribution is already <1.1% of
   // its peak — truncating there (subject to MAX_DEPOSIT_KERNEL_RADIUS's
   // own hard cap) loses nothing visible, same reasoning
   // core/repulsion.wgsl's own splatDensity() gives.
-  let kernelRadius = min(i32(ceil(3.0 * sigmaTexels)), MAX_DEPOSIT_KERNEL_RADIUS);
+  let kernelRadius = min(
+    i32(ceil(3.0 * sigmaTexels * largestStretch)),
+    MAX_DEPOSIT_KERNEL_RADIUS,
+  );
+  let fieldDimensions = vec2<f32>(f32(FIELD_WIDTH), f32(FIELD_HEIGHT));
 
   for (var di: i32 = -kernelRadius; di <= kernelRadius; di = di + 1) {
     for (var dj: i32 = -kernelRadius; dj <= kernelRadius; dj = dj + 1) {
@@ -681,13 +697,22 @@ fn depositGaussian(
       // stored level at full strength instead of an unintended half-texel loss.
       let texelCenter = vec2<f32>(f32(ti), f32(tj));
       let delta = centerFieldPos - texelCenter;
-      let d2 = dot(delta, delta);
+      // growthF acts in normalized world coordinates. Convert the texel delta
+      // there, pull it back into the stress-free frame, then return to texels
+      // so depositSigma keeps its existing grid-space meaning.
+      let worldDelta = delta / fieldDimensions;
+      let referenceWorldDelta = vec2<f32>(
+        inverseGrowth.x * worldDelta.x + inverseGrowth.y * worldDelta.y,
+        inverseGrowth.z * worldDelta.x + inverseGrowth.w * worldDelta.y,
+      );
+      let referenceDelta = referenceWorldDelta * fieldDimensions;
+      let d2 = dot(referenceDelta, referenceDelta);
       let weight = exp(-d2 / (2.0 * sigma2));
 
       let wx = u32(wrapDepositIndex(ti, FIELD_WIDTH));
       let wy = u32(wrapDepositIndex(tj, FIELD_HEIGHT));
       for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-        let scaled = envWrite[c] * weight * contributionScale
+        let scaled = envWrite[c] * weight
           * physics.chemicalProjectionWeight * DEPOSIT_SCALE;
         atomicAdd(&depositScratch[fieldIndex(c, wy, wx)], i32(round(scaled)));
       }
@@ -706,11 +731,11 @@ fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
     levels[c] = agentState.particleMeta[pi].chemicalState[c];
   }
-  // A daughter should not communicate as a full-area cell while its visible
-  // area is still emerging. Scale only this transient projection: its owned
-  // chemical state remains intact and reaches full strength with its disc.
-  let contributionScale = clamp(particleRest[pi].appearanceScale, 0.0, 1.0);
-  depositGaussian(levels, fieldPos, contributionScale);
+  // appearanceScale is deliberately rendering-only. Physical mass and
+  // chemistry are fully present immediately after division; growthF controls
+  // the projection footprint before division so the substrate follows the
+  // continuously growing material.
+  depositGaussian(levels, fieldPos, particleRest[pi].growthF);
 }
 
 // The bounded subset of the network's own raw output
@@ -913,14 +938,16 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
         1.0,
       );
     }
-  } else {
-    // Persistent-environment retains the original interpretation: chemical
-    // outputs are direct spatial writes. Environment decay/deposit-rate owns
-    // timestep scaling, so result.envWrite is not integrated here.
+  } else if (stepMode.commitLifecycle != 0u) {
+    // Persistent-environment uses only the final neural round's chemical
+    // output. Intermediate rounds deliberate against one frozen field while
+    // updating private/orientation state; after the loop the host diffuses and
+    // decays that snapshot once, then merges this final Gaussian deposit.
+    // Environment depositRate owns the macro communication-time scaling.
     depositGaussian(
       result.envWrite,
       fieldPos,
-      clamp(particleRest[pi].appearanceScale, 0.0, 1.0),
+      particleRest[pi].growthF,
     );
   }
 
@@ -988,7 +1015,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (forcedBoundaryTangent
       && lifecycleMorphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
     // During a tangent-controlled Lab cycle, align morphoelastic growth with
-    // the same local boundary tangent that will place the two daughters.
+    // the local boundary tangent. Division placement remains rear-facing.
     growthDirectionWorld = vec2<f32>(
       -lifecycleMorphologyGradient.y,
       lifecycleMorphologyGradient.x,
@@ -997,9 +1024,9 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - headingVal);
     particleRest[pi].growthFrameHeading = headingVal;
   } else if (forcedLifecycle && !forcedBoundaryTangent) {
-    // Lock the persistent world-frame growth axis, not merely the final
-    // daughter offset. g2p therefore grows Fg along this same direction and
-    // transfers its stress through the ordinary MPM grid before division.
+    // Lock the persistent world-frame growth axis. g2p therefore grows Fg
+    // along this direction and transfers its stress through the ordinary MPM
+    // grid before rear-facing division.
     growthDirectionWorld = normalize(physics.forcedDivisionDirection);
     growthWorldAngle = atan2(growthDirectionWorld.y, growthDirectionWorld.x);
     particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - headingVal);
@@ -1115,40 +1142,27 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     let newIndex = atomicAdd(&agentState.growthCount, 1u);
     if (newIndex < physics.maxActiveParticles) {
       let nextGeneration = agentState.particleMeta[pi].rng + 1u;
-      let morphologyGradient = vec2<f32>(morphologyGx, morphologyGy);
-      let morphologyGradientMagnitude = length(morphologyGradient);
-      var spawnDir = growthDirectionWorld;
-      let directionStrength = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
+      // Daughter placement has one permanent axis: directly behind the
+      // parent's current facing direction. Neural and morphology directions
+      // remain relevant to growthF, never to spawning.
+      let spawnDir = -forward;
+      let polarization = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
         * clamp(stepMode.divisionDirectionality, 0.0, 1.0);
-      var centerShift = spawnDir * (0.5 * physics.splitDisplacement) * directionStrength;
-      // A scheduled Lab lifecycle is an axis-controlled diagnostic: keep the
-      // real conservative division path, but replace the policy's polarized
-      // placement with a pair centered on the original particle. Production
-      // divisions retain their usual divisionBias-controlled center shift.
+      var centerShift = spawnDir * (0.5 * physics.splitDisplacement) * polarization;
+      // Scheduled Lab lifecycles keep the real conservative division path but
+      // center the rear-facing pair on the original particle. Production
+      // divisions retain their divisionBias-controlled rearward center shift.
       if (forcedLifecycle) {
         centerShift = vec2<f32>(0.0);
       }
-      if ((!forcedLifecycle || forcedBoundaryTangent)
-          && morphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
-        // The gradient is the boundary normal. Rotating it by +90 degrees
-        // gives either representative of the tangent axis; because daughter
-        // placement is symmetric, the sign of that representative is
-        // irrelevant.
-        spawnDir = vec2<f32>(-morphologyGradient.y, morphologyGradient.x)
-          / morphologyGradientMagnitude;
-        centerShift = vec2<f32>(0.0);
-      }
       let halfOffset = spawnDir * (0.5 * physics.splitDisplacement);
-      // A measurable boundary (and every scheduled Lab split) keeps the pair
-      // centered; only production's flat-field fallback retains the existing
-      // network-controlled center shift.
       positions[pi] = fract(pos - halfOffset + centerShift);
       positions[newIndex] = fract(pos + halfOffset + centerShift);
       // "A copy of itself": heading/angularVelocity copied from this
       // particle's own CURRENT state (its pre-integration values — the
       // integrator below hasn't run yet at this point in the function).
-      // Heading itself stays copied (not randomized) — only the spawn
-      // POSITION is random now, not the child's own facing direction.
+      // Heading itself stays copied; the daughter starts facing the same way
+      // as its parent after being placed behind it.
       agentState.particleMeta[newIndex].heading = headingVal;
       agentState.particleMeta[newIndex].angularVelocity = agentState.particleMeta[pi].angularVelocity;
       agentState.particleMeta[newIndex].color = agentState.particleMeta[pi].color;

@@ -18,6 +18,6 @@
   "POLICY_ARCHITECTURE": "stateful-128",
   "CELL_MEMORY": "recurrent",
   "HIDDEN_LAYERS": [128],
-  "CHEMICAL_COMMUNICATION_ARCHITECTURE": "cell-owned-projection",
+  "CHEMICAL_COMMUNICATION_ARCHITECTURE": "persistent-environment",
   "INTERNAL_STATE_SPEED": 1.0
 }
