@@ -4,6 +4,12 @@
 // direct policy deposits. Both expose the same parity-indexed sensing buffers.
 
 import environmentSrc from "../../../core/environment.wgsl?raw";
+import {
+  homogeneousChemicalChannelProfiles,
+  packChemicalChannelLayout,
+  type ChemicalChannelProfile,
+  type PackedChemicalLayout,
+} from "./chemicalChannels";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
 import type { ChemicalCommunicationArchitecture } from "./types";
@@ -20,6 +26,7 @@ export interface EnvironmentConfig {
   depositDensityReference?: number;
   advectionDt?: number;
   chemicalCommunicationArchitecture?: ChemicalCommunicationArchitecture;
+  channelProfiles?: readonly ChemicalChannelProfile[];
 }
 
 const CLEAR_WORKGROUP = 256;
@@ -30,6 +37,9 @@ export class Environment {
   readonly channels: number;
   readonly width: number;
   readonly height: number;
+  readonly layout: PackedChemicalLayout;
+  readonly maxWidth: number;
+  readonly maxHeight: number;
   // Public so agents.ts can build its own parity-indexed bind group
   // variants against the exact same buffers, kept in lockstep by the one
   // parity counter this class owns.
@@ -69,6 +79,13 @@ export class Environment {
     this.channels = config.channels;
     this.width = config.width;
     this.height = config.height;
+    this.layout = packChemicalChannelLayout(
+      config.width,
+      config.height,
+      config.channelProfiles ?? homogeneousChemicalChannelProfiles(config.channels),
+    );
+    this.maxWidth = this.layout.maxWidth;
+    this.maxHeight = this.layout.maxHeight;
     this.chemicalCommunicationArchitecture = config.chemicalCommunicationArchitecture ?? "cell-owned-projection";
     this.baseDecay = config.decay;
     this.baseDepositRate = config.depositRate;
@@ -76,8 +93,8 @@ export class Environment {
     this.depositDensityReference = Math.max(0, config.depositDensityReference ?? 1.0);
     this.advectionDt = Math.max(0, config.advectionDt ?? 0);
 
-    const total = config.width * config.height * config.channels;
-    const scratchTotal = total + config.width * config.height;
+    const total = this.layout.total;
+    const scratchTotal = total * 2;
     const f32 = 4;
 
     this.buffers = [
@@ -92,9 +109,8 @@ export class Environment {
     const module = device.createShaderModule({
       code: templateShader(environmentSrc, {
         CHANNELS: config.channels,
-        WIDTH: config.width,
-        HEIGHT: config.height,
         GRID_N,
+        ...this.layout.shaderConstants,
       }),
     });
 
@@ -154,7 +170,11 @@ export class Environment {
       CLEAR_WORKGROUP,
       device.limits.maxComputeWorkgroupsPerDimension,
     );
-    this.gridDispatch = [ceilDiv(config.width, GRID_WORKGROUP), ceilDiv(config.height, GRID_WORKGROUP), config.channels];
+    this.gridDispatch = [
+      ceilDiv(this.maxWidth, GRID_WORKGROUP),
+      ceilDiv(this.maxHeight, GRID_WORKGROUP),
+      config.channels,
+    ];
   }
 
   /** Configure one persistent-field evolution per macro tick, while returning
@@ -200,8 +220,7 @@ export class Environment {
    * trainer/environment.py Environment instance each Python-side
    * rollout). */
   reset(): void {
-    const total = this.width * this.height * this.channels;
-    const zeros = new Float32Array(total);
+    const zeros = new Float32Array(this.layout.total);
     writeFloat32(this.device, this.buffers[0], 0, zeros);
     writeFloat32(this.device, this.buffers[1], 0, zeros);
     this._parity = 0;

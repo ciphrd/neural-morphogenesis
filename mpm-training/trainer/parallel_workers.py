@@ -43,6 +43,7 @@ from simulation_settings import (
     ANGULAR_DAMPING,
     CHEM_CHANNELS,
     CHIRALITY,
+    CHEMICAL_CHANNEL_PROFILES,
     DECAY,
     DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
@@ -103,6 +104,7 @@ def _worker_init(
         NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
         DEPOSIT_DENSITY_REFERENCE,
         grid_velocity=_core.grid_vel,
+        channel_profiles=CHEMICAL_CHANNEL_PROFILES,
     )
     _agents = AgentsGPU(
         wgpu_device,

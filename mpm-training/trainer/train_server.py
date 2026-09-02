@@ -39,6 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from agents_gpu import AgentsGPU
+from chemical_channels import profiles_to_wire
 from debug_images import save_grown_image, save_raster_image
 from density import DENSITY_MODEL_VERSION
 from device import pick_device
@@ -62,6 +63,7 @@ from simulation_settings import (
     ANGULAR_DAMPING,
     BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEM_CHANNELS,
+    CHEMICAL_CHANNEL_PROFILES,
     CHEMICAL_GRADIENT_INPUT_SCALE,
     CHIRALITY,
     COMMUNICATION_SPEED,
@@ -377,6 +379,7 @@ async def _training_loop_body() -> None:
         NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
         DEPOSIT_DENSITY_REFERENCE,
         grid_velocity=core.grid_vel,
+        channel_profiles=CHEMICAL_CHANNEL_PROFILES,
     )
     agents = AgentsGPU(
         wgpu_device,
@@ -447,6 +450,7 @@ async def _training_loop_body() -> None:
         "spawnHalfWidth": args.spawn_half_width,
         "channels": CHEM_CHANNELS,
         "fieldN": FIELD_N,
+        "chemicalChannelProfiles": profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
         "morphologyBlurSigma": MORPHOLOGY_BLUR_SIGMA,
         "morphologyDensityReference": MORPHOLOGY_DENSITY_REFERENCE,
         "boundaryTangentMinGradient": BOUNDARY_TANGENT_MIN_GRADIENT,
@@ -637,6 +641,7 @@ async def _training_loop_body() -> None:
                         "spawn_half_width": args.spawn_half_width,
                         "channels": CHEM_CHANNELS,
                         "field_n": FIELD_N,
+                        "chemical_channel_profiles": profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
                         "population": args.population,
                         "seeds_per_candidate": args.seeds_per_candidate,
                         # These identify the evaluation that selected

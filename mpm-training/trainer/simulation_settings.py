@@ -23,12 +23,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from chemical_channels import default_channel_profiles
+
 _CORE_CONSTANTS = json.loads((Path(__file__).parent.parent / "core" / "constants.json").read_text())
 _GRID_N: int = _CORE_CONSTANTS["GRID_N"]
 
 # --- Policy architecture (UpdateRule) ---
 HIDDEN_DIM = 128
 CHEM_CHANNELS = 8  # last channel is always growth's own split-probability field
+CHEMICAL_CHANNEL_PROFILES = default_channel_profiles(CHEM_CHANNELS)
 # Per-physics-substep elastic-shear relaxation. Zero preserves the legacy
 # solid-like material response exactly.
 MATERIAL_FLUIDITY = 0.0

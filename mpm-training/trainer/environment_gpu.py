@@ -23,6 +23,14 @@ from __future__ import annotations
 import numpy as np
 import wgpu
 
+from chemical_channels import (
+    ChemicalChannelProfile,
+    channel_shader_constants,
+    homogeneous_channel_profiles,
+    packed_offsets,
+    resolve_channel_profiles,
+    resolved_dimensions,
+)
 from mpm_core import GRID_N, ceil_div, flat_dispatch_2d
 from policy_parameters import (
     CELL_OWNED_PROJECTION_ARCHITECTURE,
@@ -48,11 +56,27 @@ class EnvironmentGPU:
         *,
         grid_velocity: wgpu.GPUBuffer | None = None,
         advection_dt: float = 0.0,
+        channel_profiles: tuple[ChemicalChannelProfile, ...] | None = None,
     ) -> None:
         self.device = device
         self.channels = channels
         self.width = width
         self.height = height
+        # Explicit profiles opt into the developmental layout.  Omission stays
+        # homogeneous for legacy checkpoints and focused single-field checks.
+        self.channel_profiles = resolve_channel_profiles(
+            channels,
+            channel_profiles if channel_profiles is not None else homogeneous_channel_profiles(channels),
+        )
+        self.channel_widths, self.channel_heights = resolved_dimensions(
+            width, height, self.channel_profiles
+        )
+        self.channel_offsets, self.total_values = packed_offsets(
+            self.channel_widths, self.channel_heights
+        )
+        self.shader_constants = channel_shader_constants(width, height, self.channel_profiles)
+        self.max_width = max(self.channel_widths)
+        self.max_height = max(self.channel_heights)
         self.chemical_communication_architecture = normalize_chemical_communication_architecture(
             chemical_communication_architecture
         )
@@ -69,8 +93,8 @@ class EnvironmentGPU:
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
 
-        total = width * height * channels
-        scratch_total = total + width * height
+        total = self.total_values
+        scratch_total = total * 2
         f32 = 4
 
         self.buffers = [
@@ -92,7 +116,7 @@ class EnvironmentGPU:
 
         module = device.create_shader_module(code=load_core_shader(
             "environment.wgsl",
-            {"CHANNELS": channels, "WIDTH": width, "HEIGHT": height, "GRID_N": GRID_N},
+            {"CHANNELS": channels, "GRID_N": GRID_N, **self.shader_constants},
         ))
 
         self._clear_scratch_pipeline = device.create_compute_pipeline(
@@ -159,7 +183,11 @@ class EnvironmentGPU:
         ]
 
         self._clear_dispatch = flat_dispatch_2d(scratch_total, CLEAR_WORKGROUP)
-        self._grid_dispatch = (ceil_div(width, GRID_WORKGROUP), ceil_div(height, GRID_WORKGROUP), channels)
+        self._grid_dispatch = (
+            ceil_div(self.max_width, GRID_WORKGROUP),
+            ceil_div(self.max_height, GRID_WORKGROUP),
+            channels,
+        )
 
         self._parity = 0
 
@@ -208,8 +236,7 @@ class EnvironmentGPU:
         (and what a fresh trainer/environment.py Environment instance
         used to give for free each Python-side rollout, before this
         class started being reused across rollouts instead)."""
-        total = self.width * self.height * self.channels
-        zeros = np.zeros(total, dtype=np.float32)
+        zeros = np.zeros(self.total_values, dtype=np.float32)
         self.device.queue.write_buffer(self.buffers[0], 0, zeros)
         self.device.queue.write_buffer(self.buffers[1], 0, zeros)
         self._parity = 0

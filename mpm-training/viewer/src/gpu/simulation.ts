@@ -227,6 +227,7 @@ export class GpuSimulation {
       config.particles,
       config.channels,
       config.fieldN,
+      JSON.stringify(config.chemicalChannelProfiles ?? []),
       config.hiddenDim,
       config.policyArchitecture ?? "stateless-128",
       chemicalCommunicationArchitectureFromConfig(config),
@@ -270,6 +271,7 @@ export class GpuSimulation {
       depositDensityReference: config.depositDensityReference ?? 1.0,
       advectionDt: config.substepsPerMacro * coreConstants.DT,
       chemicalCommunicationArchitecture: chemicalCommunicationArchitectureFromConfig(config),
+      channelProfiles: config.chemicalChannelProfiles,
     }, mpmCore.gridVel);
 
     const agents = new Agents(this.device, mpmCore, environment, {

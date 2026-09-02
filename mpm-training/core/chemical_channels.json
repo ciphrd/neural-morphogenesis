@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "preset": "developmental-2-3-3",
+  "profiles": {
+    "global": {
+      "resolutionScale": 0.125,
+      "decayExponent": 0.05,
+      "diffusionMultiplier": 1.0,
+      "depositSigmaMultiplier": 3.0
+    },
+    "regional": {
+      "resolutionScale": 0.25,
+      "decayExponent": 0.25,
+      "diffusionMultiplier": 1.0,
+      "depositSigmaMultiplier": 3.0
+    },
+    "local": {
+      "resolutionScale": 1.0,
+      "decayExponent": 1.0,
+      "diffusionMultiplier": 1.0,
+      "depositSigmaMultiplier": 4.0
+    }
+  },
+  "channels": [
+    { "scale": "global" },
+    { "scale": "global" },
+    { "scale": "regional" },
+    { "scale": "regional" },
+    { "scale": "regional" },
+    { "scale": "local" },
+    { "scale": "local" },
+    { "scale": "local", "role": "growth" }
+  ]
+}

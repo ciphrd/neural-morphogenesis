@@ -185,6 +185,33 @@ decay selects `persistent-environment`, while zero decay selects
 Any checkpoint from before elastic-strain sensing has a 27-column first layer;
 the current policy requires 30 and must be retrained.
 
+### Multi-scale channel layout
+
+The production eight-channel system uses a data-driven `2 / 3 / 3` transport
+layout from `core/chemical_channels.json`:
+
+| Channels | Scale | Native grid at `FIELD_N=512` | Base-decay exponent | Role |
+| --- | --- | ---: | ---: | --- |
+| 0–1 | global | 64² | 0.05 | organism-wide coordination |
+| 2–4 | regional | 128² | 0.25 | body regions and repeated structures |
+| 5–6 | local | 512² | 1.00 | short-range signaling |
+| 7 | local | 512² | 1.00 | existing growth substrate |
+
+Channels are packed into common field, gradient, and deposit buffers, so this
+does not add agent-shader storage bindings. Each recorded channel profile owns
+its resolution scale, decay exponent, diffusion multiplier, and deposit-sigma
+multiplier. The shader derives indexing and transport from generated arrays;
+adding a scale or moving a channel between scales is therefore a configuration
+change rather than another GPU architecture.
+
+The live `decay` setting remains the local-channel retention. A channel with
+exponent `a` retains `decay^a` per unit communication time, so coarse global
+channels can be long-lived without removing the existing control. Sobel
+gradients are converted back to the finest-grid convention before entering the
+policy, preventing coarse channels from receiving artificially larger neural
+inputs. New run/checkpoint metadata records the complete expanded profiles.
+Configurations without profiles retain the old homogeneous-grid behavior.
+
 The three elastic lanes can be ablated without changing checkpoint dimensions
 through `ELASTIC_STRAIN_INPUTS_ENABLED`; it is currently enabled.
 

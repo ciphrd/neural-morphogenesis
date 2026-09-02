@@ -30,12 +30,22 @@
 // its conv2d-based gradient (cost independent of particle count).
 
 const CHANNELS: u32 = __CHANNELS__u;
-const WIDTH: u32 = __WIDTH__u;
-const HEIGHT: u32 = __HEIGHT__u;
+// Channels share two packed storage buffers but may live at different native
+// resolutions.  These arrays are generated from the run's recorded channel
+// profiles, so adding another scale is host configuration rather than a new
+// shader/binding architecture.
+const FIELD_WIDTHS: array<u32, CHANNELS> = __FIELD_WIDTHS__;
+const FIELD_HEIGHTS: array<u32, CHANNELS> = __FIELD_HEIGHTS__;
+const FIELD_OFFSETS: array<u32, CHANNELS> = __FIELD_OFFSETS__;
+const FIELD_DECAY_EXPONENTS: array<f32, CHANNELS> = __FIELD_DECAY_EXPONENTS__;
+const FIELD_DIFFUSION_MULTIPLIERS: array<f32, CHANNELS> = __FIELD_DIFFUSION_MULTIPLIERS__;
+const FIELD_TOTAL: u32 = __FIELD_TOTAL__u;
+const FIELD_MAX_WIDTH: u32 = __FIELD_MAX_WIDTH__u;
+const FIELD_MAX_HEIGHT: u32 = __FIELD_MAX_HEIGHT__u;
 const GRID_N: u32 = __GRID_N__u;
-const PLANE_SIZE: u32 = WIDTH * HEIGHT;
-const TOTAL: u32 = PLANE_SIZE * CHANNELS;
-const SCRATCH_TOTAL: u32 = TOTAL + PLANE_SIZE;
+// A matching packed density plane per channel supports normalized convolution
+// even when adjacent channels use different grids.
+const SCRATCH_TOTAL: u32 = FIELD_TOTAL * 2u;
 const CLEAR_WORKGROUP_SIZE: u32 = 256u;
 
 // Must match agents.wgsl's own copy of this constant — the fixed-point
@@ -43,7 +53,7 @@ const CLEAR_WORKGROUP_SIZE: u32 = 256u;
 const DEPOSIT_SCALE: f32 = 4096.0;
 
 fn gridIndex(c: u32, y: u32, x: u32) -> u32 {
-  return c * PLANE_SIZE + y * WIDTH + x;
+  return FIELD_OFFSETS[c] + y * FIELD_WIDTHS[c] + x;
 }
 
 // read_write (not read) on every binding below, even where a given entry
@@ -92,7 +102,7 @@ fn clearScratch(
 fn resolvedDeposit(i: u32) -> f32 {
   let numerator = f32(atomicLoad(&depositScratch[i])) / DEPOSIT_SCALE;
   if (physics.normalizeDeposits < 0.5) { return numerator; }
-  let density = f32(atomicLoad(&depositScratch[TOTAL + (i % PLANE_SIZE)]))
+  let density = f32(atomicLoad(&depositScratch[FIELD_TOTAL + i]))
     / DEPOSIT_SCALE;
   return numerator / max(density + max(physics.depositDensityReference, 0.0), 1e-6);
 }
@@ -107,7 +117,7 @@ fn materializeSplat(
   @builtin(num_workgroups) workgroups: vec3<u32>,
 ) {
   let i = flatDispatchIndex(gid, workgroups);
-  if (i >= TOTAL) { return; }
+  if (i >= FIELD_TOTAL) { return; }
   gridCurrent[i] = resolvedDeposit(i);
 }
 
@@ -121,7 +131,7 @@ fn mergeDeposit(
   @builtin(num_workgroups) workgroups: vec3<u32>,
 ) {
   let i = flatDispatchIndex(gid, workgroups);
-  if (i >= TOTAL) { return; }
+  if (i >= FIELD_TOTAL) { return; }
   gridCurrent[i] = gridCurrent[i]
     + resolvedDeposit(i) * physics.depositRate;
 }
@@ -150,10 +160,12 @@ fn sampleMpmVelocity(worldPos: vec2<f32>) -> vec2<f32> {
 }
 
 fn sampleChemical(c: u32, fieldPos: vec2<f32>) -> f32 {
-  let x = wrapFloat(fieldPos.x, f32(WIDTH));
-  let y = wrapFloat(fieldPos.y, f32(HEIGHT));
+  let width = FIELD_WIDTHS[c];
+  let height = FIELD_HEIGHTS[c];
+  let x = wrapFloat(fieldPos.x, f32(width));
+  let y = wrapFloat(fieldPos.y, f32(height));
   let base = vec2<u32>(floor(vec2<f32>(x, y)));
-  let next = vec2<u32>((base.x + 1u) % WIDTH, (base.y + 1u) % HEIGHT);
+  let next = vec2<u32>((base.x + 1u) % width, (base.y + 1u) % height);
   let f = fract(vec2<f32>(x, y));
   let v00 = gridCurrent[gridIndex(c, base.y, base.x)];
   let v10 = gridCurrent[gridIndex(c, base.y, next.x)];
@@ -171,12 +183,15 @@ fn diffuseDecay(@builtin(global_invocation_id) gid: vec3<u32>) {
   let x = gid.x;
   let y = gid.y;
   let c = gid.z;
-  if (x >= WIDTH || y >= HEIGHT || c >= CHANNELS) { return; }
+  if (c >= CHANNELS) { return; }
+  let width = FIELD_WIDTHS[c];
+  let height = FIELD_HEIGHTS[c];
+  if (x >= width || y >= height) { return; }
 
-  let worldPos = vec2<f32>(f32(x) / f32(WIDTH), f32(y) / f32(HEIGHT));
+  let worldPos = vec2<f32>(f32(x) / f32(width), f32(y) / f32(height));
   let velocity = sampleMpmVelocity(worldPos);
   let backtracedWorld = fract(worldPos - velocity * max(physics.advectionDt, 0.0));
-  let backtracedField = backtracedWorld * vec2<f32>(f32(WIDTH), f32(HEIGHT));
+  let backtracedField = backtracedWorld * vec2<f32>(f32(width), f32(height));
   let advected = sampleChemical(c, backtracedField);
   var acc: f32 = 0.0;
   for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
@@ -186,8 +201,12 @@ fn diffuseDecay(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
   let idx = gridIndex(c, y, x);
-  let diffused = mix(advected, acc, clamp(physics.diffusionStep, 0.0, 1.0));
-  gridNext[idx] = diffused * physics.decay;
+  let diffusion = clamp(
+    physics.diffusionStep * FIELD_DIFFUSION_MULTIPLIERS[c], 0.0, 1.0
+  );
+  let diffused = mix(advected, acc, diffusion);
+  let channelDecay = pow(clamp(physics.decay, 0.0, 1.0), FIELD_DECAY_EXPONENTS[c]);
+  gridNext[idx] = diffused * channelDecay;
 }
 
 // Matches trainer/environment.py's own _SOBEL_X (and its transpose for Y)
@@ -208,14 +227,17 @@ fn computeGradient(@builtin(global_invocation_id) gid: vec3<u32>) {
   let x = gid.x;
   let y = gid.y;
   let c = gid.z;
-  if (x >= WIDTH || y >= HEIGHT || c >= CHANNELS) { return; }
+  if (c >= CHANNELS) { return; }
+  let width = FIELD_WIDTHS[c];
+  let height = FIELD_HEIGHTS[c];
+  if (x >= width || y >= height) { return; }
 
   var gx: f32 = 0.0;
   var gy: f32 = 0.0;
   for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
     for (var dx: i32 = -1; dx <= 1; dx = dx + 1) {
-      let nx = u32((i32(x) + dx + i32(WIDTH)) % i32(WIDTH));
-      let ny = u32((i32(y) + dy + i32(HEIGHT)) % i32(HEIGHT));
+      let nx = u32((i32(x) + dx + i32(width)) % i32(width));
+      let ny = u32((i32(y) + dy + i32(height)) % i32(height));
       let v = gridCurrent[gridIndex(c, ny, nx)];
       gx = gx + v * sobelX(dy, dx);
       gy = gy + v * sobelY(dy, dx);
@@ -223,5 +245,5 @@ fn computeGradient(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let idx = gridIndex(c, y, x);
   gradient[idx] = gx;
-  gradient[TOTAL + idx] = gy;
+  gradient[FIELD_TOTAL + idx] = gy;
 }

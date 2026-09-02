@@ -3,6 +3,7 @@ import {
   chemicalCommunicationArchitectureFromConfig,
   type RunSettings,
 } from "../gpu/types"
+import { defaultChemicalChannelProfiles, homogeneousChemicalChannelProfiles } from "../gpu/chemicalChannels"
 
 const STORAGE_KEY = "mpm-training:last-run-settings:v1"
 
@@ -23,6 +24,7 @@ export const DEFAULT_RUN_SETTINGS: RunSettings = {
   spawnHalfWidth: 0.08,
   channels: 8,
   fieldN: 256,
+  chemicalChannelProfiles: defaultChemicalChannelProfiles(8),
   morphologyBlurSigma: 0.01,
   morphologyDensityReference: 1,
   neuralUpdatesPerMacro: 4,
@@ -107,6 +109,9 @@ export function loadDefaultRunSettings(): RunSettings {
         chemicalCommunicationArchitectureFromConfig({
           decay: typeof cached.decay === "number" ? cached.decay : 0,
         })
+    }
+    if (!("chemicalChannelProfiles" in cached)) {
+      merged.chemicalChannelProfiles = homogeneousChemicalChannelProfiles(merged.channels)
     }
     if (!("hiddenLayers" in cached))
       merged.hiddenLayers = [cached.hiddenDim ?? merged.hiddenDim]

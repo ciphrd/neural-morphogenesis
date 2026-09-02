@@ -19,6 +19,7 @@ import numpy as np
 import wgpu
 
 from agents_gpu import PARTICLE_META_BUFFER_OFFSET, AgentsGPU, weight_layout
+from chemical_channels import homogeneous_channel_profiles, resolve_channel_profiles
 from density import DensityReference, resolve_checkpoint_density
 from device import pick_device
 from environment_gpu import EnvironmentGPU
@@ -106,8 +107,7 @@ class PolicyInputProbe:
             "policyInputProbe.wgsl",
             {
                 "CHANNELS": environment.channels,
-                "FIELD_WIDTH": environment.width,
-                "FIELD_HEIGHT": environment.height,
+                **environment.shader_constants,
                 "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
                 "TRACKED": tracked,
                 "IN_DIM": self.input_dim,
@@ -381,6 +381,9 @@ def main() -> int:
         meta.get("normalize_deposits_by_local_density", NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY),
         meta.get("deposit_density_reference", DEPOSIT_DENSITY_REFERENCE),
         grid_velocity=core.grid_vel,
+        channel_profiles=resolve_channel_profiles(
+            channels, meta.get("chemical_channel_profiles", homogeneous_channel_profiles(channels))
+        ),
     )
     agents = AgentsGPU(
         device, core, environment, channels, hidden,

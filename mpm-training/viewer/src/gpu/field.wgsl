@@ -424,13 +424,26 @@ fn morphologyFragment(in: QuadOut) -> @location(0) vec4<f32> {
 // parity) — render.ts picks the right one of two precomputed bind
 // groups each frame, mirroring environment.ts's own parity-indexed
 // bind-group-array convention exactly.
-const SUBSTRATE_WIDTH: u32 = __SUBSTRATE_WIDTH__u;
-const SUBSTRATE_HEIGHT: u32 = __SUBSTRATE_HEIGHT__u;
+const SUBSTRATE_WIDTH: u32 = __FIELD_MAX_WIDTH__u;
+const SUBSTRATE_HEIGHT: u32 = __FIELD_MAX_HEIGHT__u;
 const SUBSTRATE_CHANNELS: u32 = __CHANNELS__u;
+const SUBSTRATE_WIDTHS: array<u32, SUBSTRATE_CHANNELS> = __FIELD_WIDTHS__;
+const SUBSTRATE_HEIGHTS: array<u32, SUBSTRATE_CHANNELS> = __FIELD_HEIGHTS__;
+const SUBSTRATE_OFFSETS: array<u32, SUBSTRATE_CHANNELS> = __FIELD_OFFSETS__;
 const SUBSTRATE_MAX: f32 = 2.0;
 
 fn substrateIndex(c: u32, y: u32, x: u32) -> u32 {
-  return c * SUBSTRATE_HEIGHT * SUBSTRATE_WIDTH + y * SUBSTRATE_WIDTH + x;
+  return SUBSTRATE_OFFSETS[c] + y * SUBSTRATE_WIDTHS[c] + x;
+}
+
+fn substrateValue(c: u32, outputX: u32, outputY: u32) -> f32 {
+  let uv = (vec2<f32>(f32(outputX), f32(outputY)) + vec2<f32>(0.5))
+    / vec2<f32>(f32(SUBSTRATE_WIDTH), f32(SUBSTRATE_HEIGHT));
+  let width = SUBSTRATE_WIDTHS[c];
+  let height = SUBSTRATE_HEIGHTS[c];
+  let x = min(u32(floor(uv.x * f32(width))), width - 1u);
+  let y = min(u32(floor(uv.y * f32(height))), height - 1u);
+  return substrateGrid[substrateIndex(c, y, x)];
 }
 
 @group(0) @binding(8) var<storage, read> substrateGrid: array<f32>;
@@ -443,9 +456,9 @@ fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let y = gid.y;
   if (x >= SUBSTRATE_WIDTH || y >= SUBSTRATE_HEIGHT) { return; }
 
-  let r = substrateGrid[substrateIndex(substrateChannelStart, y, x)];
-  let g = substrateGrid[substrateIndex(min(substrateChannelStart + 1u, SUBSTRATE_CHANNELS - 1u), y, x)];
-  let b = substrateGrid[substrateIndex(min(substrateChannelStart + 2u, SUBSTRATE_CHANNELS - 1u), y, x)];
+  let r = substrateValue(substrateChannelStart, x, y);
+  let g = substrateValue(min(substrateChannelStart + 1u, SUBSTRATE_CHANNELS - 1u), x, y);
+  let b = substrateValue(min(substrateChannelStart + 2u, SUBSTRATE_CHANNELS - 1u), x, y);
   let color = vec3<f32>(graypoint(r, SUBSTRATE_MAX), graypoint(g, SUBSTRATE_MAX), graypoint(b, SUBSTRATE_MAX));
 
   textureStore(substrateOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(color, 1.0));
@@ -483,7 +496,7 @@ fn colorizeGrowth(@builtin(global_invocation_id) gid: vec3<u32>) {
   let y = gid.y;
   if (x >= SUBSTRATE_WIDTH || y >= SUBSTRATE_HEIGHT) { return; }
 
-  let v = substrateGrid[substrateIndex(GROWTH_CHANNEL, y, x)];
+  let v = substrateValue(GROWTH_CHANNEL, x, y);
   let t = (accentedSigned(v) + 1.0) * 0.5;
   textureStore(growthOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(cividis(t), 1.0));
 }

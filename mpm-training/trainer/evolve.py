@@ -96,6 +96,7 @@ import numpy as np
 import torch
 
 from agents_gpu import AgentsGPU
+from chemical_channels import profiles_to_wire
 from alignment import training_alignment_distance
 from density import DENSITY_MODEL_VERSION, DensityReference, ResolvedDensity, parse_multipliers, resolve_density
 from environment_gpu import EnvironmentGPU
@@ -104,6 +105,7 @@ from parallel_workers import build_pool, worker_rollout
 from raster import build_target_distance_field, build_target_raster
 from simulation_settings import (
     CHEM_CHANNELS,
+    CHEMICAL_CHANNEL_PROFILES,
     CHEMICAL_COMMUNICATION_ARCHITECTURE,
     CHEMICAL_GRADIENT_INPUT_SCALE,
     COMMUNICATION_SPEED,
@@ -751,6 +753,7 @@ def main() -> None:
                         "spawn_half_width": args.spawn_half_width,
                         "channels": CHEM_CHANNELS,
                         "field_n": FIELD_N,
+                        "chemical_channel_profiles": profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
                         "population": args.population,
                         "seeds_per_candidate": args.seeds_per_candidate,
                         # These belong to best_weights, which may come from an

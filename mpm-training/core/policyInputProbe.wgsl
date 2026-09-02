@@ -4,10 +4,12 @@
 // participates in training.
 
 const CHANNELS: u32 = __CHANNELS__u;
-const FIELD_WIDTH: u32 = __FIELD_WIDTH__u;
-const FIELD_HEIGHT: u32 = __FIELD_HEIGHT__u;
-const FIELD_PLANE: u32 = FIELD_WIDTH * FIELD_HEIGHT;
-const FIELD_TOTAL: u32 = FIELD_PLANE * CHANNELS;
+const FIELD_WIDTHS: array<u32, CHANNELS> = __FIELD_WIDTHS__;
+const FIELD_HEIGHTS: array<u32, CHANNELS> = __FIELD_HEIGHTS__;
+const FIELD_OFFSETS: array<u32, CHANNELS> = __FIELD_OFFSETS__;
+const FIELD_TOTAL: u32 = __FIELD_TOTAL__u;
+const FIELD_MAX_WIDTH: u32 = __FIELD_MAX_WIDTH__u;
+const FIELD_MAX_HEIGHT: u32 = __FIELD_MAX_HEIGHT__u;
 const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
 const TRACKED: u32 = __TRACKED__u;
 const ELASTIC_SCALE: f32 = __ELASTIC_SCALE__;
@@ -46,21 +48,22 @@ struct Corners {
 @group(0) @binding(9) var<storage, read_write> output: array<f32>;
 
 fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
-  return c * FIELD_PLANE + y * FIELD_WIDTH + x;
+  return FIELD_OFFSETS[c] + y * FIELD_WIDTHS[c] + x;
 }
 fn wrapCoord(v: f32, size: f32) -> f32 {
   let m = v % size;
   return select(m, m + size, m < 0.0);
 }
-fn corners(posIn: vec2<f32>) -> Corners {
-  let p = vec2<f32>(wrapCoord(posIn.x, f32(FIELD_WIDTH)), wrapCoord(posIn.y, f32(FIELD_HEIGHT)));
+fn corners(c: u32, posIn: vec2<f32>) -> Corners {
+  let width = FIELD_WIDTHS[c]; let height = FIELD_HEIGHTS[c];
+  let p = vec2<f32>(wrapCoord(posIn.x, f32(width)), wrapCoord(posIn.y, f32(height)));
   let x0f = floor(p.x);
   let y0f = floor(p.y);
   var out: Corners;
   out.wx1 = p.x - x0f; out.wx0 = 1.0 - out.wx1;
   out.wy1 = p.y - y0f; out.wy0 = 1.0 - out.wy1;
-  out.x0 = u32(x0f) % FIELD_WIDTH; out.x1 = (out.x0 + 1u) % FIELD_WIDTH;
-  out.y0 = u32(y0f) % FIELD_HEIGHT; out.y1 = (out.y0 + 1u) % FIELD_HEIGHT;
+  out.x0 = u32(x0f) % width; out.x1 = (out.x0 + 1u) % width;
+  out.y0 = u32(y0f) % height; out.y1 = (out.y0 + 1u) % height;
   return out;
 }
 fn sampleValue(c: u32, k: Corners) -> f32 {
@@ -149,14 +152,15 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let cosH = cos(agentState.heading); let sinH = sin(agentState.heading);
   let forward = vec2<f32>(cosH, sinH); let lateral = vec2<f32>(-sinH, cosH);
-  let k = corners(fract(pos) * vec2<f32>(f32(FIELD_WIDTH), f32(FIELD_HEIGHT)));
   let rawBase = baseOut + META_DIM;
   let inputBase = rawBase + IN_DIM;
   for (var c=0u; c<CHANNELS; c = c + 1u) {
+    let k = corners(c, fract(pos) * vec2<f32>(f32(FIELD_WIDTHS[c]), f32(FIELD_HEIGHTS[c])));
     let rawValue = sampleValue(c, k);
     output[rawBase+c] = rawValue;
     output[inputBase+c] = normalizeChemicalValue(rawValue);
-    let gx = sampleGrad(0u, c, k); let gy = sampleGrad(FIELD_TOTAL, c, k);
+    let gx = sampleGrad(0u, c, k) * f32(FIELD_WIDTHS[c]) / f32(FIELD_MAX_WIDTH);
+    let gy = sampleGrad(FIELD_TOTAL, c, k) * f32(FIELD_HEIGHTS[c]) / f32(FIELD_MAX_HEIGHT);
     let rawForward = gx*cosH + gy*sinH;
     let rawLateral = -gx*sinH + gy*cosH;
     output[rawBase+CHANNELS+c] = rawForward;

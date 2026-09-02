@@ -469,9 +469,8 @@ export class Renderer {
       code: templateShader(fieldSrc, {
         GRID_N,
         REPULSION_FIELD_N,
-        SUBSTRATE_WIDTH: environment.width,
-        SUBSTRATE_HEIGHT: environment.height,
         CHANNELS: environment.channels,
+        ...environment.layout.shaderConstants,
       }),
     });
     const nodes = GRID_N + 1;
@@ -592,7 +591,7 @@ export class Renderer {
 
     // --- substrate background ---
     this.substrateTexture = device.createTexture({
-      size: [environment.width, environment.height, 1],
+      size: [environment.maxWidth, environment.maxHeight, 1],
       format: "rgba8unorm",
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
@@ -616,7 +615,7 @@ export class Renderer {
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];
-    this.substrateDispatch = [ceilDiv(environment.width, 16), ceilDiv(environment.height, 16)];
+    this.substrateDispatch = [ceilDiv(environment.maxWidth, 16), ceilDiv(environment.maxHeight, 16)];
 
     this.substratePresentPipeline = device.createRenderPipeline({
       layout: "auto",
@@ -641,7 +640,7 @@ export class Renderer {
 
     // --- growth background ---
     this.growthTexture = device.createTexture({
-      size: [environment.width, environment.height, 1],
+      size: [environment.maxWidth, environment.maxHeight, 1],
       format: "rgba8unorm",
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });

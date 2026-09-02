@@ -50,6 +50,8 @@ export interface RunSettings {
   spawnHalfWidth: number;
   channels: number;
   fieldN: number;
+  /** Per-channel spatial/temporal transport profile, packed into shared buffers. */
+  chemicalChannelProfiles?: ChemicalChannelProfile[];
   morphologyBlurSigma?: number;
   morphologyDensityReference?: number;
   boundaryTangentMinGradient?: number;
@@ -382,3 +384,4 @@ export interface SceneData {
   Jp: Float32Array; // (count,), ones
 }
 import coreConstants from "../../../core/constants.json";
+import type { ChemicalChannelProfile } from "./chemicalChannels";

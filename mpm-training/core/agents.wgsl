@@ -172,10 +172,15 @@ const FC2B_OFFSET: u32 = FC2W_OFFSET + OUT_DIM * HIDDEN_DIM;
 // Total float count — agents.ts's flattenWeights() must produce exactly
 // this many floats, in exactly this fc1w/fc1b/fc2w/fc2b order.
 
-const FIELD_WIDTH: u32 = __FIELD_WIDTH__u;
-const FIELD_HEIGHT: u32 = __FIELD_HEIGHT__u;
-const FIELD_PLANE: u32 = FIELD_WIDTH * FIELD_HEIGHT;
-const FIELD_TOTAL: u32 = FIELD_PLANE * CHANNELS;
+// Packed multi-resolution chemical layout. Every channel keeps its ordinary
+// policy index while choosing its spatial/temporal scale through host data.
+const FIELD_WIDTHS: array<u32, CHANNELS> = __FIELD_WIDTHS__;
+const FIELD_HEIGHTS: array<u32, CHANNELS> = __FIELD_HEIGHTS__;
+const FIELD_OFFSETS: array<u32, CHANNELS> = __FIELD_OFFSETS__;
+const FIELD_DEPOSIT_SIGMA_MULTIPLIERS: array<f32, CHANNELS> = __FIELD_DEPOSIT_SIGMA_MULTIPLIERS__;
+const FIELD_TOTAL: u32 = __FIELD_TOTAL__u;
+const FIELD_MAX_WIDTH: u32 = __FIELD_MAX_WIDTH__u;
+const FIELD_MAX_HEIGHT: u32 = __FIELD_MAX_HEIGHT__u;
 
 // Must match environment.wgsl's own copy exactly.
 const DEPOSIT_SCALE: f32 = 4096.0;
@@ -426,7 +431,7 @@ fn sampleMorphology(p: vec2<f32>) -> f32 {
 }
 
 fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
-  return c * FIELD_PLANE + y * FIELD_WIDTH + x;
+  return FIELD_OFFSETS[c] + y * FIELD_WIDTHS[c] + x;
 }
 
 // A real, confirmed failure mode on this backend: naive tanh computed as
@@ -579,8 +584,10 @@ fn wrapCoord(v: f32, size: f32) -> f32 {
 // Bilinear gather/scatter corners at a continuous field-pixel position,
 // wrapped (toroidal) into [0,size) — matches trainer/environment.py's
 // own _corners() exactly (see environment.wgsl's own module docstring).
-fn corners(posIn: vec2<f32>) -> Corners {
-  let pos = vec2<f32>(wrapCoord(posIn.x, f32(FIELD_WIDTH)), wrapCoord(posIn.y, f32(FIELD_HEIGHT)));
+fn corners(c: u32, posIn: vec2<f32>) -> Corners {
+  let width = FIELD_WIDTHS[c];
+  let height = FIELD_HEIGHTS[c];
+  let pos = vec2<f32>(wrapCoord(posIn.x, f32(width)), wrapCoord(posIn.y, f32(height)));
   let x0f = floor(pos.x);
   let y0f = floor(pos.y);
   var out: Corners;
@@ -588,10 +595,10 @@ fn corners(posIn: vec2<f32>) -> Corners {
   out.wx0 = 1.0 - out.wx1;
   out.wy1 = pos.y - y0f;
   out.wy0 = 1.0 - out.wy1;
-  out.x0 = u32(x0f) % FIELD_WIDTH;
-  out.x1 = (u32(x0f) + 1u) % FIELD_WIDTH;
-  out.y0 = u32(y0f) % FIELD_HEIGHT;
-  out.y1 = (u32(y0f) + 1u) % FIELD_HEIGHT;
+  out.x0 = u32(x0f) % width;
+  out.x1 = (u32(x0f) + 1u) % width;
+  out.y0 = u32(y0f) % height;
+  out.y1 = (u32(y0f) + 1u) % height;
   return out;
 }
 
@@ -619,7 +626,7 @@ fn sampleGrad(planeOffset: u32, c: u32, k: Corners) -> f32 {
 // rather than growing without limit alongside a live-tunable radius.
 // Smaller than repulsion's own cap (5) to keep each particle's chemical
 // write bounded.
-const MAX_DEPOSIT_KERNEL_RADIUS: i32 = 3;
+const MAX_DEPOSIT_KERNEL_RADIUS: i32 = 6;
 
 // Euclidean modulo, i32 in/out — same wraparound idea
 // core/repulsion.wgsl's own wrapFieldIndex() already uses for its own
@@ -658,14 +665,9 @@ fn wrapDepositIndex(i: i32, size: u32) -> i32 {
 // baseline particle and leaving fast growth behind.
 fn depositGaussian(
   envWrite: array<f32, ENV_WRITE_DIM>,
-  centerFieldPos: vec2<f32>,
+  centerWorldPos: vec2<f32>,
   growthF: vec4<f32>,
 ) {
-  let baseI = i32(floor(centerFieldPos.x));
-  let baseJ = i32(floor(centerFieldPos.y));
-
-  let sigmaTexels = max(physics.depositSigma, 1e-3);
-  let sigma2 = sigmaTexels * sigmaTexels;
   let growthDet = max(abs(matDet(growthF)), 1e-6);
   let inverseGrowth = matInverse(growthF);
   // Largest singular value of growthF. It bounds the deformed Gaussian in
@@ -677,51 +679,47 @@ fn depositGaussian(
       - 4.0 * growthDet * growthDet, 0.0))),
     1e-6,
   ));
-  // 3-sigma is where a Gaussian's own contribution is already <1.1% of
-  // its peak — truncating there (subject to MAX_DEPOSIT_KERNEL_RADIUS's
-  // own hard cap) loses nothing visible, same reasoning
-  // core/repulsion.wgsl's own splatDensity() gives.
-  let kernelRadius = min(
-    i32(ceil(3.0 * sigmaTexels * largestStretch)),
-    MAX_DEPOSIT_KERNEL_RADIUS,
-  );
-  let fieldDimensions = vec2<f32>(f32(FIELD_WIDTH), f32(FIELD_HEIGHT));
-
-  for (var di: i32 = -kernelRadius; di <= kernelRadius; di = di + 1) {
-    for (var dj: i32 = -kernelRadius; dj <= kernelRadius; dj = dj + 1) {
-      let ti = baseI + di;
-      let tj = baseJ + dj;
-      // Field samples use integer grid coordinates (corners() floors the
-      // continuous field position), so the Gaussian is centered on that same
-      // lattice. A cell exactly on a grid coordinate therefore senses its own
-      // stored level at full strength instead of an unintended half-texel loss.
-      let texelCenter = vec2<f32>(f32(ti), f32(tj));
-      let delta = centerFieldPos - texelCenter;
-      // growthF acts in normalized world coordinates. Convert the texel delta
-      // there, pull it back into the stress-free frame, then return to texels
-      // so depositSigma keeps its existing grid-space meaning.
-      let worldDelta = delta / fieldDimensions;
-      let referenceWorldDelta = vec2<f32>(
-        inverseGrowth.x * worldDelta.x + inverseGrowth.y * worldDelta.y,
-        inverseGrowth.z * worldDelta.x + inverseGrowth.w * worldDelta.y,
-      );
-      let referenceDelta = referenceWorldDelta * fieldDimensions;
-      let d2 = dot(referenceDelta, referenceDelta);
-      let weight = exp(-d2 / (2.0 * sigma2));
-
-      let wx = u32(wrapDepositIndex(ti, FIELD_WIDTH));
-      let wy = u32(wrapDepositIndex(tj, FIELD_HEIGHT));
-      let projectionWeight = weight * physics.chemicalProjectionWeight;
-      for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+  // Each channel is scattered in its own native grid. Coarse channels acquire
+  // organism-scale physical support without a huge fine-grid convolution.
+  for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+    let width = FIELD_WIDTHS[c];
+    let height = FIELD_HEIGHTS[c];
+    let fieldDimensions = vec2<f32>(f32(width), f32(height));
+    let centerFieldPos = fract(centerWorldPos) * fieldDimensions;
+    let baseI = i32(floor(centerFieldPos.x));
+    let baseJ = i32(floor(centerFieldPos.y));
+    let sigmaTexels = max(
+      physics.depositSigma * FIELD_DEPOSIT_SIGMA_MULTIPLIERS[c], 1e-3
+    );
+    let sigma2 = sigmaTexels * sigmaTexels;
+    let kernelRadius = min(
+      i32(ceil(3.0 * sigmaTexels * largestStretch)),
+      MAX_DEPOSIT_KERNEL_RADIUS,
+    );
+    for (var di: i32 = -kernelRadius; di <= kernelRadius; di = di + 1) {
+      for (var dj: i32 = -kernelRadius; dj <= kernelRadius; dj = dj + 1) {
+        let ti = baseI + di;
+        let tj = baseJ + dj;
+        let texelCenter = vec2<f32>(f32(ti), f32(tj));
+        let delta = centerFieldPos - texelCenter;
+        let worldDelta = delta / fieldDimensions;
+        let referenceWorldDelta = vec2<f32>(
+          inverseGrowth.x * worldDelta.x + inverseGrowth.y * worldDelta.y,
+          inverseGrowth.z * worldDelta.x + inverseGrowth.w * worldDelta.y,
+        );
+        let referenceDelta = referenceWorldDelta * fieldDimensions;
+        let d2 = dot(referenceDelta, referenceDelta);
+        let weight = exp(-d2 / (2.0 * sigma2));
+        let wx = u32(wrapDepositIndex(ti, width));
+        let wy = u32(wrapDepositIndex(tj, height));
+        let projectionWeight = weight * physics.chemicalProjectionWeight;
         let scaled = envWrite[c] * projectionWeight * DEPOSIT_SCALE;
         atomicAdd(&depositScratch[fieldIndex(c, wy, wx)], i32(round(scaled)));
+        atomicAdd(
+          &depositScratch[FIELD_TOTAL + fieldIndex(c, wy, wx)],
+          i32(round(projectionWeight * DEPOSIT_SCALE)),
+        );
       }
-      // One extra scratch plane carries the exact matching denominator for
-      // optional local-density normalization in environment.wgsl.
-      atomicAdd(
-        &depositScratch[FIELD_TOTAL + wy * FIELD_WIDTH + wx],
-        i32(round(projectionWeight * DEPOSIT_SCALE)),
-      );
     }
   }
 }
@@ -732,7 +730,6 @@ fn depositGaussian(
 fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
   if (pi >= activeCount) { return; }
-  let fieldPos = fract(positions[pi]) * vec2<f32>(f32(FIELD_WIDTH), f32(FIELD_HEIGHT));
   var levels: array<f32, ENV_WRITE_DIM>;
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
     levels[c] = agentState.particleMeta[pi].chemicalState[c];
@@ -741,7 +738,7 @@ fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
   // chemistry are fully present immediately after division; growthF controls
   // the projection footprint before division so the substrate follows the
   // continuously growing material.
-  depositGaussian(levels, fieldPos, particleRest[pi].growthF);
+  depositGaussian(levels, positions[pi], particleRest[pi].growthF);
 }
 
 // The bounded subset of the network's own raw output
@@ -849,9 +846,6 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // spawn center/half-width combination that reaches past an edge.
   // fract() makes this correct (wrapped) either way, not just in the
   // common case.
-  let fieldPos = fract(pos) * vec2<f32>(f32(FIELD_WIDTH), f32(FIELD_HEIGHT));
-  let k = corners(fieldPos);
-
   // Rotate each channel's world-frame gradient into this particle's own
   // local frame (forward = heading, lateral = 90° left) before it
   // reaches the network — matches trainer/training_sim.py's own
@@ -860,11 +854,16 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   var inputVec: array<f32, IN_DIM>;
   var rawGrowthSignal = 0.0;
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+    let fieldPos = fract(pos) * vec2<f32>(f32(FIELD_WIDTHS[c]), f32(FIELD_HEIGHTS[c]));
+    let k = corners(c, fieldPos);
     let rawValue = sampleValue(c, k);
     if (c == CHANNELS - 1u) { rawGrowthSignal = rawValue; }
     inputVec[c] = normalizeChemicalValue(rawValue);
-    let gx = sampleGrad(0u, c, k);
-    let gy = sampleGrad(FIELD_TOTAL, c, k);
+    // Sobel is a derivative per native texel. Convert it to the reference
+    // finest-grid convention so a world-space slope has comparable neural
+    // magnitude regardless of the channel's chosen resolution.
+    let gx = sampleGrad(0u, c, k) * f32(FIELD_WIDTHS[c]) / f32(FIELD_MAX_WIDTH);
+    let gy = sampleGrad(FIELD_TOTAL, c, k) * f32(FIELD_HEIGHTS[c]) / f32(FIELD_MAX_HEIGHT);
     inputVec[CHANNELS + c] = normalizeChemicalGradient(gx * cosH + gy * sinH);
     inputVec[2u * CHANNELS + c] = normalizeChemicalGradient(-gx * sinH + gy * cosH);
   }
@@ -952,7 +951,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Environment depositRate owns the macro communication-time scaling.
     depositGaussian(
       result.envWrite,
-      fieldPos,
+      pos,
       particleRest[pi].growthF,
     );
   }

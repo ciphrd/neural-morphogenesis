@@ -73,6 +73,7 @@ from simulation_settings import (
     SPLAT_RADIUS,
 )
 from targets import load_target
+from chemical_channels import homogeneous_channel_profiles, resolve_channel_profiles
 from training_sim import TrainingRollout
 from policy_parameters import STATELESS_ARCHITECTURE, policy_hidden_dim, resolve_chemical_communication_architecture
 
@@ -151,6 +152,10 @@ def main() -> int:
         meta.get("normalize_deposits_by_local_density", NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY),
         meta.get("deposit_density_reference", DEPOSIT_DENSITY_REFERENCE),
         grid_velocity=core.grid_vel,
+        channel_profiles=resolve_channel_profiles(
+            CHEM_CHANNELS,
+            meta.get("chemical_channel_profiles", homogeneous_channel_profiles(CHEM_CHANNELS)),
+        ),
     )
     agents = AgentsGPU(
         wgpu_device,
