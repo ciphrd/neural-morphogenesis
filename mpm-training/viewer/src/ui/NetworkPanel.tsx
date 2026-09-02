@@ -1,7 +1,7 @@
 import type { PointerEvent as ReactPointerEvent } from "react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { evalPolicy, policyWeightsShapeError } from "../gpu/policyEval"
-import { chemicalCommunicationArchitectureFromConfig, policyHasRecurrence, type PhysicsSettings, type PolicyArchitecture, type SimulationConfig, type UpdateRuleWeights } from "../gpu/types"
+import { policyHasRecurrence, type PhysicsSettings, type PolicyArchitecture, type SimulationConfig, type UpdateRuleWeights } from "../gpu/types"
 import { Slider } from "./Slider"
 
 interface NetworkPanelProps {
@@ -319,8 +319,8 @@ function buildChannelHeatmaps(
  * particle probe: the first MANUAL_CHANNELS policy-normalized channels are
  * each dialed in by hand here (a square pad for that channel's normalized
  * local-frame gradient, plus a slider for its normalized sensed value), every
- * other input stays at zero, and the whole output (centered chemical
- * env-writes per channel + turn/growth controls + RGB) is evalPolicy()'s (gpu/policyEval.ts,
+ * other input stays at zero, and the whole output (signed chemical
+ * deltas per channel + turn/growth controls + RGB) is evalPolicy()'s (gpu/policyEval.ts,
  * mirroring core/agents.wgsl) own response to THAT exact vector,
  * recomputed live on every pad drag/slider tick — cheap enough (one
  * forward pass, no sweep) to do inline via useMemo, no probe timer
@@ -329,8 +329,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
   const channels = config?.channels ?? 0
   const hiddenDim = config?.hiddenDim ?? 0
   const architecture = config?.policyArchitecture ?? "stateless-128"
-  const cellOwnedChemistry = !config
-    || chemicalCommunicationArchitectureFromConfig(config) === "cell-owned-projection"
   const maxEnvWrite = physics?.maxEnvWrite ?? 1
   const maxAngularAccel = physics?.maxAngularAccel ?? 1
   const maxStrafe = physics?.maxStrafe ?? 1
@@ -438,7 +436,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       <div className="nn-block">
         <h3>Input</h3>
         <p className="hint">
-          Background: this channel's own {cellOwnedChemistry ? "cell-state delta" : "environment deposit"} output, swept across the pad (its own value + every other
+          Background: this channel's signed chemical delta, swept across the pad (its own value + every other
           channel held as set). Contrast is exaggerated independently per pad
           by stretching its observed min/max across Viridis. This shows
           response shape, not absolute output strength.
@@ -534,7 +532,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       {output && (
         <>
           <div className="nn-block">
-            <h3>Output — chemical {cellOwnedChemistry ? "Δ" : "deposit"}</h3>
+            <h3>Output — chemical delta</h3>
             <div className="nn-group">
               <span className="nn-group-label">Under particle</span>
               {Array.from({ length: channels }, (_, c) => (
@@ -576,6 +574,11 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
               <ActivationBar
                 label="division bias"
                 value={output.divisionBias}
+                domain={1}
+              />
+              <ActivationBar
+                label="division drive"
+                value={output.divisionDrive}
                 domain={1}
               />
             </div>

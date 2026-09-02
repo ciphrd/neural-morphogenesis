@@ -108,6 +108,7 @@ from simulation_settings import (
     CHEMICAL_CHANNEL_PROFILES,
     CHEMICAL_COMMUNICATION_ARCHITECTURE,
     CHEMICAL_GRADIENT_INPUT_SCALE,
+    CHEMICAL_VALUE_INPUT_MULTIPLIER,
     COMMUNICATION_SPEED,
     DAMPING_LOSS_FRACTION,
     DECAY,
@@ -115,6 +116,7 @@ from simulation_settings import (
     NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
     DEPOSIT_DENSITY_REFERENCE,
     DEPOSIT_SIGMA,
+    DEFAULT_RUN_SETTINGS,
     DEFAULT_SUBSTEPS_PER_MACRO,
     ELASTIC_STRAIN_SCALE,
     ELASTIC_STRAIN_INPUTS_ENABLED,
@@ -126,6 +128,7 @@ from simulation_settings import (
     GROWTH_ANISOTROPY_AUTHORITY,
     INITIAL_PARTICLE_COUNT,
     INTERNAL_STATE_SPEED,
+    DIVISION_DRIVE_BOOST,
     DIVISION_DIRECTIONALITY,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
@@ -501,39 +504,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="checkpoint destination (useful for paired architecture comparisons)",
     )
     parser.add_argument(
-        "--target", default="circle", choices=available_targets(), help="target shape name (a .json file in ./targets/)"
+        "--target", default=DEFAULT_RUN_SETTINGS["target"], choices=available_targets(), help="target shape name (a .json file in ./targets/)"
     )
-    parser.add_argument("--population", type=int, default=16, help="number of candidate weight-sets per generation")
+    parser.add_argument("--population", type=int, default=DEFAULT_RUN_SETTINGS["population"], help="number of candidate weight-sets per generation")
     parser.add_argument(
         "--seeds-per-candidate",
         type=int,
-        default=1,
+        default=DEFAULT_RUN_SETTINGS["seedsPerCandidate"],
         help=(
             "shared rollout seeds used to evaluate every candidate each generation; "
             "the batch rotates between generations and candidate fitness is its mean "
             "across the batch (default: 1, preserving the previous rollout cost)"
         ),
     )
-    parser.add_argument("--elites", type=int, default=3, help="top performers carried into the next generation unmutated")
-    parser.add_argument("--generations", type=int, default=50)
+    parser.add_argument("--elites", type=int, default=DEFAULT_RUN_SETTINGS["elites"], help="top performers carried into the next generation unmutated")
+    parser.add_argument("--generations", type=int, default=DEFAULT_RUN_SETTINGS["totalGenerations"])
     parser.add_argument(
         "--particles",
         type=int,
-        default=400,
+        default=DEFAULT_RUN_SETTINGS["particles"],
         help="maximum particle count a rollout can grow to via splitting",
     )
     parser.add_argument(
         "--particle-densities",
         type=float,
         nargs="+",
-        default=[1.0],
+        default=DEFAULT_RUN_SETTINGS["trainingDensityMultipliers"],
         metavar="Q",
         help="particle sampling-density multipliers evaluated for every candidate (default: 1.0)",
     )
     parser.add_argument(
         "--density-aggregation",
         choices=("worst", "mean"),
-        default="worst",
+        default=DEFAULT_RUN_SETTINGS["densityAggregation"],
         help="combine one candidate's mean-per-density fitnesses (default: worst)",
     )
     parser.add_argument(
@@ -550,7 +553,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--macro-steps",
         type=int,
-        default=160,
+        default=DEFAULT_RUN_SETTINGS["macroSteps"],
         help="total NN sense/act interventions per rollout",
     )
     parser.add_argument(
@@ -565,36 +568,36 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SUBSTEPS_PER_MACRO,
         help="MLS-MPM physics substeps run between each NN intervention (mpm_core.MpmCore.step's own substep unit)",
     )
-    parser.add_argument("--gravity", type=float, default=200.0)
+    parser.add_argument("--gravity", type=float, default=DEFAULT_RUN_SETTINGS["gravity"])
     # Center of MpmCore's own [0,1]^2 domain — particles start in the
     # middle of the space, not offset toward any one wall.
-    parser.add_argument("--spawn-x", type=float, default=0.5)
-    parser.add_argument("--spawn-y", type=float, default=0.5)
-    parser.add_argument("--spawn-half-width", type=float, default=0.08)
-    parser.add_argument("--mutation-sigma", type=float, default=0.05)
+    parser.add_argument("--spawn-x", type=float, default=DEFAULT_RUN_SETTINGS["spawnX"])
+    parser.add_argument("--spawn-y", type=float, default=DEFAULT_RUN_SETTINGS["spawnY"])
+    parser.add_argument("--spawn-half-width", type=float, default=DEFAULT_RUN_SETTINGS["spawnHalfWidth"])
+    parser.add_argument("--mutation-sigma", type=float, default=DEFAULT_RUN_SETTINGS["mutationSigma"])
     parser.add_argument(
         "--raster-resolution",
         type=int,
-        default=128,
+        default=DEFAULT_RUN_SETTINGS["rasterResolution"],
         help="side length of the square lattice target/particle point clouds are splatted onto for fitness — see raster.py",
     )
     parser.add_argument(
         "--raster-sigma",
         type=float,
-        default=1.5,
+        default=DEFAULT_RUN_SETTINGS["rasterSigma"],
         help="Gaussian splat width, in raster pixels (not domain units) — see raster.rasterize_points",
     )
     parser.add_argument(
         "--outside-weight",
         type=float,
-        default=1.0,
+        default=DEFAULT_RUN_SETTINGS["outsideWeight"],
         help=(
             "weight of the distance-transform penalty for particles landing outside the target's footprint "
             "(0 disables it, falling back to raster coverage MSE alone) — see raster.outside_shape_penalty"
         ),
     )
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--checkpoint-every", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=DEFAULT_RUN_SETTINGS["runSeed"])
+    parser.add_argument("--checkpoint-every", type=int, default=DEFAULT_RUN_SETTINGS["checkpointEvery"])
     parser.add_argument(
         "--workers",
         type=int,
@@ -727,6 +730,7 @@ def main() -> None:
                         "particle_volume": VOL,
                         "deposit_sigma": DEPOSIT_SIGMA,
                         "chemical_projection_weight": 1.0,
+                        "chemical_value_input_multiplier": CHEMICAL_VALUE_INPUT_MULTIPLIER,
                         "chemical_gradient_input_scale": CHEMICAL_GRADIENT_INPUT_SCALE,
                         "winner_seed": best_winner_seed,
                         "winner_density_multiplier": best_winner_density,
@@ -745,6 +749,7 @@ def main() -> None:
                         "communication_speed": COMMUNICATION_SPEED,
                         "internal_state_speed": INTERNAL_STATE_SPEED,
                         "division_directionality": DIVISION_DIRECTIONALITY,
+                        "division_drive_boost": DIVISION_DRIVE_BOOST,
                         "elastic_strain_scale": ELASTIC_STRAIN_SCALE,
                         "elastic_strain_inputs_enabled": ELASTIC_STRAIN_INPUTS_ENABLED,
                         "gravity": args.gravity,

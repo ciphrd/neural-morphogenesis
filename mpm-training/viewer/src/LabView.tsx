@@ -205,6 +205,14 @@ export function LabView() {
     }
   }
 
+  const particleStateChannelCount = particleRenderMode === "dots-internal-state"
+    ? 8
+    : (config?.channels ?? 1)
+  const particleStateChannelStart = Math.min(
+    Math.max(0, particleStateChannelCount - 3),
+    internalStateChannelStart,
+  )
+
   return (
     <div className="training-layout lab-layout">
       <aside className="controls lab-controls">
@@ -402,8 +410,8 @@ export function LabView() {
             <select className="select" value={particleRenderMode} onChange={(event) => setParticleRenderMode(event.target.value as ParticleRenderMode)}>
               <option value="dots-white">Dots (white)</option>
               <option value="dots-neural-color">Dots (neural RGB)</option>
-              <option value="dots-internal-state">Chemical memory</option>
-              <option value="dots-chemical-levels">Chemical levels</option>
+              <option value="dots-internal-state">Neural memory</option>
+              <option value="dots-chemical-levels">Chemical memory</option>
               <option value="dots-boundary-value">Boundary value</option>
               <option value="dots-activation">Dots (neurons)</option>
               <option value="dots-activation-translucent">Dots (translucent neurons)</option>
@@ -418,10 +426,10 @@ export function LabView() {
           )}
           {(particleRenderMode === "dots-internal-state" || particleRenderMode === "dots-chemical-levels") && (
             <>
-              <label className="slider-row"><span>{particleRenderMode === "dots-internal-state" ? "Chemical memory alpha" : "Chemical levels alpha"}</span><Slider min={0} max={1} step={0.01} value={internalStateAlpha} onChange={setInternalStateAlpha} /><span className="slider-value">{internalStateAlpha.toFixed(2)}</span></label>
+              <label className="slider-row"><span>{particleRenderMode === "dots-internal-state" ? "Neural memory alpha" : "Chemical memory alpha"}</span><Slider min={0} max={1} step={0.01} value={internalStateAlpha} onChange={setInternalStateAlpha} /><span className="slider-value">{internalStateAlpha.toFixed(2)}</span></label>
               <div className="channel-window-control">
-                <div className="channel-window-label"><span>Channels</span><span>{internalStateChannelStart}–{internalStateChannelStart + 2}</span></div>
-                <ChannelWindowSlider channels={particleRenderMode === "dots-internal-state" ? 8 : (config?.channels ?? 8)} value={internalStateChannelStart} onChange={setInternalStateChannelStart} />
+                <div className="channel-window-label"><span>Channels</span><span>{particleStateChannelStart}–{particleStateChannelStart + 2}</span></div>
+                <ChannelWindowSlider channels={particleStateChannelCount} value={particleStateChannelStart} onChange={setInternalStateChannelStart} />
               </div>
               {particleRenderMode === "dots-internal-state" && (
                 <label className="slider-row"><span>Opponent subtraction</span><Slider min={0} max={1} step={0.01} value={chemicalMemoryOpponentSubtraction} onChange={setChemicalMemoryOpponentSubtraction} /><span className="slider-value">{chemicalMemoryOpponentSubtraction.toFixed(2)}</span></label>
@@ -440,7 +448,7 @@ export function LabView() {
           <label className="slider-row">
             <span>Background</span>
             <select className="select" value={fieldMode} onChange={(event) => setFieldMode(event.target.value as FieldMode)}>
-              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology (gradient + density)</option><option value="substrate">Substrate</option><option value="growth">Growth (cividis)</option><option value="gradient">Boundary gradient</option>
+              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology (gradient + density)</option><option value="substrate">Substrate</option><option value="growth">Last chemical channel (cividis)</option><option value="gradient">Boundary gradient</option>
             </select>
           </label>
           {fieldMode === "morphology" && <>

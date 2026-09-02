@@ -59,9 +59,9 @@ See `DENSITY_MODEL.md` for the scaling rationale and
 
 Three signals have distinct responsibilities:
 
-1. **The last substrate channel starts growth.** Its value at a particle is
-   clamped to `[0, 1]` and treated as the per-macro-step probability of
-   entering a cell cycle.
+1. **A dedicated neural output starts growth.** Its signed `[-1, 1]` value is
+   clamped to `[0, 1]`; positive values are the per-macro-step probability of
+   entering a cell cycle, while zero and negative values inhibit admission.
 2. **Neural targets control persistent growth geometry.** Two bounded outputs
    propose a local growth direction, while a sigmoid proposes anisotropy; the
    stored angle and anisotropy relax smoothly toward them. Another sigmoid
@@ -72,18 +72,17 @@ Three signals have distinct responsibilities:
    smoothly lengthens this duration and fully pauses growth above the
    configured arrest threshold; releasing compression resumes the cycle.
 
-The policy therefore does not directly output a scalar growth amount. It
-controls growth indirectly through the last chemical channel, reacting to all
-substrate values and gradients, changing its heading, and selecting a growth
-direction, anisotropy, and division polarity.
+The policy directly controls cycle admission but not the amount of growth in an
+active cycle. It may use any substrate values and gradients to choose its signed
+division drive, heading, growth direction, anisotropy, and division polarity.
 
 The current eight-channel policy has 30 inputs: 24 chemical value/gradient
 components, morphology occupancy and its two heading-relative gradient
 components, plus heading-relative elastic Hencky volume, axial, and shear
-strain. Its shared 128-unit tanh trunk feeds six logical output heads: eight
-cell-chemical deltas, a two-component desired heading, growth anisotropy,
-division bias, a two-component desired growth direction, and three sigmoid RGB
-cell-color outputs (17 outputs total). The heads remain concatenated into one
+strain. Its shared 128-unit tanh trunk feeds seven logical output heads: nine
+signed chemical delta rates, a two-component desired heading, growth anisotropy,
+division bias, a two-component desired growth direction, a signed division
+drive, and three sigmoid RGB cell-color outputs (19 outputs total). The heads remain concatenated into one
 matrix for GPU inference and checkpoint compatibility, but use head-specific
 initialization and mutation scales from `core/policy_parameters.json`.
 
@@ -93,7 +92,7 @@ head multiplies it by a fixed sensitivity scale:
 | Parameter bucket | Initial bias prior | Mutation multiplier |
 | --- | --- | ---: |
 | shared trunk | zero | 1.00 |
-| chemical deltas | neutral | 0.50 |
+| chemical delta rates | neutral | 0.50 |
 | desired heading | local-forward | 0.20 |
 | growth anisotropy | sigmoid ≈ 0.20 | 0.15 |
 | division bias | sigmoid = 0.50 | 0.25 |
@@ -161,8 +160,8 @@ Chemical memory is an independent run-level architecture selected with
 
 | Variant | Memory owner | Chemical-head meaning | Field lifecycle |
 | --- | --- | --- | --- |
-| `persistent-environment` | spatial environment | final-round Gaussian deposit | hold the field fixed through all neural rounds, then diffuse/decay once and add the last output |
-| `cell-owned-projection` | each cell | delta to persistent cell chemistry | clear and rebuild the sensed field from cell states every round |
+| `persistent-environment` | spatial environment | signed chemical delta rate | hold the field fixed through all neural rounds, then diffuse/decay once and add the final delta |
+| `cell-owned-projection` | each cell | signed chemical delta rate | integrate per-cell chemistry, then clear and rebuild the sensed field from cell state every round |
 
 The cell-memory axis is selected independently with `--cell-memory`.
 For example, the earlier stateful persistent-field model is:
@@ -182,27 +181,41 @@ comparing the same weights under either communication model.
 Untagged legacy checkpoints are inferred from their recorded decay: positive
 decay selects `persistent-environment`, while zero decay selects
 `cell-owned-projection`.
-Any checkpoint from before elastic-strain sensing has a 27-column first layer;
-the current policy requires 30 and must be retrained.
+Older recorded runs remain replayable with their recorded channel count and
+weight shapes. A policy must be retrained to move from the former eight-channel
+layout to the current nine-channel layout.
 
 ### Multi-scale channel layout
 
-The production eight-channel system uses a data-driven `2 / 3 / 3` transport
+The production nine-channel system uses a data-driven `3 / 3 / 3` transport
 layout from `core/chemical_channels.json`:
 
-| Channels | Scale | Native grid at `FIELD_N=512` | Base-decay exponent | Role |
-| --- | --- | ---: | ---: | --- |
-| 0–1 | global | 64² | 0.05 | organism-wide coordination |
-| 2–4 | regional | 128² | 0.25 | body regions and repeated structures |
-| 5–6 | local | 512² | 1.00 | short-range signaling |
-| 7 | local | 512² | 1.00 | existing growth substrate |
+| Channels | Scale | Native grid | Cell delta timescale | Field delta timescale | Base-decay exponent | Role |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| 0–2 | global | 64² | 24 | 24 | 0.05 | organism-wide coordination |
+| 3–5 | regional | 256² | 10 | 10 | 0.50 | body regions and repeated structures |
+| 6–7 | local | 512² | 3 | 3 | 1.00 | short-range signaling |
+| 8 | local | 512² | 3 | 3 | 1.00 | local signaling |
 
 Channels are packed into common field, gradient, and deposit buffers, so this
 does not add agent-shader storage bindings. Each recorded channel profile owns
-its resolution scale, decay exponent, diffusion multiplier, and deposit-sigma
-multiplier. The shader derives indexing and transport from generated arrays;
+its resolution scale, cell-delta timescale, field-delta timescale, decay exponent,
+diffusion multiplier, and deposit-sigma multiplier. Both temporal scales divide
+the corresponding signed delta rate, letting slow channels accumulate gradually
+instead of turning their output into a concentration target. The shader derives indexing and transport from generated arrays;
 adding a scale or moving a channel between scales is therefore a configuration
 change rather than another GPU architecture.
+
+When local-density limiting is enabled, every texel accumulates a matched
+chemical numerator `N` and represented-material density `D` from exactly the
+same kernel weights. Its effective source is `N / max(D, D_capacity)`: raw
+Gaussian deposition is preserved below capacity, while additional overlapping
+material cannot amplify the source above the density-weighted mean. Persistent
+decay and forcing are integrated with the exact constant-source leaky-system
+factor `(1-r)/(-log(r))`, where `r` is that channel's retention for the tick.
+The integer atomic scale is derived from the live particle-capacity and
+projection bounds each round, retaining deterministic accumulation while
+avoiding the former fixed 1/4096 quantization.
 
 The live `decay` setting remains the local-channel retention. A channel with
 exponent `a` retains `decay^a` per unit communication time, so coarse global
@@ -210,7 +223,8 @@ channels can be long-lived without removing the existing control. Sobel
 gradients are converted back to the finest-grid convention before entering the
 policy, preventing coarse channels from receiving artificially larger neural
 inputs. New run/checkpoint metadata records the complete expanded profiles.
-Configurations without profiles retain the old homogeneous-grid behavior.
+Configurations without profiles retain the old homogeneous spatial layout;
+chemical-head outputs retain signed additive-delta semantics.
 
 The three elastic lanes can be ablated without changing checkpoint dimensions
 through `ELASTIC_STRAIN_INPUTS_ENABLED`; it is currently enabled.
@@ -255,8 +269,10 @@ repeat neural_updates_per_macro communication rounds:
 
     outputs = neural_policy(inputs)
 
-    particle.chemical_state += chemical_delta * communication_dt
-    clamp particle.chemical_state to [-1, 1]
+    chemical_delta = clamp(chemical_output, -1, 1)
+    if cell-owned chemistry:
+      particle.chemical_state += chemical_delta * communication_dt / channel_delta_timescale
+      particle.chemical_state = clamp(particle.chemical_state, -1, 1)
     update angular velocity and heading from the turning output,
       scaled by communication_dt
 
@@ -272,8 +288,8 @@ repeat neural_updates_per_macro communication rounds:
 
     if this is the final communication round:
       if persistent environment:
-        growth-deformed gaussian-splat the final chemical output
-      growth_probability = clamp(last_substrate_value, 0, 1)
+        growth-deformed gaussian-splat the final signed chemical delta
+      growth_probability = clamp(remap(division_drive, division_chance_boost), 0, 1)
       decrement division cooldown
 
       if growth is enabled
@@ -494,7 +510,9 @@ chemistry. Persistent internal chemical state remains unscaled.
 
 The visible organism is an emergent result of:
 
-- **spatial growth admission:** which particles encounter growth substrate;
+- **neural growth admission:** where the policy produces positive division drive;
+  the viewer's division-chance boost can continuously remap its signed range
+  toward a full `[0,1]` probability range;
 - **chemical feedback:** where particles write signals and how neighbors react;
 - **directional rest growth:** the accumulated tensor `Fg` of each particle;
 - **rear-facing division polarity:** whether the parent stays fixed or the
@@ -614,11 +632,9 @@ pooled across all channels (and both directions for gradients). A value equal
 to its scale maps to approximately `0.762`, while large outliers approach `±1`
 smoothly.
 
-The last chemical channel's raw value still drives persistent division hazard.
-Normalization only changes the copy sensed by the neural network, not the
-growth probability or timing law. Because this changes first-layer input
-semantics without changing tensor shape, pre-normalization checkpoints should
-be retrained even though they remain structurally loadable.
+Chemical inputs influence division only through the network. A separate signed
+policy output drives persistent division hazard, so no chemical channel has a
+hard-coded growth role.
 
 New policy-input reports store both `raw_inputs` and normalized `inputs`; the
 HTML dashboard's **Input space** selector switches every trace, heatmap, and

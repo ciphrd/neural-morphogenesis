@@ -46,6 +46,7 @@ from simulation_settings import (
     DEPOSIT_DENSITY_REFERENCE,
     DEPOSIT_SIGMA,
     DIVISION_COOLDOWN,
+    DIVISION_DRIVE_BOOST,
     DIVISION_DIRECTIONALITY,
     FIELD_N,
     FRICTION,
@@ -177,7 +178,7 @@ def main() -> int:
         # count" on any checkpoint trained before growth existed; using it
         # as the growth cap here regardless is still correct (evolve.py's
         # own module docstring: a policy that never learns to use the
-        # growth channel just stays at 1 particle forever either way, same
+        # division drive just stays at 1 particle forever either way, same
         # as this used to be the ONLY option for an old, pre-growth
         # checkpoint).
         meta.get("chirality", CHIRALITY),
@@ -195,6 +196,7 @@ def main() -> int:
         policy_architecture=architecture,
         internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
         division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
+        division_drive_boost=meta.get("division_drive_boost", DIVISION_DRIVE_BOOST),
         chemical_communication_architecture=chemical_architecture,
         growth_compression_start=meta.get("growth_compression_start", GROWTH_COMPRESSION_START),
         growth_compression_stop=meta.get("growth_compression_stop", GROWTH_COMPRESSION_STOP),

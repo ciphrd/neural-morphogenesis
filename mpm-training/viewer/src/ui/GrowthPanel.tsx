@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthAnisotropy" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "divisionDirectionality" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  "growthDuration" | "growthAnisotropy" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "divisionDirectionality" | "divisionDriveBoost" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 export interface GrowthSliderSpec {
@@ -49,6 +49,15 @@ function activeTangentThreshold(value: number): number {
 // real semantics, none of which depend on whatever value the
 // run happened to be trained with.
 export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
+  {
+    key: "divisionDriveBoost",
+    label: "Division chance boost",
+    hint: "Blends the signed neural division drive toward a probability mapping. At 0, outputs at or below zero cannot start growth. At 1, neural [-1,1] maps to [0,1], so a zero output gives 50% division chance per tick.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+    format: (v) => `${(100 * v).toFixed(0)}%`,
+  },
   {
     key: "neuralUpdatesPerMacro",
     label: "Neural updates / tick",
@@ -150,7 +159,7 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
  * Split into its own section rather than appended to PhysicsPanel's own
  * flat list because these controls behave as a group:
  * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
- * growthDuration controls the substrate-driven cell cycle;
+ * growthDuration controls the policy-driven cell cycle;
  * growthAnisotropy controls tensor directionality and divisionDirectionality
  * controls how strongly rear-facing splits are polarized;
  * boundaryTangentMinGradient controls Lab tangent-growth diagnostics.

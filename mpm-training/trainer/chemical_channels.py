@@ -1,6 +1,6 @@
 """Shared chemical-channel layout resolution and WGSL packing constants.
 
-The canonical 8-channel preset lives in ``core/chemical_channels.json``.
+The canonical 9-channel preset lives in ``core/chemical_channels.json``.
 Callers may instead supply a layout recorded in checkpoint/run metadata.  Any
 other channel count receives a homogeneous legacy layout, keeping focused GPU
 checks and old experimental utilities independent from the production preset.
@@ -21,6 +21,8 @@ _CONFIG = json.loads(_CONFIG_PATH.read_text())
 class ChemicalChannelProfile:
     scale: str
     resolution_scale: float = 1.0
+    relaxation_time: float = 1.0
+    field_response_time: float = 1.0
     decay_exponent: float = 1.0
     diffusion_multiplier: float = 1.0
     deposit_sigma_multiplier: float = 1.0
@@ -30,6 +32,8 @@ class ChemicalChannelProfile:
         return {
             "scale": self.scale,
             "resolutionScale": self.resolution_scale,
+            "relaxationTime": self.relaxation_time,
+            "fieldResponseTime": self.field_response_time,
             "decayExponent": self.decay_exponent,
             "diffusionMultiplier": self.diffusion_multiplier,
             "depositSigmaMultiplier": self.deposit_sigma_multiplier,
@@ -44,13 +48,22 @@ def _positive(value: Any, name: str) -> float:
     return result
 
 
+def _nonnegative(value: Any, name: str) -> float:
+    result = float(value)
+    if result < 0.0:
+        raise ValueError(f"chemical channel {name} must be nonnegative, got {result}")
+    return result
+
+
 def _parse_profile(raw: dict[str, Any], defaults: dict[str, Any] | None = None) -> ChemicalChannelProfile:
     merged = {**(defaults or {}), **raw}
     return ChemicalChannelProfile(
         scale=str(merged.get("scale", "local")),
         resolution_scale=_positive(merged.get("resolutionScale", 1.0), "resolutionScale"),
+        relaxation_time=_positive(merged.get("relaxationTime", 1.0), "relaxationTime"),
+        field_response_time=_positive(merged.get("fieldResponseTime", 1.0), "fieldResponseTime"),
         decay_exponent=_positive(merged.get("decayExponent", 1.0), "decayExponent"),
-        diffusion_multiplier=_positive(merged.get("diffusionMultiplier", 1.0), "diffusionMultiplier"),
+        diffusion_multiplier=_nonnegative(merged.get("diffusionMultiplier", 1.0), "diffusionMultiplier"),
         deposit_sigma_multiplier=_positive(merged.get("depositSigmaMultiplier", 1.0), "depositSigmaMultiplier"),
         role=str(merged["role"]) if merged.get("role") is not None else None,
     )
@@ -82,9 +95,6 @@ def resolve_channel_profiles(
     )
     if len(profiles) != channels:
         raise ValueError(f"expected {channels} chemical channel profiles, got {len(profiles)}")
-    growth = [i for i, profile in enumerate(profiles) if profile.role == "growth"]
-    if growth and growth != [channels - 1]:
-        raise ValueError("the optional growth role must belong only to the last chemical channel")
     return profiles
 
 
@@ -133,6 +143,8 @@ def channel_shader_constants(
         "FIELD_WIDTHS": _wgsl_array("u32", widths),
         "FIELD_HEIGHTS": _wgsl_array("u32", heights),
         "FIELD_OFFSETS": _wgsl_array("u32", offsets),
+        "FIELD_RELAXATION_TIMES": _wgsl_array("f32", (p.relaxation_time for p in profiles)),
+        "FIELD_RESPONSE_TIMES": _wgsl_array("f32", (p.field_response_time for p in profiles)),
         "FIELD_DECAY_EXPONENTS": _wgsl_array("f32", (p.decay_exponent for p in profiles)),
         "FIELD_DIFFUSION_MULTIPLIERS": _wgsl_array("f32", (p.diffusion_multiplier for p in profiles)),
         "FIELD_DEPOSIT_SIGMA_MULTIPLIERS": _wgsl_array("f32", (p.deposit_sigma_multiplier for p in profiles)),

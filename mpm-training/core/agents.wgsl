@@ -44,22 +44,19 @@
 //   work) in exchange for ruling out an arbitrary, physically
 //   unmotivated left/right turning bias by construction.
 //
-// Communication — each cell owns persistent chemicalState. A separate
-// splatChemicalState pass projects every cell's OLD state as a live-tunable
-// Gaussian before any brain runs. agentStep senses the resulting values and
-// gradients, then interprets the chemical output head as a bounded local state
-// delta. No post-brain value is written to persistent environmental state.
+// Communication — the chemical head emits one signed delta rate per channel.
+// Cell-owned mode integrates it into persistent per-cell chemicalState and
+// projects the old synchronous state before each brain round. Persistent-
+// environment mode deposits only the final round's delta into its transported
+// spatial field. Per-channel temporal scales divide both delta rates.
 //
 // Growth — each particle may spawn a copy of itself after completing its
 // tensor-growth cycle. Division always places the new daughter directly behind
 // the parent's current heading. The policy's growth-direction output belongs
 // exclusively to the morphoelastic growth tensor; it no longer participates in
-// daughter placement. Growth admission integrates persistent
-// hazard from the LAST channel's sensed VALUE (inputVec[CHANNELS-1u] — the same
-// value already fed into this step's own NN input, clamped to [0,1];
-// NOT a network output, so CHIRALITY's mirror-averaging never touches
-// it) — an evolved policy can shape this "growth substrate" the exact
-// same way it shapes any other channel, via its own existing env_write.
+// daughter placement. Growth admission integrates persistent hazard from a
+// dedicated signed policy output: positive values are interpreted as a
+// per-macro-step probability, while zero and negative values inhibit division.
 // See agentStep()'s own comment for the exact split logic.
 //
 // A new particle claims the next free slot via an atomic counter
@@ -153,13 +150,12 @@ const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
 // heading-relative elastic Hencky-strain components.
 const IN_DIM: u32 = __IN_DIM__u;
 const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
-const CHEMICAL_VALUE_INPUT_SCALE: f32 = __CHEMICAL_VALUE_INPUT_SCALE__;
 const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__;
 const GROWTH_DIRECTION_RESPONSE_RATE: f32 = __GROWTH_DIRECTION_RESPONSE_RATE__;
 const GROWTH_ANISOTROPY_RESPONSE_RATE: f32 = __GROWTH_ANISOTROPY_RESPONSE_RATE__;
 const DIRECTION_CONFIDENCE_SCALE: f32 = __DIRECTION_CONFIDENCE_SCALE__;
-// One chemical-state delta per channel. The legacy name is retained in the
-// checkpoint/output ABI.
+// One signed chemical delta rate per channel. The legacy name is retained in
+// the checkpoint/output ABI.
 const ENV_WRITE_DIM: u32 = CHANNELS;
 const OUT_DIM: u32 = __OUT_DIM__u;
 
@@ -177,13 +173,21 @@ const FC2B_OFFSET: u32 = FC2W_OFFSET + OUT_DIM * HIDDEN_DIM;
 const FIELD_WIDTHS: array<u32, CHANNELS> = __FIELD_WIDTHS__;
 const FIELD_HEIGHTS: array<u32, CHANNELS> = __FIELD_HEIGHTS__;
 const FIELD_OFFSETS: array<u32, CHANNELS> = __FIELD_OFFSETS__;
+const FIELD_RELAXATION_TIMES: array<f32, CHANNELS> = __FIELD_RELAXATION_TIMES__;
 const FIELD_DEPOSIT_SIGMA_MULTIPLIERS: array<f32, CHANNELS> = __FIELD_DEPOSIT_SIGMA_MULTIPLIERS__;
 const FIELD_TOTAL: u32 = __FIELD_TOTAL__u;
 const FIELD_MAX_WIDTH: u32 = __FIELD_MAX_WIDTH__u;
 const FIELD_MAX_HEIGHT: u32 = __FIELD_MAX_HEIGHT__u;
 
-// Must match environment.wgsl's own copy exactly.
-const DEPOSIT_SCALE: f32 = 4096.0;
+// Scratch stores one extra atomic after numerator+density. Every publisher
+// writes the same dynamically derived fixed-point scale there before adding
+// contributions. The scale uses the live capacity/projection bounds, giving
+// sub-micro precision for ordinary runs while retaining explicit overflow
+// headroom for much larger particle counts.
+const DEPOSIT_SCALE_INDEX: u32 = FIELD_TOTAL * 2u;
+const MAX_DEPOSIT_SCALE: f32 = 1048576.0;
+const DEPOSIT_ACCUMULATOR_BUDGET: f32 = 1000000000.0;
+const MAX_PROJECTION_GROWTH: f32 = 4.0;
 const SPATIAL_RANDOM_CELLS: u32 = __SPATIAL_RANDOM_CELLS__u;
 
 @group(0) @binding(0) var<storage, read> weights: array<f32>;
@@ -196,6 +200,7 @@ const SPATIAL_RANDOM_CELLS: u32 = __SPATIAL_RANDOM_CELLS__u;
 struct AgentPhysics {
   maxAccel: f32,
   maxStrafe: f32,
+  // Amplitude of the policy's signed chemical delta rate.
   maxEnvWrite: f32,
   maxAngularAccel: f32,
   angularDamping: f32,
@@ -228,13 +233,10 @@ struct AgentPhysics {
   // independent knob, not a duplicate of that one). trainer/
   // simulation_settings.py's own FRICTION is the starting value.
   friction: f32,
-  // Gaussian splat radius (sigma), field-pixel units (not domain [0,1]
-  // units like core/repulsion.wgsl's own splat sigma), since it spreads
-  // a deposit around the particle's field-pixel position. See
-  // depositGaussian()'s own comment
-  // for the exact kernel this drives. trainer/simulation_settings.py's
-  // own DEPOSIT_SIGMA is the starting value — live-tunable via
-  // PhysicsPanel, for testing this splat's own shape/spread.
+  // Gaussian splat sigma in normalized world-domain units. Each channel
+  // converts it to its native grid only to choose a bounded support; weights
+  // themselves are evaluated in world space, so changing field resolution no
+  // longer changes the physical deposit footprint.
   depositSigma: f32,
   // Host-controlled gate for STARTING new cell cycles. Already-active
   // cycles are allowed to finish, so switching this off creates a clean
@@ -278,6 +280,14 @@ struct AgentPhysics {
   growthCompressionStart: f32,
   growthCompressionStop: f32,
   growthCompressionFeedback: f32,
+  // Live gain on chemical concentration inputs. 1 uses their natural [-1,1]
+  // scale; 0 removes values while leaving gradients intact.
+  chemicalValueInputMultiplier: f32,
+  // Blends division drive from its signed meaning toward a full probability
+  // remap: 0 keeps drive unchanged; 1 maps [-1,1] to [0,1].
+  divisionDriveBoost: f32,
+  _physicsPadding2: f32,
+  _physicsPadding3: f32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -318,8 +328,7 @@ struct ParticleMeta {
   privateState: array<f32, PRIVATE_STATE_DIM>,
   // Persistent chemical levels owned by this cell. Before every policy
   // invocation splatChemicalState() projects these values into the transient
-  // substrate; agentStep() then applies the chemical head as a local delta.
-  // The environment itself never preserves or receives a post-policy write.
+  // substrate; agentStep() then integrates the chemical head's signed delta.
   chemicalState: array<f32, CHANNELS>,
 }
 // Pack growth's counter and particle metadata into one allocation. The
@@ -381,8 +390,8 @@ struct ParticleRest {
   // because there was nowhere else to put it, which entangled two
   // unrelated meanings; `growthF` above is now that home.
   jp: f32,
-  // Cell-cycle latch. The last substrate channel probabilistically sets
-  // this to 1; g2p advances growth until division and both daughters reset it.
+  // Cell-cycle latch. The policy's dedicated division drive probabilistically
+  // sets this to 1; g2p advances growth until division and both daughters reset it.
   cycleActive: f32,
   // Persistent growth polarity, stored as one angle relative to the
   // particle's heading rather than an instantly-overwritten world vector.
@@ -449,7 +458,7 @@ fn safeTanh(x: f32) -> f32 {
 // channel and both gradient directions share their respective scale,
 // preserving channel-permutation and rotational symmetry.
 fn normalizeChemicalValue(raw: f32) -> f32 {
-  return safeTanh(raw / max(CHEMICAL_VALUE_INPUT_SCALE, 1e-6));
+  return safeTanh(raw * max(physics.chemicalValueInputMultiplier, 0.0));
 }
 
 fn normalizeChemicalGradient(raw: f32) -> f32 {
@@ -637,37 +646,79 @@ fn wrapDepositIndex(i: i32, size: u32) -> i32 {
   return ((i % n) + n) % n;
 }
 
-// Scatter-adds one particle's per-channel chemical levels as a bounded
-// Gaussian splat around `centerFieldPos` — replaces this shader's old
-// 4-corner bilinear
-// scatter (sensing still uses that: corners()/sampleValue()/
-// sampleGrad() above are untouched, only the DEPOSIT side changed) per
-// this project's own explicit request for finer, live-tunable control
-// over deposit shape/spread than a hard 2x2 footprint allowed. Same
-// kernel-loop shape as core/repulsion.wgsl's own splatDensity() —
-// bounded radius, Gaussian falloff, toroidal-wrapped storage index with
-// an UNWRAPPED distance calculation (see that function's own comment
-// for why: the falloff needs a genuine continuous-space distance across
-// the domain seam, only the buffer index itself wraps) — except this
-// splat's own weight is computed ONCE per kernel tap and reused across
-// all CHANNELS at that tap (same position, only the per-channel VALUE
-// differs), rather than one call per channel each re-deriving its own
-// weights the way the old per-corner depositAt() did.
-//
-// UNLIKE the old bilinear scatter, this is NOT mass-normalized — each
-// tap's weight peaks at 1.0 (not 1/(2*pi*sigma^2)), matching
-// splatDensity()'s own convention. The kernel is evaluated in the particle's
-// stress-free reference frame, so growthF deforms its footprint along with
-// the material. Its integrated projection therefore grows approximately as
-// det(growthF), matching the represented rest area, while the peak chemical
-// level stays stable. At conservative division one area-2 footprint becomes
-// two area-1 footprints instead of the substrate briefly collapsing to one
-// baseline particle and leaving fast growth behind.
+fn currentDepositScale() -> f32 {
+  let worstCaseMagnitude = max(
+    f32(physics.maxActiveParticles)
+      * max(physics.chemicalProjectionWeight, 1e-6)
+      * MAX_PROJECTION_GROWTH
+      * max(abs(physics.maxEnvWrite), 1.0),
+    1.0,
+  );
+  return max(
+    1.0,
+    min(MAX_DEPOSIT_SCALE, floor(DEPOSIT_ACCUMULATOR_BUDGET / worstCaseMagnitude)),
+  );
+}
+
+fn publishDepositScale() -> f32 {
+  let scale = currentDepositScale();
+  // Every invocation writes the same integer. Compute-pass ordering makes it
+  // visible to environment.wgsl before materialization/merge.
+  atomicStore(&depositScratch[DEPOSIT_SCALE_INDEX], i32(scale));
+  return scale;
+}
+
+fn addChemicalDeposit(c: u32, y: u32, x: u32, value: f32, projectionWeight: f32) {
+  let depositScale = f32(max(atomicLoad(&depositScratch[DEPOSIT_SCALE_INDEX]), 1));
+  let scaled = value * projectionWeight * depositScale;
+  atomicAdd(&depositScratch[fieldIndex(c, y, x)], i32(round(scaled)));
+  atomicAdd(
+    &depositScratch[FIELD_TOTAL + fieldIndex(c, y, x)],
+    i32(round(projectionWeight * depositScale)),
+  );
+}
+
+// Four-point quadrature over the texel centered at the unwrapped native-grid
+// coordinate (ti,tj). Evaluating the deformed Gaussian in world coordinates
+// makes its physical width independent of FIELD_WIDTHS/FIELD_HEIGHTS. This is
+// an inexpensive approximation to the texel integral and handles rotated,
+// anisotropic growthF, for which separable Gaussian-CDF differences do not.
+fn integratedGaussianTexelWeight(
+  centerFieldPos: vec2<f32>,
+  fieldDimensions: vec2<f32>,
+  ti: i32,
+  tj: i32,
+  inverseGrowth: vec4<f32>,
+  sigmaWorld2: f32,
+) -> f32 {
+  var weight = 0.0;
+  for (var sy: u32 = 0u; sy < 2u; sy = sy + 1u) {
+    for (var sx: u32 = 0u; sx < 2u; sx = sx + 1u) {
+      let sampleOffset = vec2<f32>(f32(sx) * 0.5 - 0.25, f32(sy) * 0.5 - 0.25);
+      let sampleFieldPos = vec2<f32>(f32(ti), f32(tj)) + sampleOffset;
+      let worldDelta = (centerFieldPos - sampleFieldPos) / fieldDimensions;
+      let referenceWorldDelta = vec2<f32>(
+        inverseGrowth.x * worldDelta.x + inverseGrowth.y * worldDelta.y,
+        inverseGrowth.z * worldDelta.x + inverseGrowth.w * worldDelta.y,
+      );
+      weight = weight + exp(-dot(referenceWorldDelta, referenceWorldDelta) / (2.0 * sigmaWorld2));
+    }
+  }
+  return weight * 0.25;
+}
+
+// Scatter-adds one particle's per-channel chemical expression using a
+// normalized-world-space kernel. Sub-texel Gaussians use the grid's bilinear
+// basis directly; resolved Gaussians use texel-integrated quadrature and a
+// second normalization pass. Both paths conserve projection mass, remain
+// smooth under sub-texel particle motion, and scale total projection by
+// det(growthF), so conservative division preserves represented material area.
 fn depositGaussian(
   envWrite: array<f32, ENV_WRITE_DIM>,
   centerWorldPos: vec2<f32>,
   growthF: vec4<f32>,
 ) {
+  _ = publishDepositScale();
   let growthDet = max(abs(matDet(growthF)), 1e-6);
   let inverseGrowth = matInverse(growthF);
   // Largest singular value of growthF. It bounds the deformed Gaussian in
@@ -679,46 +730,60 @@ fn depositGaussian(
       - 4.0 * growthDet * growthDet, 0.0))),
     1e-6,
   ));
-  // Each channel is scattered in its own native grid. Coarse channels acquire
-  // organism-scale physical support without a huge fine-grid convolution.
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
     let width = FIELD_WIDTHS[c];
     let height = FIELD_HEIGHTS[c];
     let fieldDimensions = vec2<f32>(f32(width), f32(height));
-    let centerFieldPos = fract(centerWorldPos) * fieldDimensions;
+    // Storage texel i is centered at world coordinate (i + 0.5) / size.
+    // Shift world coordinates into the integer-centered lattice used by
+    // corners() and integratedGaussianTexelWeight().
+    let centerFieldPos = fract(centerWorldPos) * fieldDimensions - vec2<f32>(0.5);
     let baseI = i32(floor(centerFieldPos.x));
     let baseJ = i32(floor(centerFieldPos.y));
-    let sigmaTexels = max(
-      physics.depositSigma * FIELD_DEPOSIT_SIGMA_MULTIPLIERS[c], 1e-3
+    let sigmaWorld = max(
+      physics.depositSigma * FIELD_DEPOSIT_SIGMA_MULTIPLIERS[c], 1e-8
     );
-    let sigma2 = sigmaTexels * sigmaTexels;
+    let sigmaNative = sigmaWorld * max(fieldDimensions.x, fieldDimensions.y);
+    let projectionScale = growthDet * physics.chemicalProjectionWeight;
+
+    // A Gaussian narrower than half a native texel is not meaningfully
+    // resolved. Cloud-in-cell is its mass-conserving, motion-continuous limit
+    // on the same bilinear grid used by sampleValue()/sampleGrad().
+    if (sigmaNative < 0.5) {
+      let k = corners(c, centerFieldPos);
+      addChemicalDeposit(c, k.y0, k.x0, envWrite[c], projectionScale * k.wx0 * k.wy0);
+      addChemicalDeposit(c, k.y0, k.x1, envWrite[c], projectionScale * k.wx1 * k.wy0);
+      addChemicalDeposit(c, k.y1, k.x0, envWrite[c], projectionScale * k.wx0 * k.wy1);
+      addChemicalDeposit(c, k.y1, k.x1, envWrite[c], projectionScale * k.wx1 * k.wy1);
+      continue;
+    }
+
+    let sigmaWorld2 = sigmaWorld * sigmaWorld;
     let kernelRadius = min(
-      i32(ceil(3.0 * sigmaTexels * largestStretch)),
+      i32(ceil(3.0 * sigmaNative * largestStretch + 0.5)),
       MAX_DEPOSIT_KERNEL_RADIUS,
     );
+
+    var totalWeight = 0.0;
+    for (var di: i32 = -kernelRadius; di <= kernelRadius; di = di + 1) {
+      for (var dj: i32 = -kernelRadius; dj <= kernelRadius; dj = dj + 1) {
+        totalWeight = totalWeight + integratedGaussianTexelWeight(
+          centerFieldPos, fieldDimensions, baseI + di, baseJ + dj,
+          inverseGrowth, sigmaWorld2,
+        );
+      }
+    }
+    let inverseTotalWeight = 1.0 / max(totalWeight, 1e-20);
     for (var di: i32 = -kernelRadius; di <= kernelRadius; di = di + 1) {
       for (var dj: i32 = -kernelRadius; dj <= kernelRadius; dj = dj + 1) {
         let ti = baseI + di;
         let tj = baseJ + dj;
-        let texelCenter = vec2<f32>(f32(ti), f32(tj));
-        let delta = centerFieldPos - texelCenter;
-        let worldDelta = delta / fieldDimensions;
-        let referenceWorldDelta = vec2<f32>(
-          inverseGrowth.x * worldDelta.x + inverseGrowth.y * worldDelta.y,
-          inverseGrowth.z * worldDelta.x + inverseGrowth.w * worldDelta.y,
-        );
-        let referenceDelta = referenceWorldDelta * fieldDimensions;
-        let d2 = dot(referenceDelta, referenceDelta);
-        let weight = exp(-d2 / (2.0 * sigma2));
+        let weight = integratedGaussianTexelWeight(
+          centerFieldPos, fieldDimensions, ti, tj, inverseGrowth, sigmaWorld2,
+        ) * inverseTotalWeight;
         let wx = u32(wrapDepositIndex(ti, width));
         let wy = u32(wrapDepositIndex(tj, height));
-        let projectionWeight = weight * physics.chemicalProjectionWeight;
-        let scaled = envWrite[c] * projectionWeight * DEPOSIT_SCALE;
-        atomicAdd(&depositScratch[fieldIndex(c, wy, wx)], i32(round(scaled)));
-        atomicAdd(
-          &depositScratch[FIELD_TOTAL + fieldIndex(c, wy, wx)],
-          i32(round(projectionWeight * DEPOSIT_SCALE)),
-        );
+        addChemicalDeposit(c, wy, wx, envWrite[c], projectionScale * weight);
       }
     }
   }
@@ -742,7 +807,7 @@ fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // The bounded subset of the network's own raw output
-// this shader actually consumes — one chemical-state delta per channel +
+// this shader actually consumes — one signed chemical delta per channel +
 // desired heading, anisotropy/division-bias controls, and desired growth
 // direction (optionally also physical acceleration), all in LOCAL frame.
 struct PolicyOutput {
@@ -751,6 +816,7 @@ struct PolicyOutput {
   anisotropyTarget: f32,
   divisionBias: f32,
   growthTargetLocal: vec2<f32>,
+  divisionDrive: f32,
   color: vec3<f32>,
   stateDelta: array<f32, PRIVATE_STATE_DIM>,
   stateGate: array<f32, PRIVATE_STATE_DIM>,
@@ -817,6 +883,7 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
   out.growthTargetLocal = vec2<f32>(
     safeTanh(outVec[ENV_WRITE_DIM + 4u]), safeTanh(outVec[ENV_WRITE_DIM + 5u])
   );
+  out.divisionDrive = safeTanh(outVec[ENV_WRITE_DIM + 6u]);
   __POLICY_TAIL_DECODE__
   return out;
 }
@@ -852,12 +919,12 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // macro_step() exactly, same rotation envnca/simulation.py's own
   // step() applies.
   var inputVec: array<f32, IN_DIM>;
-  var rawGrowthSignal = 0.0;
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-    let fieldPos = fract(pos) * vec2<f32>(f32(FIELD_WIDTHS[c]), f32(FIELD_HEIGHTS[c]));
+    let fieldPos = fract(pos)
+      * vec2<f32>(f32(FIELD_WIDTHS[c]), f32(FIELD_HEIGHTS[c]))
+      - vec2<f32>(0.5);
     let k = corners(c, fieldPos);
     let rawValue = sampleValue(c, k);
-    if (c == CHANNELS - 1u) { rawGrowthSignal = rawValue; }
     inputVec[c] = normalizeChemicalValue(rawValue);
     // Sobel is a derivative per native texel. Convert it to the reference
     // finest-grid convention so a world-space slope has comparable neural
@@ -897,7 +964,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the genuinely symmetric part of its response survives — see
   // simulation_settings.py's own CHIRALITY for the full reasoning.
   // Both desired-direction vectors have their lateral component un-mirrored.
-  // A scalar chemical-state delta has no handedness, so it is averaged
+  // A scalar chemical delta has no handedness, so it is averaged
   // channel-for-channel.
   if (CHIRALITY) {
     var mirroredInput = inputVec;
@@ -923,6 +990,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       (result.growthTargetLocal.x + mirrored.growthTargetLocal.x) * 0.5,
       (result.growthTargetLocal.y - mirrored.growthTargetLocal.y) * 0.5
     );
+    result.divisionDrive = (result.divisionDrive + mirrored.divisionDrive) * 0.5;
     result.color = (result.color + mirrored.color) * 0.5;
     for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
       result.stateDelta[s] = (result.stateDelta[s] + mirrored.stateDelta[s]) * 0.5;
@@ -933,22 +1001,21 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   let communicationDt = max(stepMode.communicationDt, 0.0);
 
   if (CELL_OWNED_CHEMISTRY) {
-    // Cell-owned-projection interprets the chemical head as a delta to
-    // persistent per-cell chemistry. The separate splat pass publishes the
-    // pre-update state on the following communication round.
+    // The head is a rate, so subdividing one communication interval into more
+    // rounds preserves its elapsed-time scale. Slow channels still accumulate;
+    // they simply integrate a smaller delta per unit communication time.
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+      let chemicalDelta = result.envWrite[c] * communicationDt
+        / max(FIELD_RELAXATION_TIMES[c], 1e-6);
       agentState.particleMeta[pi].chemicalState[c] = clamp(
-        agentState.particleMeta[pi].chemicalState[c] + result.envWrite[c] * communicationDt,
+        agentState.particleMeta[pi].chemicalState[c] + chemicalDelta,
         -1.0,
         1.0,
       );
     }
   } else if (stepMode.commitLifecycle != 0u) {
-    // Persistent-environment uses only the final neural round's chemical
-    // output. Intermediate rounds deliberate against one frozen field while
-    // updating private/orientation state; after the loop the host diffuses and
-    // decays that snapshot once, then merges this final Gaussian deposit.
-    // Environment depositRate owns the macro communication-time scaling.
+    // Persistent mode deliberates against a frozen field and deposits only the
+    // final neural round. Environment depositRate owns macro-time scaling.
     depositGaussian(
       result.envWrite,
       pos,
@@ -1051,15 +1118,20 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // always runs before those substeps).
   velocities[pi] = (velocities[pi] + growthDirectionWorld * physics.maxStrafe) * physics.friction;
 
-  // Grow-then-divide cell cycle. The last substrate channel supplies a
-  // bounded per-macro-step growth probability. Convert it to cumulative
-  // hazard, h=-log(1-p), so a constant signal retains the former event
+  // Grow-then-divide cell cycle. A dedicated signed neural output supplies
+  // the bounded per-macro-step division drive: positive values are
+  // probabilities while zero/negative values inhibit admission. Convert it to
+  // cumulative hazard, h=-log(1-p), so a constant signal retains the event
   // probability while partial drive persists instead of being discarded.
   // g2p grows Fg until g=2 after admission; only then is one grown parent
   // replaced by two baseline daughters.
-  // Lifecycle semantics remain in raw substrate units. Input normalization is
-  // exclusively a neural-sensing transform and must not accelerate division.
-  let splitProb = clamp(rawGrowthSignal, 0.0, 1.0);
+  let divisionDriveBoost = clamp(physics.divisionDriveBoost, 0.0, 1.0);
+  let remappedDivisionDrive = mix(
+    result.divisionDrive,
+    0.5 * (result.divisionDrive + 1.0),
+    divisionDriveBoost,
+  );
+  let splitProb = clamp(remappedDivisionDrive, 0.0, 1.0);
   let mechanicalGate = mechanicalGrowthGate(particleF[pi], particleRest[pi].growthF);
   // Division cooldown — counted down every step regardless of whether
   // the division clock would otherwise cross (so it's a clean
@@ -1096,7 +1168,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     cooldownNow <= 0.0
   ) {
     // This is the scenario's only synthetic action: admit the exact same
-    // persistent cycle organic substrate hazard would admit. Everything from
+    // persistent cycle the policy's division hazard would admit. Everything from
     // Fg growth onward remains the production grow-then-divide path.
     particleRest[pi].cycleActive = 1.0;
     agentState.particleMeta[pi].divisionHazard = 0.0;
@@ -1111,7 +1183,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       agentState.particleMeta[pi].divisionThreshold = max(-log(max(1.0 - u, 1e-7)), 1e-7);
     }
     var hazardIncrement = -log(max(1.0 - splitProb, 1e-7));
-    // Preserve the old exact p=1 behavior: a saturated growth field admits
+    // Preserve exact p=1 behavior: a saturated division drive admits
     // immediately even for the vanishingly rare Exp(1) threshold >16.1.
     if (splitProb >= 1.0) {
       hazardIncrement = agentState.particleMeta[pi].divisionThreshold + 1.0;

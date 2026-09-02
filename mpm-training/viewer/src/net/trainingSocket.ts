@@ -17,7 +17,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { randomWeights } from "../gpu/agents";
 import type { GenerationRecord, RunSettings, SimulationConfig } from "../gpu/types";
-import { loadDefaultRunSettings, storeRunSettings } from "./settingsStorage";
+import { loadInitialRunSettings } from "./settingsStorage";
 
 export interface GenerationStat {
   generation: number;
@@ -117,11 +117,10 @@ export function deriveState(acc: Accumulator): TrainingSocketState {
 }
 
 export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocketState {
-  // Seed a randomized placeholder rollout immediately. Browser storage holds
-  // the last settings received from a backend; the bundled fallback covers a
-  // first-ever visit made while the backend is down.
+  // Seed a randomized placeholder immediately from either the last settings
+  // supplied by a backend or the shared trainer/viewer defaults.
   const [acc, setAcc] = useState<Accumulator>(() => ({
-    settings: loadDefaultRunSettings(),
+    settings: loadInitialRunSettings(),
     records: new Map(),
   }));
 
@@ -134,7 +133,6 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocket
         .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`GET /settings -> ${res.status}`))))
         .then((data: RunSettings) => {
           if (!cancelled) {
-            storeRunSettings(data);
             setAcc((prev) => applySettings(prev, data));
           }
         })
@@ -142,7 +140,7 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocket
           // 503 while _training_loop_body() hasn't reached its own
           // settings assignment yet (see train_server.py's own /settings
           // docstring) — retry rather than give up; this is the ONLY
-          // authoritative source of live-run settings. The cached/fallback
+          // authoritative source of live-run settings. The shared fallback
           // settings keep the viewer usable while this retries; in practice
           // a running backend resolves within one or two attempts (settings
           // are written near the top of the training loop, well before

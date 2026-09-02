@@ -33,7 +33,7 @@ own module docstring.
 - `environment.wgsl` — the GPU-resident chemical field `agents.wgsl`
   senses/writes. It contains both selectable lifecycles: transient
   materialization from cell-owned chemistry, and persistent ping-pong
-  blur/decay plus direct policy deposits. Both use the same Sobel sensing and
+  blur/decay followed by density-normalized addition of signed neural deltas. Both use the same Sobel sensing and
   toroidal domain.
 - `constants.json` — the numeric constants (`GRID_N`, `DX`, `INV_DX`,
   `DT`, `PARTICLE_MASS`, `VOL`, `MAX_PARTICLES`, `FIELD_N`,

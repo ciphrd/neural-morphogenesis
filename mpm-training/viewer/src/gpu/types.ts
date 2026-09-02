@@ -1,7 +1,7 @@
 export interface UpdateRuleWeights {
   fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6 [+ 8 private state])
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // stateless: channels+9; stateful: channels+22
+  fc2w: number[][]; // stateless: channels+10; stateful: channels+23
   fc2b: number[];
 }
 export type PolicyArchitecture = "stateless-128" | "stateful-64" | "stateful-128";
@@ -37,6 +37,7 @@ export interface RunSettings {
   particleCapacity?: number;
   particleMass?: number;
   particleVolume?: number;
+  chemicalValueInputMultiplier?: number;
   chemicalGradientInputScale?: number;
   chemicalProjectionWeight?: number;
   macroSteps: number;
@@ -60,6 +61,8 @@ export interface RunSettings {
   internalStateSpeed?: number;
   /** Cap on policy-polarized daughter placement: 0 symmetric, 1 full. */
   divisionDirectionality?: number;
+  /** Blend signed division drive toward the full [-1,1] -> [0,1] remap. */
+  divisionDriveBoost?: number;
   elasticStrainScale?: number;
   elasticStrainInputsEnabled?: boolean;
   hiddenDim: number;
@@ -75,20 +78,20 @@ export interface RunSettings {
   /** Used by persistent-environment; ignored by cell-owned-projection. */
   depositRate: number;
   normalizeDepositsByLocalDensity?: boolean;
+  /** Represented-material density at which overcrowding normalization begins. */
   depositDensityReference?: number;
   maxAccel: number;
   maxStrafe: number;
+  /** Amplitude of the signed neural chemical delta rate. */
   maxEnvWrite: number;
   maxAngularAccel: number;
   angularDamping: number;
   maxAngularVelocity: number;
   /** Legacy ABI field; centered deposits do not use an offset. */
   depositDistance: number;
-  // Gaussian splat radius (sigma), field-pixel units — same convention as
-  // core/agents.wgsl's own depositGaussian() reads this, replacing that
-  // shader's old flat 4-corner bilinear deposit scatter. Live-tunable,
-  // added specifically for testing this splat's own shape/spread via
-  // PhysicsPanel.
+  // Gaussian splat sigma in normalized [0,1] world-domain units. The shader
+  // projects it onto each channel's native grid without changing its physical
+  // footprint as channel resolution changes.
   depositSigma: number;
   splitDisplacement: number;
   divisionCooldown: number;
@@ -249,11 +252,13 @@ export interface PhysicsSettings {
   materialFluidity: number;
   particleMass: number;
   particleVolume: number;
+  chemicalValueInputMultiplier: number;
   chemicalGradientInputScale: number;
   chemicalProjectionWeight: number;
   decay: number;
   depositRate: number;
   normalizeDepositsByLocalDensity: boolean;
+  /** Represented-material density capacity; wire name retained for compatibility. */
   depositDensityReference: number;
   maxAccel: number;
   maxStrafe: number;
@@ -272,6 +277,7 @@ export interface PhysicsSettings {
   communicationSpeed: number;
   internalStateSpeed: number;
   divisionDirectionality: number;
+  divisionDriveBoost: number;
   growthMax: number;
   // Global cap on the neural per-particle anisotropy output.
   growthAnisotropy: number;
@@ -305,6 +311,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     materialFluidity: Math.max(0, Math.min(1, config.materialFluidity ?? 0)),
     particleMass: config.particleMass ?? coreConstants.PARTICLE_MASS,
     particleVolume: config.particleVolume ?? coreConstants.VOL,
+    chemicalValueInputMultiplier: Math.max(0, config.chemicalValueInputMultiplier ?? 1.0),
     chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
     chemicalProjectionWeight: config.chemicalProjectionWeight ?? 1.0,
     decay: config.decay,
@@ -324,12 +331,12 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     angularDamping: config.angularDamping,
     maxAngularVelocity: config.maxAngularVelocity,
     depositDistance: config.depositDistance,
-    // Falls back to 0.6 (trainer/simulation_settings.py's own
-    // DEPOSIT_SIGMA default) for a `generation` message from a
+    // Falls back to the normalized-world trainer DEPOSIT_SIGMA for a
+    // `generation` message from a
     // train_server.py process still running pre-depositSigma code, same
     // "don't crash on `undefined.toFixed()` before a restart picks up
     // the new field" reasoning depositRate's own fallback above gives.
-    depositSigma: config.depositSigma ?? 0.6,
+    depositSigma: config.depositSigma ?? 0.0006328125,
     splitDisplacement: config.splitDisplacement,
     divisionCooldown: config.divisionCooldown,
     friction: config.friction,
@@ -344,6 +351,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     communicationSpeed: Math.max(0, config.communicationSpeed ?? 1.0),
     internalStateSpeed: Math.max(0, config.internalStateSpeed ?? 1.0),
     divisionDirectionality: Math.max(0, Math.min(1, config.divisionDirectionality ?? 1.0)),
+    divisionDriveBoost: Math.max(0, Math.min(1, config.divisionDriveBoost ?? 0.0)),
     growthMax: config.growthMax ?? 2.0,
     growthAnisotropy: Math.max(0, Math.min(1, config.growthAnisotropy ?? 1.0)),
     growthCompressionStart: Math.max(0, config.growthCompressionStart ?? 0.10),

@@ -39,22 +39,31 @@ from training_sim import TrainingRollout
 
 
 def check_layout() -> None:
-    profiles = default_channel_profiles(8)
+    profiles = default_channel_profiles(CHEM_CHANNELS)
     assert [profile.scale for profile in profiles] == [
-        "global", "global", "regional", "regional", "regional", "local", "local", "local"
+        "global", "global", "global", "regional", "regional", "regional", "local", "local", "local"
     ]
-    assert profiles[-1].role == "growth"
+    assert all(profile.role is None for profile in profiles)
     widths, heights = resolved_dimensions(512, 512, profiles)
-    assert widths == heights == (64, 64, 128, 128, 128, 512, 512, 512)
+    assert widths == heights
+    assert widths[0] == widths[1] == widths[2]
+    assert widths[3] == widths[4] == widths[5]
+    assert widths[6] == widths[7] == widths[8]
+    assert 1 <= widths[0] < widths[3] < widths[6] == 512
     offsets, total = packed_offsets(widths, heights)
-    assert offsets == (0, 4096, 8192, 24576, 40960, 57344, 319488, 581632)
-    assert total == 843776
+    expected_offsets = []
+    expected_total = 0
+    for width, height in zip(widths, heights, strict=True):
+        expected_offsets.append(expected_total)
+        expected_total += width * height
+    assert offsets == tuple(expected_offsets)
+    assert total == expected_total
     wire = profiles_to_wire(profiles)
-    assert resolve_channel_profiles(8, wire) == profiles
+    assert resolve_channel_profiles(CHEM_CHANNELS, wire) == profiles
     constants = channel_shader_constants(512, 512, profiles)
     assert constants["FIELD_TOTAL"] == total
     assert constants["FIELD_MAX_WIDTH"] == 512
-    print("[PASS] 2/3/3 profiles resolve and round-trip through run metadata")
+    print("[PASS] 3/3/3 profiles resolve and round-trip through run metadata")
 
 
 def check_gpu_pipelines() -> None:
@@ -79,7 +88,7 @@ def check_gpu_pipelines() -> None:
             chemical_communication_architecture=architecture,
         )
         assert environment.buffers[0].size == environment.total_values * 4
-        assert environment.deposit_scratch.size == environment.total_values * 2 * 4
+        assert environment.deposit_scratch.size == (environment.total_values * 2 + 1) * 4
         agents.load_weights(weights)
         sim = TrainingRollout(
             core, agents, environment, spawn_center=(0.5, 0.5), spawn_half_width=0.0,

@@ -566,6 +566,14 @@ export function TrainingView() {
     }
   }
 
+  const particleStateChannelCount = particleRenderMode === "dots-internal-state"
+    ? 8
+    : (activeConfig?.channels ?? 1)
+  const particleStateChannelStart = Math.min(
+    Math.max(0, particleStateChannelCount - 3),
+    internalStateChannelStart,
+  )
+
   return (
     <div className="training-layout">
       <div className="controls">
@@ -929,8 +937,8 @@ export function TrainingView() {
             >
               <option value="dots-white">Dots (white)</option>
               <option value="dots-neural-color">Dots (neural RGB)</option>
-              <option value="dots-internal-state">Chemical memory</option>
-              <option value="dots-chemical-levels">Chemical levels</option>
+              <option value="dots-internal-state">Neural memory</option>
+              <option value="dots-chemical-levels">Chemical memory</option>
               <option value="dots-boundary-value">Boundary value</option>
               <option value="dots-activation">Dots (neurons)</option>
               <option value="dots-activation-translucent">
@@ -973,8 +981,8 @@ export function TrainingView() {
               <label className="slider-row">
                 <span>
                   {particleRenderMode === "dots-internal-state"
-                    ? "Chemical memory alpha"
-                    : "Chemical levels alpha"}
+                    ? "Neural memory alpha"
+                    : "Chemical memory alpha"}
                 </span>
                 <Slider
                   min={0}
@@ -991,21 +999,17 @@ export function TrainingView() {
                 <div className="channel-window-label">
                   <span>Channels</span>
                   <span>
-                    {internalStateChannelStart}–{internalStateChannelStart + 2}
+                    {particleStateChannelStart}–{particleStateChannelStart + 2}
                   </span>
                 </div>
                 <ChannelWindowSlider
-                  channels={
-                    particleRenderMode === "dots-internal-state"
-                      ? 8
-                      : (activeConfig?.channels ?? 8)
-                  }
-                  value={internalStateChannelStart}
+                  channels={particleStateChannelCount}
+                  value={particleStateChannelStart}
                   onChange={setInternalStateChannelStart}
                   channelKind={
                     particleRenderMode === "dots-internal-state"
-                      ? "chemical memory"
-                      : "chemical levels"
+                      ? "neural memory"
+                      : "chemical memory"
                   }
                 />
               </div>
@@ -1026,18 +1030,9 @@ export function TrainingView() {
               )}
               {particleRenderMode === "dots-internal-state" &&
                 previewConfig &&
-                cellMemoryFromConfig(previewConfig) !== "recurrent" && (
+                  cellMemoryFromConfig(previewConfig) !== "recurrent" && (
                   <p className="hint">
-                    Cell memory is disabled, so these channels remain zero.
-                  </p>
-                )}
-              {particleRenderMode === "dots-chemical-levels" &&
-                activeConfig &&
-                chemicalCommunicationArchitectureFromConfig(
-                  previewConfig ?? activeConfig
-                ) !== "cell-owned-projection" && (
-                  <p className="hint">
-                    Chemical levels are inactive in persistent-environment mode.
+                    Neural memory is disabled, so these channels remain zero.
                   </p>
                 )}
             </>
@@ -1113,7 +1108,7 @@ export function TrainingView() {
                 Policy morphology (gradient + density)
               </option>
               <option value="substrate">Substrate</option>
-              <option value="growth">Growth (cividis)</option>
+              <option value="growth">Last chemical channel (cividis)</option>
               <option value="gradient">Boundary gradient</option>
             </select>
           </label>

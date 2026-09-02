@@ -289,7 +289,7 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // fluidity=0 is precisely the previous plasticity path.
   // The seventh chemical channel selects a particle's fraction of the global
   // fluidity maximum, using the same positive-only [0,1] convention as the
-  // final growth channel: zero/negative is solid and +1 is fully fluid.
+  // dedicated division drive: zero/negative is solid and +1 is fully fluid.
   var chemicalFluidity = 1.0;
   if (CHEMICAL_CHANNELS > FLUIDITY_CHANNEL) {
     chemicalFluidity = clamp(chemicalState.particles[pi].levels[FLUIDITY_CHANNEL], 0.0, 1.0);
@@ -323,8 +323,8 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let JpNew = clamp(Jp0 * oldJe / newJe, 0.6, 20.0);
 
-  // SUBSTRATE-DRIVEN GROWTH. agentStep probabilistically starts a cell
-  // cycle from the last substrate channel and latches cycleActive. Once
+  // POLICY-DRIVEN GROWTH. agentStep probabilistically starts a cell cycle
+  // from its dedicated signed division drive and latches cycleActive. Once
   // active, Fg grows independently of pre-existing dilation. Holding F
   // fixed while g increases makes Fe compressive; the constitutive force
   // then expands the compatible body. This is growth followed by elastic

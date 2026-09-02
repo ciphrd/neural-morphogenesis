@@ -6,19 +6,17 @@
 // translucent activation dots, and signed directional-growth arrows.
 //
 // Field modes: "none" | "density" | "speed" | "deformation" | "pressure"
-// | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient" — the
-// same set mls-mpm/src/gpu/render.ts exposes, plus "substrate"/"growth"/
-// "gradient" (this project's own chemical field/repulsion density, mls-
+// | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient".
+// This extends the set mls-mpm/src/gpu/render.ts exposes with chemical field
+// views and "gradient" (this project's own chemical field/repulsion density; mls-
 // mpm has no equivalent of). "deformation"/"pressure"/"shear" read
 // gpu/fieldDiagnostics.wgsl's own scatter pass, NOT core/p2g.wgsl's
 // gridAccum (that shared physics core was deliberately stripped of these
 // diagnostic channels when it was extracted from mls-mpm's sandbox — see
 // fieldDiagnostics.wgsl's own module docstring for why this project
 // keeps them in a separate, viewer-owned pass instead of adding them
-// back). "growth" reads the SAME chemical field "substrate" does, just
-// one specific channel (the LAST one — this project's own growth
-// probability substrate, see core/agents.wgsl's own module docstring)
-// through a cividis colormap over its own clamped [-1,1] range instead
+// back). The internally named "growth" mode is now simply the LAST chemical
+// channel through a cividis colormap over its clamped [-1,1] range instead
 // of substrate's 3-channel RGB composite — see field.wgsl's own
 // colorizeGrowth() comment. "gradient" reads the REPULSION density
 // field's own spatial gradient instead (mpmCore.densityTexture — the
@@ -125,6 +123,7 @@ export class Renderer {
   private activationAlpha = 0.2;
   private neuralColorAlpha = 1.0;
   private internalStateAlpha = 1.0;
+  private internalStateChannelStart = 0;
   private particleRadiusPx = DEFAULT_PARTICLE_RADIUS_PX;
   private growthAxisLengthPx = 6;
   private canvasMinDimPx = 512;
@@ -229,7 +228,9 @@ export class Renderer {
     this.device = device;
     this.environment = environment;
     this.bloom = new BloomPostProcess(device, format);
-    const renderModule = device.createShaderModule({ code: renderSrc });
+    const renderModule = device.createShaderModule({
+      code: templateShader(renderSrc, { CHANNELS: environment.channels }),
+    });
 
     // --- particles/target ---
     const viewLayout = device.createBindGroupLayout({
@@ -801,6 +802,9 @@ export class Renderer {
 
   setParticleRenderMode(mode: ParticleRenderMode): void {
     this.particleRenderMode = mode;
+    // Recurrent neural memory has eight fixed slots; cellular chemical memory
+    // follows the run's configured channel count.
+    this.setInternalStateChannelStart(this.internalStateChannelStart);
     if (mode === "dots-activation" || mode === "dots-activation-translucent") {
       writeFloat32(this.device, this.activationAlphaUniform, 0, new Float32Array([
         mode === "dots-activation-translucent" ? this.activationAlpha : 1.0,
@@ -848,7 +852,11 @@ export class Renderer {
   }
 
   setInternalStateChannelStart(start: number): void {
-    const clamped = Math.min(5, Math.max(0, Math.floor(start)));
+    this.internalStateChannelStart = Math.max(0, Math.floor(start));
+    const channelCount = this.particleRenderMode === "dots-chemical-levels"
+      ? this.environment.channels
+      : 8;
+    const clamped = Math.min(Math.max(0, channelCount - 3), this.internalStateChannelStart);
     writeFloat32(this.device, this.internalStateStyleUniform, 0, new Uint32Array([clamped, clamped + 1, clamped + 2, 0]));
   }
 

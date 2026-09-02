@@ -24,8 +24,9 @@ import wgpu
 from simulation_settings import (
     BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEMICAL_GRADIENT_INPUT_SCALE,
-    CHEMICAL_VALUE_INPUT_SCALE,
+    CHEMICAL_VALUE_INPUT_MULTIPLIER,
     DIRECTION_CONFIDENCE_SCALE,
+    DIVISION_DRIVE_BOOST,
     DIVISION_DIRECTIONALITY,
     ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE,
@@ -161,8 +162,8 @@ def weight_layout(
     # lateral gradient per channel, with no positional inputs.
     architecture = normalize_architecture(architecture)
     in_dim = policy_input_dim(channels, architecture)
-    # One centered env_write per channel + heading target(2) + ACCEL_DIM(2)
-    # + STRAFE_DIM(2) + RGB_DIM(3).
+    # Chemical deltas + heading(2), anisotropy/division bias(2),
+    # growth direction(2), division drive(1), then architecture-specific tail.
     out_dim = sum(head.size for head in policy_heads(channels, architecture))
     fc1w_offset = 0
     fc1b_offset = fc1w_offset + hidden_dim * in_dim
@@ -213,6 +214,7 @@ class AgentsGPU:
         growth_compression_start: float = GROWTH_COMPRESSION_START,
         growth_compression_stop: float = GROWTH_COMPRESSION_STOP,
         growth_compression_feedback: float = GROWTH_COMPRESSION_FEEDBACK,
+        division_drive_boost: float = DIVISION_DRIVE_BOOST,
     ) -> None:
         self.device = device
         self.channels = channels
@@ -235,13 +237,12 @@ class AgentsGPU:
         self._weights_buffer = device.create_buffer(
             size=layout["total_floats"] * 4, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST
         )
-        # 112 bytes — the original 64-byte layout plus density-resolved
-        # chemical-gradient state and the live boundary-tangent cutoff. The
-        # cutoff occupies what was the final uniform-alignment padding word.
+        # 128 bytes — the original layout plus runtime neural-input controls
+        # and trailing uniform-alignment padding.
         # NOT written by set_physics() below; see set_spawn_center()'s own
         # docstring for why those get a separate setter into this same
         # buffer instead.
-        self._physics_uniform = device.create_buffer(size=112, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self._physics_uniform = device.create_buffer(size=128, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_physics(
             max_accel,
             max_strafe,
@@ -260,6 +261,8 @@ class AgentsGPU:
         self.set_max_active_particles(max_active_particles)
         self.set_elastic_strain_scale(elastic_strain_scale)
         self.set_chemical_gradient_input_scale(CHEMICAL_GRADIENT_INPUT_SCALE)
+        self.set_chemical_value_input_multiplier(CHEMICAL_VALUE_INPUT_MULTIPLIER)
+        self.set_division_drive_boost(division_drive_boost)
         self.set_chemical_projection_weight(1.0)
         self.set_rollout_seed(0)
         self.set_boundary_tangent_min_gradient(BOUNDARY_TANGENT_MIN_GRADIENT)
@@ -364,7 +367,6 @@ class AgentsGPU:
                     **environment.shader_constants,
                     "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
                     "SPATIAL_RANDOM_CELLS": SPATIAL_RANDOM_CELLS,
-                    "CHEMICAL_VALUE_INPUT_SCALE": repr(CHEMICAL_VALUE_INPUT_SCALE),
                     "MORPHOLOGY_GRADIENT_INPUT_SCALE": repr(MORPHOLOGY_GRADIENT_INPUT_SCALE),
                     "GROWTH_DIRECTION_RESPONSE_RATE": repr(GROWTH_DIRECTION_RESPONSE_RATE),
                     "GROWTH_ANISOTROPY_RESPONSE_RATE": repr(GROWTH_ANISOTROPY_RESPONSE_RATE),
@@ -386,14 +388,14 @@ class AgentsGPU:
                     "POLICY_TAIL_DECODE": (
                         "out.color = vec3<f32>(0.5);\n"
                         "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
-                        "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 6u + s]);\n"
-                        "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 6u + PRIVATE_STATE_DIM + s]);\n"
+                        "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 7u + s]);\n"
+                        "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 7u + PRIVATE_STATE_DIM + s]);\n"
                         "  }"
                         if policy_has_recurrence(self.policy_architecture) else
                         "out.color = vec3<f32>(\n"
-                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 6u]),\n"
                         "    safeSigmoid(outVec[ENV_WRITE_DIM + 7u]),\n"
-                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 8u])\n"
+                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 8u]),\n"
+                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 9u])\n"
                         "  );\n"
                         "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
                         "    out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0;\n"
@@ -624,6 +626,22 @@ class AgentsGPU:
             self._physics_uniform,
             64,
             np.array([max(float(scale), 1e-6)], dtype=np.float32),
+        )
+
+    def set_chemical_value_input_multiplier(self, multiplier: float) -> None:
+        """Write the live chemical-concentration neural gain at byte offset 112."""
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            112,
+            np.array([max(float(multiplier), 0.0)], dtype=np.float32),
+        )
+
+    def set_division_drive_boost(self, boost: float) -> None:
+        """Blend signed division drive toward [-1,1] -> [0,1] at byte 116."""
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            116,
+            np.array([max(0.0, min(1.0, float(boost)))], dtype=np.float32),
         )
 
     def set_chemical_projection_weight(self, weight: float) -> None:

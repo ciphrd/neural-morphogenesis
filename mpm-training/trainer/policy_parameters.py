@@ -101,6 +101,7 @@ def policy_heads(num_channels: int, architecture: str = STATELESS_ARCHITECTURE) 
         "anisotropy": 1,
         "division": 1,
         "growthDirection": 2,
+        "divisionDrive": 1,
     }
     if policy_has_recurrence(architecture):
         sizes.update({"stateDelta": PRIVATE_STATE_DIM, "stateGate": PRIVATE_STATE_DIM})

@@ -94,7 +94,8 @@ class EnvironmentGPU:
         )
 
         total = self.total_values
-        scratch_total = total * 2
+        # Numerator + matched density + one shared adaptive fixed-point scale.
+        scratch_total = total * 2 + 1
         f32 = 4
 
         self.buffers = [
@@ -218,7 +219,7 @@ class EnvironmentGPU:
         return neural_dt
 
     def set_deposit_normalization(self, enabled: bool, density_reference: float) -> None:
-        """Configure matching-kernel local-density normalization."""
+        """Configure matching-kernel capacity normalization."""
         self.normalize_deposits_by_local_density = bool(enabled)
         self.deposit_density_reference = max(0.0, float(density_reference))
 
@@ -276,7 +277,7 @@ class EnvironmentGPU:
         self._parity = 1 - self._parity
 
     def encode_merge_persistent(self, encoder: wgpu.GPUCommandEncoder) -> None:
-        """Merge this tick's final direct deposits into the prepared field."""
+        """Add this tick's final signed policy deltas to the prepared field."""
         if self.chemical_communication_architecture != PERSISTENT_ENVIRONMENT_ARCHITECTURE:
             return
         p = encoder.begin_compute_pass()

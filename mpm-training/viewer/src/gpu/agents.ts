@@ -81,6 +81,8 @@ export interface AgentsConfig {
   spawnY: number;
   elasticStrainScale: number;
   elasticStrainInputsEnabled: boolean;
+  chemicalValueInputMultiplier?: number;
+  divisionDriveBoost?: number;
   chemicalGradientInputScale?: number;
   chemicalProjectionWeight?: number;
   boundaryTangentMinGradient?: number;
@@ -94,9 +96,9 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
   // gradient per channel, with no positional inputs.
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  // One centered env_write per channel + desired heading(2) + ACCEL_DIM(2)
-  // + STRAFE_DIM(2) + RGB_DIM(3).
-  const outDim = channels + (stateful ? 22 : 9);
+  // Chemical deltas plus heading, growth controls/direction, a dedicated
+  // signed division drive, and either private-state updates or RGB.
+  const outDim = channels + (stateful ? 23 : 10);
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -179,6 +181,7 @@ export function randomWeights(
     [1, policyParameters.heads.anisotropy],
     [1, policyParameters.heads.division],
     [2, policyParameters.heads.growthDirection],
+    [1, policyParameters.heads.divisionDrive],
   ] as const;
   const specs = policyHasRecurrence(architecture)
     ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const]
@@ -224,14 +227,13 @@ export class Agents {
     const layout = weightLayout(config.channels, config.hiddenDim, this.policyArchitecture);
     const { totalFloats } = layout;
     this.weightsBuffer = device.createBuffer({ size: totalFloats * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // 112 bytes — original layout plus density-resolved chemical-gradient
-    // normalization and the live boundary-tangent cutoff. The cutoff occupies
-    // what was previously the uniform struct's final alignment-padding word.
+    // 128 bytes — original layout plus runtime neural-input controls and
+    // trailing uniform-alignment padding.
     // The final spawnX/spawnY/maxActiveParticles fields are
     // NOT written by setPhysics() below; see setSpawnCenter()'s own
     // docstring for why those get a separate setter into this same
     // buffer instead.
-    this.physicsUniform = device.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.physicsUniform = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setPhysics({
       maxAccel: config.maxAccel,
       maxStrafe: config.maxStrafe,
@@ -249,6 +251,8 @@ export class Agents {
     this.setSpawnCenter(config.spawnX, config.spawnY);
     this.setMaxActiveParticles(config.maxActiveParticles);
     this.setElasticStrainScale(config.elasticStrainScale);
+    this.setChemicalValueInputMultiplier(config.chemicalValueInputMultiplier ?? 1.0);
+    this.setDivisionDriveBoost(config.divisionDriveBoost ?? 0.0);
     this.setChemicalGradientInputScale(config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE);
     this.setChemicalProjectionWeight(config.chemicalProjectionWeight ?? 1.0);
     this.setRolloutSeed(0);
@@ -326,7 +330,6 @@ export class Agents {
         ...environment.layout.shaderConstants,
         MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
         SPATIAL_RANDOM_CELLS: densityModel.SPATIAL_RANDOM_CELLS,
-        CHEMICAL_VALUE_INPUT_SCALE: coreConstants.CHEMICAL_VALUE_INPUT_SCALE,
         MORPHOLOGY_GRADIENT_INPUT_SCALE: coreConstants.MORPHOLOGY_GRADIENT_INPUT_SCALE,
         GROWTH_DIRECTION_RESPONSE_RATE: coreConstants.GROWTH_DIRECTION_RESPONSE_RATE,
         GROWTH_ANISOTROPY_RESPONSE_RATE: coreConstants.GROWTH_ANISOTROPY_RESPONSE_RATE,
@@ -344,8 +347,8 @@ export class Agents {
           ? "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { inputVec[3u * CHANNELS + 6u + s] = tanh(agentState.particleMeta[pi].privateState[s]); }"
           : "",
         POLICY_TAIL_DECODE: policyHasRecurrence(this.policyArchitecture)
-          ? "out.color = vec3<f32>(0.5); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 6u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 6u + PRIVATE_STATE_DIM + s]); }"
-          : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 6u]), safeSigmoid(outVec[ENV_WRITE_DIM + 7u]), safeSigmoid(outVec[ENV_WRITE_DIM + 8u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
+          ? "out.color = vec3<f32>(0.5); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 7u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 7u + PRIVATE_STATE_DIM + s]); }"
+          : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 7u]), safeSigmoid(outVec[ENV_WRITE_DIM + 8u]), safeSigmoid(outVec[ENV_WRITE_DIM + 9u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
         ELASTIC_STRAIN_INPUTS_ENABLED: config.elasticStrainInputsEnabled ? "true" : "false",
         MORPHOLOGY_SAMPLER_DECLARATION: filterableMorphology
           ? "@group(0) @binding(14) var morphologySampler: sampler;"
@@ -527,6 +530,21 @@ export class Agents {
 
   setChemicalGradientInputScale(scale: number): void {
     writeFloat32(this.device, this.physicsUniform, 64, new Float32Array([Math.max(scale, 1e-6)]));
+  }
+
+  /** Relative neural gain for chemical concentration values; zero ablates them. */
+  setChemicalValueInputMultiplier(multiplier: number): void {
+    writeFloat32(this.device, this.physicsUniform, 112, new Float32Array([Math.max(multiplier, 0)]));
+  }
+
+  /** Blend signed division drive toward a full probability remap. */
+  setDivisionDriveBoost(boost: number): void {
+    writeFloat32(
+      this.device,
+      this.physicsUniform,
+      116,
+      new Float32Array([Math.max(0, Math.min(1, boost))]),
+    );
   }
 
   setChemicalProjectionWeight(weight: number): void {
@@ -723,7 +741,7 @@ export class Agents {
    * parity buffer (must match `parity`, see simulation.ts), writes the
    * policy's growth direction into MpmCore's particle-rest buffer,
    * optionally applies it to velocity through maxStrafe, and writes
-   * chemical deltas into cell-owned state. Does not submit. */
+   * integrates or deposits signed chemical deltas. Does not submit. */
   encodeStep(encoder: GPUCommandEncoder, parity: number, commitLifecycle = true): void {
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.pipeline);

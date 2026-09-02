@@ -35,6 +35,12 @@
       "biasJitter": 0.1,
       "mutationScale": 0.2
     },
+    "divisionDrive": {
+      "weightGain": 0.25,
+      "biasCenter": [0.0],
+      "biasJitter": 0.05,
+      "mutationScale": 0.25
+    },
     "color": {
       "weightGain": 0.5,
       "biasCenter": [0.0, 0.0, 0.0],

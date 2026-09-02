@@ -60,13 +60,11 @@ controls whether the reconstructed world direction also acts as physical
 acceleration and is zero by default.
 
 Growth: every rollout starts with the configured initial particle count;
-core/agents.wgsl's own agentStep() may spawn
-new ones from there (splitting, based on the last chemical channel's own
-sensed value — see that file's own module docstring for the full
-design), up to evolve.py's own --particles (now a CAP, not a fixed
-starting count — see that module's own module docstring for why; a
-policy that never learns to use the growth channel stays at that initial
-count). This is the
+core/agents.wgsl's own agentStep() may spawn new ones from there based on
+the policy's dedicated signed division drive, up to evolve.py's own
+--particles (now a CAP, not a fixed starting count). A policy that never
+produces enough effective division drive stays at that initial count (with the
+default zero division-drive boost). This is the
 ONE exception to "zero host round-trips for anything data-related" this
 module's own docstring boasts about above: macro_step() reads back a
 single 4-byte atomic counter every macro step (agents.read_grown_count())
@@ -270,7 +268,7 @@ class TrainingRollout:
                 self.environment.parity,
                 commit_lifecycle=final_round,
             )
-        # Persistent mode merges only the final neural round's direct deposits
+        # Persistent mode merges only the final neural round's signed delta deposits
         # after the transported field has been sensed.
         self.environment.encode_merge_persistent(encoder)
         core.device.queue.submit([encoder.finish()])
@@ -283,7 +281,7 @@ class TrainingRollout:
         # dispatches. A plain != check, not unconditional writes, so a
         # macro step where nothing actually split (the overwhelmingly
         # common case early in a rollout, or for a policy that never
-        # learns to use the growth channel at all) costs one 4-byte read
+        # produces a positive division drive) costs one 4-byte read
         # and nothing else.
         # min(...) — the atomic itself can overshoot max_active_particles
         # slightly (several agents claiming a slot the same step, right

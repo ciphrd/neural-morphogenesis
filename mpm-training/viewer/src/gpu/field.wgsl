@@ -7,9 +7,9 @@
 // file's own module docstring for why those three live outside
 // ../core/ rather than being added back to it), "substrate" reads
 // the chemical field environment.wgsl already maintains for the NN
-// policy's own sensing, and "growth" reads that SAME field's own LAST
-// channel specifically (this project's own growth probability substrate
-// — see colorizeGrowth()'s own comment).
+// policy's own sensing, and "growth" is retained as an internal mode name for
+// a cividis view of the last chemical channel. That channel no longer controls
+// division; the UI labels this view by what it actually displays.
 //
 // Three coloring conventions, per this project's own dataviz choice:
 //  - Single, non-negative *magnitude* fields (density, speed, shear —
@@ -138,8 +138,7 @@ fn batlow(t: f32) -> vec3<f32> {
 }
 
 // --- cividis: matplotlib's own scientific colormap, used specifically
-// for the "growth" background mode (this project's own growth substrate
-// — the LAST chemical channel, see colorizeGrowth()'s own comment),
+// for the single-channel background mode (the LAST chemical channel),
 // per this feature's own explicit request (was viridis(); swapped for
 // cividis() — same LUT-lookup technique, still perceptually-uniform,
 // additionally CVD-friendly by design, per that same request). Same
@@ -471,22 +470,15 @@ fn substrateFragment(in: QuadOut) -> @location(0) vec4<f32> {
   return textureSample(substrateTex, fieldSampler, in.uv);
 }
 
-// --- Growth background: the LAST chemical channel only (index
-// CHANNELS-1) — this project's own growth probability substrate, see
-// core/agents.wgsl's own module docstring for why that specific channel
-// doubles as a particle's own split probability, clamped to [0,1], each
-// macro step — mapped through cividis() over [-1,1] (NOT [0,1]: the
-// channel itself isn't bounded to [0,1] the way the split probability
-// derived from it is — see simulation_settings.py's own MAX_ENV_WRITE —
-// so this deliberately shows the full clamped range a policy could
-// actually be depositing, not just the sub-range that maps to "will
-// split"). Reuses colorizeSubstrate's own input buffer (`substrateGrid`,
+// --- Single-channel background: the LAST chemical channel only (index
+// CHANNELS-1), mapped through cividis() over [-1,1]. Reuses
+// colorizeSubstrate's own input buffer (`substrateGrid`,
 // binding 8 — same environment.ts ping-pong buffer, same per-macro-step
 // parity indexing — see that pass's own module docstring) rather than a
 // new binding, since it's the exact same source data; own output
 // texture/present pipeline (bindings 11/12) since this is a genuinely
 // different image from substrate's own 3-channel RGB composite.
-const GROWTH_CHANNEL: u32 = __CHANNELS__u - 1u;
+const LAST_CHEMICAL_CHANNEL: u32 = __CHANNELS__u - 1u;
 
 @group(0) @binding(11) var growthOutputTex: texture_storage_2d<rgba8unorm, write>;
 
@@ -496,7 +488,7 @@ fn colorizeGrowth(@builtin(global_invocation_id) gid: vec3<u32>) {
   let y = gid.y;
   if (x >= SUBSTRATE_WIDTH || y >= SUBSTRATE_HEIGHT) { return; }
 
-  let v = substrateValue(GROWTH_CHANNEL, x, y);
+  let v = substrateValue(LAST_CHEMICAL_CHANNEL, x, y);
   let t = (accentedSigned(v) + 1.0) * 0.5;
   textureStore(growthOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(cividis(t), 1.0));
 }

@@ -1,11 +1,11 @@
 // TS wrapper around environment.wgsl's two chemical lifecycles. Cell-owned
 // projection materializes per-cell state into buffer 0 each round; persistent
-// environment ping-pongs a spatial field through diffusion/decay and merges
-// direct policy deposits. Both expose the same parity-indexed sensing buffers.
+// environment ping-pongs a spatial field through diffusion/decay and adds
+// the final neural round's signed deltas. Both expose the same parity-indexed sensing buffers.
 
 import environmentSrc from "../../../core/environment.wgsl?raw";
 import {
-  homogeneousChemicalChannelProfiles,
+  defaultChemicalChannelProfiles,
   packChemicalChannelLayout,
   type ChemicalChannelProfile,
   type PackedChemicalLayout,
@@ -82,7 +82,11 @@ export class Environment {
     this.layout = packChemicalChannelLayout(
       config.width,
       config.height,
-      config.channelProfiles ?? homogeneousChemicalChannelProfiles(config.channels),
+      // A legacy server/run may predate chemicalChannelProfiles. The viewer's
+      // fallback comes from core/chemical_channels.json, the same canonical
+      // configuration read by trainer/simulation_settings.py, rather than a
+      // separate homogeneous frontend default.
+      config.channelProfiles ?? defaultChemicalChannelProfiles(config.channels),
     );
     this.maxWidth = this.layout.maxWidth;
     this.maxHeight = this.layout.maxHeight;
@@ -94,7 +98,8 @@ export class Environment {
     this.advectionDt = Math.max(0, config.advectionDt ?? 0);
 
     const total = this.layout.total;
-    const scratchTotal = total * 2;
+    // Numerator + matched density + one shared adaptive fixed-point scale.
+    const scratchTotal = total * 2 + 1;
     const f32 = 4;
 
     this.buffers = [
@@ -266,7 +271,7 @@ export class Environment {
     this._parity = 1 - this._parity;
   }
 
-  /** Add the final neural round's direct writes to the prepared field. */
+  /** Add the final neural round's signed chemical deltas to the field. */
   encodeMergePersistent(encoder: GPUCommandEncoder): void {
     if (this.chemicalCommunicationArchitecture !== "persistent-environment") return;
     const pass = encoder.beginComputePass();

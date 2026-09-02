@@ -215,7 +215,10 @@ class MpmCore:
             size=NODE_COUNT * GRID_ACCUM_CHANNELS * f32,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
         )
-        self.grid_vel = device.create_buffer(size=NODE_COUNT * 2 * f32, usage=wgpu.BufferUsage.STORAGE)
+        self.grid_vel = device.create_buffer(
+            size=NODE_COUNT * 2 * f32,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+        )
 
         # Purely a GPU-sync barrier for step()'s own chunking — see
         # _MAX_SUBSTEPS_PER_SUBMIT's docstring. STORAGE|COPY_SRC (not

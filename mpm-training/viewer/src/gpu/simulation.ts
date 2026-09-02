@@ -17,7 +17,7 @@
 //
 // Per macro step, in order:
 //   1. Clear the round's deposit scratch. Cell-owned mode then publishes each
-//      cell's chemistry; persistent mode leaves it ready for direct NN writes.
+//      cell's chemistry; persistent mode leaves it ready for signed delta deposits.
 //   2. environment.encodeSense() — materialize cell splats when applicable and
 //      compute the shared gradient over the architecture's current field.
 //   3. agents.encodeStep() — NN forward pass: reads that field and either
@@ -287,13 +287,13 @@ export class GpuSimulation {
       maxAngularVelocity: config.maxAngularVelocity,
       chirality: config.chirality,
       depositDistance: config.depositDistance,
-      // ?? 0.6 (trainer/simulation_settings.py's own DEPOSIT_SIGMA
-      // default) guards a `generation` message from a train_server.py
+      // Normalized-world fallback matching trainer/simulation_settings.py's
+      // DEPOSIT_SIGMA guards a `generation` message from a train_server.py
       // process still running pre-depositSigma code — same reasoning
       // depositRate's own ?? 1.0 guard above gives (see that guard's own
       // comment): an unguarded `undefined` here would write NaN into
       // this uniform and silently corrupt every deposit from step one.
-      depositSigma: config.depositSigma ?? 0.6,
+      depositSigma: config.depositSigma ?? 0.0006328125,
       splitDisplacement: config.splitDisplacement,
       divisionCooldown: config.divisionCooldown,
       friction: config.friction,
@@ -303,6 +303,8 @@ export class GpuSimulation {
       spawnY: config.spawnY,
       elasticStrainScale: config.elasticStrainScale ?? 0.15,
       elasticStrainInputsEnabled: config.elasticStrainInputsEnabled ?? false,
+      chemicalValueInputMultiplier: config.chemicalValueInputMultiplier ?? 1.0,
+      divisionDriveBoost: config.divisionDriveBoost ?? 0.0,
       chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
       chemicalProjectionWeight: config.chemicalProjectionWeight ?? 1.0,
       boundaryTangentMinGradient: config.boundaryTangentMinGradient
@@ -482,6 +484,8 @@ export class GpuSimulation {
     this.agents.setCommunicationTimestep(communicationDt);
     this.agents.setInternalStateSpeed(physics.internalStateSpeed ?? 1.0);
     this.agents.setDivisionDirectionality(physics.divisionDirectionality ?? 1.0);
+    this.agents.setDivisionDriveBoost(physics.divisionDriveBoost ?? 0.0);
+    this.agents.setChemicalValueInputMultiplier(physics.chemicalValueInputMultiplier);
     this.agents.setChemicalGradientInputScale(physics.chemicalGradientInputScale);
     this.agents.setChemicalProjectionWeight(physics.chemicalProjectionWeight);
     this.agents.setBoundaryTangentMinGradient(physics.boundaryTangentMinGradient);
@@ -498,9 +502,9 @@ export class GpuSimulation {
       angularDamping: physics.angularDamping,
       maxAngularVelocity: physics.maxAngularVelocity,
       depositDistance: physics.depositDistance,
-      // ?? 0.6 — same pre-depositSigma-broadcast guard reasoning
+      // Normalized-world fallback — same pre-depositSigma-broadcast guard reasoning
       // depositRate's own ?? 1.0 guard above gives.
-      depositSigma: physics.depositSigma ?? 0.6,
+      depositSigma: physics.depositSigma ?? 0.0006328125,
       splitDisplacement: physics.splitDisplacement,
       divisionCooldown: physics.divisionCooldown,
       friction: physics.friction,

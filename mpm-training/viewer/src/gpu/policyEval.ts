@@ -17,12 +17,13 @@ import { policyHasRecurrence, type PolicyArchitecture, type UpdateRuleWeights } 
 import coreConstants from "../../../core/constants.json";
 
 export interface PolicyOutput {
-  /** One cell-owned chemical-state delta per channel. */
+  /** One signed chemical delta rate per channel. */
   envWrite: Float32Array;
   headingDirection: [number, number];
   angularAccel: number;
   anisotropy: number;
   divisionBias: number;
+  divisionDrive: number;
   direction: [number, number];
   color: [number, number, number];
   stateDelta: Float32Array;
@@ -40,7 +41,7 @@ export function policyWeightsShapeError(
 ): string | null {
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  const outDim = channels + (stateful ? 22 : 9);
+  const outDim = channels + (stateful ? 23 : 10);
   const fc1w = weights?.fc1w;
   const fc1b = weights?.fc1b;
   const fc2w = weights?.fc2w;
@@ -62,7 +63,7 @@ export function policyWeightsShapeError(
   const receivedOut = Array.isArray(fc2w) ? fc2w.length : "missing";
   return (
     `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
-    `(one chemical-state delta per channel plus growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
+    `(chemical deltas plus a dedicated division drive and growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
     "The current first layer includes three elastic Hencky-strain inputs; restart the training backend and retrain older checkpoints."
   );
 }
@@ -108,7 +109,7 @@ export function evalPolicy(
   }
 
   const stateful = policyHasRecurrence(architecture);
-  const outDim = channels + (stateful ? 22 : 9);
+  const outDim = channels + (stateful ? 23 : 10);
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -135,6 +136,7 @@ export function evalPolicy(
   const divisionBias = safeSigmoid(outVec[envWriteDim + 3]);
   const rawX = safeTanh(outVec[envWriteDim + 4]);
   const rawY = safeTanh(outVec[envWriteDim + 5]);
+  const divisionDrive = safeTanh(outVec[envWriteDim + 6]);
   const magnitude = Math.hypot(rawX, rawY);
   const direction: [number, number] = magnitude > 1e-6
     ? [rawX / magnitude, rawY / magnitude]
@@ -144,18 +146,18 @@ export function evalPolicy(
   let color: [number, number, number];
   if (stateful) {
     for (let i = 0; i < 8; i++) {
-      stateDelta[i] = safeTanh(outVec[envWriteDim + 6 + i]);
-      stateGate[i] = safeSigmoid(outVec[envWriteDim + 14 + i]);
+      stateDelta[i] = safeTanh(outVec[envWriteDim + 7 + i]);
+      stateGate[i] = safeSigmoid(outVec[envWriteDim + 15 + i]);
     }
     // The inspector evaluates a zero private state. Live RGB is derived after
     // applying the residual update to each particle's actual persistent state.
     color = [0.5, 0.5, 0.5];
   } else {
     color = [
-      safeSigmoid(outVec[envWriteDim + 6]),
       safeSigmoid(outVec[envWriteDim + 7]),
       safeSigmoid(outVec[envWriteDim + 8]),
+      safeSigmoid(outVec[envWriteDim + 9]),
     ];
   }
-  return { envWrite, headingDirection, angularAccel, anisotropy, divisionBias, direction, color, stateDelta, stateGate };
+  return { envWrite, headingDirection, angularAccel, anisotropy, divisionBias, divisionDrive, direction, color, stateDelta, stateGate };
 }

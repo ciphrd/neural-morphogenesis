@@ -61,7 +61,7 @@ def main() -> None:
     stateful_random = random_flat_policy_weights(
         CHEM_CHANNELS, stateful_hidden, np.random.default_rng(31), STATEFUL_ARCHITECTURE
     )
-    assert stateful_flat.size == stateful_random.size == 4446
+    assert stateful_flat.size == stateful_random.size == 4768
     assert [head.name for head in policy_heads(CHEM_CHANNELS, STATEFUL_ARCHITECTURE)][-2:] == [
         "stateDelta", "stateGate"
     ]
@@ -69,13 +69,13 @@ def main() -> None:
         stateful_flat, sigma, np.random.default_rng(32), STATEFUL_ARCHITECTURE
     )
     assert stateful_mutated.shape == stateful_flat.shape
-    print("[PASS] stateful-64 has 38 inputs, 30 outputs, 4446 parameters, and state-head mutation buckets")
+    print("[PASS] stateful-64 has 41 inputs, 32 outputs, 4768 parameters, and state-head mutation buckets")
 
     recurrent_128 = UpdateRule(CHEM_CHANNELS, STATEFUL_128_ARCHITECTURE)
     recurrent_128_flat = get_weights(recurrent_128)
     assert policy_hidden_dim(STATEFUL_128_ARCHITECTURE) == 128
-    assert recurrent_128_flat.size == 8862
-    print("[PASS] new recurrent policy keeps 128 hidden units and has 8862 parameters")
+    assert recurrent_128_flat.size == 9504
+    print("[PASS] recurrent policy keeps 128 hidden units and has 9504 parameters")
 
     assert CHEMICAL_COMMUNICATION_ARCHITECTURES == (
         PERSISTENT_ENVIRONMENT_ARCHITECTURE,

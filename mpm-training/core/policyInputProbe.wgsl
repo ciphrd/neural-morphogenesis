@@ -17,7 +17,7 @@ const ELASTIC_ENABLED: bool = __ELASTIC_ENABLED__;
 const IN_DIM: u32 = __IN_DIM__u;
 const META_DIM: u32 = 12u;
 const OUT_STRIDE: u32 = META_DIM + 2u * IN_DIM;
-const CHEMICAL_VALUE_INPUT_SCALE: f32 = __CHEMICAL_VALUE_INPUT_SCALE__;
+const CHEMICAL_VALUE_INPUT_MULTIPLIER: f32 = __CHEMICAL_VALUE_INPUT_MULTIPLIER__;
 const CHEMICAL_GRADIENT_INPUT_SCALE: f32 = __CHEMICAL_GRADIENT_INPUT_SCALE__;
 const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__;
 
@@ -93,7 +93,9 @@ fn sampleMorphology(p: vec2<f32>) -> f32 {
   return mix(a, b, f.y);
 }
 fn safeTanh(x: f32) -> f32 { return tanh(clamp(x, -20.0, 20.0)); }
-fn normalizeChemicalValue(raw: f32) -> f32 { return safeTanh(raw/max(CHEMICAL_VALUE_INPUT_SCALE,1e-6)); }
+fn normalizeChemicalValue(raw: f32) -> f32 {
+  return safeTanh(raw * max(CHEMICAL_VALUE_INPUT_MULTIPLIER, 0.0));
+}
 fn normalizeChemicalGradient(raw: f32) -> f32 { return safeTanh(raw/max(CHEMICAL_GRADIENT_INPUT_SCALE,1e-6)); }
 fn normalizeMorphologyGradient(raw: f32) -> f32 { return safeTanh(raw/max(MORPHOLOGY_GRADIENT_INPUT_SCALE,1e-6)); }
 fn matMul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
@@ -155,7 +157,11 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
   let rawBase = baseOut + META_DIM;
   let inputBase = rawBase + IN_DIM;
   for (var c=0u; c<CHANNELS; c = c + 1u) {
-    let k = corners(c, fract(pos) * vec2<f32>(f32(FIELD_WIDTHS[c]), f32(FIELD_HEIGHTS[c])));
+    let k = corners(
+      c,
+      fract(pos) * vec2<f32>(f32(FIELD_WIDTHS[c]), f32(FIELD_HEIGHTS[c]))
+        - vec2<f32>(0.5),
+    );
     let rawValue = sampleValue(c, k);
     output[rawBase+c] = rawValue;
     output[inputBase+c] = normalizeChemicalValue(rawValue);

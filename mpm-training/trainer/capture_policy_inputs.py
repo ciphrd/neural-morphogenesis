@@ -27,10 +27,10 @@ from mpm_core import PARTICLE_MASS, VOL, MpmCore, REPULSION_FIELD_N, ceil_div
 from shader_template import load_core_shader
 from simulation_settings import (
     ANGULAR_DAMPING, CHEM_CHANNELS, CHIRALITY, COMMUNICATION_SPEED,
-    CHEMICAL_GRADIENT_INPUT_SCALE, CHEMICAL_VALUE_INPUT_SCALE,
+    CHEMICAL_GRADIENT_INPUT_SCALE, CHEMICAL_VALUE_INPUT_MULTIPLIER,
     DAMPING_LOSS_FRACTION, DECAY, DEPOSIT_DISTANCE, DEPOSIT_RATE,
     NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY, DEPOSIT_DENSITY_REFERENCE,
-    DEPOSIT_SIGMA, DIVISION_COOLDOWN, DIVISION_DIRECTIONALITY, ELASTIC_STRAIN_INPUTS_ENABLED,
+    DEPOSIT_SIGMA, DIVISION_COOLDOWN, DIVISION_DRIVE_BOOST, DIVISION_DIRECTIONALITY, ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE, FIELD_N, FRICTION, GROWTH_DURATION_MACRO_STEPS,
     GROWTH_COMPRESSION_START, GROWTH_COMPRESSION_STOP,
     GROWTH_ANISOTROPY_AUTHORITY, GROWTH_MAX, INITIAL_PARTICLE_COUNT,
@@ -117,7 +117,7 @@ class PolicyInputProbe:
                 ),
                 "ELASTIC_SCALE": repr(float(elastic_scale)),
                 "ELASTIC_ENABLED": "true" if elastic_enabled else "false",
-                "CHEMICAL_VALUE_INPUT_SCALE": repr(CHEMICAL_VALUE_INPUT_SCALE),
+                "CHEMICAL_VALUE_INPUT_MULTIPLIER": repr(CHEMICAL_VALUE_INPUT_MULTIPLIER),
                 "CHEMICAL_GRADIENT_INPUT_SCALE": repr(float(chemical_gradient_scale)),
                 "MORPHOLOGY_GRADIENT_INPUT_SCALE": repr(MORPHOLOGY_GRADIENT_INPUT_SCALE),
             },
@@ -400,6 +400,7 @@ def main() -> int:
         policy_architecture=architecture,
         internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
         division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
+        division_drive_boost=meta.get("division_drive_boost", DIVISION_DRIVE_BOOST),
         chemical_communication_architecture=chemical_architecture,
         growth_compression_start=meta.get("growth_compression_start", GROWTH_COMPRESSION_START),
         growth_compression_stop=meta.get("growth_compression_stop", GROWTH_COMPRESSION_STOP),
@@ -535,7 +536,7 @@ def main() -> int:
         "summary": percentile_summary(all_values, names),
         "raw_summary": percentile_summary(all_raw_values, names), "samples": sampled_times,
         "normalization": {
-            "chemical_value_scale": CHEMICAL_VALUE_INPUT_SCALE,
+            "chemical_value_multiplier": CHEMICAL_VALUE_INPUT_MULTIPLIER,
             "chemical_gradient_scale": density.chemical_gradient_input_scale,
             "morphology_occupancy": "clamp(2*x-1,-1,1)",
             "morphology_gradient_scale": MORPHOLOGY_GRADIENT_INPUT_SCALE,

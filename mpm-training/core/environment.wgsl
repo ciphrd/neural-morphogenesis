@@ -3,7 +3,7 @@
 // replaces gridCurrent from persistent per-cell chemistry every brain round;
 // persistent-environment first transports a ping-pong spatial field with the
 // preceding MPM motion, keeps it fixed throughout a macro tick's neural rounds,
-// then adds only the final policy output. TOROIDAL, matching
+// then adds the cells' final signed chemical deltas. TOROIDAL, matching
 // envnca's own version exactly: MpmCore's own MLS-MPM domain has no
 // walls either now (gridUpdate.wgsl's own module docstring — a
 // particle's 3x3 P2G/G2P stencil wraps at the domain edge, not clamps),
@@ -37,6 +37,7 @@ const CHANNELS: u32 = __CHANNELS__u;
 const FIELD_WIDTHS: array<u32, CHANNELS> = __FIELD_WIDTHS__;
 const FIELD_HEIGHTS: array<u32, CHANNELS> = __FIELD_HEIGHTS__;
 const FIELD_OFFSETS: array<u32, CHANNELS> = __FIELD_OFFSETS__;
+const FIELD_RESPONSE_TIMES: array<f32, CHANNELS> = __FIELD_RESPONSE_TIMES__;
 const FIELD_DECAY_EXPONENTS: array<f32, CHANNELS> = __FIELD_DECAY_EXPONENTS__;
 const FIELD_DIFFUSION_MULTIPLIERS: array<f32, CHANNELS> = __FIELD_DIFFUSION_MULTIPLIERS__;
 const FIELD_TOTAL: u32 = __FIELD_TOTAL__u;
@@ -45,15 +46,20 @@ const FIELD_MAX_HEIGHT: u32 = __FIELD_MAX_HEIGHT__u;
 const GRID_N: u32 = __GRID_N__u;
 // A matching packed density plane per channel supports normalized convolution
 // even when adjacent channels use different grids.
-const SCRATCH_TOTAL: u32 = FIELD_TOTAL * 2u;
+const DEPOSIT_SCALE_INDEX: u32 = FIELD_TOTAL * 2u;
+const SCRATCH_TOTAL: u32 = DEPOSIT_SCALE_INDEX + 1u;
 const CLEAR_WORKGROUP_SIZE: u32 = 256u;
-
-// Must match agents.wgsl's own copy of this constant — the fixed-point
-// scale cell-state splats are encoded at before landing in depositScratch.
-const DEPOSIT_SCALE: f32 = 4096.0;
 
 fn gridIndex(c: u32, y: u32, x: u32) -> u32 {
   return FIELD_OFFSETS[c] + y * FIELD_WIDTHS[c] + x;
+}
+
+fn channelForIndex(i: u32) -> u32 {
+  var c = 0u;
+  while (c + 1u < CHANNELS && i >= FIELD_OFFSETS[c + 1u]) {
+    c = c + 1u;
+  }
+  return c;
 }
 
 // read_write (not read) on every binding below, even where a given entry
@@ -100,11 +106,32 @@ fn clearScratch(
 }
 
 fn resolvedDeposit(i: u32) -> f32 {
-  let numerator = f32(atomicLoad(&depositScratch[i])) / DEPOSIT_SCALE;
+  let depositScale = f32(max(atomicLoad(&depositScratch[DEPOSIT_SCALE_INDEX]), 1));
+  let numerator = f32(atomicLoad(&depositScratch[i])) / depositScale;
   if (physics.normalizeDeposits < 0.5) { return numerator; }
   let density = f32(atomicLoad(&depositScratch[FIELD_TOTAL + i]))
-    / DEPOSIT_SCALE;
-  return numerator / max(density + max(physics.depositDensityReference, 0.0), 1e-6);
+    / depositScale;
+  // Below one configured layer of represented material, preserve the raw
+  // Gaussian source. Above it, divide by density so overcrowding cannot
+  // amplify the local source. This is N/max(D,D_capacity), not a soft
+  // N/(D+D_reference) attenuation.
+  let capacity = max(physics.depositDensityReference, 1e-6);
+  return numerator / max(density, capacity);
+}
+
+fn channelRetention(c: u32) -> f32 {
+  return pow(clamp(physics.decay, 0.0, 1.0), FIELD_DECAY_EXPONENTS[c]);
+}
+
+// Exact integral factor for constant forcing under dC/dt=-lambda*C+source
+// over the same interval whose retention is exp(-lambda*dt). depositRate
+// already contains dt, so the dimensionless multiplier is (1-r)/(-log r).
+fn decayIntegratedSourceFactor(c: u32) -> f32 {
+  let retention = channelRetention(c);
+  if (retention <= 0.0) { return 0.0; }
+  let loss = -log(retention);
+  if (loss < 1e-6) { return 1.0; }
+  return (1.0 - retention) / loss;
 }
 
 // Builds the sensed chemical field from this communication round's cell
@@ -121,10 +148,10 @@ fn materializeSplat(
   gridCurrent[i] = resolvedDeposit(i);
 }
 
-// Persistent-environment only: add the final neural round's policy writes
-// after the old field has diffused and decayed. "Merge" here is just this
-// pointwise addition into the newly evolved field; it is not another blend or
-// neural operation. The result is sensed on the following macro tick.
+// Persistent-environment only: add the final neural round's signed policy
+// delta after transport/diffusion/decay. Matching-kernel density normalization
+// keeps the rate stable across local particle density. FIELD_RESPONSE_TIMES
+// gives each scale its own accumulation speed without changing spatial units.
 @compute @workgroup_size(256)
 fn mergeDeposit(
   @builtin(global_invocation_id) gid: vec3<u32>,
@@ -132,8 +159,11 @@ fn mergeDeposit(
 ) {
   let i = flatDispatchIndex(gid, workgroups);
   if (i >= FIELD_TOTAL) { return; }
+  let c = channelForIndex(i);
   gridCurrent[i] = gridCurrent[i]
-    + resolvedDeposit(i) * physics.depositRate;
+    + resolvedDeposit(i) * max(physics.depositRate, 0.0)
+      * decayIntegratedSourceFactor(c)
+      / max(FIELD_RESPONSE_TIMES[c], 1e-6);
 }
 
 fn blurWeight(dy: i32, dx: i32) -> f32 {
@@ -188,10 +218,13 @@ fn diffuseDecay(@builtin(global_invocation_id) gid: vec3<u32>) {
   let height = FIELD_HEIGHTS[c];
   if (x >= width || y >= height) { return; }
 
-  let worldPos = vec2<f32>(f32(x) / f32(width), f32(y) / f32(height));
+  // Evolve the concentration represented at this texel's center, not its
+  // lower-left edge. sampleChemical() uses an integer-centered lattice.
+  let fieldDimensions = vec2<f32>(f32(width), f32(height));
+  let worldPos = (vec2<f32>(f32(x), f32(y)) + vec2<f32>(0.5)) / fieldDimensions;
   let velocity = sampleMpmVelocity(worldPos);
   let backtracedWorld = fract(worldPos - velocity * max(physics.advectionDt, 0.0));
-  let backtracedField = backtracedWorld * vec2<f32>(f32(width), f32(height));
+  let backtracedField = backtracedWorld * fieldDimensions - vec2<f32>(0.5);
   let advected = sampleChemical(c, backtracedField);
   var acc: f32 = 0.0;
   for (var dy: i32 = -1; dy <= 1; dy = dy + 1) {
@@ -205,7 +238,7 @@ fn diffuseDecay(@builtin(global_invocation_id) gid: vec3<u32>) {
     physics.diffusionStep * FIELD_DIFFUSION_MULTIPLIERS[c], 0.0, 1.0
   );
   let diffused = mix(advected, acc, diffusion);
-  let channelDecay = pow(clamp(physics.decay, 0.0, 1.0), FIELD_DECAY_EXPONENTS[c]);
+  let channelDecay = channelRetention(c);
   gridNext[idx] = diffused * channelDecay;
 }
 

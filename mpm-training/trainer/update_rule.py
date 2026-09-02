@@ -32,16 +32,16 @@ pipelines now).
   There is no absolute or spawn-relative position input. This module itself
   is frame-agnostic; the gradient rotation and robust input normalization are
   entirely the caller's job.
-- Output: env_write (C) — retained ABI name for one bounded delta to the
-  particle's cell-owned chemical state per channel — plus desired heading (2), anisotropy/polarity logits (2),
-  and desired growth direction (2). Stateless-128 ends with RGB logits (3);
+- Output: env_write (C) — retained ABI name for one bounded signed chemical
+  delta rate per channel — plus desired heading (2), anisotropy/polarity logits (2),
+  desired growth direction (2), and a signed division drive (1). Stateless-128 ends with RGB logits (3);
   stateful-64 instead ends with private-state residuals (8) and gates (8),
-  all raw/local-frame. The desired-heading vector is converted by the shader
+  all raw/local-frame. C=9 gives 33 inputs and 19 stateless outputs, or 41
+  inputs and 32 stateful outputs. The desired-heading vector is converted by the shader
   into angular acceleration from its shortest local angular error; the two
   former strafe channels encode a desired local growth direction.
   The two former acceleration channels independently control tensor
-  anisotropy and division bias through sigmoid. C=8
-  (simulation_settings.CHEM_CHANNELS), giving widths 17 and 30 respectively.
+  anisotropy and division bias through sigmoid.
 """
 from __future__ import annotations
 
@@ -113,7 +113,7 @@ class UpdateRule(nn.Module):
         simply concatenates the three channel blocks. Returns
         (env_write, heading_target, growth_controls, direction, tail), all raw/un-squashed;
         tail is RGB for stateless-128 or concatenated state residual/gate for stateful-64
-        and still in LOCAL frame — squashing (tanh for vectors and writes;
+        and still in LOCAL frame — squashing (tanh for vectors and chemical deltas;
         sigmoid for scalar controls), conversion of the heading target to
         angular acceleration, and rotating growth direction to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
@@ -129,7 +129,12 @@ class UpdateRule(nn.Module):
         env_write = self.heads["chemical"](hidden)
         heading_target = self.heads["heading"](hidden)
         growth_controls = torch.cat(
-            [self.heads["anisotropy"](hidden), self.heads["division"](hidden)], dim=-1
+            [
+                self.heads["anisotropy"](hidden),
+                self.heads["division"](hidden),
+                self.heads["divisionDrive"](hidden),
+            ],
+            dim=-1,
         )
         direction = self.heads["growthDirection"](hidden)
         tail = (

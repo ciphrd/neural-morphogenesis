@@ -44,9 +44,10 @@ export interface PhysicsSliderSpec {
  * envnca/frontend/src/ui/PhysicsPanel.tsx's own scaledRange() exactly. */
 function scaledRange(
   trained: number,
-  multiplier: number
+  multiplier: number,
+  minimumMax = 0.05
 ): { min: number; max: number; step: number } {
-  const max = Math.max(trained * multiplier, 0.05)
+  const max = Math.max(trained * multiplier, minimumMax)
   return { min: 0, max, step: max / 200 }
 }
 
@@ -116,13 +117,19 @@ export function physicsSliderSpecsFor(
     },
     {
       key: "depositRate",
-      label: "Deposit rate",
+      label: "Chemical delta rate",
       ...scaledRange(trained.depositRate, 4),
       format: (v) => v.toFixed(3),
     },
     {
+      key: "chemicalValueInputMultiplier",
+      label: "Chemical neural input multiplier",
+      ...scaledRange(trained.chemicalValueInputMultiplier, 10, 1),
+      format: (v) => v.toFixed(2),
+    },
+    {
       key: "depositDensityReference",
-      label: "Deposit density reference",
+      label: "Deposit density capacity",
       min: 0,
       max: Math.max(4, trained.depositDensityReference * 4),
       step: 0.01,
@@ -148,7 +155,7 @@ export function physicsSliderSpecsFor(
     },
     {
       key: "maxEnvWrite",
-      label: "Max env write",
+      label: "Chemical delta amplitude",
       ...scaledRange(trained.maxEnvWrite, 3),
       format: (v) => v.toFixed(3),
     },
@@ -176,9 +183,9 @@ export function physicsSliderSpecsFor(
     },
     {
       key: "depositSigma",
-      label: "Deposit splat radius",
-      ...scaledRange(trained.depositSigma, 3),
-      format: (v) => v.toFixed(3),
+      label: "Deposit sigma (world)",
+      ...scaledRange(trained.depositSigma, 8, 0.01),
+      format: (v) => v.toFixed(5),
     },
     {
       key: "splitDisplacement",
@@ -240,12 +247,12 @@ export function physicsSliderSpecsFor(
 /** Collapsible "Physics" section (default closed) exposing every
  * live-adjustable simulation setting as a slider — gravity, damping, MPM
  * material (E/nu/hardening/elasticity), persistent substrate decay and deposit rate,
- * cell-chemical delta magnitude,
+ * chemical delta amplitude,
  * strafe's own maxAccel/maxStrafe/friction (strafe
  * drives MpmCore's own velocity directly — an acceleration, damped by
  * friction — see agents.wgsl's own module docstring for the full
  * history), the heading integrator's maxAngularAccel/angularDamping/
- * maxAngularVelocity, and depositSigma (the cell-state Gaussian splat radius — see
+ * maxAngularVelocity, and depositSigma (the normalized-world cell-state Gaussian sigma — see
  * agents.wgsl's own depositGaussian() for the exact kernel this drives,
  * replacing that shader's old flat 4-corner bilinear scatter),
  * growth's own splitDisplacement (rear-facing daughter separation) and
@@ -319,17 +326,19 @@ export function PhysicsPanel({
           </label>
           <label
             className="checkbox-row"
-            title="Divide chemical splats by a matching local-density splat so crowded regions approach the average cell signal instead of summing without bound."
+            title="Preserve raw deposits below the configured material capacity, then divide by matching local density so overcrowding cannot amplify the chemical source."
           >
             <input
               type="checkbox"
               checked={value.normalizeDepositsByLocalDensity}
-              onChange={(e) => onChange({
-                ...value,
-                normalizeDepositsByLocalDensity: e.target.checked,
-              })}
+              onChange={(e) =>
+                onChange({
+                  ...value,
+                  normalizeDepositsByLocalDensity: e.target.checked,
+                })
+              }
             />
-            Normalize deposits by local density
+            Limit deposits by local density
           </label>
           {specs.map((spec) => (
             <label key={spec.key} className="slider-row">

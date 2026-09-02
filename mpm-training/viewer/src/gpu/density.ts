@@ -105,7 +105,7 @@ export function configAtDensity<T extends {
     chemicalFieldN: config.fieldN,
     particleMass: typeof config.particleMass === "number" ? config.particleMass : coreConstants.PARTICLE_MASS,
     particleVolume: typeof config.particleVolume === "number" ? config.particleVolume : coreConstants.VOL,
-    depositSigma: typeof config.depositSigma === "number" ? config.depositSigma : 0.324,
+    depositSigma: typeof config.depositSigma === "number" ? config.depositSigma : 0.0006328125,
     chemicalGradientInputScale: typeof config.chemicalGradientInputScale === "number"
       ? config.chemicalGradientInputScale
       : coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,

@@ -1,7 +1,7 @@
 """Capture the tensor-Fg isotropic-equivalence elastic baseline.
 
-The base scenario is policy-independent: zero network weights and a saturated
-growth-chemical channel force every eligible particle into a cell cycle. The
+The base scenario uses a saturated dedicated division-drive output to force
+every eligible particle into a cell cycle. The
 ``--directional`` selects a constant local-forward axis and saturates the
 independent anisotropy and division-bias controls for comparison.
 
@@ -135,6 +135,7 @@ def main() -> None:
     weights = np.zeros(agents._total_floats, dtype=np.float32)
     layout = weight_layout(CHEM_CHANNELS, HIDDEN_DIM)
     env_write_dim = CHEM_CHANNELS
+    weights[layout["fc2b_offset"] + env_write_dim + 6] = 20.0
     if args.directional:
         # Saturated anisotropy/polarity plus a constant local-forward axis.
         weights[layout["fc2b_offset"] + env_write_dim + 2] = 20.0
@@ -168,8 +169,6 @@ def main() -> None:
         initial_particle_count=2,
     )
 
-    growth_plane = np.ones(FIELD_N * FIELD_N, dtype=np.float32)
-    growth_plane_offset = (CHEM_CHANNELS - 1) * FIELD_N * FIELD_N * 4
     measurements: list[dict] = []
 
     def capture(step: int) -> None:
@@ -191,10 +190,6 @@ def main() -> None:
 
     capture(0)
     for step in range(1, TOTAL_STEPS + 1):
-        if step <= GROWTH_STEPS:
-            # Refill the currently-readable parity buffer so the experiment
-            # measures saturated growth rather than chemical decay kinetics.
-            device.queue.write_buffer(environment.buffers[environment.parity], growth_plane_offset, growth_plane)
         sim.macro_step(SUBSTEPS, growth_enabled=step <= GROWTH_STEPS)
         if step in CHECKPOINTS:
             capture(step)
@@ -229,8 +224,8 @@ def main() -> None:
             "seed": SEED,
             "initial_particles": 2,
             "max_active_particles": MAX_ACTIVE,
-            "growth_field": "last substrate channel refilled uniformly to 1 during growth phase",
-            "policy_weights": "anisotropy/polarity logits=20, local-forward direction bias=1" if args.directional else "all zero",
+            "division_drive": "dedicated signed policy output saturated at +1",
+            "policy_weights": "division drive and anisotropy/polarity logits=20, local-forward direction bias=1" if args.directional else "division drive logit=20; all other outputs zero except anisotropy=-20",
             "growth_direction": (
                 "normalized local-forward axis with sigmoid anisotropy=1 and division bias=1"
                 if args.directional

@@ -302,9 +302,10 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
         device, core, environment, channels, 128,
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False,
         0.0,  # legacy deposit-distance ABI slot; centered writes ignore it
-        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
+        2, 0.01, 1.0, 1.0, 0.01, 1.0, 0.5, 0.5,
     )
-    # Exactly the center of texel (x=8,y=24), avoiding an argmax tie.
+    # Exactly the center of texel (x=8,y=24). Keep the diagnostic kernel
+    # sub-texel so fixed-point quantization cannot flatten neighboring peaks.
     position = np.array([[(8.5 / width), (24.5 / height)]], dtype=np.float32)
     core.load_scene(
         position,
@@ -323,8 +324,8 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     for channel in range(4):
         weights[layout["fc2b_offset"] + channel] = 20.0
     env_write_dim = channels
-    weights[layout["fc2b_offset"] + env_write_dim + 8] = 20.0
-    weights[layout["fc2b_offset"] + env_write_dim + 9] = -20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 7] = 20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 8] = -20.0
     # Blue stays at logit 0 -> sigmoid 0.5.
     agents.load_weights(weights)
 
@@ -434,7 +435,10 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
         ),
         dtype=agents._particle_meta_dtype, count=1,
     ).copy()
-    np.testing.assert_allclose(meta["chemicalState"][0, :4], 1.0, atol=1e-7)
+    expected_relaxed_level = 1.0
+    np.testing.assert_allclose(
+        meta["chemicalState"][0, :4], expected_relaxed_level, atol=1e-7
+    )
     meta["chemicalState"][:] = 0.0
     device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
     encoder = device.create_command_encoder()
@@ -511,17 +515,37 @@ def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
             device.queue.read_buffer(environment.buffers[environment.parity]), np.float32
         ).copy()
 
+    def reset_cellular_chemistry() -> None:
+        raw = device.queue.read_buffer(
+            agents._agent_state_buffer,
+            PARTICLE_META_BUFFER_OFFSET,
+            agents._particle_meta_dtype.itemsize,
+        )
+        meta = np.frombuffer(
+            raw, dtype=agents._particle_meta_dtype, count=1
+        ).copy()
+        meta["chemicalState"][0] = 0.0
+        device.queue.write_buffer(
+            agents._agent_state_buffer,
+            PARTICLE_META_BUFFER_OFFSET,
+            meta.tobytes(),
+        )
+
     environment.reset()
+    reset_cellular_chemistry()
     deposited_once = macro_tick(1)
     assert deposited_once.max() > 0.0 and deposited_once.sum() > 0.0, deposited_once
 
     # Four deliberation rounds must still produce exactly one deposit from the
     # final output, not four accumulated writes or four diffusion/decay steps.
     environment.reset()
+    reset_cellular_chemistry()
     deposited_four = macro_tick(4)
     np.testing.assert_allclose(deposited_four, deposited_once, rtol=2e-5, atol=2e-5)
 
     agents.load_weights(np.zeros_like(weights))
+    reset_cellular_chemistry()
+    agents.set_active_count(0)
     aged = macro_tick(4)
     np.testing.assert_allclose(aged.sum(), deposited_four.sum() * decay, rtol=2e-5, atol=2e-5)
     assert aged.max() < deposited_four.max(), (aged.max(), deposited_four.max())
@@ -576,7 +600,7 @@ def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
     layout = weight_layout(channels, hidden)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     elastic_offset = channels * 3 + 3
-    color_start = channels + 6
+    color_start = channels + 7
     for component in range(3):
         weights[layout["fc1w_offset"] + component * layout["in_dim"] + elastic_offset + component] = 1.0
         weights[layout["fc2w_offset"] + (color_start + component) * hidden + component] = 1.0
@@ -1214,16 +1238,10 @@ def _cycle_gate_case(
     environment.reset()
     agents.set_active_count(1)
     agents.reset_heading(19)
-    meta = np.frombuffer(
-        device.queue.read_buffer(
-            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
-            agents._particle_meta_dtype.itemsize,
-        ),
-        dtype=agents._particle_meta_dtype, count=1,
-    ).copy()
-    meta["chemicalState"][0, 7] = 1.0
-    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
-    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
+    layout = weight_layout(8, 128)
+    weights = np.zeros(layout["total_floats"], dtype=np.float32)
+    weights[layout["fc2b_offset"] + 8 + 6] = 20.0
+    agents.load_weights(weights)
     agents.set_growth_enabled(enabled)
     if runtime_cap is not None:
         agents.set_max_active_particles(runtime_cap)
@@ -1265,7 +1283,7 @@ def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
 
 
 def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
-    """Weak growth drive accumulates, survives zero-signal gaps, then admits."""
+    """A weak division drive accumulates, survives inhibited gaps, then admits."""
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 8, 256, 256, 1.0, 1.0)
     agents = AgentsGPU(
@@ -1282,7 +1300,14 @@ def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
     )
     agents.set_active_count(1)
     agents.reset_heading(37)
-    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
+    layout = weight_layout(8, 128)
+    inactive_weights = np.zeros(layout["total_floats"], dtype=np.float32)
+    drive_weights = inactive_weights.copy()
+    division_probability = 0.2
+    drive_weights[
+        layout["fc2b_offset"] + 8 + 6
+    ] = np.arctanh(division_probability)
+    agents.load_weights(drive_weights)
     meta = np.frombuffer(
         device.queue.read_buffer(
             agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
@@ -1291,7 +1316,6 @@ def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
         dtype=agents._particle_meta_dtype, count=1,
     ).copy()
     meta["divisionThreshold"][0] = 10.0
-    meta["chemicalState"][0, 7] = 0.2
     device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
 
     def advance(rounds: int) -> None:
@@ -1312,20 +1336,18 @@ def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
 
     advance(3)
     accumulated = read_meta()
-    represented_signal = round(0.2 * 4096.0) / 4096.0
-    expected = 3.0 * -np.log(1.0 - represented_signal)
+    expected = 3.0 * -np.log(1.0 - division_probability)
     assert np.isclose(accumulated["divisionHazard"][0], expected, atol=2e-6), accumulated
     assert _probe(core, 1)[0, 2] == 0.0
 
-    accumulated["chemicalState"][0, 7] = 0.0
-    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, accumulated.tobytes())
+    agents.load_weights(inactive_weights)
     advance(2)
     paused = read_meta()
     assert np.isclose(paused["divisionHazard"][0], expected, atol=2e-6), paused
 
     paused["divisionThreshold"][0] = expected + 0.1
-    paused["chemicalState"][0, 7] = 0.2
     device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, paused.tobytes())
+    agents.load_weights(drive_weights)
     advance(1)
     admitted = read_meta()
     assert _probe(core, 1)[0, 2] == 1.0
@@ -1358,10 +1380,10 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     agents.reset_heading(31)
     layout = weight_layout(1, 128, STATEFUL_128_ARCHITECTURE)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Common motion/growth outputs occupy C+6 rows. Drive private channel 0
+    # Common motion/growth outputs plus division drive occupy C+7 rows. Drive private channel 0
     # positively and open its gate; all other private channels remain still.
-    weights[layout["fc2b_offset"] + 7] = 1.0
-    weights[layout["fc2b_offset"] + 15] = 20.0
+    weights[layout["fc2b_offset"] + 8] = 1.0
+    weights[layout["fc2b_offset"] + 16] = 20.0
     agents.load_weights(weights)
     agents.set_communication_timestep(0.25)
 

@@ -1,21 +1,27 @@
 {
   "version": 1,
-  "preset": "developmental-2-3-3",
+  "preset": "developmental-3-3-3",
   "profiles": {
     "global": {
       "resolutionScale": 0.125,
-      "decayExponent": 0.05,
-      "diffusionMultiplier": 1.0,
-      "depositSigmaMultiplier": 3.0
+      "relaxationTime": 24.0,
+      "fieldResponseTime": 24.0,
+      "decayExponent": 0.1,
+      "diffusionMultiplier": 0.001,
+      "depositSigmaMultiplier": 1.0
     },
     "regional": {
       "resolutionScale": 0.25,
-      "decayExponent": 0.25,
+      "relaxationTime": 10.0,
+      "fieldResponseTime": 10.0,
+      "decayExponent": 0.5,
       "diffusionMultiplier": 1.0,
       "depositSigmaMultiplier": 3.0
     },
     "local": {
       "resolutionScale": 1.0,
+      "relaxationTime": 3.0,
+      "fieldResponseTime": 3.0,
       "decayExponent": 1.0,
       "diffusionMultiplier": 1.0,
       "depositSigmaMultiplier": 4.0
@@ -24,11 +30,12 @@
   "channels": [
     { "scale": "global" },
     { "scale": "global" },
+    { "scale": "global" },
     { "scale": "regional" },
     { "scale": "regional" },
     { "scale": "regional" },
     { "scale": "local" },
     { "scale": "local" },
-    { "scale": "local", "role": "growth" }
+    { "scale": "local" }
   ]
 }
