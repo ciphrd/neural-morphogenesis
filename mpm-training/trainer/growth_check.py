@@ -833,23 +833,24 @@ def _polarized_split_case(
     return core.read_positions()
 
 
-def check_division_always_uses_rear_facing_direction(device: wgpu.GPUDevice) -> None:
+def check_division_uses_signed_neural_direction(device: wgpu.GPUDevice) -> None:
     positive = _polarized_split_case(device, 20.0)
     negative = _polarized_split_case(device, -20.0)
     unbiased = _polarized_split_case(device, 20.0, -20.0)
     globally_symmetric = _polarized_split_case(device, 20.0, directionality=0.0)
-    expected_rear_biased = np.array([[0.5, 0.5], [0.49, 0.5]], dtype=np.float32)
-    expected_symmetric = np.array([[0.505, 0.5], [0.495, 0.5]], dtype=np.float32)
-    assert np.allclose(positive, expected_rear_biased, atol=2e-6), positive
-    assert np.allclose(negative, expected_rear_biased, atol=2e-6), negative
+    expected_positive_biased = np.array([[0.5, 0.5], [0.51, 0.5]], dtype=np.float32)
+    expected_negative_biased = np.array([[0.5, 0.5], [0.49, 0.5]], dtype=np.float32)
+    expected_symmetric = np.array([[0.495, 0.5], [0.505, 0.5]], dtype=np.float32)
+    assert np.allclose(positive, expected_positive_biased, atol=2e-6), positive
+    assert np.allclose(negative, expected_negative_biased, atol=2e-6), negative
     assert np.allclose(unbiased, expected_symmetric, atol=2e-6), unbiased
     assert np.allclose(globally_symmetric, expected_symmetric, atol=2e-6), globally_symmetric
-    assert positive[1, 0] < positive[0, 0] and negative[1, 0] < negative[0, 0]
-    print("[PASS] division places the daughter behind its parent's facing direction")
+    assert positive[1, 0] > positive[0, 0] and negative[1, 0] < negative[0, 0]
+    print("[PASS] division uses the signed neural growth direction")
 
 
-def check_boundary_gradient_does_not_change_rear_split(device: wgpu.GPUDevice) -> None:
-    """Boundary-tangent growth must not change rear-facing placement."""
+def check_morphology_gradient_does_not_override_neural_split(device: wgpu.GPUDevice) -> None:
+    """A production split follows its neural direction, not the morphology gradient."""
     core = MpmCore(device)
     environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
     agents = AgentsGPU(
@@ -857,13 +858,11 @@ def check_boundary_gradient_does_not_change_rear_split(device: wgpu.GPUDevice) -
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
         6, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
     )
-    # This diagnostic deliberately exercises tangent-directed growth even for
-    # its small synthetic gradient; rear-facing placement must remain fixed.
+    # Make the synthetic morphology gradient comfortably measurable.
     agents.set_boundary_tangent_min_gradient(1e-6)
     # Particle 0 is just to the right of a small cluster. Its morphology
-    # gradient is nonzero, while a zeroed policy would otherwise request a
-    # horizontal split. The assertion below reconstructs the exact sampled
-    # gradient rather than assuming an ideal direction on the discrete grid.
+    # gradient is nonzero, while a zeroed policy retains its initialized local
+    # +x direction. The assertion below verifies morphology does not override it.
     positions = np.array([
         [0.53, 0.50],
         [0.50, 0.49],
@@ -932,9 +931,9 @@ def check_boundary_gradient_does_not_change_rear_split(device: wgpu.GPUDevice) -
     separation = (separation + 0.5) % 1.0 - 0.5
     assert np.isclose(np.linalg.norm(separation), 0.01, atol=2e-5), daughters
     np.testing.assert_allclose(
-        separation / np.linalg.norm(separation), [-1.0, 0.0], atol=2e-5
+        separation / np.linalg.norm(separation), [1.0, 0.0], atol=2e-5
     )
-    print("[PASS] morphology-tangent growth leaves rear-facing placement unchanged")
+    print("[PASS] morphology gradient does not override neural split direction")
 
 
 def check_anisotropic_tensor_split(device: wgpu.GPUDevice) -> None:
@@ -1442,8 +1441,8 @@ def main() -> None:
     check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
     check_desired_heading_derives_angular_acceleration(device)
-    check_division_always_uses_rear_facing_direction(device)
-    check_boundary_gradient_does_not_change_rear_split(device)
+    check_division_uses_signed_neural_direction(device)
+    check_morphology_gradient_does_not_override_neural_split(device)
     check_anisotropic_tensor_split(device)
     check_isotropic_increment_preserves_tensor_shape(device)
     check_directional_increment_and_objectivity(device)

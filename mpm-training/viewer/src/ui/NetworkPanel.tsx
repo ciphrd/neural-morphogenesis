@@ -547,7 +547,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           </div>
 
           <div className="nn-block">
-            <h3>Output — growth direction</h3>
+            <h3>Output — growth / split direction</h3>
             <div className="nn-group">
               <ActivationBar
                 label="derived turn"

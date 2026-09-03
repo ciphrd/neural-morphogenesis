@@ -51,10 +51,9 @@
 // spatial field. Per-channel temporal scales divide both delta rates.
 //
 // Growth — each particle may spawn a copy of itself after completing its
-// tensor-growth cycle. Division always places the new daughter directly behind
-// the parent's current heading. The policy's growth-direction output belongs
-// exclusively to the morphoelastic growth tensor; it no longer participates in
-// daughter placement. Growth admission integrates persistent hazard from a
+// tensor-growth cycle. The policy's signed growth-direction output selects both
+// the morphoelastic growth axis and the eventual daughter-placement direction.
+// Growth admission integrates persistent hazard from a
 // dedicated signed policy output: positive values are interpreted as a
 // per-macro-step probability, while zero and negative values inhibit division.
 // See agentStep()'s own comment for the exact split logic.
@@ -124,9 +123,9 @@
 // buffers (see simulation.ts/agents_gpu.py).
 //
 // The policy proposes a local growth direction and anisotropy target;
-// agentStep() relaxes persistent angle/anisotropy states toward them. These
-// affect Fg (and optional strafe) only. A separate sigmoid controls how far the
-// rear-facing daughter pair's center shifts, but not its axis. physics.maxStrafe
+// agentStep() relaxes persistent angle/anisotropy states toward them. The signed
+// direction controls Fg, optional strafe, and the split axis. A separate sigmoid
+// controls how far the daughter pair's center shifts along that axis. physics.maxStrafe
 // remains an optional scale for applying the growth direction as physical
 // acceleration; it is zero by default and does not scale growth geometry.
 
@@ -1090,8 +1089,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   let lifecycleMorphologyGradientMagnitude = length(lifecycleMorphologyGradient);
   if (forcedBoundaryTangent
       && lifecycleMorphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
-    // During a tangent-controlled Lab cycle, align morphoelastic growth with
-    // the local boundary tangent. Division placement remains rear-facing.
+    // During a tangent-controlled Lab cycle, align morphoelastic growth and
+    // daughter placement with the local boundary tangent.
     growthDirectionWorld = vec2<f32>(
       -lifecycleMorphologyGradient.y,
       lifecycleMorphologyGradient.x,
@@ -1102,7 +1101,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   } else if (forcedLifecycle && !forcedBoundaryTangent) {
     // Lock the persistent world-frame growth axis. g2p therefore grows Fg
     // along this direction and transfers its stress through the ordinary MPM
-    // grid before rear-facing division.
+    // grid before division on the same axis.
     growthDirectionWorld = normalize(physics.forcedDivisionDirection);
     growthWorldAngle = atan2(growthDirectionWorld.y, growthDirectionWorld.x);
     particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - headingVal);
@@ -1224,16 +1223,16 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     let newIndex = atomicAdd(&agentState.growthCount, 1u);
     if (newIndex < physics.maxActiveParticles) {
       let nextGeneration = agentState.particleMeta[pi].rng + 1u;
-      // Daughter placement has one permanent axis: directly behind the
-      // parent's current facing direction. Neural and morphology directions
-      // remain relevant to growthF, never to spawning.
-      let spawnDir = -forward;
+      // Use the latest persistent signed neural direction for division as well
+      // as growth. growthDirectionWorld includes the heading-relative transform
+      // and any forced Lab direction selected above.
+      let spawnDir = growthDirectionWorld;
       let polarization = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
         * clamp(stepMode.divisionDirectionality, 0.0, 1.0);
       var centerShift = spawnDir * (0.5 * physics.splitDisplacement) * polarization;
       // Scheduled Lab lifecycles keep the real conservative division path but
-      // center the rear-facing pair on the original particle. Production
-      // divisions retain their divisionBias-controlled rearward center shift.
+      // center the pair on the original particle. Production divisions retain
+      // their divisionBias-controlled shift along the neural direction.
       if (forcedLifecycle) {
         centerShift = vec2<f32>(0.0);
       }

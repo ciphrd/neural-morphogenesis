@@ -255,7 +255,7 @@ export function physicsSliderSpecsFor(
  * maxAngularVelocity, and depositSigma (the normalized-world cell-state Gaussian sigma — see
  * agents.wgsl's own depositGaussian() for the exact kernel this drives,
  * replacing that shader's old flat 4-corner bilinear scatter),
- * growth's own splitDisplacement (rear-facing daughter separation) and
+ * growth's own splitDisplacement (neural-axis daughter separation) and
  * divisionCooldown (macro steps a particle refuses
  * to split again for, right after splitting, whether as parent or child
  * — see agents.wgsl's own module docstring for the full growth design;

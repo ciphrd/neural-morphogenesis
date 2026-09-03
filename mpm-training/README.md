@@ -65,7 +65,8 @@ Three signals have distinct responsibilities:
 2. **Neural targets control persistent growth geometry.** Two bounded outputs
    propose a local growth direction, while a sigmoid proposes anisotropy; the
    stored angle and anisotropy relax smoothly toward them. Another sigmoid
-   selects how strongly rear-facing division is polarized versus centered.
+   selects how strongly division is polarized along that signed direction
+   versus centered.
 3. **The morphoelastic law supplies the amount of growth.** Once a cell cycle
    is active, a configured duration determines approximately how many mechanical
    macro steps it takes to double stress-free area. Elastic compression
@@ -445,11 +446,11 @@ Division occurs when the parent's stress-free area reaches
 determinant(Fg) = 2
 ```
 
-Daughter placement always uses the direction behind the parent's current
-heading. The policy has no spawn-direction control. For split distance `d`:
+Daughter placement uses the latest persistent signed neural growth direction.
+For split distance `d`:
 
 ```text
-n = -agent_forward
+n = world_growth_direction
 bias = division_bias * division_directionality
 
 half_offset = n * d / 2
@@ -459,17 +460,17 @@ parent_position   = old_position - half_offset + center_shift
 daughter_position = old_position + half_offset + center_shift
 ```
 
-With zero bias, the split is symmetric along the forward/rear axis. With full
-bias, the parent remains at the old position and the daughter is placed one
-split distance behind it. Intermediate values smoothly interpolate between
-those cases. Positions wrap around the toroidal simulation domain. The neural
-growth direction controls only the stress-free growth tensor and optional
-strafe acceleration.
+With zero bias, the split is symmetric along the neural axis. With full bias,
+the parent remains at the old position and the daughter is placed one split
+distance along `+n`. Intermediate values smoothly interpolate between those
+cases. Positions wrap around the toroidal simulation domain. Because tensor
+growth is axial, `n` and `-n` produce the same `Fg`; division preserves the
+direction's sign and makes the distinction observable.
 
 The viewer's Growth panel exposes `division_directionality` from 0 to 1 as a
-playback-only polarization cap: 0 makes each rear-facing split center-preserving
-and symmetric, while 1 permits the policy's division bias to keep the parent in
-place and put the daughter the full split distance behind it.
+playback-only polarization cap: 0 makes each split center-preserving and
+symmetric, while 1 permits the policy's division bias to keep the parent in
+place and put the daughter the full split distance along its neural direction.
 
 Division conserves mass and rest area:
 
@@ -515,8 +516,8 @@ The visible organism is an emergent result of:
   toward a full `[0,1]` probability range;
 - **chemical feedback:** where particles write signals and how neighbors react;
 - **directional rest growth:** the accumulated tensor `Fg` of each particle;
-- **rear-facing division polarity:** whether the parent stays fixed or the
-  daughter pair remains centered;
+- **signed division polarity:** the neural split direction and whether the
+  parent stays fixed or the daughter pair remains centered;
 - **elastic relaxation:** how neighboring material accommodates new rest area;
 - **plasticity:** which sufficiently large elastic deformations become
   permanent;
@@ -554,7 +555,7 @@ cap.
 ## Relevant implementation files
 
 - [`core/agents.wgsl`](core/agents.wgsl) — sensing, neural policy, chemical
-  writes, cell-cycle admission, rear-facing division, and daughter initialization.
+  writes, cell-cycle admission, neural-direction division, and daughter initialization.
 - [`core/g2p.wgsl`](core/g2p.wgsl) — deformation update, plastic clamp, and
   tensor-valued `Fg` growth law.
 - [`core/p2g.wgsl`](core/p2g.wgsl) — effective grown mass/volume and elastic
