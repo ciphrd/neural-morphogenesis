@@ -1,4 +1,4 @@
-import type { FieldMode, ParticleRenderMode } from "./gpu/render"
+import type { FieldMode, ParticleColorMode, ParticleShape } from "./gpu/render"
 import type { DeformSettings, Tool } from "./render/GridCanvas"
 
 interface ViewerDefaults {
@@ -17,12 +17,17 @@ interface ViewerDefaults {
   rendering: {
     fieldMode: FieldMode
     substrateChannelStart: number
+    substrateZeroIsBlack: boolean
+    boundaryGradientZeroIsBlack: boolean
     morphologyGradientVisible: boolean
     morphologyDensityVisible: boolean
     accent: number
     blur: number
     gradientExponent: number
-    particleRenderMode: ParticleRenderMode
+    particleShape: ParticleShape
+    particleColorMode: ParticleColorMode
+    particleAlpha: number
+    directionalLineVisible: boolean
     boundaryGradientScale: number
     zoom: number
     autoZoom: {
@@ -46,14 +51,10 @@ interface ViewerDefaults {
     }
     particleRadiusPx: number
     targetVisible: boolean
-    whiteDotsAlpha: number
-    activationAlpha: number
-    neuralColorAlpha: number
-    internalStateAlpha: number
+    mitosisSignalBoost: number
     internalStateChannelStart: number
     /** Amount of wrapped memory channels +3/+4/+5 subtracted from particle RGB. */
     chemicalMemoryOpponentSubtraction: number
-    growthAxisLengthPx: number
   }
   tools: {
     selected: Tool
@@ -82,12 +83,17 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
   rendering: {
     fieldMode: "none",
     substrateChannelStart: 0,
+    substrateZeroIsBlack: false,
+    boundaryGradientZeroIsBlack: false,
     morphologyGradientVisible: true,
     morphologyDensityVisible: true,
     accent: 0,
     blur: 0,
     gradientExponent: 1,
-    particleRenderMode: "dots-internal-state",
+    particleShape: "dot",
+    particleColorMode: "neural-memory",
+    particleAlpha: 0.4,
+    directionalLineVisible: false,
     boundaryGradientScale: 0.01,
     zoom: 1,
     autoZoom: {
@@ -108,13 +114,9 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
     },
     particleRadiusPx: 1,
     targetVisible: true,
-    whiteDotsAlpha: 1,
-    activationAlpha: 0.2,
-    neuralColorAlpha: 1,
-    internalStateAlpha: 0.4,
+    mitosisSignalBoost: 1,
     internalStateChannelStart: 0,
     chemicalMemoryOpponentSubtraction: 0,
-    growthAxisLengthPx: 6,
   },
   tools: {
     selected: "none",

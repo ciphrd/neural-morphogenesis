@@ -2,7 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import type { DeformDirection, DeformMode } from "../gpu/deform";
 import type { BloomSettings } from "../gpu/bloom";
 import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu/device";
-import type { FieldMode, ParticleRenderMode } from "../gpu/render";
+import type { FieldMode, ParticleColorMode, ParticleShape } from "../gpu/render";
 import { GpuSimulation, type SimulationScenario } from "../gpu/simulation";
 import { policyWeightsShapeError } from "../gpu/policyEval";
 import type { PhysicsSettings, SimulationConfig, UpdateRuleWeights } from "../gpu/types";
@@ -68,20 +68,21 @@ interface GridCanvasProps {
   fieldMode?: FieldMode;
   /** First of three contiguous chemical channels mapped to substrate RGB. */
   substrateChannelStart?: number;
-  particleRenderMode?: ParticleRenderMode;
+  substrateZeroIsBlack?: boolean;
+  boundaryGradientZeroIsBlack?: boolean;
+  particleShape?: ParticleShape;
+  particleColorMode?: ParticleColorMode;
+  particleAlpha?: number;
+  directionalLineVisible?: boolean;
   particleRadiusPx?: number;
-  whiteDotsAlpha?: number;
-  activationAlpha?: number;
-  neuralColorAlpha?: number;
-  internalStateAlpha?: number;
+  /** Visualization-only multiplier for the signed mitosis drive. */
+  mitosisSignalBoost?: number;
   /** Boundary diagnostic half-activation gradient g0. */
   boundaryGradientScale?: number;
   /** First of three contiguous private-state channels mapped to cell RGB. */
   internalStateChannelStart?: number;
   /** Amount of the wrapped next three private-state channels subtracted from particle RGB. */
   chemicalMemoryOpponentSubtraction?: number;
-  /** Full-strength axis length in device pixels. */
-  growthAxisLengthPx?: number;
   /** [-2,2] — negative suppresses background-field contrast, 0 is
    * identity, positive accentuates faint values. */
   accent?: number;
@@ -295,16 +296,17 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     initialParticleCount,
     fieldMode = "none",
     substrateChannelStart = 0,
-    particleRenderMode = "dots-white",
+    substrateZeroIsBlack = false,
+    boundaryGradientZeroIsBlack = false,
+    particleShape = "dot",
+    particleColorMode = "white",
+    particleAlpha = 1,
+    directionalLineVisible = false,
     particleRadiusPx,
-    whiteDotsAlpha = 1,
-    activationAlpha = 0.2,
-    neuralColorAlpha = 1,
-    internalStateAlpha = 1,
+    mitosisSignalBoost = 1,
     boundaryGradientScale = 0.01,
     internalStateChannelStart = 0,
     chemicalMemoryOpponentSubtraction = 0,
-    growthAxisLengthPx = 6,
     accent = 0,
     morphologyGradientVisible = true,
     morphologyDensityVisible = true,
@@ -333,16 +335,17 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const initialParticleCountRef = useRef(initialParticleCount);
   const fieldModeRef = useRef(fieldMode);
   const substrateChannelStartRef = useRef(substrateChannelStart);
-  const particleRenderModeRef = useRef(particleRenderMode);
+  const substrateZeroIsBlackRef = useRef(substrateZeroIsBlack);
+  const boundaryGradientZeroIsBlackRef = useRef(boundaryGradientZeroIsBlack);
+  const particleShapeRef = useRef(particleShape);
+  const particleColorModeRef = useRef(particleColorMode);
+  const particleAlphaRef = useRef(particleAlpha);
+  const directionalLineVisibleRef = useRef(directionalLineVisible);
   const particleRadiusPxRef = useRef(particleRadiusPx);
-  const whiteDotsAlphaRef = useRef(whiteDotsAlpha);
-  const activationAlphaRef = useRef(activationAlpha);
-  const neuralColorAlphaRef = useRef(neuralColorAlpha);
-  const internalStateAlphaRef = useRef(internalStateAlpha);
+  const mitosisSignalBoostRef = useRef(mitosisSignalBoost);
   const boundaryGradientScaleRef = useRef(boundaryGradientScale);
   const internalStateChannelStartRef = useRef(internalStateChannelStart);
   const chemicalMemoryOpponentSubtractionRef = useRef(chemicalMemoryOpponentSubtraction);
-  const growthAxisLengthPxRef = useRef(growthAxisLengthPx);
   const accentRef = useRef(accent);
   const morphologyGradientVisibleRef = useRef(morphologyGradientVisible);
   const morphologyDensityVisibleRef = useRef(morphologyDensityVisible);
@@ -478,16 +481,17 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   initialParticleCountRef.current = initialParticleCount;
   fieldModeRef.current = fieldMode;
   substrateChannelStartRef.current = substrateChannelStart;
-  particleRenderModeRef.current = particleRenderMode;
+  substrateZeroIsBlackRef.current = substrateZeroIsBlack;
+  boundaryGradientZeroIsBlackRef.current = boundaryGradientZeroIsBlack;
+  particleShapeRef.current = particleShape;
+  particleColorModeRef.current = particleColorMode;
+  particleAlphaRef.current = particleAlpha;
+  directionalLineVisibleRef.current = directionalLineVisible;
   particleRadiusPxRef.current = particleRadiusPx;
-  whiteDotsAlphaRef.current = whiteDotsAlpha;
-  activationAlphaRef.current = activationAlpha;
-  neuralColorAlphaRef.current = neuralColorAlpha;
-  internalStateAlphaRef.current = internalStateAlpha;
+  mitosisSignalBoostRef.current = mitosisSignalBoost;
   boundaryGradientScaleRef.current = boundaryGradientScale;
   internalStateChannelStartRef.current = internalStateChannelStart;
   chemicalMemoryOpponentSubtractionRef.current = chemicalMemoryOpponentSubtraction;
-  growthAxisLengthPxRef.current = growthAxisLengthPx;
   accentRef.current = accent;
   morphologyGradientVisibleRef.current = morphologyGradientVisible;
   morphologyDensityVisibleRef.current = morphologyDensityVisible;
@@ -662,16 +666,17 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setTargetVisible(targetVisible);
       simulation.setFieldMode(fieldModeRef.current);
       simulation.setSubstrateChannelStart(substrateChannelStartRef.current);
-      simulation.setParticleRenderMode(particleRenderModeRef.current);
-      simulation.setWhiteDotsAlpha(whiteDotsAlphaRef.current);
-      simulation.setActivationAlpha(activationAlphaRef.current);
-      simulation.setNeuralColorAlpha(neuralColorAlphaRef.current);
-      simulation.setInternalStateAlpha(internalStateAlphaRef.current);
+      simulation.setSubstrateZeroIsBlack(substrateZeroIsBlackRef.current);
+      simulation.setBoundaryGradientZeroIsBlack(boundaryGradientZeroIsBlackRef.current);
+      simulation.setParticleShape(particleShapeRef.current);
+      simulation.setParticleColorMode(particleColorModeRef.current);
+      simulation.setParticleAlpha(particleAlphaRef.current);
+      simulation.setDirectionalLineVisible(directionalLineVisibleRef.current);
+      simulation.setMitosisSignalBoost(mitosisSignalBoostRef.current);
       simulation.setBoundaryGradientScale(boundaryGradientScaleRef.current);
       simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
       simulation.setChemicalMemoryOpponentSubtraction(chemicalMemoryOpponentSubtractionRef.current);
       if (particleRadiusPxRef.current !== undefined) simulation.setPointRadiusPx(particleRadiusPxRef.current);
-      simulation.setGrowthAxisLengthPx(growthAxisLengthPxRef.current);
       simulation.setAccent(accentRef.current);
       simulation.setMorphologyDisplay(morphologyGradientVisibleRef.current, morphologyDensityVisibleRef.current);
       simulation.setBlur(blurRef.current);
@@ -975,24 +980,32 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [substrateChannelStart]);
 
   useEffect(() => {
-    simulationRef.current?.setParticleRenderMode(particleRenderMode);
-  }, [particleRenderMode]);
+    simulationRef.current?.setSubstrateZeroIsBlack(substrateZeroIsBlack);
+  }, [substrateZeroIsBlack]);
 
   useEffect(() => {
-    simulationRef.current?.setWhiteDotsAlpha(whiteDotsAlpha);
-  }, [whiteDotsAlpha]);
+    simulationRef.current?.setBoundaryGradientZeroIsBlack(boundaryGradientZeroIsBlack);
+  }, [boundaryGradientZeroIsBlack]);
 
   useEffect(() => {
-    simulationRef.current?.setActivationAlpha(activationAlpha);
-  }, [activationAlpha]);
+    simulationRef.current?.setParticleShape(particleShape);
+  }, [particleShape]);
 
   useEffect(() => {
-    simulationRef.current?.setNeuralColorAlpha(neuralColorAlpha);
-  }, [neuralColorAlpha]);
+    simulationRef.current?.setParticleColorMode(particleColorMode);
+  }, [particleColorMode]);
 
   useEffect(() => {
-    simulationRef.current?.setInternalStateAlpha(internalStateAlpha);
-  }, [internalStateAlpha]);
+    simulationRef.current?.setParticleAlpha(particleAlpha);
+  }, [particleAlpha]);
+
+  useEffect(() => {
+    simulationRef.current?.setDirectionalLineVisible(directionalLineVisible);
+  }, [directionalLineVisible]);
+
+  useEffect(() => {
+    simulationRef.current?.setMitosisSignalBoost(mitosisSignalBoost);
+  }, [mitosisSignalBoost]);
 
   useEffect(() => {
     simulationRef.current?.setBoundaryGradientScale(boundaryGradientScale);
@@ -1009,10 +1022,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     if (particleRadiusPx !== undefined) simulationRef.current?.setPointRadiusPx(particleRadiusPx);
   }, [particleRadiusPx]);
-
-  useEffect(() => {
-    simulationRef.current?.setGrowthAxisLengthPx(growthAxisLengthPx);
-  }, [growthAxisLengthPx]);
 
   useEffect(() => {
     simulationRef.current?.setAccent(accent);

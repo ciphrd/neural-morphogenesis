@@ -3,7 +3,7 @@
   "preset": "developmental-3-3-3",
   "profiles": {
     "global": {
-      "resolutionScale": 0.125,
+      "resolutionScale": 0.25,
       "relaxationTime": 24.0,
       "fieldResponseTime": 24.0,
       "decayExponent": 0.1,
@@ -11,7 +11,7 @@
       "depositSigmaMultiplier": 1.0
     },
     "regional": {
-      "resolutionScale": 0.25,
+      "resolutionScale": 0.5,
       "relaxationTime": 10.0,
       "fieldResponseTime": 10.0,
       "decayExponent": 0.5,

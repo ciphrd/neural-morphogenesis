@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
-import type { FieldMode, ParticleRenderMode } from "./gpu/render"
+import type { FieldMode, ParticleColorMode, ParticleShape } from "./gpu/render"
 import type { CellMemory, ChemicalCommunicationArchitecture, PhysicsSettings } from "./gpu/types"
 import {
   cellMemoryFromConfig,
@@ -175,17 +175,18 @@ export function LabView() {
   }), [autoZoomEnabled])
   const [bloom, setBloom] = useState(() => ({ ...VIEWER_DEFAULTS.rendering.bloom }))
   const [particleRadiusPx, setParticleRadiusPx] = useState(VIEWER_DEFAULTS.rendering.particleRadiusPx)
-  const [particleRenderMode, setParticleRenderMode] = useState<ParticleRenderMode>(VIEWER_DEFAULTS.rendering.particleRenderMode)
-  const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(VIEWER_DEFAULTS.rendering.whiteDotsAlpha)
-  const [neuralColorAlpha, setNeuralColorAlpha] = useState(VIEWER_DEFAULTS.rendering.neuralColorAlpha)
-  const [internalStateAlpha, setInternalStateAlpha] = useState(VIEWER_DEFAULTS.rendering.internalStateAlpha)
-  const [activationAlpha, setActivationAlpha] = useState(VIEWER_DEFAULTS.rendering.activationAlpha)
+  const [particleShape, setParticleShape] = useState<ParticleShape>(VIEWER_DEFAULTS.rendering.particleShape)
+  const [particleColorMode, setParticleColorMode] = useState<ParticleColorMode>(VIEWER_DEFAULTS.rendering.particleColorMode)
+  const [particleAlpha, setParticleAlpha] = useState(VIEWER_DEFAULTS.rendering.particleAlpha)
+  const [directionalLineVisible, setDirectionalLineVisible] = useState(VIEWER_DEFAULTS.rendering.directionalLineVisible)
+  const [mitosisSignalBoost, setMitosisSignalBoost] = useState(VIEWER_DEFAULTS.rendering.mitosisSignalBoost)
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(VIEWER_DEFAULTS.rendering.internalStateChannelStart)
   const [chemicalMemoryOpponentSubtraction, setChemicalMemoryOpponentSubtraction] = useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
   const [boundaryGradientScale, setBoundaryGradientScale] = useState(VIEWER_DEFAULTS.rendering.boundaryGradientScale)
-  const [growthAxisLengthPx, setGrowthAxisLengthPx] = useState(VIEWER_DEFAULTS.rendering.growthAxisLengthPx)
   const [fieldMode, setFieldMode] = useState<FieldMode>(VIEWER_DEFAULTS.rendering.fieldMode)
   const [substrateChannelStart, setSubstrateChannelStart] = useState(VIEWER_DEFAULTS.rendering.substrateChannelStart)
+  const [substrateZeroIsBlack, setSubstrateZeroIsBlack] = useState(VIEWER_DEFAULTS.rendering.substrateZeroIsBlack)
+  const [boundaryGradientZeroIsBlack, setBoundaryGradientZeroIsBlack] = useState(VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack)
   const [morphologyGradientVisible, setMorphologyGradientVisible] = useState(VIEWER_DEFAULTS.rendering.morphologyGradientVisible)
   const [morphologyDensityVisible, setMorphologyDensityVisible] = useState(VIEWER_DEFAULTS.rendering.morphologyDensityVisible)
   const [accent, setAccent] = useState(VIEWER_DEFAULTS.rendering.accent)
@@ -205,7 +206,7 @@ export function LabView() {
     }
   }
 
-  const particleStateChannelCount = particleRenderMode === "dots-internal-state"
+  const particleStateChannelCount = particleColorMode === "neural-memory"
     ? 8
     : (config?.channels ?? 1)
   const particleStateChannelStart = Math.min(
@@ -241,7 +242,8 @@ export function LabView() {
           <div className="stat-row"><span>Spacing</span><span>Split distance</span></div>
         </section>
         <section>
-          <h2>Simulation</h2>
+          <details className="settings-category">
+          <summary>Simulation</summary>
           <div className="stat-row">
             <span>Cell memory</span>
             <select
@@ -364,6 +366,7 @@ export function LabView() {
             />
             Chirality
           </label>
+          </details>
         </section>
         <section>
           <h2>Events</h2>
@@ -405,61 +408,41 @@ export function LabView() {
             <Slider min={1} max={16} step={1} value={particleRadiusPx} onChange={setParticleRadiusPx} />
             <span className="slider-value">{particleRadiusPx}px</span>
           </label>
-          <label className="slider-row">
-            <span>Particles</span>
-            <select className="select" value={particleRenderMode} onChange={(event) => setParticleRenderMode(event.target.value as ParticleRenderMode)}>
-              <option value="dots-white">Dots (white)</option>
-              <option value="dots-neural-color">Dots (neural RGB)</option>
-              <option value="dots-internal-state">Neural memory</option>
-              <option value="dots-chemical-levels">Chemical memory</option>
-              <option value="dots-boundary-value">Boundary value</option>
-              <option value="dots-activation">Dots (neurons)</option>
-              <option value="dots-activation-translucent">Dots (translucent neurons)</option>
-              <option value="directional-arrows">Directional triangles</option>
-            </select>
-          </label>
-          {particleRenderMode === "dots-white" && (
-            <label className="slider-row"><span>Dots alpha</span><Slider min={0} max={1} step={0.01} value={whiteDotsAlpha} onChange={setWhiteDotsAlpha} /><span className="slider-value">{whiteDotsAlpha.toFixed(2)}</span></label>
+          <label className="slider-row"><span>Shape</span><select className="select" value={particleShape} onChange={(event) => setParticleShape(event.target.value as ParticleShape)}><option value="dot">Dot</option><option value="triangle">Triangle</option></select></label>
+          <label className="slider-row"><span>Color</span><select className="select" value={particleColorMode} onChange={(event) => setParticleColorMode(event.target.value as ParticleColorMode)}><option value="white">White</option><option value="neural-color">Neural RGB</option><option value="mitosis-drive">Mitosis drive</option><option value="neural-memory">Neural memory</option><option value="chemical-memory">Chemical memory</option><option value="boundary-value">Boundary value</option><option value="neurons">Neurons</option></select></label>
+          <label className="slider-row"><span>Alpha</span><Slider min={0} max={1} step={0.01} value={particleAlpha} onChange={setParticleAlpha} /><span className="slider-value">{particleAlpha.toFixed(2)}</span></label>
+          <label className="checkbox-row"><input type="checkbox" checked={directionalLineVisible} onChange={(event) => setDirectionalLineVisible(event.target.checked)} />Directional line</label>
+          {particleColorMode === "mitosis-drive" && (
+            <label className="slider-row"><span>Signal boost</span><Slider min={1} max={10} step={0.1} value={mitosisSignalBoost} onChange={setMitosisSignalBoost} /><span className="slider-value">{mitosisSignalBoost.toFixed(1)}×</span></label>
           )}
-          {particleRenderMode === "dots-neural-color" && (
-            <label className="slider-row"><span>Neural RGB alpha</span><Slider min={0} max={1} step={0.01} value={neuralColorAlpha} onChange={setNeuralColorAlpha} /><span className="slider-value">{neuralColorAlpha.toFixed(2)}</span></label>
-          )}
-          {(particleRenderMode === "dots-internal-state" || particleRenderMode === "dots-chemical-levels") && (
+          {(particleColorMode === "neural-memory" || particleColorMode === "chemical-memory") && (
             <>
-              <label className="slider-row"><span>{particleRenderMode === "dots-internal-state" ? "Neural memory alpha" : "Chemical memory alpha"}</span><Slider min={0} max={1} step={0.01} value={internalStateAlpha} onChange={setInternalStateAlpha} /><span className="slider-value">{internalStateAlpha.toFixed(2)}</span></label>
               <div className="channel-window-control">
                 <div className="channel-window-label"><span>Channels</span><span>{particleStateChannelStart}–{particleStateChannelStart + 2}</span></div>
                 <ChannelWindowSlider channels={particleStateChannelCount} value={particleStateChannelStart} onChange={setInternalStateChannelStart} />
               </div>
-              {particleRenderMode === "dots-internal-state" && (
+              {particleColorMode === "neural-memory" && (
                 <label className="slider-row"><span>Opponent subtraction</span><Slider min={0} max={1} step={0.01} value={chemicalMemoryOpponentSubtraction} onChange={setChemicalMemoryOpponentSubtraction} /><span className="slider-value">{chemicalMemoryOpponentSubtraction.toFixed(2)}</span></label>
               )}
             </>
           )}
-          {particleRenderMode === "dots-boundary-value" && (
+          {particleColorMode === "boundary-value" && (
             <label className="slider-row"><span>Boundary g0</span><Slider min={0.001} max={0.1} step={0.001} value={boundaryGradientScale} onChange={setBoundaryGradientScale} /><span className="slider-value">{boundaryGradientScale.toFixed(3)}</span></label>
-          )}
-          {particleRenderMode === "dots-activation-translucent" && (
-            <label className="slider-row"><span>Activation alpha</span><Slider min={0} max={1} step={0.01} value={activationAlpha} onChange={setActivationAlpha} /><span className="slider-value">{activationAlpha.toFixed(2)}</span></label>
-          )}
-          {particleRenderMode === "directional-arrows" && (
-            <label className="slider-row"><span>Triangle size</span><Slider min={1} max={20} step={1} value={growthAxisLengthPx} onChange={setGrowthAxisLengthPx} /><span className="slider-value">{growthAxisLengthPx}px</span></label>
           )}
           <label className="slider-row">
             <span>Background</span>
             <select className="select" value={fieldMode} onChange={(event) => setFieldMode(event.target.value as FieldMode)}>
-              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology (gradient + density)</option><option value="substrate">Substrate</option><option value="growth">Last chemical channel (cividis)</option><option value="gradient">Boundary gradient</option>
+              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="substrate">Substrate</option><option value="gradient">Boundary gradient</option>
             </select>
           </label>
           {fieldMode === "morphology" && <>
             <label className="checkbox-row"><input type="checkbox" checked={morphologyGradientVisible} onChange={(event) => setMorphologyGradientVisible(event.target.checked)} />Show morphology gradient (R/G)</label>
             <label className="checkbox-row"><input type="checkbox" checked={morphologyDensityVisible} onChange={(event) => setMorphologyDensityVisible(event.target.checked)} />Show morphology density (B)</label>
           </>}
-          {fieldMode === "substrate" && config && (
-            <div className="channel-window-control"><div className="channel-window-label"><span>RGB channels</span><span>{substrateChannelStart}–{Math.min(config.channels - 1, substrateChannelStart + 2)}</span></div><ChannelWindowSlider channels={config.channels} value={substrateChannelStart} onChange={setSubstrateChannelStart} /></div>
-          )}
+          {fieldMode === "substrate" && config && <><div className="channel-window-control"><div className="channel-window-label"><span>RGB channels</span><span>{substrateChannelStart}–{Math.min(config.channels - 1, substrateChannelStart + 2)}</span></div><ChannelWindowSlider channels={config.channels} value={substrateChannelStart} onChange={setSubstrateChannelStart} /></div><label className="checkbox-row"><input type="checkbox" checked={substrateZeroIsBlack} onChange={(event) => setSubstrateZeroIsBlack(event.target.checked)} />Zero is black</label></>}
           <label className="slider-row"><span>Accent</span><Slider min={-2} max={2} step={0.01} value={accent} onChange={setAccent} /><span className="slider-value">{accent.toFixed(2)}</span></label>
           {fieldMode === "gradient" && <>
+            <label className="checkbox-row"><input type="checkbox" checked={boundaryGradientZeroIsBlack} onChange={(event) => setBoundaryGradientZeroIsBlack(event.target.checked)} />Zero is black</label>
             <label className="slider-row"><span>Blur</span><Slider min={0} max={2} step={0.01} value={blur} onChange={setBlur} /><span className="slider-value">{blur.toFixed(2)}</span></label>
             <label className="slider-row"><span>Gradient exponent</span><Slider min={0.25} max={4} step={0.05} value={gradientExponent} onChange={setGradientExponent} /><span className="slider-value">{gradientExponent.toFixed(2)}</span></label>
           </>}
@@ -502,17 +485,18 @@ export function LabView() {
             onEffectiveZoomChange={setEffectiveZoom}
             bloom={bloom}
             particleRadiusPx={particleRadiusPx}
-            particleRenderMode={particleRenderMode}
-            whiteDotsAlpha={whiteDotsAlpha}
-            neuralColorAlpha={neuralColorAlpha}
-            internalStateAlpha={internalStateAlpha}
-            activationAlpha={activationAlpha}
+            particleShape={particleShape}
+            particleColorMode={particleColorMode}
+            particleAlpha={particleAlpha}
+            directionalLineVisible={directionalLineVisible}
+            mitosisSignalBoost={mitosisSignalBoost}
             internalStateChannelStart={internalStateChannelStart}
             chemicalMemoryOpponentSubtraction={chemicalMemoryOpponentSubtraction}
             boundaryGradientScale={boundaryGradientScale}
-            growthAxisLengthPx={growthAxisLengthPx}
             fieldMode={fieldMode}
             substrateChannelStart={substrateChannelStart}
+            substrateZeroIsBlack={substrateZeroIsBlack}
+            boundaryGradientZeroIsBlack={boundaryGradientZeroIsBlack}
             morphologyGradientVisible={morphologyGradientVisible}
             morphologyDensityVisible={morphologyDensityVisible}
             accent={accent}
@@ -537,13 +521,10 @@ export function LabView() {
 
         <div className="toolbar">
           <div className="tool-buttons-wrap">
-            {tool !== "none" && (
+            {tool === "deform" && (
               <div className="tool-settings-panel">
-                <h3>{tool === "add" ? "Add" : tool === "move" ? "Move" : "Deform"}</h3>
-                {tool !== "deform" ? (
-                  <p className="hint">{tool === "add" ? "Click the sim to add a particle." : "Drag a particle to move it."}</p>
-                ) : (
-                  <>
+                <h3>Deform</h3>
+                <>
                     <label className="checkbox-row">
                       <input type="checkbox" checked={deformSettings.direction === "outward"} onChange={(event) => setDeformSettings((value) => ({ ...value, direction: event.target.checked ? "outward" : "inward" }))} />
                       {deformSettings.direction === "outward" ? "Push outward (explode)" : "Pull inward (implode)"}
@@ -551,13 +532,12 @@ export function LabView() {
                     <label className="slider-row"><span>Strength</span><input type="range" min="0" max="2" step="0.01" value={deformSettings.strength} onChange={(event) => setDeformSettings((value) => ({ ...value, strength: Number(event.target.value) }))} /><span className="slider-value">{deformSettings.strength.toFixed(2)}</span></label>
                     <label className="slider-row"><span>Radius</span><input type="range" min="0.01" max="0.5" step="0.01" value={deformSettings.radius} onChange={(event) => setDeformSettings((value) => ({ ...value, radius: Number(event.target.value) }))} /><span className="slider-value">{deformSettings.radius.toFixed(2)}</span></label>
                     <label className="checkbox-row"><input type="checkbox" checked={deformSettings.mode === "deformation"} onChange={(event) => setDeformSettings((value) => ({ ...value, mode: event.target.checked ? "deformation" : "velocity" }))} />Direct deformation (F) edit</label>
-                  </>
-                )}
+                </>
               </div>
             )}
             <div className="tool-buttons">
-              <button className={`icon-button${tool === "add" ? " is-active" : ""}`} onClick={() => setTool((value) => value === "add" ? "none" : "add")} title="Add particle — click the sim to place one" aria-label="Add particle" aria-pressed={tool === "add"}>＋</button>
-              <button className={`icon-button${tool === "move" ? " is-active" : ""}`} onClick={() => setTool((value) => value === "move" ? "none" : "move")} title="Move particles — drag one in the sim" aria-label="Move particles" aria-pressed={tool === "move"}>✥</button>
+              <button className={`icon-button${tool === "add" ? " is-active" : ""}`} onClick={() => setTool((value) => value === "add" ? "none" : "add")} aria-label="Add particle" aria-pressed={tool === "add"}>＋</button>
+              <button className={`icon-button${tool === "move" ? " is-active" : ""}`} onClick={() => setTool((value) => value === "move" ? "none" : "move")} aria-label="Move particles" aria-pressed={tool === "move"}>✥</button>
               <button className={`icon-button${tool === "deform" ? " is-active" : ""}`} onClick={() => setTool((value) => value === "deform" ? "none" : "deform")} title="Deform" aria-label="Deform" aria-pressed={tool === "deform"}>⤢</button>
             </div>
           </div>

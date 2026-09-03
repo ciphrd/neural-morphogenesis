@@ -317,7 +317,7 @@ class AgentsGPU:
         # here to free the 2 slots particleF/particleJp needed (particleC
         # was dropped instead of freeing a 3rd — see core/agents.wgsl's
         # own comment on why that one's safe to skip).
-        chemical_padding_floats = (-(72 + channels * 4)) % 16 // 4
+        chemical_padding_floats = (-(76 + channels * 4)) % 16 // 4
         self._particle_meta_dtype = np.dtype([
             ("rng", "<u4"),
             ("cooldown", "<f4"),
@@ -326,6 +326,7 @@ class AgentsGPU:
             ("color", "<f4", (4,)),
             ("divisionHazard", "<f4"),
             ("divisionThreshold", "<f4"),
+            ("mitosisPropensity", "<f4"),
             ("privateState", "<f4", (PRIVATE_STATE_DIM,)),
             ("chemicalState", "<f4", (channels,)),
             ("_padding", "<f4", (chemical_padding_floats,)),

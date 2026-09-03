@@ -50,7 +50,7 @@ import { Deform, type DeformDirection, type DeformMode } from "./deform";
 import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
-import { Renderer, type FieldMode, type ParticleRenderMode } from "./render";
+import { Renderer, type FieldMode, type ParticleColorMode, type ParticleShape } from "./render";
 import { seedBlob, seedRows } from "./rng";
 import { chemicalCommunicationArchitectureFromConfig, physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig, type UpdateRuleWeights } from "./types";
 import coreConstants from "../../../core/constants.json";
@@ -95,16 +95,17 @@ export class GpuSimulation {
   // choices shouldn't reset just because that happened).
   private pendingFieldMode: FieldMode = "none";
   private pendingSubstrateChannelStart = 0;
-  private pendingParticleRenderMode: ParticleRenderMode = "dots-white";
-  private pendingWhiteDotsAlpha = 1.0;
-  private pendingActivationAlpha = 0.2;
-  private pendingNeuralColorAlpha = 1.0;
-  private pendingInternalStateAlpha = 1.0;
+  private pendingSubstrateZeroIsBlack = false;
+  private pendingBoundaryGradientZeroIsBlack = false;
+  private pendingParticleShape: ParticleShape = "dot";
+  private pendingParticleColorMode: ParticleColorMode = "white";
+  private pendingParticleAlpha = 1.0;
+  private pendingDirectionalLineVisible = false;
+  private pendingMitosisSignalBoost = 1.0;
   private pendingInternalStateChannelStart = 0;
   private pendingChemicalMemoryOpponentSubtraction = 0;
   private pendingBoundaryGradientScale = 0.01;
   private pendingPointRadiusPx: number | null = null;
-  private pendingGrowthAxisLengthPx = 6;
   // 0 = identity — see gpu/render.ts's own setAccent()/field.wgsl's own
   // accent uniform comment. Same "view-only, survives rebuild()" reasoning
   // pendingFieldMode above already has.
@@ -322,16 +323,17 @@ export class GpuSimulation {
     renderer.setTargetVisible(this.pendingTargetVisible);
     renderer.setFieldMode(this.pendingFieldMode);
     renderer.setSubstrateChannelStart(this.pendingSubstrateChannelStart);
-    renderer.setParticleRenderMode(this.pendingParticleRenderMode);
-    renderer.setWhiteDotsAlpha(this.pendingWhiteDotsAlpha);
-    renderer.setActivationAlpha(this.pendingActivationAlpha);
-    renderer.setNeuralColorAlpha(this.pendingNeuralColorAlpha);
-    renderer.setInternalStateAlpha(this.pendingInternalStateAlpha);
+    renderer.setSubstrateZeroIsBlack(this.pendingSubstrateZeroIsBlack);
+    renderer.setBoundaryGradientZeroIsBlack(this.pendingBoundaryGradientZeroIsBlack);
+    renderer.setParticleShape(this.pendingParticleShape);
+    renderer.setParticleColorMode(this.pendingParticleColorMode);
+    renderer.setParticleAlpha(this.pendingParticleAlpha);
+    renderer.setDirectionalLineVisible(this.pendingDirectionalLineVisible);
+    renderer.setMitosisSignalBoost(this.pendingMitosisSignalBoost);
     renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart);
     renderer.setChemicalMemoryOpponentSubtraction(this.pendingChemicalMemoryOpponentSubtraction);
     renderer.setBoundaryGradientScale(this.pendingBoundaryGradientScale);
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
-    renderer.setGrowthAxisLengthPx(this.pendingGrowthAxisLengthPx);
     renderer.setAccent(this.pendingAccent);
     renderer.setMorphologyDisplay(this.pendingMorphologyGradientVisible, this.pendingMorphologyDensityVisible);
     renderer.setBlur(this.pendingBlur);
@@ -694,29 +696,39 @@ export class GpuSimulation {
     this.renderer?.setSubstrateChannelStart(start);
   }
 
-  setParticleRenderMode(mode: ParticleRenderMode): void {
-    this.pendingParticleRenderMode = mode;
-    this.renderer?.setParticleRenderMode(mode);
+  setSubstrateZeroIsBlack(enabled: boolean): void {
+    this.pendingSubstrateZeroIsBlack = enabled;
+    this.renderer?.setSubstrateZeroIsBlack(enabled);
   }
 
-  setActivationAlpha(alpha: number): void {
-    this.pendingActivationAlpha = alpha;
-    this.renderer?.setActivationAlpha(alpha);
+  setBoundaryGradientZeroIsBlack(enabled: boolean): void {
+    this.pendingBoundaryGradientZeroIsBlack = enabled;
+    this.renderer?.setBoundaryGradientZeroIsBlack(enabled);
   }
 
-  setWhiteDotsAlpha(alpha: number): void {
-    this.pendingWhiteDotsAlpha = alpha;
-    this.renderer?.setWhiteDotsAlpha(alpha);
+  setParticleShape(shape: ParticleShape): void {
+    this.pendingParticleShape = shape;
+    this.renderer?.setParticleShape(shape);
   }
 
-  setNeuralColorAlpha(alpha: number): void {
-    this.pendingNeuralColorAlpha = alpha;
-    this.renderer?.setNeuralColorAlpha(alpha);
+  setParticleColorMode(mode: ParticleColorMode): void {
+    this.pendingParticleColorMode = mode;
+    this.renderer?.setParticleColorMode(mode);
   }
 
-  setInternalStateAlpha(alpha: number): void {
-    this.pendingInternalStateAlpha = alpha;
-    this.renderer?.setInternalStateAlpha(alpha);
+  setParticleAlpha(alpha: number): void {
+    this.pendingParticleAlpha = alpha;
+    this.renderer?.setParticleAlpha(alpha);
+  }
+
+  setDirectionalLineVisible(visible: boolean): void {
+    this.pendingDirectionalLineVisible = visible;
+    this.renderer?.setDirectionalLineVisible(visible);
+  }
+
+  setMitosisSignalBoost(boost: number): void {
+    this.pendingMitosisSignalBoost = boost;
+    this.renderer?.setMitosisSignalBoost(boost);
   }
 
   setInternalStateChannelStart(start: number): void {
@@ -732,11 +744,6 @@ export class GpuSimulation {
   setBoundaryGradientScale(g0: number): void {
     this.pendingBoundaryGradientScale = g0;
     this.renderer?.setBoundaryGradientScale(g0);
-  }
-
-  setGrowthAxisLengthPx(px: number): void {
-    this.pendingGrowthAxisLengthPx = px;
-    this.renderer?.setGrowthAxisLengthPx(px);
   }
 
   setPointRadiusPx(px: number): void {

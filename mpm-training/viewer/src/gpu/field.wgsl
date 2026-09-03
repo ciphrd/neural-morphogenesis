@@ -6,10 +6,8 @@
 // buffer this project's own fieldDiagnostics.wgsl scatters (see that
 // file's own module docstring for why those three live outside
 // ../core/ rather than being added back to it), "substrate" reads
-// the chemical field environment.wgsl already maintains for the NN
-// policy's own sensing, and "growth" is retained as an internal mode name for
-// a cividis view of the last chemical channel. That channel no longer controls
-// division; the UI labels this view by what it actually displays.
+// the chemical field environment.wgsl already maintains for the NN policy's
+// own sensing.
 //
 // Three coloring conventions, per this project's own dataviz choice:
 //  - Single, non-negative *magnitude* fields (density, speed, shear —
@@ -29,11 +27,6 @@
 //    needed. Distinct from "no material here" (which still fades to
 //    BG, same as ever): 0.5 gray means "material present, genuinely at
 //    zero," not "nothing measured."
-//  - growth specifically uses cividis() instead — a direct LUT lookup
-//    over the value's own clamped [-1,1] range, no BG-fade/gray-midpoint
-//    indirection — per this mode's own explicit request (see
-//    colorizeGrowth()'s own comment for why [-1,1] rather than [0,1]).
-//
 // Also includes the "repulsion" background mode's own present shader —
 // same full-screen-quad vertex shader, a separate fragment entry point
 // sampling MpmCore's own r32float density texture directly via
@@ -137,62 +130,10 @@ fn batlow(t: f32) -> vec3<f32> {
   return mix(BATLOW[i0], BATLOW[i1], fract(c));
 }
 
-// --- cividis: matplotlib's own scientific colormap, used specifically
-// for the single-channel background mode (the LAST chemical channel),
-// per this feature's own explicit request (was viridis(); swapped for
-// cividis() — same LUT-lookup technique, still perceptually-uniform,
-// additionally CVD-friendly by design, per that same request). Same
-// 32-stop-LUT-pasted-in technique BATLOW above already uses, generated
-// once, offline, via:
-//   import matplotlib.cm as cm; import numpy as np
-//   cm.cividis(np.linspace(0, 1, 32))[:, :3]
-const CIVIDIS_N: u32 = 32u;
-const CIVIDIS: array<vec3<f32>, 32> = array<vec3<f32>, 32>(
-  vec3<f32>(0.0000, 0.1351, 0.3048),
-  vec3<f32>(0.0000, 0.1579, 0.3575),
-  vec3<f32>(0.0000, 0.1788, 0.4148),
-  vec3<f32>(0.0179, 0.1985, 0.4412),
-  vec3<f32>(0.1107, 0.2232, 0.4351),
-  vec3<f32>(0.1597, 0.2452, 0.4295),
-  vec3<f32>(0.1998, 0.2671, 0.4255),
-  vec3<f32>(0.2351, 0.2888, 0.4233),
-  vec3<f32>(0.2716, 0.3133, 0.4228),
-  vec3<f32>(0.3022, 0.3350, 0.4242),
-  vec3<f32>(0.3315, 0.3567, 0.4271),
-  vec3<f32>(0.3599, 0.3786, 0.4315),
-  vec3<f32>(0.3912, 0.4035, 0.4381),
-  vec3<f32>(0.4184, 0.4257, 0.4456),
-  vec3<f32>(0.4451, 0.4482, 0.4549),
-  vec3<f32>(0.4715, 0.4710, 0.4664),
-  vec3<f32>(0.5032, 0.4969, 0.4723),
-  vec3<f32>(0.5328, 0.5201, 0.4724),
-  vec3<f32>(0.5630, 0.5437, 0.4705),
-  vec3<f32>(0.5936, 0.5677, 0.4664),
-  vec3<f32>(0.6286, 0.5951, 0.4596),
-  vec3<f32>(0.6601, 0.6199, 0.4515),
-  vec3<f32>(0.6920, 0.6451, 0.4415),
-  vec3<f32>(0.7243, 0.6709, 0.4292),
-  vec3<f32>(0.7611, 0.7004, 0.4126),
-  vec3<f32>(0.7943, 0.7272, 0.3950),
-  vec3<f32>(0.8280, 0.7546, 0.3743),
-  vec3<f32>(0.8621, 0.7825, 0.3500),
-  vec3<f32>(0.9012, 0.8146, 0.3170),
-  vec3<f32>(0.9367, 0.8438, 0.2809),
-  vec3<f32>(0.9731, 0.8736, 0.2347),
-  vec3<f32>(0.9957, 0.9093, 0.2178),
-);
-
-fn cividis(t: f32) -> vec3<f32> {
-  let c = clamp(t, 0.0, 1.0) * f32(CIVIDIS_N - 1u);
-  let i0 = u32(floor(c));
-  let i1 = min(i0 + 1u, CIVIDIS_N - 1u);
-  return mix(CIVIDIS[i0], CIVIDIS[i1], fract(c));
-}
-
 // Live-adjustable "accent" — a [-2,2] exponential contrast curve applied
 // to EVERY background mode's own normalized value before color-mapping
 // (accentedMagnitude()/accentedSigned() below, which scalarColor()/
-// graypoint() and the growth/repulsion modes' own standalone code all
+// graypoint() and the repulsion mode's own standalone code all
 // funnel through — see each call site for exactly how), per this
 // project's own explicit request: a single shared knob to make a mode's
 // own effect "more visible" without touching that mode's own MAX/scale
@@ -448,6 +389,15 @@ fn substrateValue(c: u32, outputX: u32, outputY: u32) -> f32 {
 @group(0) @binding(8) var<storage, read> substrateGrid: array<f32>;
 @group(0) @binding(9) var substrateOutputTex: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(21) var<uniform> substrateChannelStart: u32;
+// x: substrate zero-is-black, y: boundary-gradient zero-is-black.
+@group(0) @binding(23) var<uniform> backgroundZeroIsBlack: vec2<u32>;
+
+fn substrateDisplayValue(value: f32) -> f32 {
+  if (backgroundZeroIsBlack.x != 0u) {
+    return max(accentedSigned(value / max(SUBSTRATE_MAX, 1e-6)), 0.0);
+  }
+  return graypoint(value, SUBSTRATE_MAX);
+}
 
 @compute @workgroup_size(16, 16)
 fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -458,7 +408,7 @@ fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let r = substrateValue(substrateChannelStart, x, y);
   let g = substrateValue(min(substrateChannelStart + 1u, SUBSTRATE_CHANNELS - 1u), x, y);
   let b = substrateValue(min(substrateChannelStart + 2u, SUBSTRATE_CHANNELS - 1u), x, y);
-  let color = vec3<f32>(graypoint(r, SUBSTRATE_MAX), graypoint(g, SUBSTRATE_MAX), graypoint(b, SUBSTRATE_MAX));
+  let color = vec3<f32>(substrateDisplayValue(r), substrateDisplayValue(g), substrateDisplayValue(b));
 
   textureStore(substrateOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(color, 1.0));
 }
@@ -468,36 +418,6 @@ fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
 @fragment
 fn substrateFragment(in: QuadOut) -> @location(0) vec4<f32> {
   return textureSample(substrateTex, fieldSampler, in.uv);
-}
-
-// --- Single-channel background: the LAST chemical channel only (index
-// CHANNELS-1), mapped through cividis() over [-1,1]. Reuses
-// colorizeSubstrate's own input buffer (`substrateGrid`,
-// binding 8 — same environment.ts ping-pong buffer, same per-macro-step
-// parity indexing — see that pass's own module docstring) rather than a
-// new binding, since it's the exact same source data; own output
-// texture/present pipeline (bindings 11/12) since this is a genuinely
-// different image from substrate's own 3-channel RGB composite.
-const LAST_CHEMICAL_CHANNEL: u32 = __CHANNELS__u - 1u;
-
-@group(0) @binding(11) var growthOutputTex: texture_storage_2d<rgba8unorm, write>;
-
-@compute @workgroup_size(16, 16)
-fn colorizeGrowth(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let x = gid.x;
-  let y = gid.y;
-  if (x >= SUBSTRATE_WIDTH || y >= SUBSTRATE_HEIGHT) { return; }
-
-  let v = substrateValue(LAST_CHEMICAL_CHANNEL, x, y);
-  let t = (accentedSigned(v) + 1.0) * 0.5;
-  textureStore(growthOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(cividis(t), 1.0));
-}
-
-@group(0) @binding(12) var growthTex: texture_2d<f32>;
-
-@fragment
-fn growthFragment(in: QuadOut) -> @location(0) vec4<f32> {
-  return textureSample(growthTex, fieldSampler, in.uv);
 }
 
 // --- Gradient background: a first step toward a "shape boundary"
@@ -516,14 +436,11 @@ fn growthFragment(in: QuadOut) -> @location(0) vec4<f32> {
 // computeGradient is chemical-field-only), and computing one here, once
 // per background redraw, is cheap enough not to need one.
 //
-// A flat region (uniformly empty, or uniformly dense) has zero gradient
-// and renders exactly the MID (0.5) gray this file's own graypoint()
-// convention already uses for "measured, genuinely zero" — the boundary
-// of wherever particles actually are is where color moves away from that
-// gray: R for the gradient's own x component, G for y (B held at a fixed
-// 0.5 — there's no third gradient component to show, just the flat
-// backdrop this mode's own name asked for). Direction alone for now, per
-// this feature's own first iteration — no arrow/outline geometry yet.
+// A flat region (uniformly empty, or uniformly dense) has zero gradient.
+// The default signed view renders it at the 0.5 midpoint: R is gradient X,
+// G is gradient Y, and B is fixed at 0.5. The optional zero-is-black view
+// instead maps zero and negative components to black while positive X/Y use
+// the full R/G range. Direction alone for now—no arrow/outline geometry yet.
 //
 // Own output texture, sized to REPULSION_FIELD_N (core/constants.json's
 // own FIELD_N, via mpmCore.ts's own REPULSION_FIELD_N — see that
@@ -661,7 +578,10 @@ fn colorizeGradient(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   let shaped = dir * shapedMag;
 
-  let color = vec3<f32>(shaped.x * 0.5 + 0.5, shaped.y * 0.5 + 0.5, 0.5);
+  var color = vec3<f32>(shaped.x * 0.5 + 0.5, shaped.y * 0.5 + 0.5, 0.5);
+  if (backgroundZeroIsBlack.y != 0u) {
+    color = vec3<f32>(max(shaped.x, 0.0), max(shaped.y, 0.0), 0.0);
+  }
   textureStore(gradientOutputTex, vec2<i32>(x, y), vec4<f32>(color, 1.0));
 }
 

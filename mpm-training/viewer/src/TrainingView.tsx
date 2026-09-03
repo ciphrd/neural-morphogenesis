@@ -4,7 +4,7 @@ import { FitnessChart } from "./charts/FitnessChart"
 import { randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
 import { MAX_PARTICLES } from "./gpu/mpmCore"
-import type { FieldMode, ParticleRenderMode } from "./gpu/render"
+import type { FieldMode, ParticleColorMode, ParticleShape } from "./gpu/render"
 import type {
   CellMemory,
   ChemicalCommunicationArchitecture,
@@ -140,6 +140,12 @@ export function TrainingView() {
   const [substrateChannelStart, setSubstrateChannelStart] = useState(
     VIEWER_DEFAULTS.rendering.substrateChannelStart
   )
+  const [substrateZeroIsBlack, setSubstrateZeroIsBlack] = useState(
+    VIEWER_DEFAULTS.rendering.substrateZeroIsBlack
+  )
+  const [boundaryGradientZeroIsBlack, setBoundaryGradientZeroIsBlack] = useState(
+    VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack
+  )
   const [morphologyGradientVisible, setMorphologyGradientVisible] =
     useState(VIEWER_DEFAULTS.rendering.morphologyGradientVisible)
   const [morphologyDensityVisible, setMorphologyDensityVisible] = useState(
@@ -162,8 +168,14 @@ export function TrainingView() {
   const [gradientExponent, setGradientExponent] = useState(
     VIEWER_DEFAULTS.rendering.gradientExponent
   )
-  const [particleRenderMode, setParticleRenderMode] =
-    useState<ParticleRenderMode>(VIEWER_DEFAULTS.rendering.particleRenderMode)
+  const [particleShape, setParticleShape] =
+    useState<ParticleShape>(VIEWER_DEFAULTS.rendering.particleShape)
+  const [particleColorMode, setParticleColorMode] =
+    useState<ParticleColorMode>(VIEWER_DEFAULTS.rendering.particleColorMode)
+  const [particleAlpha, setParticleAlpha] = useState(VIEWER_DEFAULTS.rendering.particleAlpha)
+  const [directionalLineVisible, setDirectionalLineVisible] = useState(
+    VIEWER_DEFAULTS.rendering.directionalLineVisible
+  )
   const [boundaryGradientScale, setBoundaryGradientScale] = useState(
     VIEWER_DEFAULTS.rendering.boundaryGradientScale
   )
@@ -200,26 +212,14 @@ export function TrainingView() {
   const [targetVisible, setTargetVisible] = useState(
     VIEWER_DEFAULTS.rendering.targetVisible
   )
-  const [whiteDotsAlpha, setWhiteDotsAlpha] = useState(
-    VIEWER_DEFAULTS.rendering.whiteDotsAlpha
-  )
-  const [activationAlpha, setActivationAlpha] = useState(
-    VIEWER_DEFAULTS.rendering.activationAlpha
-  )
-  const [neuralColorAlpha, setNeuralColorAlpha] = useState(
-    VIEWER_DEFAULTS.rendering.neuralColorAlpha
-  )
-  const [internalStateAlpha, setInternalStateAlpha] = useState(
-    VIEWER_DEFAULTS.rendering.internalStateAlpha
+  const [mitosisSignalBoost, setMitosisSignalBoost] = useState(
+    VIEWER_DEFAULTS.rendering.mitosisSignalBoost
   )
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(
     VIEWER_DEFAULTS.rendering.internalStateChannelStart
   )
   const [chemicalMemoryOpponentSubtraction, setChemicalMemoryOpponentSubtraction] =
     useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
-  const [growthAxisLengthPx, setGrowthAxisLengthPx] = useState(
-    VIEWER_DEFAULTS.rendering.growthAxisLengthPx
-  )
   // "Add"/"Move"/"Deform" interaction tools (render/GridCanvas.tsx's own
   // Tool type) — toggled on/off by clicking their own icon button again
   // (see the Tools section below), not reset by a run/generation change
@@ -566,7 +566,7 @@ export function TrainingView() {
     }
   }
 
-  const particleStateChannelCount = particleRenderMode === "dots-internal-state"
+  const particleStateChannelCount = particleColorMode === "neural-memory"
     ? 8
     : (activeConfig?.channels ?? 1)
   const particleStateChannelStart = Math.min(
@@ -608,7 +608,8 @@ export function TrainingView() {
         </section>
 
         <section>
-          <h2>Simulation</h2>
+          <details className="settings-category">
+          <summary>Simulation</summary>
           <div className="stat-row">
             <span>Cell memory</span>
             <select
@@ -814,6 +815,7 @@ export function TrainingView() {
               }}
             />
           </label>
+          </details>
         </section>
 
         <section>
@@ -927,74 +929,55 @@ export function TrainingView() {
             <span className="slider-value">{particleRadiusPx}px</span>
           </label>
           <label className="slider-row">
-            <span>Particles</span>
+            <span>Shape</span>
             <select
               className="select"
-              value={particleRenderMode}
-              onChange={(e) =>
-                setParticleRenderMode(e.target.value as ParticleRenderMode)
-              }
+              value={particleShape}
+              onChange={(e) => setParticleShape(e.target.value as ParticleShape)}
             >
-              <option value="dots-white">Dots (white)</option>
-              <option value="dots-neural-color">Dots (neural RGB)</option>
-              <option value="dots-internal-state">Neural memory</option>
-              <option value="dots-chemical-levels">Chemical memory</option>
-              <option value="dots-boundary-value">Boundary value</option>
-              <option value="dots-activation">Dots (neurons)</option>
-              <option value="dots-activation-translucent">
-                Dots (translucent neurons)
-              </option>
-              <option value="directional-arrows">Directional triangles</option>
+              <option value="dot">Dot</option>
+              <option value="triangle">Triangle</option>
             </select>
           </label>
-          {particleRenderMode === "dots-white" && (
+          <label className="slider-row">
+            <span>Color</span>
+            <select
+              className="select"
+              value={particleColorMode}
+              onChange={(e) => setParticleColorMode(e.target.value as ParticleColorMode)}
+            >
+              <option value="white">White</option>
+              <option value="neural-color">Neural RGB</option>
+              <option value="mitosis-drive">Mitosis drive</option>
+              <option value="neural-memory">Neural memory</option>
+              <option value="chemical-memory">Chemical memory</option>
+              <option value="boundary-value">Boundary value</option>
+              <option value="neurons">Neurons</option>
+            </select>
+          </label>
+          <label className="slider-row">
+            <span>Alpha</span>
+            <Slider min={0} max={1} step={0.01} value={particleAlpha} onChange={setParticleAlpha} />
+            <span className="slider-value">{particleAlpha.toFixed(2)}</span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={directionalLineVisible}
+              onChange={(e) => setDirectionalLineVisible(e.target.checked)}
+            />
+            Directional line
+          </label>
+          {particleColorMode === "mitosis-drive" && (
             <label className="slider-row">
-              <span>Dots alpha</span>
-              <Slider
-                min={0}
-                max={1}
-                step={0.01}
-                value={whiteDotsAlpha}
-                onChange={setWhiteDotsAlpha}
-              />
-              <span className="slider-value">{whiteDotsAlpha.toFixed(2)}</span>
+              <span>Signal boost</span>
+              <Slider min={1} max={10} step={0.1} value={mitosisSignalBoost} onChange={setMitosisSignalBoost} />
+              <span className="slider-value">{mitosisSignalBoost.toFixed(1)}×</span>
             </label>
           )}
-          {particleRenderMode === "dots-neural-color" && (
-            <label className="slider-row">
-              <span>Neural RGB alpha</span>
-              <Slider
-                min={0}
-                max={1}
-                step={0.01}
-                value={neuralColorAlpha}
-                onChange={setNeuralColorAlpha}
-              />
-              <span className="slider-value">
-                {neuralColorAlpha.toFixed(2)}
-              </span>
-            </label>
-          )}
-          {(particleRenderMode === "dots-internal-state" ||
-            particleRenderMode === "dots-chemical-levels") && (
+          {(particleColorMode === "neural-memory" ||
+            particleColorMode === "chemical-memory") && (
             <>
-              <label className="slider-row">
-                <span>
-                  {particleRenderMode === "dots-internal-state"
-                    ? "Neural memory alpha"
-                    : "Chemical memory alpha"}
-                </span>
-                <Slider
-                  min={0}
-                  max={1}
-                  step={0.01}
-                  value={internalStateAlpha}
-                  onChange={setInternalStateAlpha}
-                />
-                <span className="slider-value">
-                  {internalStateAlpha.toFixed(2)}
-                </span>
-              </label>
               <div className="channel-window-control">
                 <div className="channel-window-label">
                   <span>Channels</span>
@@ -1007,13 +990,13 @@ export function TrainingView() {
                   value={particleStateChannelStart}
                   onChange={setInternalStateChannelStart}
                   channelKind={
-                    particleRenderMode === "dots-internal-state"
+                    particleColorMode === "neural-memory"
                       ? "neural memory"
                       : "chemical memory"
                   }
                 />
               </div>
-              {particleRenderMode === "dots-internal-state" && (
+              {particleColorMode === "neural-memory" && (
                 <label className="slider-row">
                   <span>Opponent subtraction</span>
                   <Slider
@@ -1028,7 +1011,7 @@ export function TrainingView() {
                   </span>
                 </label>
               )}
-              {particleRenderMode === "dots-internal-state" &&
+              {particleColorMode === "neural-memory" &&
                 previewConfig &&
                   cellMemoryFromConfig(previewConfig) !== "recurrent" && (
                   <p className="hint">
@@ -1037,7 +1020,7 @@ export function TrainingView() {
                 )}
             </>
           )}
-          {particleRenderMode === "dots-boundary-value" && (
+          {particleColorMode === "boundary-value" && (
             <>
               <label className="slider-row">
                 <span>Boundary g0</span>
@@ -1058,38 +1041,6 @@ export function TrainingView() {
               </p>
             </>
           )}
-          {particleRenderMode === "dots-activation-translucent" && (
-            <label className="slider-row">
-              <span>Activation alpha</span>
-              <Slider
-                min={0}
-                max={1}
-                step={0.01}
-                value={activationAlpha}
-                onChange={setActivationAlpha}
-              />
-              <span className="slider-value">{activationAlpha.toFixed(2)}</span>
-            </label>
-          )}
-          {particleRenderMode === "directional-arrows" && (
-            <>
-              <label className="slider-row">
-                <span>Triangle size</span>
-                <Slider
-                  min={1}
-                  max={20}
-                  step={1}
-                  value={growthAxisLengthPx}
-                  onChange={setGrowthAxisLengthPx}
-                />
-                <span className="slider-value">{growthAxisLengthPx}px</span>
-              </label>
-              <p className="hint">
-                Compact white triangles point toward +n division polarity;
-                size and opacity show signal strength.
-              </p>
-            </>
-          )}
           <label className="slider-row">
             <span>Background</span>
             <select
@@ -1104,11 +1055,8 @@ export function TrainingView() {
               <option value="pressure">Pressure</option>
               <option value="shear">Shear</option>
               <option value="repulsion">Repulsion field</option>
-              <option value="morphology">
-                Policy morphology (gradient + density)
-              </option>
+              <option value="morphology">Policy morphology</option>
               <option value="substrate">Substrate</option>
-              <option value="growth">Last chemical channel (cividis)</option>
               <option value="gradient">Boundary gradient</option>
             </select>
           </label>
@@ -1137,23 +1085,26 @@ export function TrainingView() {
             </>
           )}
           {fieldMode === "substrate" && activeConfig && (
-            <div className="channel-window-control">
-              <div className="channel-window-label">
-                <span>RGB channels</span>
-                <span>
-                  {substrateChannelStart}–
-                  {Math.min(
-                    activeConfig.channels - 1,
-                    substrateChannelStart + 2
-                  )}
-                </span>
+            <>
+              <div className="channel-window-control">
+                <div className="channel-window-label">
+                  <span>RGB channels</span>
+                  <span>
+                    {substrateChannelStart}–
+                    {Math.min(activeConfig.channels - 1, substrateChannelStart + 2)}
+                  </span>
+                </div>
+                <ChannelWindowSlider
+                  channels={activeConfig.channels}
+                  value={substrateChannelStart}
+                  onChange={setSubstrateChannelStart}
+                />
               </div>
-              <ChannelWindowSlider
-                channels={activeConfig.channels}
-                value={substrateChannelStart}
-                onChange={setSubstrateChannelStart}
-              />
-            </div>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={substrateZeroIsBlack} onChange={(e) => setSubstrateZeroIsBlack(e.target.checked)} />
+                Zero is black
+              </label>
+            </>
           )}
           <label className="checkbox-row">
             <input
@@ -1181,6 +1132,10 @@ export function TrainingView() {
               hidden rather than shown-but-inert. */}
           {fieldMode === "gradient" && (
             <>
+              <label className="checkbox-row">
+                <input type="checkbox" checked={boundaryGradientZeroIsBlack} onChange={(e) => setBoundaryGradientZeroIsBlack(e.target.checked)} />
+                Zero is black
+              </label>
               <label className="slider-row">
                 <span>Blur</span>
                 <Slider
@@ -1240,25 +1195,26 @@ export function TrainingView() {
             initialParticleCount={frontendInitialParticleCount}
             fieldMode={fieldMode}
             substrateChannelStart={substrateChannelStart}
+            substrateZeroIsBlack={substrateZeroIsBlack}
+            boundaryGradientZeroIsBlack={boundaryGradientZeroIsBlack}
             accent={accent}
             morphologyGradientVisible={morphologyGradientVisible}
             morphologyDensityVisible={morphologyDensityVisible}
             blur={blur}
             gradientExponent={gradientExponent}
-            particleRenderMode={particleRenderMode}
+            particleShape={particleShape}
+            particleColorMode={particleColorMode}
+            particleAlpha={particleAlpha}
+            directionalLineVisible={directionalLineVisible}
             zoom={zoom}
             autoZoom={autoZoomSettings}
             onEffectiveZoomChange={setEffectiveZoom}
             bloom={bloom}
             particleRadiusPx={particleRadiusPx}
-            whiteDotsAlpha={whiteDotsAlpha}
-            activationAlpha={activationAlpha}
-            neuralColorAlpha={neuralColorAlpha}
-            internalStateAlpha={internalStateAlpha}
+            mitosisSignalBoost={mitosisSignalBoost}
             boundaryGradientScale={boundaryGradientScale}
             internalStateChannelStart={internalStateChannelStart}
             chemicalMemoryOpponentSubtraction={chemicalMemoryOpponentSubtraction}
-            growthAxisLengthPx={growthAxisLengthPx}
             tool={tool}
             deformSettings={deformSettings}
             onStep={(step, particles) => {
@@ -1284,25 +1240,15 @@ export function TrainingView() {
         </div>
         <div className="toolbar">
           <div className="tool-buttons-wrap">
-            {/* The active tool's own contextual settings — pops up
+            {/* Deform's contextual settings — pops up
                 directly above the tool-selector buttons instead of
                 living in the left sidebar, so it stays visually
-                attached to the tool it belongs to. Renders nothing
-                while no tool is active. */}
-            {tool !== "none" && (
+                attached to the tool it belongs to. Add and Move need no
+                contextual panel. */}
+            {tool === "deform" && (
               <div className="tool-settings-panel">
-                <h3>
-                  {tool === "add" ? "Add" : tool === "move" ? "Move" : "Deform"}
-                </h3>
-                {tool !== "deform" && (
-                  <p className="hint">
-                    {tool === "add"
-                      ? "Click the sim to add a particle."
-                      : "Drag a particle to move it."}
-                  </p>
-                )}
-                {tool === "deform" && (
-                  <>
+                <h3>Deform</h3>
+                <>
                     <label className="checkbox-row">
                       <input
                         type="checkbox"
@@ -1361,15 +1307,13 @@ export function TrainingView() {
                       />
                       Direct deformation (F) edit
                     </label>
-                  </>
-                )}
+                </>
               </div>
             )}
             <div className="tool-buttons">
               <button
                 className={`icon-button${tool === "add" ? " is-active" : ""}`}
                 onClick={() => setTool((t) => (t === "add" ? "none" : "add"))}
-                title="Add particle — click the sim to place one"
                 aria-label="Add particle"
                 aria-pressed={tool === "add"}
               >
@@ -1378,7 +1322,6 @@ export function TrainingView() {
               <button
                 className={`icon-button${tool === "move" ? " is-active" : ""}`}
                 onClick={() => setTool((t) => (t === "move" ? "none" : "move"))}
-                title="Move particles — drag one in the sim"
                 aria-label="Move particles"
                 aria-pressed={tool === "move"}
               >

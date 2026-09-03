@@ -6,7 +6,7 @@
 // translucent activation dots, and signed directional-growth arrows.
 //
 // Field modes: "none" | "density" | "speed" | "deformation" | "pressure"
-// | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient".
+// | "shear" | "repulsion" | "morphology" | "substrate" | "gradient".
 // This extends the set mls-mpm/src/gpu/render.ts exposes with chemical field
 // views and "gradient" (this project's own chemical field/repulsion density; mls-
 // mpm has no equivalent of). "deformation"/"pressure"/"shear" read
@@ -15,10 +15,7 @@
 // diagnostic channels when it was extracted from mls-mpm's sandbox — see
 // fieldDiagnostics.wgsl's own module docstring for why this project
 // keeps them in a separate, viewer-owned pass instead of adding them
-// back). The internally named "growth" mode is now simply the LAST chemical
-// channel through a cividis colormap over its clamped [-1,1] range instead
-// of substrate's 3-channel RGB composite — see field.wgsl's own
-// colorizeGrowth() comment. "gradient" reads the REPULSION density
+// back). "gradient" reads the REPULSION density
 // field's own spatial gradient instead (mpmCore.densityTexture — the
 // SAME field "repulsion" mode's own repulsionFragment samples, NOT the
 // chemical field), computed on the fly via a Sobel finite difference
@@ -37,10 +34,11 @@ import type { Environment } from "./environment";
 import { DX, GRID_N, INV_DX, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
-export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "growth" | "gradient";
-export type ParticleRenderMode = "dots-white" | "dots-neural-color" | "dots-internal-state" | "dots-chemical-levels" | "dots-boundary-value" | "dots-activation" | "dots-activation-translucent" | "directional-arrows";
+export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "gradient";
+export type ParticleShape = "dot" | "triangle";
+export type ParticleColorMode = "white" | "neural-color" | "mitosis-drive" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
 
-const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "growth" | "gradient">, number> = {
+const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "gradient">, number> = {
   none: 0,
   density: 1,
   speed: 2,
@@ -58,7 +56,6 @@ const GRID_FIELD_MODES: ReadonlySet<FieldMode> = new Set(["density", "speed", "d
 
 const PARTICLE_COLOR = [1, 1, 1, 1]; // white — matches debug_images.py's GROWN_COLOR
 const TARGET_COLOR = [0.95, 0.4, 0.25, 0.8]; // warm accent, alpha-blended under the particles
-const GROWTH_AXIS_COLOR = [1, 1, 1, 1]; // white for legibility at dense particle counts
 const HEADING_LINE_COLOR = [1, 0, 0, 1];
 const HEADING_LINE_LENGTH_PX = 4;
 
@@ -93,6 +90,7 @@ export class Renderer {
   private readonly activationParticlePipeline: GPURenderPipeline;
   private readonly activationParticleBindGroup: GPUBindGroup;
   private readonly neuralColorParticlePipeline: GPURenderPipeline;
+  private readonly mitosisPropensityParticlePipeline: GPURenderPipeline;
   private readonly neuralColorParticleBindGroup: GPUBindGroup;
   private readonly neuralColorStyleUniform: GPUBuffer;
   private readonly internalStateParticlePipeline: GPURenderPipeline;
@@ -102,11 +100,7 @@ export class Renderer {
   private readonly boundaryValueParticlePipeline: GPURenderPipeline;
   private readonly boundaryValueParticleBindGroup: GPUBindGroup;
   private readonly boundaryGradientScaleUniform: GPUBuffer;
-  private readonly activationAlphaUniform: GPUBuffer;
-  private readonly growthAxisPipeline: GPURenderPipeline;
-  private readonly growthAxisBindGroup: GPUBindGroup;
-  private readonly growthAxisStyleUniform: GPUBuffer;
-  private readonly growthAxisColorUniform: GPUBuffer;
+  private readonly directionalLineStyleUniform: GPUBuffer;
   private readonly headingLinePipeline: GPURenderPipeline;
   private readonly headingLineBindGroup: GPUBindGroup;
   private readonly headingLineColorUniform: GPUBuffer;
@@ -118,14 +112,11 @@ export class Renderer {
   private targetCount = 0;
   private targetVisible = true;
 
-  private particleRenderMode: ParticleRenderMode = "dots-white";
-  private whiteDotsAlpha = 1.0;
-  private activationAlpha = 0.2;
-  private neuralColorAlpha = 1.0;
-  private internalStateAlpha = 1.0;
+  private particleColorMode: ParticleColorMode = "white";
+  private directionalLineVisible = false;
+  private mitosisSignalBoost = 1.0;
   private internalStateChannelStart = 0;
   private particleRadiusPx = DEFAULT_PARTICLE_RADIUS_PX;
-  private growthAxisLengthPx = 6;
   private canvasMinDimPx = 512;
 
   // --- field-visualize background (field.wgsl) ---
@@ -134,11 +125,12 @@ export class Renderer {
   private readonly fieldModeUniform: GPUBuffer;
   // field.wgsl's own accent uniform (binding 13) — shared across every
   // background mode's own color-computing pass (colorizeField,
-  // repulsionFragment, colorizeSubstrate, colorizeGrowth all reach it,
+  // repulsionFragment and colorizeSubstrate both reach it,
   // transitively, via accentedMagnitude()/accentedSigned() or directly
   // — see that file's own comment), so it's threaded into each of THEIR
   // bind groups below, not just this class's own field one.
   private readonly accentUniform: GPUBuffer;
+  private readonly backgroundZeroIsBlackUniform: GPUBuffer;
   private readonly morphologyDisplayUniform: GPUBuffer;
   private readonly fieldTexture: GPUTexture;
   private readonly fieldPresentPipeline: GPURenderPipeline;
@@ -173,19 +165,6 @@ export class Renderer {
   private readonly substratePresentPipeline: GPURenderPipeline;
   private readonly substratePresentBindGroup: GPUBindGroup;
   private readonly substrateDispatch: [number, number];
-
-  // --- growth background (field.wgsl's own colorizeGrowth) ---
-  // Same parity-indexed bind-group-array shape as substrate above (same
-  // reasoning, same source buffers — colorizeGrowth reads the LAST
-  // channel of that SAME environment.buffers[p], not a separate buffer),
-  // own output texture/present pipeline since it's a genuinely different
-  // image (cividis over one channel's own clamped [-1,1] range, not
-  // substrate's 3-channel RGB composite).
-  private readonly growthTexture: GPUTexture;
-  private readonly growthColorizePipeline: GPUComputePipeline;
-  private readonly growthColorizeBindGroups: [GPUBindGroup, GPUBindGroup];
-  private readonly growthPresentPipeline: GPURenderPipeline;
-  private readonly growthPresentBindGroup: GPUBindGroup;
 
   // --- gradient background (field.wgsl's own blurDensity/colorizeGradient) ---
   // Reads the REPULSION density field (mpmCore.densityTexture — the same
@@ -234,10 +213,10 @@ export class Renderer {
 
     // --- particles/target ---
     const viewLayout = device.createBindGroupLayout({
-      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } }],
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } }],
     });
-    this.viewUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    writeFloat32(device, this.viewUniform, 0, new Float32Array([1]));
+    this.viewUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    writeFloat32(device, this.viewUniform, 0, new Float32Array([1, 0, 1, 0]));
     this.viewBindGroup = device.createBindGroup({
       layout: viewLayout,
       entries: [{ binding: 0, resource: { buffer: this.viewUniform } }],
@@ -254,7 +233,7 @@ export class Renderer {
     this.circlePipeline = device.createRenderPipeline({
       layout: pointLayoutPipeline,
       vertex: { module: renderModule, entryPoint: "targetVertex" },
-      fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
+      fragment: { module: renderModule, entryPoint: "targetFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
 
@@ -263,6 +242,7 @@ export class Renderer {
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
       ],
     });
@@ -282,6 +262,7 @@ export class Renderer {
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: this.particleRadiusUniform } },
         { binding: 2, resource: { buffer: this.particleColorUniform } },
+        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
         { binding: 4, resource: { buffer: mpmCore.rest } },
       ],
     });
@@ -289,8 +270,8 @@ export class Renderer {
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
-        { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       ],
     });
     this.activationParticlePipeline = device.createRenderPipeline({
@@ -299,15 +280,13 @@ export class Renderer {
       fragment: { module: renderModule, entryPoint: "activationParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
-    this.activationAlphaUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    writeFloat32(device, this.activationAlphaUniform, 0, new Float32Array([1]));
     this.activationParticleBindGroup = device.createBindGroup({
       layout: activationLayout,
       entries: [
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: this.particleRadiusUniform } },
+        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
         { binding: 4, resource: { buffer: mpmCore.rest } },
-        { binding: 6, resource: { buffer: this.activationAlphaUniform } },
       ],
     });
 
@@ -317,7 +296,7 @@ export class Renderer {
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
         { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
-        { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+        { binding: 7, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
       ],
     });
     this.neuralColorParticlePipeline = device.createRenderPipeline({
@@ -326,9 +305,15 @@ export class Renderer {
       fragment: { module: renderModule, entryPoint: "neuralColorParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
+    this.mitosisPropensityParticlePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [neuralColorLayout, viewLayout] }),
+      vertex: { module: renderModule, entryPoint: "mitosisPropensityParticleVertex" },
+      fragment: { module: renderModule, entryPoint: "mitosisPropensityParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
+      primitive: { topology: "triangle-list" },
+    });
     this.neuralColorStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    // alpha, saturation boost, contrast around sigmoid-neutral 0.5, padding
-    writeFloat32(device, this.neuralColorStyleUniform, 0, new Float32Array([1.0, 4.0, 1.5, 0.0]));
+    // Neural alpha, saturation, contrast, and mitosis display gain.
+    writeFloat32(device, this.neuralColorStyleUniform, 0, new Float32Array([1.0, 4.0, 1.5, 1.0]));
     this.neuralColorParticleBindGroup = device.createBindGroup({
       layout: neuralColorLayout,
       entries: [
@@ -382,6 +367,7 @@ export class Renderer {
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+        { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 9, visibility: GPUShaderStage.VERTEX, texture: { sampleType: "unfilterable-float" } },
         { binding: 10, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
@@ -403,6 +389,7 @@ export class Renderer {
       entries: [
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: this.particleRadiusUniform } },
+        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
         { binding: 4, resource: { buffer: mpmCore.rest } },
         { binding: 9, resource: mpmCore.morphologyTexture.createView() },
         { binding: 10, resource: { buffer: this.boundaryGradientScaleUniform } },
@@ -413,7 +400,7 @@ export class Renderer {
     // so the glyph is exactly the signal g2p consumes rather than a
     // reconstructed NN preview. Binding numbers 0/2 reuse the positions
     // and color declarations in render.wgsl; 4/5 are overlay-specific.
-    const growthAxisLayout = device.createBindGroupLayout({
+    const directionalLineLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
@@ -422,42 +409,24 @@ export class Renderer {
         { binding: 5, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
       ],
     });
-    this.growthAxisPipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [growthAxisLayout, viewLayout] }),
-      vertex: { module: renderModule, entryPoint: "growthAxisVertex" },
-      fragment: { module: renderModule, entryPoint: "growthAxisFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
-      primitive: { topology: "triangle-list" },
-    });
     this.headingLinePipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [growthAxisLayout, viewLayout] }),
+      layout: device.createPipelineLayout({ bindGroupLayouts: [directionalLineLayout, viewLayout] }),
       vertex: { module: renderModule, entryPoint: "headingLineVertex" },
       fragment: { module: renderModule, entryPoint: "headingLineFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       // WebGPU line-list rasterization is one device pixel wide.
       primitive: { topology: "line-list" },
     });
-    this.growthAxisStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.growthAxisColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.directionalLineStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.headingLineColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    writeFloat32(device, this.growthAxisColorUniform, 0, new Float32Array(GROWTH_AXIS_COLOR));
     writeFloat32(device, this.headingLineColorUniform, 0, new Float32Array(HEADING_LINE_COLOR));
-    this.growthAxisBindGroup = device.createBindGroup({
-      layout: growthAxisLayout,
-      entries: [
-        { binding: 0, resource: { buffer: mpmCore.positions } },
-        { binding: 2, resource: { buffer: this.growthAxisColorUniform } },
-        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
-        { binding: 4, resource: { buffer: mpmCore.rest } },
-        { binding: 5, resource: { buffer: this.growthAxisStyleUniform } },
-      ],
-    });
     this.headingLineBindGroup = device.createBindGroup({
-      layout: growthAxisLayout,
+      layout: directionalLineLayout,
       entries: [
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 2, resource: { buffer: this.headingLineColorUniform } },
         { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
         { binding: 4, resource: { buffer: mpmCore.rest } },
-        { binding: 5, resource: { buffer: this.growthAxisStyleUniform } },
+        { binding: 5, resource: { buffer: this.directionalLineStyleUniform } },
       ],
     });
 
@@ -488,6 +457,8 @@ export class Renderer {
     // comment.
     this.accentUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     writeFloat32(device, this.accentUniform, 0, new Float32Array([0]));
+    this.backgroundZeroIsBlackUniform = device.createBuffer({ size: 8, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    writeFloat32(device, this.backgroundZeroIsBlackUniform, 0, new Uint32Array([0, 0]));
     this.morphologyDisplayUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setMorphologyDisplay(true, true);
 
@@ -613,6 +584,7 @@ export class Renderer {
           { binding: 9, resource: this.substrateTexture.createView() },
           { binding: 13, resource: { buffer: this.accentUniform } },
           { binding: 21, resource: { buffer: this.substrateChannelStartUniform } },
+          { binding: 23, resource: { buffer: this.backgroundZeroIsBlackUniform } },
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];
@@ -635,45 +607,6 @@ export class Renderer {
       entries: [
         { binding: 5, resource: fieldSampler },
         { binding: 10, resource: this.substrateTexture.createView() },
-        { binding: 22, resource: { buffer: this.viewUniform } },
-      ],
-    });
-
-    // --- growth background ---
-    this.growthTexture = device.createTexture({
-      size: [environment.maxWidth, environment.maxHeight, 1],
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
-    });
-    this.growthColorizePipeline = device.createComputePipeline({
-      layout: "auto",
-      compute: { module: fieldModule, entryPoint: "colorizeGrowth" },
-    });
-    this.growthColorizeBindGroups = [0, 1].map((p) =>
-      device.createBindGroup({
-        layout: this.growthColorizePipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 8, resource: { buffer: environment.buffers[p] } },
-          { binding: 11, resource: this.growthTexture.createView() },
-          { binding: 13, resource: { buffer: this.accentUniform } },
-        ],
-      })
-    ) as [GPUBindGroup, GPUBindGroup];
-
-    this.growthPresentPipeline = device.createRenderPipeline({
-      layout: "auto",
-      vertex: { module: fieldModule, entryPoint: "fieldVertex" },
-      fragment: { module: fieldModule, entryPoint: "growthFragment", targets: [{ format: BLOOM_SCENE_FORMAT }] },
-      primitive: { topology: "triangle-list" },
-    });
-    this.growthPresentBindGroup = device.createBindGroup({
-      layout: this.growthPresentPipeline.getBindGroupLayout(0),
-      // growthFragment reuses fieldFragment's own fieldSampler (binding
-      // 5) too — same reasoning substratePresentBindGroup's own comment
-      // gives.
-      entries: [
-        { binding: 5, resource: fieldSampler },
-        { binding: 12, resource: this.growthTexture.createView() },
         { binding: 22, resource: { buffer: this.viewUniform } },
       ],
     });
@@ -716,6 +649,7 @@ export class Renderer {
         { binding: 18, resource: this.blurredDensityTexture.createView() },
         { binding: 15, resource: this.gradientTexture.createView() },
         { binding: 19, resource: { buffer: this.gradientExponentUniform } },
+        { binding: 23, resource: { buffer: this.backgroundZeroIsBlackUniform } },
       ],
     });
     this.gradientDispatch = [ceilDiv(REPULSION_FIELD_N, 16), ceilDiv(REPULSION_FIELD_N, 16)];
@@ -743,7 +677,7 @@ export class Renderer {
 
   setFieldMode(mode: FieldMode): void {
     this.fieldMode = mode;
-    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "growth" && mode !== "gradient") {
+    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "gradient") {
       writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode]]));
     }
   }
@@ -766,6 +700,14 @@ export class Renderer {
    * fieldModeUniform write — safe to call every frame off a live slider. */
   setAccent(accent: number): void {
     writeFloat32(this.device, this.accentUniform, 0, new Float32Array([accent]));
+  }
+
+  setSubstrateZeroIsBlack(enabled: boolean): void {
+    writeFloat32(this.device, this.backgroundZeroIsBlackUniform, 0, new Uint32Array([enabled ? 1 : 0]));
+  }
+
+  setBoundaryGradientZeroIsBlack(enabled: boolean): void {
+    writeFloat32(this.device, this.backgroundZeroIsBlackUniform, 4, new Uint32Array([enabled ? 1 : 0]));
   }
 
   setMorphologyDisplay(gradientEnabled: boolean, densityEnabled: boolean): void {
@@ -800,16 +742,25 @@ export class Renderer {
     writeFloat32(this.device, this.gradientExponentUniform, 0, new Float32Array([exponent]));
   }
 
-  setParticleRenderMode(mode: ParticleRenderMode): void {
-    this.particleRenderMode = mode;
+  setParticleShape(shape: ParticleShape): void {
+    writeFloat32(this.device, this.viewUniform, 4, new Float32Array([shape === "triangle" ? 1 : 0]));
+  }
+
+  setParticleColorMode(mode: ParticleColorMode): void {
+    this.particleColorMode = mode;
     // Recurrent neural memory has eight fixed slots; cellular chemical memory
     // follows the run's configured channel count.
     this.setInternalStateChannelStart(this.internalStateChannelStart);
-    if (mode === "dots-activation" || mode === "dots-activation-translucent") {
-      writeFloat32(this.device, this.activationAlphaUniform, 0, new Float32Array([
-        mode === "dots-activation-translucent" ? this.activationAlpha : 1.0,
-      ]));
-    }
+  }
+
+  setParticleAlpha(alpha: number): void {
+    writeFloat32(this.device, this.viewUniform, 8, new Float32Array([
+      Math.min(1, Math.max(0, alpha)),
+    ]));
+  }
+
+  setDirectionalLineVisible(visible: boolean): void {
+    this.directionalLineVisible = visible;
   }
 
   /** Camera zoom applied by every particle/target vertex shader. */
@@ -829,31 +780,14 @@ export class Renderer {
     );
   }
 
-  setActivationAlpha(alpha: number): void {
-    this.activationAlpha = Math.min(1, Math.max(0, alpha));
-    if (this.particleRenderMode === "dots-activation-translucent") {
-      writeFloat32(this.device, this.activationAlphaUniform, 0, new Float32Array([this.activationAlpha]));
-    }
-  }
-
-  setWhiteDotsAlpha(alpha: number): void {
-    this.whiteDotsAlpha = Math.min(1, Math.max(0, alpha));
-    writeFloat32(this.device, this.particleColorUniform, 0, new Float32Array([1, 1, 1, this.whiteDotsAlpha]));
-  }
-
-  setNeuralColorAlpha(alpha: number): void {
-    this.neuralColorAlpha = Math.min(1, Math.max(0, alpha));
-    writeFloat32(this.device, this.neuralColorStyleUniform, 0, new Float32Array([this.neuralColorAlpha]));
-  }
-
-  setInternalStateAlpha(alpha: number): void {
-    this.internalStateAlpha = Math.min(1, Math.max(0, alpha));
-    writeFloat32(this.device, this.internalStateStyleUniform, 16, new Float32Array([this.internalStateAlpha]));
+  setMitosisSignalBoost(boost: number): void {
+    this.mitosisSignalBoost = Math.min(10, Math.max(1, boost));
+    writeFloat32(this.device, this.neuralColorStyleUniform, 12, new Float32Array([this.mitosisSignalBoost]));
   }
 
   setInternalStateChannelStart(start: number): void {
     this.internalStateChannelStart = Math.max(0, Math.floor(start));
-    const channelCount = this.particleRenderMode === "dots-chemical-levels"
+    const channelCount = this.particleColorMode === "chemical-memory"
       ? this.environment.channels
       : 8;
     const clamped = Math.min(Math.max(0, channelCount - 3), this.internalStateChannelStart);
@@ -864,12 +798,6 @@ export class Renderer {
   setChemicalMemoryOpponentSubtraction(amount: number): void {
     const clamped = Math.min(1, Math.max(0, amount));
     writeFloat32(this.device, this.internalStateStyleUniform, 20, new Float32Array([clamped]));
-  }
-
-  /** Device-pixel scale of a full-strength signed growth-polarity triangle. */
-  setGrowthAxisLengthPx(px: number): void {
-    this.growthAxisLengthPx = px;
-    this.writeGrowthAxisStyle();
   }
 
   /** Device-pixel particle radius — mirrors mls-mpm/src/gpu/render.ts's
@@ -885,7 +813,7 @@ export class Renderer {
     this.canvasMinDimPx = Math.max(1, Math.min(widthPx, heightPx));
     this.bloom.resize(widthPx, heightPx);
     this.writeParticleRadius();
-    this.writeGrowthAxisStyle();
+    this.writeDirectionalLineStyle();
     writeFloat32(this.device, this.targetRadiusUniform, 0, new Float32Array([(TARGET_RADIUS_PX * 2) / this.canvasMinDimPx]));
   }
 
@@ -897,10 +825,10 @@ export class Renderer {
     writeFloat32(this.device, this.particleRadiusUniform, 0, new Float32Array([(this.particleRadiusPx * 2) / this.canvasMinDimPx]));
   }
 
-  private writeGrowthAxisStyle(): void {
+  private writeDirectionalLineStyle(): void {
     const pxToNdc = 2 / this.canvasMinDimPx;
-    writeFloat32(this.device, this.growthAxisStyleUniform, 0, new Float32Array([
-      this.growthAxisLengthPx * 0.5 * pxToNdc,
+    writeFloat32(this.device, this.directionalLineStyleUniform, 0, new Float32Array([
+      0,
       HEADING_LINE_LENGTH_PX * pxToNdc,
       4.0 * pxToNdc,
       2.7 * pxToNdc,
@@ -972,12 +900,6 @@ export class Renderer {
       computePass.setBindGroup(0, this.substrateColorizeBindGroups[this.environment.parity]);
       computePass.dispatchWorkgroups(...this.substrateDispatch);
       computePass.end();
-    } else if (this.fieldMode === "growth") {
-      const computePass = encoder.beginComputePass();
-      computePass.setPipeline(this.growthColorizePipeline);
-      computePass.setBindGroup(0, this.growthColorizeBindGroups[this.environment.parity]);
-      computePass.dispatchWorkgroups(...this.substrateDispatch);
-      computePass.end();
     } else if (this.fieldMode === "gradient") {
       // blurDensity MUST run first — colorizeGradient reads its own
       // output (blurredDensityTexture), not repulsionTex directly — see
@@ -1022,10 +944,6 @@ export class Renderer {
       pass.setPipeline(this.substratePresentPipeline);
       pass.setBindGroup(0, this.substratePresentBindGroup);
       pass.draw(6);
-    } else if (this.fieldMode === "growth") {
-      pass.setPipeline(this.growthPresentPipeline);
-      pass.setBindGroup(0, this.growthPresentBindGroup);
-      pass.draw(6);
     } else if (this.fieldMode === "gradient") {
       pass.setPipeline(this.gradientPresentPipeline);
       pass.setBindGroup(0, this.gradientPresentBindGroup);
@@ -1041,34 +959,36 @@ export class Renderer {
 
     if (activeCount > 0) {
       pass.setBindGroup(1, this.viewBindGroup);
-      if (this.particleRenderMode === "dots-white") {
+      if (this.particleColorMode === "white") {
         pass.setPipeline(this.particleCirclePipeline);
         pass.setBindGroup(0, this.circleParticleBindGroup);
         pass.draw(6, activeCount);
-      } else if (this.particleRenderMode === "dots-neural-color") {
+      } else if (this.particleColorMode === "neural-color") {
         pass.setPipeline(this.neuralColorParticlePipeline);
         pass.setBindGroup(0, this.neuralColorParticleBindGroup);
         pass.draw(6, activeCount);
-      } else if (this.particleRenderMode === "dots-internal-state") {
+      } else if (this.particleColorMode === "mitosis-drive") {
+        pass.setPipeline(this.mitosisPropensityParticlePipeline);
+        pass.setBindGroup(0, this.neuralColorParticleBindGroup);
+        pass.draw(6, activeCount);
+      } else if (this.particleColorMode === "neural-memory") {
         pass.setPipeline(this.internalStateParticlePipeline);
         pass.setBindGroup(0, this.internalStateParticleBindGroup);
         pass.draw(6, activeCount);
-      } else if (this.particleRenderMode === "dots-chemical-levels") {
+      } else if (this.particleColorMode === "chemical-memory") {
         pass.setPipeline(this.chemicalLevelsParticlePipeline);
         pass.setBindGroup(0, this.internalStateParticleBindGroup);
         pass.draw(6, activeCount);
-      } else if (this.particleRenderMode === "dots-boundary-value") {
+      } else if (this.particleColorMode === "boundary-value") {
         pass.setPipeline(this.boundaryValueParticlePipeline);
         pass.setBindGroup(0, this.boundaryValueParticleBindGroup);
         pass.draw(6, activeCount);
-      } else if (this.particleRenderMode === "dots-activation" || this.particleRenderMode === "dots-activation-translucent") {
+      } else {
         pass.setPipeline(this.activationParticlePipeline);
         pass.setBindGroup(0, this.activationParticleBindGroup);
         pass.draw(6, activeCount);
-      } else {
-        pass.setPipeline(this.growthAxisPipeline);
-        pass.setBindGroup(0, this.growthAxisBindGroup);
-        pass.draw(3, activeCount);
+      }
+      if (this.directionalLineVisible) {
         pass.setPipeline(this.headingLinePipeline);
         pass.setBindGroup(0, this.headingLineBindGroup);
         pass.draw(2, activeCount);
@@ -1083,12 +1003,10 @@ export class Renderer {
   destroy(): void {
     this.particleRadiusUniform.destroy();
     this.particleColorUniform.destroy();
-    this.activationAlphaUniform.destroy();
     this.neuralColorStyleUniform.destroy();
     this.internalStateStyleUniform.destroy();
     this.boundaryGradientScaleUniform.destroy();
-    this.growthAxisStyleUniform.destroy();
-    this.growthAxisColorUniform.destroy();
+    this.directionalLineStyleUniform.destroy();
     this.headingLineColorUniform.destroy();
     this.targetRadiusUniform.destroy();
     this.targetColorUniform.destroy();
@@ -1096,12 +1014,12 @@ export class Renderer {
     this.viewUniform.destroy();
     this.fieldModeUniform.destroy();
     this.accentUniform.destroy();
+    this.backgroundZeroIsBlackUniform.destroy();
     this.morphologyDisplayUniform.destroy();
     this.fieldTexture.destroy();
     this.diagnosticsBuffer.destroy();
     this.substrateTexture.destroy();
     this.substrateChannelStartUniform.destroy();
-    this.growthTexture.destroy();
     this.blurredDensityTexture.destroy();
     this.blurSigmaUniform.destroy();
     this.gradientTexture.destroy();

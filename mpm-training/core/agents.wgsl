@@ -315,7 +315,7 @@ struct ParticleMeta {
   heading: f32,
   angularVelocity: f32,
   // Current neural cell color. vec4 keeps the packed record naturally
-  // aligned while the unused alpha lane remains fixed at 1.
+  // aligned while the alpha lane remains fixed at 1.
   color: vec4<f32>,
   // Integrated division clock. Positive growth signal adds hazard; the
   // particle starts a cycle when it crosses an exponentially-distributed
@@ -323,6 +323,10 @@ struct ParticleMeta {
   // discarded when the signal later changes or temporarily vanishes.
   divisionHazard: f32,
   divisionThreshold: f32,
+  // Neural mitosis drive after the global division-drive remapping. This is
+  // signed at zero boost and shifts toward [0,1] as boost approaches one.
+  // Kept explicitly so rendering reads the value used by the simulation.
+  mitosisPropensity: f32,
   // Eight private neural-memory channels. Stateless policies leave these at
   // zero. Stateful policies sense them and apply gated residual updates.
   privateState: array<f32, PRIVATE_STATE_DIM>,
@@ -1131,6 +1135,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     0.5 * (result.divisionDrive + 1.0),
     divisionDriveBoost,
   );
+  agentState.particleMeta[pi].mitosisPropensity = clamp(remappedDivisionDrive, -1.0, 1.0);
   let splitProb = clamp(remappedDivisionDrive, 0.0, 1.0);
   let mechanicalGate = mechanicalGrowthGate(particleF[pi], particleRest[pi].growthF);
   // Division cooldown — counted down every step regardless of whether
@@ -1245,6 +1250,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       agentState.particleMeta[newIndex].color = agentState.particleMeta[pi].color;
       agentState.particleMeta[newIndex].divisionHazard = 0.0;
       agentState.particleMeta[newIndex].divisionThreshold = 0.0;
+      agentState.particleMeta[newIndex].mitosisPropensity = 0.0;
       for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
         agentState.particleMeta[newIndex].privateState[s] = agentState.particleMeta[pi].privateState[s];
       }

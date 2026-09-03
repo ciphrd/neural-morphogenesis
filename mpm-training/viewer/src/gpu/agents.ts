@@ -51,7 +51,7 @@ const WORKGROUP = 64;
 // angularVelocity are only ever left at their zero-initialized default
 // by the TS side (see resetHeading()'s own comment), never written at a
 // specific offset the way rng/heading are.
-const particleMetaStride = (channels: number) => Math.ceil((72 + channels * 4) / 16) * 16;
+const particleMetaStride = (channels: number) => Math.ceil((76 + channels * 4) / 16) * 16;
 const PARTICLE_META_OFFSET_RNG = 0;
 const PARTICLE_META_OFFSET_HEADING = 8;
 // AgentState places its runtime ParticleMeta array after one atomic u32 and
