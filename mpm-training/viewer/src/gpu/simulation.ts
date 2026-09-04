@@ -101,6 +101,7 @@ export class GpuSimulation {
   private pendingParticleColorMode: ParticleColorMode = "white";
   private pendingParticleAlpha = 1.0;
   private pendingDirectionalLineVisible = false;
+  private pendingGrowthLineVisible = false;
   private pendingMitosisSignalBoost = 1.0;
   private pendingInternalStateChannelStart = 0;
   private pendingChemicalMemoryOpponentSubtraction = 0;
@@ -329,6 +330,7 @@ export class GpuSimulation {
     renderer.setParticleColorMode(this.pendingParticleColorMode);
     renderer.setParticleAlpha(this.pendingParticleAlpha);
     renderer.setDirectionalLineVisible(this.pendingDirectionalLineVisible);
+    renderer.setGrowthLineVisible(this.pendingGrowthLineVisible);
     renderer.setMitosisSignalBoost(this.pendingMitosisSignalBoost);
     renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart);
     renderer.setChemicalMemoryOpponentSubtraction(this.pendingChemicalMemoryOpponentSubtraction);
@@ -402,12 +404,9 @@ export class GpuSimulation {
     this.agents.setSpawnCenter(this.config.spawnX, this.config.spawnY);
     this.agents.setMaxActiveParticles(this.particleCap);
     this.agents.setActiveCount(scene.count);
-    // Heading's own per-slot fill and growth's own seed are both bit-
-    // exact via rng.ts's own spawnUniform01()/growthSeed() respectively
-    // (two DIFFERENT hash domains, see spawnUniform01()'s own comment
-    // for why they're safe to derive from the identical raw seed
-    // without correlating) — see Agents.resetHeading()'s own docstring.
-    this.agents.resetHeading(this.config.seed, scene.positions);
+    // Clear rollout-scoped policy state. The first agent evaluation derives
+    // alignment from chemical channel 7's freshly sensed gradient.
+    this.agents.resetState(this.config.seed);
     this._currentStep = 0;
   }
 
@@ -724,6 +723,11 @@ export class GpuSimulation {
   setDirectionalLineVisible(visible: boolean): void {
     this.pendingDirectionalLineVisible = visible;
     this.renderer?.setDirectionalLineVisible(visible);
+  }
+
+  setGrowthLineVisible(visible: boolean): void {
+    this.pendingGrowthLineVisible = visible;
+    this.renderer?.setGrowthLineVisible(visible);
   }
 
   setMitosisSignalBoost(boost: number): void {

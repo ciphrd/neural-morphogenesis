@@ -75,7 +75,7 @@ struct ParticleRest {
   growthAngle: f32,
   growthAnisotropy: f32,
   divisionBias: f32,
-  growthFrameHeading: f32,
+  growthFrameAngle: f32,
   appearanceScale: f32,
   _padding: f32,
 }

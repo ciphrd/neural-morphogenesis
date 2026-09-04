@@ -89,7 +89,7 @@ WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass
 # growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-# growthFrameHeading, appearanceScale, padding — 48 bytes.
+# growthFrameAngle, appearanceScale, padding — 48 bytes.
 REST_FIELDS = 12
 REST_GROWTH_F = slice(0, 4)
 REST_JP = 4
@@ -775,7 +775,7 @@ class MpmCore:
         """Returns active particles' raw tensor-growth rest-state rows.
 
         Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,growthAngle,
-        growthAnisotropy,divisionBias,growthFrameHeading,appearanceScale,
+        growthAnisotropy,divisionBias,growthFrameAngle,appearanceScale,
         padding]``.
         This is diagnostic-only: COPY_SRC is present on the buffer, but the
         normal simulation path performs no readback. Keeping the raw layout

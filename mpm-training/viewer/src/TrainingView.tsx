@@ -4,11 +4,13 @@ import { FitnessChart } from "./charts/FitnessChart"
 import { randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
 import { MAX_PARTICLES } from "./gpu/mpmCore"
+import { mutatePolicyWeights } from "./gpu/policyMutation"
 import type { FieldMode, ParticleColorMode, ParticleShape } from "./gpu/render"
 import type {
   CellMemory,
   ChemicalCommunicationArchitecture,
   PhysicsSettings,
+  UpdateRuleWeights,
 } from "./gpu/types"
 import {
   cellMemoryFromConfig,
@@ -33,6 +35,7 @@ import { createZip, downloadBlob } from "./render/zip"
 import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
 import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
+import { PolicyWeightControl } from "./ui/PolicyWeightControl"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { RunPicker } from "./ui/RunPicker"
 import type {
@@ -176,6 +179,9 @@ export function TrainingView() {
   const [directionalLineVisible, setDirectionalLineVisible] = useState(
     VIEWER_DEFAULTS.rendering.directionalLineVisible
   )
+  const [growthLineVisible, setGrowthLineVisible] = useState(
+    VIEWER_DEFAULTS.rendering.growthLineVisible
+  )
   const [boundaryGradientScale, setBoundaryGradientScale] = useState(
     VIEWER_DEFAULTS.rendering.boundaryGradientScale
   )
@@ -262,6 +268,7 @@ export function TrainingView() {
   const defaultParticleDensity =
     VIEWER_DEFAULTS.playback.particleDensityMultiplier ??
     activeConfig?.particleDensityMultiplier ??
+    activeConfig?.trainingDensityMultipliers?.[0] ??
     1
   const effectiveParticleDensity =
     particleDensityOverride ?? defaultParticleDensity
@@ -334,6 +341,56 @@ export function TrainingView() {
       ),
     }
   }, [playbackConfig, policyExploration])
+  const brainSelectionKey = [
+    viewingRunId ?? "current",
+    selectedGeneration ?? "latest",
+    policyExploration?.cellMemory ?? "trained",
+    policyExploration?.hiddenWidth ?? "trained",
+    policyExploration?.variant ?? "trained",
+  ].join(":")
+  const [mutation, setMutation] = useState<{
+    selectionKey: string
+    weights: UpdateRuleWeights
+  } | null>(null)
+  useEffect(() => {
+    setMutation(null)
+  }, [brainSelectionKey])
+  const mutatedWeights = mutation?.selectionKey === brainSelectionKey
+    ? mutation.weights
+    : null
+  const activeBrainConfig = useMemo(() => {
+    if (!previewConfig || !mutatedWeights) return previewConfig
+    return { ...previewConfig, weights: mutatedWeights }
+  }, [previewConfig, mutatedWeights])
+  const [policyWeightGain, setPolicyWeightGain] = useState(1)
+  const weightedPreviewConfig = useMemo(() => {
+    if (!activeBrainConfig || policyWeightGain === 1) return activeBrainConfig
+    return {
+      ...activeBrainConfig,
+      weights: {
+        ...activeBrainConfig.weights,
+        fc1w: activeBrainConfig.weights.fc1w.map((row) =>
+          row.map((weight) => weight * policyWeightGain)
+        ),
+        fc2w: activeBrainConfig.weights.fc2w.map((row) =>
+          row.map((weight) => weight * policyWeightGain)
+        ),
+      },
+    }
+  }, [activeBrainConfig, policyWeightGain])
+  const [mutationStrength, setMutationStrength] = useState(0.000005)
+  const mutateActiveBrain = () => {
+    if (!activeBrainConfig || mutationStrength <= 0) return
+    setMutation({
+      selectionKey: brainSelectionKey,
+      weights: mutatePolicyWeights(
+        activeBrainConfig.weights,
+        activeBrainConfig.channels,
+        activeBrainConfig.policyArchitecture ?? "stateless-128",
+        mutationStrength
+      ),
+    })
+  }
   const displayedCellMemory =
     policyExploration?.cellMemory ??
     (activeConfig ? cellMemoryFromConfig(activeConfig) : "recurrent")
@@ -351,7 +408,14 @@ export function TrainingView() {
   }, [activeConfig?.generation])
   useEffect(() => {
     if (!activeConfig) return
-    const runKey = viewingRunId ?? "current"
+    // Include the recorded population values so the authoritative backend
+    // settings can replace the local placeholder after an asynchronous load,
+    // without resetting user playback overrides on every new generation.
+    const runKey = [
+      viewingRunId ?? "current",
+      activeConfig.particles,
+      activeConfig.initialParticleCount ?? coreConstants.INITIAL_PARTICLE_COUNT,
+    ].join(":")
     if (particleCapRunRef.current === runKey) return
     particleCapRunRef.current = runKey
     const configuredCap = VIEWER_DEFAULTS.playback.particleCap
@@ -373,7 +437,7 @@ export function TrainingView() {
     )
     setFrontendInitialParticleCount(initialCount)
     setFrontendInitialParticleCountInput(String(initialCount))
-  }, [viewingRunId, activeConfig?.particles])
+  }, [viewingRunId, activeConfig?.particles, activeConfig?.initialParticleCount])
   // null = following this generation's own trained physics/growth values;
   // non-null once either live-control panel's sliders have been touched.
   // Reset whenever the run or the generation
@@ -445,7 +509,7 @@ export function TrainingView() {
 
   const handleSampleSweep = async (request: SampleSweepRequest) => {
     const canvas = gridCanvasRef.current
-    if (!canvas || !physicsValues || !activeConfig || !previewConfig) return
+    if (!canvas || !physicsValues || !activeConfig || !weightedPreviewConfig) return
     const combinations: Array<Partial<Record<SweepParameterKey, number>>> = []
     const visit = (
       axisIndex: number,
@@ -493,7 +557,7 @@ export function TrainingView() {
         const substrateResolution = combination.substrateResolution
           ?? effectiveSubstrateResolution
         const resolvedConfig = configAtDensity(
-          { ...previewConfig, fieldN: substrateResolution },
+          { ...weightedPreviewConfig, fieldN: substrateResolution },
           density,
         )
         const physics = { ...basePhysics }
@@ -966,7 +1030,15 @@ export function TrainingView() {
               checked={directionalLineVisible}
               onChange={(e) => setDirectionalLineVisible(e.target.checked)}
             />
-            Directional line
+            Heading direction (red)
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={growthLineVisible}
+              onChange={(e) => setGrowthLineVisible(e.target.checked)}
+            />
+            Growth direction (green)
           </label>
           {particleColorMode === "mitosis-drive" && (
             <label className="slider-row">
@@ -1057,6 +1129,7 @@ export function TrainingView() {
               <option value="repulsion">Repulsion field</option>
               <option value="morphology">Policy morphology</option>
               <option value="substrate">Substrate</option>
+              <option value="orientation">Orientation substrate (ch7)</option>
               <option value="gradient">Boundary gradient</option>
             </select>
           </label>
@@ -1105,6 +1178,12 @@ export function TrainingView() {
                 Zero is black
               </label>
             </>
+          )}
+          {fieldMode === "orientation" && (
+            <label className="checkbox-row">
+              <input type="checkbox" checked={substrateZeroIsBlack} onChange={(e) => setSubstrateZeroIsBlack(e.target.checked)} />
+              Zero is black
+            </label>
           )}
           <label className="checkbox-row">
             <input
@@ -1187,7 +1266,7 @@ export function TrainingView() {
         <div className="viewport">
           <GridCanvas
             ref={gridCanvasRef}
-            config={previewConfig}
+            config={weightedPreviewConfig}
             targetPoints={targetPoints}
             targetVisible={targetVisible}
             physics={physicsValues}
@@ -1206,6 +1285,7 @@ export function TrainingView() {
             particleColorMode={particleColorMode}
             particleAlpha={particleAlpha}
             directionalLineVisible={directionalLineVisible}
+            growthLineVisible={growthLineVisible}
             zoom={zoom}
             autoZoom={autoZoomSettings}
             onEffectiveZoomChange={setEffectiveZoom}
@@ -1340,6 +1420,43 @@ export function TrainingView() {
               </button>
             </div>
           </div>
+          <div className="mutation-control" aria-label="Brain mutation">
+            <button
+              className="mutation-button"
+              type="button"
+              disabled={!activeBrainConfig || mutationStrength <= 0}
+              onClick={mutateActiveBrain}
+              title="Add independent Gaussian noise to every weight and bias, then restart the rollout"
+            >
+              Mutate
+            </button>
+            <label
+              className="mutation-strength"
+              title="Global mutation sigma; output heads use the trainer's smaller semantic scale factors"
+            >
+              <span>σ</span>
+              <Slider
+                min={0}
+                max={0.000025}
+                step={0.0000005}
+                value={mutationStrength}
+                onChange={setMutationStrength}
+              />
+              <span className="slider-value">
+                {mutationStrength.toFixed(7)}
+              </span>
+            </label>
+            <button
+              className="icon-button"
+              type="button"
+              disabled={!mutatedWeights}
+              onClick={() => setMutation(null)}
+              title="Discard mutations and restore the selected brain"
+              aria-label="Discard brain mutations"
+            >
+              ↺
+            </button>
+          </div>
           <div className="toolbar-actions">
             <label
               className="toolbar-checkbox"
@@ -1441,6 +1558,11 @@ export function TrainingView() {
         </div>
       </div>
       <div className="controls-right">
+        <PolicyWeightControl
+          value={policyWeightGain}
+          disabled={!weightedPreviewConfig}
+          onChange={setPolicyWeightGain}
+        />
         <section>
           <h2>Stats</h2>
           <div className="stat-row">
@@ -1518,7 +1640,7 @@ export function TrainingView() {
           )}
         </section>
 
-        <NetworkPanel config={previewConfig} physics={physicsValues} />
+        <NetworkPanel config={weightedPreviewConfig} physics={physicsValues} />
       </div>
       {sampleModalOpen && physicsValues && (
         <SampleSweepModal

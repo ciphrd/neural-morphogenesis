@@ -52,9 +52,7 @@ CHEMICAL_VALUE_INPUT_MULTIPLIER = float(DEFAULT_RUN_SETTINGS["chemicalValueInput
 CHEMICAL_GRADIENT_INPUT_SCALE = float(DEFAULT_RUN_SETTINGS["chemicalGradientInputScale"])
 MORPHOLOGY_GRADIENT_INPUT_SCALE: float = _CORE_CONSTANTS["MORPHOLOGY_GRADIENT_INPUT_SCALE"]
 BOUNDARY_TANGENT_MIN_GRADIENT = float(DEFAULT_RUN_SETTINGS["boundaryTangentMinGradient"])
-GROWTH_DIRECTION_RESPONSE_RATE: float = _CORE_CONSTANTS["GROWTH_DIRECTION_RESPONSE_RATE"]
 GROWTH_ANISOTROPY_RESPONSE_RATE: float = _CORE_CONSTANTS["GROWTH_ANISOTROPY_RESPONSE_RATE"]
-DIRECTION_CONFIDENCE_SCALE: float = _CORE_CONSTANTS["DIRECTION_CONFIDENCE_SCALE"]
 # Normal training architecture selection. This is broadcast with the run's
 # settings; the paired comparison utility overrides it internally only while
 # launching its two controlled experiment subprocesses.

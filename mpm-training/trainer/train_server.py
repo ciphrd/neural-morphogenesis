@@ -54,11 +54,12 @@ from evolve import (
     rollout,
     run_generation,
     set_weights,
+    validate_fitness_configuration,
 )
 from mpm_core import PARTICLE_MASS, VOL, MpmCore
 from parallel_workers import build_pool
 from policy_parameters import mutation_scales, policy_hidden_dim
-from raster import build_target_distance_field, build_target_raster, training_raster_distance
+from raster import FITNESS_MODEL_VERSION, build_target_distance_field, build_target_raster, training_raster_distance
 from simulation_settings import (
     ANGULAR_DAMPING,
     BOUNDARY_TANGENT_MIN_GRADIENT,
@@ -157,6 +158,7 @@ def _setup() -> None:
         raise SystemExit("--seeds-per-candidate must be at least 1")
     if not 1 <= args.initial_particles <= args.particles:
         raise SystemExit("--initial-particles must be between 1 and --particles")
+    validate_fitness_configuration(args)
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
         raise SystemExit("--growth-steps must be between 0 and --macro-steps")
     finalize_density_configuration(args)
@@ -264,7 +266,7 @@ def _archive_previous_run() -> None:
 def _save_generation_images(
     generation: int, winner_weights: np.ndarray, winner_seed: int, winner_density: float,
     core: MpmCore, agents: AgentsGPU, environment: EnvironmentGPU
-) -> None:
+) -> dict[str, float] | None:
     """Three PNGs per generation — see debug_images.py's own module
     docstring for what each one is and why: `..._grown.png` (raw,
     un-aligned positions), `..._target.png` (the target's own raster,
@@ -292,7 +294,7 @@ def _save_generation_images(
         return_positions=True,
         density_multiplier=winner_density,
     )
-    _, agent_raster = training_raster_distance(
+    _, agent_raster, breakdown = training_raster_distance(
         positions,
         target.points,
         target_raster,
@@ -301,8 +303,14 @@ def _save_generation_images(
         RASTER_EXTENT,
         args.raster_sigma,
         outside_weight=args.outside_weight,
-        track_best_raster=True,
+        return_breakdown=True,
         particle_weight=1.0 / winner_density,
+        expected_weighted_particles=float(args.particles),
+        target_occupancy=args.fitness_target_occupancy,
+        coverage_weight=args.fitness_coverage_weight,
+        spill_weight=args.fitness_spill_weight,
+        boundary_weight=args.fitness_boundary_weight,
+        crowding_weight=args.fitness_crowding_weight,
     )
 
     prefix = f"gen_{generation:05d}"
@@ -310,6 +318,16 @@ def _save_generation_images(
     save_raster_image(target_raster, IMAGES_DIR / f"{prefix}_target.png")
     if agent_raster is not None:
         save_raster_image(agent_raster, IMAGES_DIR / f"{prefix}_agents.png")
+    if breakdown is None:
+        return None
+    return {
+        "total": breakdown.total,
+        "coverage": breakdown.coverage,
+        "spill": breakdown.spill,
+        "boundary": breakdown.boundary,
+        "crowding": breakdown.crowding,
+        "angle": breakdown.angle,
+    }
 
 
 @asynccontextmanager
@@ -516,6 +534,13 @@ async def _training_loop_body() -> None:
         "rasterResolution": args.raster_resolution,
         "rasterSigma": args.raster_sigma,
         "outsideWeight": args.outside_weight,
+        "fitnessTargetOccupancy": args.fitness_target_occupancy,
+        "fitnessCoverageWeight": args.fitness_coverage_weight,
+        "fitnessSpillWeight": args.fitness_spill_weight,
+        "fitnessBoundaryWeight": args.fitness_boundary_weight,
+        "fitnessCrowdingWeight": args.fitness_crowding_weight,
+        "fitnessTemporalWorstWeight": args.fitness_temporal_worst_weight,
+        "fitnessModelVersion": FITNESS_MODEL_VERSION,
         "runSeed": args.seed,
         "totalGenerations": args.generations,
         "checkpointEvery": args.checkpoint_every,
@@ -552,7 +577,7 @@ async def _training_loop_body() -> None:
         # once more (see _save_generation_images()'s own docstring) plus
         # PNG encoding/disk I/O, neither of which should stall websocket
         # message flushing either.
-        await asyncio.to_thread(
+        final_snapshot_fitness = await asyncio.to_thread(
             _save_generation_images, generation, winner_weights, winner_seed, winner_density,
             core, agents, environment,
         )
@@ -582,6 +607,10 @@ async def _training_loop_body() -> None:
             "seed": winner_seed,
             "particleDensityMultiplier": winner_density,
             "densityFitnesses": density_fitnesses,
+            # Inspectable terms for the representative rollout's final
+            # snapshot. Selection fitness above also includes four earlier
+            # captures through the configured temporal mean/worst blend.
+            "finalSnapshotFitness": final_snapshot_fitness,
             # Shared by every candidate in this generation. The batch rotates
             # on the next generation; `seed` above is the winning candidate's
             # worst member, used for the single-rollout browser replay.
@@ -623,6 +652,7 @@ async def _training_loop_body() -> None:
                     {
                         "generation": generation,
                         "fitness": best_fitness,
+                        "fitness_model_version": FITNESS_MODEL_VERSION,
                         "target": args.target,
                         "particles": args.particles,
                         "initial_particle_count": args.initial_particles,
@@ -653,6 +683,12 @@ async def _training_loop_body() -> None:
                         "evaluation_seeds": best_evaluation_seeds,
                         "elites": args.elites,
                         "mutation_sigma": args.mutation_sigma,
+                        "fitness_target_occupancy": args.fitness_target_occupancy,
+                        "fitness_coverage_weight": args.fitness_coverage_weight,
+                        "fitness_spill_weight": args.fitness_spill_weight,
+                        "fitness_boundary_weight": args.fitness_boundary_weight,
+                        "fitness_crowding_weight": args.fitness_crowding_weight,
+                        "fitness_temporal_worst_weight": args.fitness_temporal_worst_weight,
                         "policy_architecture": args.policy_architecture,
                         "cell_memory": args.cell_memory,
                         "hidden_layers": args.hidden_layers,

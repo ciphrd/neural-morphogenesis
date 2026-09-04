@@ -8,18 +8,9 @@ export was drawn), so a pose-aware fitness needs to reward getting the
 transform" convention every other evolve.py in this repo trains against,
 whichever underlying point-distance it's built on.
 
-training_alignment_distance IS evolve.py's own live fitness function
-again (see that module's own module docstring for the Chamfer/raster
-back-and-forth — raster.py's own Gaussian-splat raster distance held
-that role for a while instead, and stays fully wired for train_server.py's
-own debug-image rendering, just not for scoring). best_alignment() (the
-rotated-points version this wraps, not just the scalar distance) also
-does its own separate work regardless of which strategy is live:
-render_rollout.py's own quick visual sanity checks call it directly to
-pose-align a checkpoint's replay for display. Only training_alignment_distance/
-best_alignment are ported (the cheap coarse-rotation-grid version) —
-best_fit_distance's expensive 12-restart Nelder-Mead search is for
-one-off reporting, not needed here yet.
+The live evolutionary fitness is now raster.py's bounded multiscale occupancy
+score. These Chamfer helpers remain useful for point-cloud diagnostics and
+render_rollout.py's quick visual alignment.
 """
 from __future__ import annotations
 

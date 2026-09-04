@@ -97,7 +97,6 @@ def policy_heads(num_channels: int, architecture: str = STATELESS_ARCHITECTURE) 
     architecture = normalize_architecture(architecture)
     sizes: dict[str, int] = {
         "chemical": num_channels,
-        "heading": 2,
         "anisotropy": 1,
         "division": 1,
         "growthDirection": 2,

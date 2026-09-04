@@ -6,7 +6,8 @@
 // translucent activation dots, and signed directional-growth arrows.
 //
 // Field modes: "none" | "density" | "speed" | "deformation" | "pressure"
-// | "shear" | "repulsion" | "morphology" | "substrate" | "gradient".
+// | "shear" | "repulsion" | "morphology" | "substrate" | "orientation"
+// | "gradient".
 // This extends the set mls-mpm/src/gpu/render.ts exposes with chemical field
 // views and "gradient" (this project's own chemical field/repulsion density; mls-
 // mpm has no equivalent of). "deformation"/"pressure"/"shear" read
@@ -34,11 +35,11 @@ import type { Environment } from "./environment";
 import { DX, GRID_N, INV_DX, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
-export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "gradient";
+export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "gradient";
 export type ParticleShape = "dot" | "triangle";
 export type ParticleColorMode = "white" | "neural-color" | "mitosis-drive" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
 
-const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "gradient">, number> = {
+const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "orientation" | "gradient">, number> = {
   none: 0,
   density: 1,
   speed: 2,
@@ -57,6 +58,7 @@ const GRID_FIELD_MODES: ReadonlySet<FieldMode> = new Set(["density", "speed", "d
 const PARTICLE_COLOR = [1, 1, 1, 1]; // white — matches debug_images.py's GROWN_COLOR
 const TARGET_COLOR = [0.95, 0.4, 0.25, 0.8]; // warm accent, alpha-blended under the particles
 const HEADING_LINE_COLOR = [1, 0, 0, 1];
+const GROWTH_LINE_COLOR = [0, 1, 0, 1];
 const HEADING_LINE_LENGTH_PX = 4;
 
 // mls-mpm/src/gpu/render.ts's own DEFAULT_POINT_RADIUS_PX is 1 — this
@@ -104,6 +106,9 @@ export class Renderer {
   private readonly headingLinePipeline: GPURenderPipeline;
   private readonly headingLineBindGroup: GPUBindGroup;
   private readonly headingLineColorUniform: GPUBuffer;
+  private readonly growthLinePipeline: GPURenderPipeline;
+  private readonly growthLineBindGroup: GPUBindGroup;
+  private readonly growthLineColorUniform: GPUBuffer;
 
   private readonly targetRadiusUniform: GPUBuffer;
   private readonly targetColorUniform: GPUBuffer;
@@ -114,6 +119,7 @@ export class Renderer {
 
   private particleColorMode: ParticleColorMode = "white";
   private directionalLineVisible = false;
+  private growthLineVisible = false;
   private mitosisSignalBoost = 1.0;
   private internalStateChannelStart = 0;
   private particleRadiusPx = DEFAULT_PARTICLE_RADIUS_PX;
@@ -396,10 +402,11 @@ export class Renderer {
       ],
     });
 
-    // Live directional-growth overlay. It reads MpmCore.rest directly,
-    // so the glyph is exactly the signal g2p consumes rather than a
-    // reconstructed NN preview. Binding numbers 0/2 reuse the positions
-    // and color declarations in render.wgsl; 4/5 are overlay-specific.
+    // Live channel-7-gradient heading overlay. It reads the alignment cache
+    // written by agentStep; render.wgsl normalizes that clipped gradient for
+    // a stable visual length without changing the simulation's confidence.
+    // Binding numbers 0/2 reuse the positions and color declarations in
+    // render.wgsl; 3/4/5 are overlay-specific.
     const directionalLineLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
@@ -416,14 +423,32 @@ export class Renderer {
       // WebGPU line-list rasterization is one device pixel wide.
       primitive: { topology: "line-list" },
     });
+    this.growthLinePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [directionalLineLayout, viewLayout] }),
+      vertex: { module: renderModule, entryPoint: "growthLineVertex" },
+      fragment: { module: renderModule, entryPoint: "headingLineFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
+      primitive: { topology: "line-list" },
+    });
     this.directionalLineStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.headingLineColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.growthLineColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     writeFloat32(device, this.headingLineColorUniform, 0, new Float32Array(HEADING_LINE_COLOR));
+    writeFloat32(device, this.growthLineColorUniform, 0, new Float32Array(GROWTH_LINE_COLOR));
     this.headingLineBindGroup = device.createBindGroup({
       layout: directionalLineLayout,
       entries: [
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 2, resource: { buffer: this.headingLineColorUniform } },
+        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
+        { binding: 5, resource: { buffer: this.directionalLineStyleUniform } },
+      ],
+    });
+    this.growthLineBindGroup = device.createBindGroup({
+      layout: directionalLineLayout,
+      entries: [
+        { binding: 0, resource: { buffer: mpmCore.positions } },
+        { binding: 2, resource: { buffer: this.growthLineColorUniform } },
         { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
         { binding: 4, resource: { buffer: mpmCore.rest } },
         { binding: 5, resource: { buffer: this.directionalLineStyleUniform } },
@@ -568,9 +593,12 @@ export class Renderer {
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
     this.substrateChannelStartUniform = device.createBuffer({
-      size: 4,
+      // x = RGB-window start, y = isolate orientation channel 7. vec4 keeps
+      // the uniform layout portable while leaving two lanes for future modes.
+      size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+    writeFloat32(device, this.substrateChannelStartUniform, 0, new Uint32Array([0, 0, 0, 0]));
     this.setSubstrateChannelStart(0);
     this.substrateColorizePipeline = device.createComputePipeline({
       layout: "auto",
@@ -677,7 +705,13 @@ export class Renderer {
 
   setFieldMode(mode: FieldMode): void {
     this.fieldMode = mode;
-    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "gradient") {
+    writeFloat32(
+      this.device,
+      this.substrateChannelStartUniform,
+      4,
+      new Uint32Array([mode === "orientation" ? 1 : 0]),
+    );
+    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "orientation" && mode !== "gradient") {
       writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode]]));
     }
   }
@@ -761,6 +795,10 @@ export class Renderer {
 
   setDirectionalLineVisible(visible: boolean): void {
     this.directionalLineVisible = visible;
+  }
+
+  setGrowthLineVisible(visible: boolean): void {
+    this.growthLineVisible = visible;
   }
 
   /** Camera zoom applied by every particle/target vertex shader. */
@@ -894,7 +932,7 @@ export class Renderer {
       computePass.setBindGroup(0, this.colorizeBindGroup);
       computePass.dispatchWorkgroups(...this.fieldDispatch);
       computePass.end();
-    } else if (this.fieldMode === "substrate") {
+    } else if (this.fieldMode === "substrate" || this.fieldMode === "orientation") {
       const computePass = encoder.beginComputePass();
       computePass.setPipeline(this.substrateColorizePipeline);
       computePass.setBindGroup(0, this.substrateColorizeBindGroups[this.environment.parity]);
@@ -940,7 +978,7 @@ export class Renderer {
       pass.setPipeline(this.morphologyPresentPipeline);
       pass.setBindGroup(0, this.morphologyPresentBindGroup);
       pass.draw(6);
-    } else if (this.fieldMode === "substrate") {
+    } else if (this.fieldMode === "substrate" || this.fieldMode === "orientation") {
       pass.setPipeline(this.substratePresentPipeline);
       pass.setBindGroup(0, this.substratePresentBindGroup);
       pass.draw(6);
@@ -988,6 +1026,11 @@ export class Renderer {
         pass.setBindGroup(0, this.activationParticleBindGroup);
         pass.draw(6, activeCount);
       }
+      if (this.growthLineVisible) {
+        pass.setPipeline(this.growthLinePipeline);
+        pass.setBindGroup(0, this.growthLineBindGroup);
+        pass.draw(2, activeCount);
+      }
       if (this.directionalLineVisible) {
         pass.setPipeline(this.headingLinePipeline);
         pass.setBindGroup(0, this.headingLineBindGroup);
@@ -1008,6 +1051,7 @@ export class Renderer {
     this.boundaryGradientScaleUniform.destroy();
     this.directionalLineStyleUniform.destroy();
     this.headingLineColorUniform.destroy();
+    this.growthLineColorUniform.destroy();
     this.targetRadiusUniform.destroy();
     this.targetColorUniform.destroy();
     this.targetPositions?.destroy();

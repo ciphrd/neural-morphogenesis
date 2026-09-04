@@ -94,9 +94,10 @@ particle-sampled signal, represented population N/q, and controlled spatial
 spread across q={0.5,1,2}.
 
 Density model v3 also removes particle-slot identity from the branching
-process. Initial headings and division thresholds sample a rollout-seeded
-128x128 world-space random field. Nearby numerical samples therefore share the
-same macroscopic stochastic forcing at every q. After a conservative split,
+process. Division thresholds and the fallback split direction used only where
+the channel-3 gradient is flat sample a rollout-seeded 128x128 world-space random
+field. Nearby numerical samples therefore share the same macroscopic stochastic
+forcing at every q. After a conservative split,
 both daughters advance a lineage-generation counter so the next threshold is a
 new spatial-field layer rather than a child-slot hash.
 
@@ -169,31 +170,24 @@ the resolver, not be confused with the material model.
 
 ## Density-normalized scoring and diagnostics
 
-The live evolutionary fitness is currently the rotation-aligned symmetric
-Chamfer distance in `alignment.py`, not the raster distance. Its mean
-nearest-neighbor reductions do not grow directly with particle count, but the
-sampling error will still change with density and must be included in the
-cross-density baselines.
+The live evolutionary fitness uses the bounded weighted-occupancy raster in
+`raster.py`. Per-particle weight is `1/q`; its summed density is calibrated from
+the target mass and expected represented particle count before being saturated
+with `1 - exp(-weighted_density / reference)`. Static cross-density baselines
+must still verify residual sampling error.
 
-The debug-image path is density-sensitive: candidate particles are sum-splatted
-into its raster at unit amplitude. Increasing `q` therefore increases raster
-brightness even when the represented world-space shape is unchanged.
-
-The candidate raster should accept a per-particle area weight:
+Candidate particles carry a per-particle represented-area weight:
 
 ```text
 candidate_weight = 1 / q
 ```
 
-and use `candidate_weight * kernel` in the sum scatter. This preserves the
-current `q=1` debug raster exactly. The outside-shape penalty in that path is
-already a mean over particles, so it is much less sensitive to particle count;
-it should still be tested with deliberately nonuniform sampling.
+and use `candidate_weight * kernel` in the sum scatter. The bounded occupancy
+and aligned debug raster use the same weighting. The outside-shape penalty is
+already a mean over particles and remains comparable across densities.
 
-If Chamfer proves to favor one sampling density after the static-shape baseline,
-an eventual stronger live fitness would compare bounded occupancy fields, for
-example `1 - exp(-weighted_density / reference)`. Do not change the live fitness
-until the measurements show that this is necessary.
+Selection compares that bounded field at multiple scales and scores missing
+coverage, spill, boundary disagreement, and crowding separately.
 
 ## Morphology-density sensing
 

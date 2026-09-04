@@ -15,26 +15,14 @@ own module docstring and core/agents.wgsl's own growth design);
 --particles is the CAP that growth can reach, not a fixed per-rollout
 count.
 
-Fitness is alignment.py's own training_alignment_distance — distance.py's
-own KD-tree symmetric nearest-neighbor Chamfer distance, wrapped with a
-coarse rotation-search + centroid-matching-translation best-fit (lowest
-distance after that transform, since nothing pins particle growth to the
-target's exact pose) — see _score_fitness()'s own docstring, scored at
-several snapshots near the end of the rollout and scored by the *worst*
-of them, not just the final step — see CAPTURE_OFFSETS. This project has
-gone back and forth on this more than once: raster.py's own Gaussian-
-splat rasterization + distance-transform comparison (raster.
-training_raster_distance) was the live fitness function for a while
-instead — it's still fully wired, just no longer what candidates are
-scored/selected by: train_server.py's own end-of-generation debug images
-(the "Target"/"Agents (aligned)"/"Grown (raw)" snapshots) render via
-that same raster distance regardless of which strategy fitness itself
-uses, and target_raster/target_distance_field (raster.
-build_target_raster()/build_target_distance_field(), precomputed once
-per run) still get built and threaded through rollout()/worker_rollout()
-for exactly that reason — see rollout()'s own docstring for why removing
-them from that plumbing isn't worth it. If raster-based fitness is worth
-revisiting again, _score_fitness() is the one place to swap back.
+Fitness is raster.py's bounded, multiscale occupancy comparison. Weighted
+Gaussian particle density is saturated into [0,1] occupancy, then scored for
+missing coverage, outside spill, fine silhouette disagreement, and excessive
+crowding after centroid matching and a coarse-to-fine rotation search. Several
+snapshots near the rollout's end are blended as mean plus worst-case pressure;
+see _score_fitness() and CAPTURE_OFFSETS. The earlier aligned symmetric Chamfer
+metric remains available in alignment.py for one-off point-cloud diagnostics,
+but it no longer selects candidates.
 
 Rollouts run across a persistent pool of worker PROCESSES (see
 parallel_workers.py's own module docstring), each with its own wgpu
@@ -70,16 +58,9 @@ couldn't have helped. Multiprocessing instead adds a second (and third,
 ...) core actually doing that work concurrently — the only lever that
 was ever going to move the needle for a single-core-CPU-bound loop.
 
-Fitness scoring (raster.training_raster_distance's rotation search, back
-when raster distance was the live fitness function — see this module's
-own "Fitness is..." paragraph above for the current Chamfer/raster
-back-and-forth) was the other ~27% of profiled time, entirely separate
-from any of the above — pure NumPy, no wgpu/GPU involvement at all. See
-raster.py's own module docstring for the GPU port of the hot inner loop
-(rasterize_points_sum's scatter + the MSE/distance-transform reduction)
-that addressed it; alignment.py's own Chamfer distance (a KD-tree
-nearest-neighbor query, not this GPU-ported raster path) hasn't been
-profiled/optimized under this same worker-pool setup.
+Fitness scoring is pure NumPy/SciPy and separate from the wgpu simulation. Its
+local Gaussian scatter is vectorized, and worker processes evaluate candidates
+concurrently; raster.py documents the hot path and its complexity.
 
 Usage:
     python evolve.py --target puddle --generations 50 --population 16
@@ -97,12 +78,11 @@ import torch
 
 from agents_gpu import AgentsGPU
 from chemical_channels import profiles_to_wire
-from alignment import training_alignment_distance
 from density import DENSITY_MODEL_VERSION, DensityReference, ResolvedDensity, parse_multipliers, resolve_density
 from environment_gpu import EnvironmentGPU
 from mpm_core import MAX_PARTICLES, PARTICLE_MASS, VOL, MpmCore
 from parallel_workers import build_pool, worker_rollout
-from raster import build_target_distance_field, build_target_raster
+from raster import FITNESS_MODEL_VERSION, build_target_distance_field, build_target_raster, training_raster_distance
 from simulation_settings import (
     CHEM_CHANNELS,
     CHEMICAL_CHANNEL_PROFILES,
@@ -197,9 +177,9 @@ RASTER_EXTENT = (0.0, 1.0, 0.0, 1.0)
 # immediately drifting apart after, which would score perfectly under a
 # single-snapshot fitness while looking wrong at any other moment. Taking
 # several evenly-spaced snapshots across the last 10% of the rollout and
-# scoring by the *worst* (highest, since lower is better) of them means a
-# candidate that reaches a good shape and then immediately destabilizes
-# scores exactly as badly as one that never reached it at all. Unlike
+# blending their mean with the worst (highest, since lower is better) keeps
+# distinctions across the whole window while strongly penalizing immediate
+# destabilization. Unlike
 # envnca, this project does NOT also jitter the rollout's own total
 # macro_steps count — not asked for, and this project's macro_steps is
 # already a small, fixed count (tens, not hundreds), so the marginal
@@ -245,29 +225,43 @@ def mutate(
     return (weights.astype(np.float32, copy=False) + noise * np.float32(sigma) * scales).astype(np.float32)
 
 
-def _score_fitness(snapshots: list[np.ndarray], target: TargetShape) -> float:
-    """Called by rollout() (via the worker pool's own worker_rollout()) —
-    the *worst* (highest, since lower is better) Chamfer distance across
-    `snapshots` (one rollout's own CAPTURE_OFFSETS captures), via
-    alignment.training_alignment_distance's rotation-search + centroid-
-    matching-translation Chamfer distance (distance.py's own KD-tree
-    symmetric nearest-neighbor distance) — see this module's own module
-    docstring for the raster/Chamfer back-and-forth; this is Chamfer
-    again, not raster.py's own Gaussian-splat raster distance (that stays
-    wired for train_server.py's own debug-image rendering — see
-    rollout()'s own docstring for why it still accepts target_raster/
-    target_distance_field despite not using them for scoring anymore). A
-    diverged (non-finite, or fully emptied-out) snapshot scores +inf
-    rather than crashing the generation, same "fail soft" backstop every
-    other evolve.py in this repo has. See CAPTURE_OFFSETS's own comment
-    for why the worst-of-several-snapshots scoring exists at all."""
-    fitness = 0.0
+def _score_fitness(
+    snapshots: list[np.ndarray],
+    target: TargetShape,
+    target_raster: np.ndarray,
+    target_distance_field: np.ndarray,
+    args: argparse.Namespace,
+    density_multiplier: float,
+) -> float:
+    """Bounded multiscale raster fitness over the rollout's late snapshots.
+
+    The mean preserves distinctions across the whole late window while a
+    configurable worst-snapshot contribution still penalizes transient poses.
+    A diverged or empty snapshot fails softly with positive infinity.
+    """
+    scores: list[float] = []
     for positions in snapshots:
         if positions.shape[0] == 0 or not np.isfinite(positions).all():
             return float("inf")
-        distance = training_alignment_distance(positions, target.points)
-        fitness = max(fitness, distance)
-    return fitness
+        scores.append(float(training_raster_distance(
+            positions,
+            target.points,
+            target_raster,
+            target_distance_field,
+            args.raster_resolution,
+            RASTER_EXTENT,
+            args.raster_sigma,
+            outside_weight=args.outside_weight,
+            particle_weight=1.0 / density_multiplier,
+            expected_weighted_particles=float(args.particles),
+            target_occupancy=args.fitness_target_occupancy,
+            coverage_weight=args.fitness_coverage_weight,
+            spill_weight=args.fitness_spill_weight,
+            boundary_weight=args.fitness_boundary_weight,
+            crowding_weight=args.fitness_crowding_weight,
+        )))
+    worst_weight = args.fitness_temporal_worst_weight
+    return (1.0 - worst_weight) * float(np.mean(scores)) + worst_weight * max(scores)
 
 
 def rollout(
@@ -288,23 +282,11 @@ def rollout(
     fitness score — lower is better. Rather than reading positions once
     at the very end, a snapshot is captured at each of CAPTURE_OFFSETS
     (the last 10% of `args.macro_steps`, five evenly-spaced points), each
-    snapshot is scored via alignment.training_alignment_distance (a
-    rotation-search, centroid-matching-translation Chamfer distance —
-    see _score_fitness()'s own docstring), and the *worst* (highest) of
-    those scores is what's actually returned.
-
-    `target_raster`/`target_distance_field` are accepted but NOT used for
-    scoring anymore (see _score_fitness()'s own docstring for the raster/
-    Chamfer back-and-forth) — kept in this signature anyway since every
-    caller (parallel_workers.py's own worker_rollout(), train_server.py's
-    own debug-image replay) already threads them through positionally,
-    and train_server.py's own callers still need them regardless, for
-    their own SEPARATE raster.training_raster_distance(...,
-    track_best_raster=True) call on this function's returned positions
-    (a debug-image render, not fitness) — removing them here would just
-    relocate the same values one call frame up for no benefit, and would
-    make toggling back to raster-based fitness later (see this module's
-    own module docstring) a bigger diff than it needs to be.
+    snapshot is scored by raster.training_raster_distance's bounded multiscale
+    occupancy metric. The arithmetic mean across captures is blended with their
+    worst score, retaining granular temporal information while punishing an
+    unstable one-instant pose. `target_raster` and `target_distance_field` are
+    the run-level precomputations used directly by that metric.
     See CAPTURE_OFFSETS's own comment for the full "don't let a
     candidate learn to pose for one known instant" reasoning. A diverged
     (non-finite, or fully emptied-out) snapshot scores +inf rather than
@@ -371,7 +353,9 @@ def rollout(
             snapshots.append(sim.positions())
 
     final_positions = snapshots[-1]
-    fitness = _score_fitness(snapshots, target)
+    fitness = _score_fitness(
+        snapshots, target, target_raster, target_distance_field, args, density_multiplier
+    )
 
     return (fitness, final_positions) if return_positions else fitness
 
@@ -593,8 +577,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_RUN_SETTINGS["outsideWeight"],
         help=(
             "weight of the distance-transform penalty for particles landing outside the target's footprint "
-            "(0 disables it, falling back to raster coverage MSE alone) — see raster.outside_shape_penalty"
+            "inside the spill term (0 keeps occupancy spill but disables distance growth)"
         ),
+    )
+    parser.add_argument(
+        "--fitness-target-occupancy", type=float,
+        default=DEFAULT_RUN_SETTINGS["fitnessTargetOccupancy"],
+        help="desired bounded occupancy in a uniformly filled target interior",
+    )
+    parser.add_argument(
+        "--fitness-coverage-weight", type=float,
+        default=DEFAULT_RUN_SETTINGS["fitnessCoverageWeight"],
+        help="weight of multiscale missing-target coverage",
+    )
+    parser.add_argument(
+        "--fitness-spill-weight", type=float,
+        default=DEFAULT_RUN_SETTINGS["fitnessSpillWeight"],
+        help="weight of occupancy and distance outside the target",
+    )
+    parser.add_argument(
+        "--fitness-boundary-weight", type=float,
+        default=DEFAULT_RUN_SETTINGS["fitnessBoundaryWeight"],
+        help="weight of fine silhouette-edge disagreement",
+    )
+    parser.add_argument(
+        "--fitness-crowding-weight", type=float,
+        default=DEFAULT_RUN_SETTINGS["fitnessCrowdingWeight"],
+        help="weight of excessive raw particle-density spikes",
+    )
+    parser.add_argument(
+        "--fitness-temporal-worst-weight", type=float,
+        default=DEFAULT_RUN_SETTINGS["fitnessTemporalWorstWeight"],
+        help="blend between mean late-snapshot score (0) and worst late snapshot (1)",
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_RUN_SETTINGS["runSeed"])
     parser.add_argument("--checkpoint-every", type=int, default=DEFAULT_RUN_SETTINGS["checkpointEvery"])
@@ -638,6 +652,27 @@ def finalize_density_configuration(args: argparse.Namespace) -> None:
         )
 
 
+def validate_fitness_configuration(args: argparse.Namespace) -> None:
+    if args.raster_resolution < 8:
+        raise SystemExit("--raster-resolution must be at least 8")
+    if not np.isfinite(args.raster_sigma) or args.raster_sigma <= 0.0:
+        raise SystemExit("--raster-sigma must be finite and positive")
+    if not 0.0 < args.fitness_target_occupancy < 1.0:
+        raise SystemExit("--fitness-target-occupancy must be strictly between 0 and 1")
+    for name in (
+        "outside_weight",
+        "fitness_coverage_weight",
+        "fitness_spill_weight",
+        "fitness_boundary_weight",
+        "fitness_crowding_weight",
+    ):
+        value = getattr(args, name)
+        if not np.isfinite(value) or value < 0.0:
+            raise SystemExit(f"--{name.replace('_', '-')} must be finite and non-negative")
+    if not 0.0 <= args.fitness_temporal_worst_weight <= 1.0:
+        raise SystemExit("--fitness-temporal-worst-weight must be between 0 and 1")
+
+
 def main() -> None:
     args = build_arg_parser().parse_args()
     finalize_policy_configuration(args)
@@ -648,6 +683,7 @@ def main() -> None:
         raise SystemExit("--seeds-per-candidate must be at least 1")
     if not 1 <= args.initial_particles <= args.particles:
         raise SystemExit("--initial-particles must be between 1 and --particles")
+    validate_fitness_configuration(args)
     finalize_density_configuration(args)
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
         raise SystemExit("--growth-steps must be between 0 and --macro-steps")
@@ -719,6 +755,7 @@ def main() -> None:
                     {
                         "generation": generation,
                         "fitness": best_fitness,
+                        "fitness_model_version": FITNESS_MODEL_VERSION,
                         "target": args.target,
                         "particles": args.particles,
                         "initial_particle_count": args.initial_particles,
@@ -779,6 +816,12 @@ def main() -> None:
                         "raster_resolution": args.raster_resolution,
                         "raster_sigma": args.raster_sigma,
                         "outside_weight": args.outside_weight,
+                        "fitness_target_occupancy": args.fitness_target_occupancy,
+                        "fitness_coverage_weight": args.fitness_coverage_weight,
+                        "fitness_spill_weight": args.fitness_spill_weight,
+                        "fitness_boundary_weight": args.fitness_boundary_weight,
+                        "fitness_crowding_weight": args.fitness_crowding_weight,
+                        "fitness_temporal_worst_weight": args.fitness_temporal_worst_weight,
                         "seed": args.seed,
                         # Not CLI args (nothing above this line is) — the
                         # simulation_settings.py values this run actually

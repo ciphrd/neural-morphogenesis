@@ -45,7 +45,7 @@ struct ParticleRest {
   growthAngle: f32,
   growthAnisotropy: f32,
   divisionBias: f32,
-  growthFrameHeading: f32,
+  growthFrameAngle: f32,
   appearanceScale: f32,
   _padding: f32,
 }
@@ -53,8 +53,7 @@ struct ParticleRest {
 struct ParticleMeta {
   rng: u32,
   cooldown: f32,
-  heading: f32,
-  angularVelocity: f32,
+  alignment: vec2<f32>,
   color: vec4<f32>,
   divisionHazard: f32,
   divisionThreshold: f32,
@@ -76,10 +75,12 @@ fn particleOffset(vertexIndex: u32, instanceIndex: u32) -> vec2<f32> {
     return QUAD_OFFSETS[vertexIndex];
   }
   let local = TRIANGLE_OFFSETS[vertexIndex];
-  let heading = particleMeta[instanceIndex].heading;
-  let c = cos(heading);
-  let s = sin(heading);
-  return vec2<f32>(local.x * c - local.y * s, local.x * s + local.y * c);
+  let alignment = particleMeta[instanceIndex].alignment;
+  let strength = length(alignment);
+  if (strength <= 1e-10) { return local; }
+  let forward = alignment / strength;
+  let lateral = vec2<f32>(-forward.y, forward.x);
+  return local.x * forward + local.y * lateral;
 }
 
 fn outsideParticleShape(uv: vec2<f32>) -> bool {
@@ -153,7 +154,7 @@ fn activationParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(in
   );
   out.uv = offset;
   let rest = particleRest[instanceIndex];
-  let worldAngle = rest.growthFrameHeading + rest.growthAngle;
+  let worldAngle = rest.growthFrameAngle + rest.growthAngle;
   out.activation = vec2<f32>(cos(worldAngle), sin(worldAngle)) * rest.growthAnisotropy;
   return out;
 }
@@ -184,7 +185,7 @@ fn activationParticleFragment(in: ActivationDotOut) -> @location(0) vec4<f32> {
 }
 
 // --- heading triangles: same positions/radius/color bindings as the
-// circle pipeline above, plus Agents' own persistent per-particle state
+// circle pipeline above, plus Agents' own per-particle alignment cache
 // buffer (binding 3 — additive, not colliding with 0-2). Only ever bound
 // against MpmCore's/Agents' own live particle buffers, never the static
 // target-point overlay (which has no heading to point toward) — see
@@ -192,9 +193,8 @@ fn activationParticleFragment(in: ActivationDotOut) -> @location(0) vec4<f32> {
 //
 // Heading is NOT derived from velocity here (an earlier revision did
 // atan2(vel.y,vel.x) — see agents.wgsl's own module docstring for why
-// that coupling was removed project-wide): it's agents.wgsl's own
-// persistent per-particle state, the same buffer that shader integrates
-// every macro step.
+// that coupling was removed project-wide): it is the channel-7-gradient
+// alignment cache agents.wgsl refreshes every controller evaluation.
 //
 // ParticleMeta is a small, deliberate DUPLICATE of core/agents.wgsl's
 // own struct of the same name (WGSL has no cross-module share
@@ -489,7 +489,10 @@ fn boundaryValueParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32
 }
 
 // Optional one-pixel heading indicator, independently composited over either
-// particle shape and every color mode.
+// particle shape and every color mode. ParticleMeta.alignment stores the
+// L2-clipped chemical-channel-7 gradient, so its magnitude is confidence, not
+// a useful display length. Normalize it here to keep every defined heading
+// visible; a flat field still produces a zero-length line.
 @group(0) @binding(5) var<uniform> directionalLineStyle: vec4<f32>;
 @vertex
 fn headingLineVertex(
@@ -497,8 +500,9 @@ fn headingLineVertex(
   @builtin(instance_index) instanceIndex: u32,
 ) -> @builtin(position) vec4<f32> {
   let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
-  let heading = particleMeta[instanceIndex].heading;
-  let direction = vec2<f32>(cos(heading), sin(heading));
+  let alignment = particleMeta[instanceIndex].alignment;
+  let strength = length(alignment);
+  let direction = select(vec2<f32>(0.0), alignment / max(strength, 1e-10), strength > 1e-10);
   let offset = select(vec2<f32>(0.0), direction * directionalLineStyle.y, vertexIndex == 1u);
   return vec4<f32>(center + offset * viewStyle.x, 0.0, 1.0);
 }
@@ -506,4 +510,28 @@ fn headingLineVertex(
 @fragment
 fn headingLineFragment() -> @location(0) vec4<f32> {
   return vec4<f32>(pointColor.rgb, viewStyle.z);
+}
+
+// Effective world-space anisotropic-growth axis consumed by g2p: the NN's
+// local axis rotated through the current channel-7-gradient frame.
+// Isotropic growth has no meaningful axis, so collapse its line to the particle center.
+// Draw through both sides of the particle because v and -v are physically
+// equivalent; division independently chooses either end with equal probability.
+@vertex
+fn growthLineVertex(
+  @builtin(vertex_index) vertexIndex: u32,
+  @builtin(instance_index) instanceIndex: u32,
+) -> @builtin(position) vec4<f32> {
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
+  let rest = particleRest[instanceIndex];
+  let worldAngle = rest.growthFrameAngle + rest.growthAngle;
+  let direction = vec2<f32>(cos(worldAngle), sin(worldAngle));
+  let hasDirectionalGrowth = rest.growthAnisotropy > 1e-6;
+  let axisEnd = select(-1.5, 1.5, vertexIndex == 1u);
+  let offset = select(
+    vec2<f32>(0.0),
+    direction * directionalLineStyle.y * axisEnd,
+    hasDirectionalGrowth,
+  );
+  return vec4<f32>(center + offset * viewStyle.x, 0.0, 1.0);
 }

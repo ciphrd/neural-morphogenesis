@@ -28,6 +28,7 @@ interface ViewerDefaults {
     particleColorMode: ParticleColorMode
     particleAlpha: number
     directionalLineVisible: boolean
+    growthLineVisible: boolean
     boundaryGradientScale: number
     zoom: number
     autoZoom: {
@@ -75,9 +76,9 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
   playback: {
     loopAtTrainedSteps: false,
     paused: false,
-    particleCap: 170_000,
-    initialParticleCount: 100,
-    particleDensityMultiplier: 2,
+    particleCap: null,
+    initialParticleCount: null,
+    particleDensityMultiplier: null,
     substrateResolution: null,
   },
   rendering: {
@@ -94,6 +95,7 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
     particleColorMode: "neural-memory",
     particleAlpha: 0.4,
     directionalLineVisible: false,
+    growthLineVisible: false,
     boundaryGradientScale: 0.01,
     zoom: 1,
     autoZoom: {

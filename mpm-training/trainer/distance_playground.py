@@ -139,7 +139,7 @@ def score(req: ScoreRequest) -> JSONResponse:
     # target's-centroid form production code already uses (see this
     # module's own module docstring).
     chamfer_aligned, aligned_points = best_alignment(points, target_points)
-    raster_aligned, candidate_aligned = training_raster_distance(
+    raster_aligned, candidate_aligned, breakdown = training_raster_distance(
         points,
         target_points,
         target_raster,
@@ -148,7 +148,7 @@ def score(req: ScoreRequest) -> JSONResponse:
         EXTENT,
         req.raster_sigma,
         outside_weight=req.outside_weight,
-        track_best_raster=True,
+        return_breakdown=True,
     )
 
     return JSONResponse(
@@ -160,7 +160,14 @@ def score(req: ScoreRequest) -> JSONResponse:
                     "coverage": _finite(coverage_raw),
                     "penalty": _finite(penalty_raw),
                 },
-                "aligned": {"distance": _finite(raster_aligned)},
+                "aligned": {
+                    "distance": _finite(raster_aligned),
+                    "coverage": _finite(breakdown.coverage) if breakdown else None,
+                    "spill": _finite(breakdown.spill) if breakdown else None,
+                    "boundary": _finite(breakdown.boundary) if breakdown else None,
+                    "crowding": _finite(breakdown.crowding) if breakdown else None,
+                    "angle": _finite(breakdown.angle) if breakdown else None,
+                },
             },
             "images": {
                 "target": _raster_to_data_uri(target_raster),

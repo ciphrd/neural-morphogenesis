@@ -12,7 +12,7 @@ uses that don't need a live forward pass.
 One instance is built ONCE per training run (like MpmCore/EnvironmentGPU
 — see evolve.py's own module docstring on why rebuilding wgpu pipelines
 per candidate is real, avoidable overhead) and load_weights()/
-reset_heading() are called per candidate/rollout instead, mirroring
+reset_state() are called per candidate/rollout instead, mirroring
 agents.ts's own instance lifetime (rebuilt only when particle/channel/
 field/hidden-dim shape changes, which never happens mid-run here since
 those are fixed CLI args)."""
@@ -25,7 +25,6 @@ from simulation_settings import (
     BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEMICAL_GRADIENT_INPUT_SCALE,
     CHEMICAL_VALUE_INPUT_MULTIPLIER,
-    DIRECTION_CONFIDENCE_SCALE,
     DIVISION_DRIVE_BOOST,
     DIVISION_DIRECTIONALITY,
     ELASTIC_STRAIN_INPUTS_ENABLED,
@@ -34,7 +33,6 @@ from simulation_settings import (
     GROWTH_COMPRESSION_FEEDBACK,
     GROWTH_COMPRESSION_START,
     GROWTH_COMPRESSION_STOP,
-    GROWTH_DIRECTION_RESPONSE_RATE,
     INTERNAL_STATE_SPEED,
     MORPHOLOGY_GRADIENT_INPUT_SCALE,
 )
@@ -111,7 +109,7 @@ def _growth_seed(seed: int, count: int) -> np.ndarray:
 # growth's own child-reseeding, core/agents.wgsl's own agentStep()
 # comment). Arbitrary, just needs to be nonzero.
 _SPAWN_HASH_DOMAIN = np.uint32(0xC0FFEE00)
-_SPATIAL_HEADING_DOMAIN = np.uint32(0x48454144)
+_SPATIAL_DIVISION_DOMAIN = np.uint32(0x44495245)
 
 
 def _spawn_uniform01(seed: int, index: int) -> float:
@@ -158,11 +156,11 @@ def _spatial_uniform01_batch(seed: int, positions: np.ndarray, domain: np.uint32
 def weight_layout(
     channels: int, hidden_dim: int, architecture: str = STATELESS_ARCHITECTURE
 ) -> dict[str, int]:
-    # core/agents.wgsl's own IN_DIM: value + heading-forward gradient +
-    # lateral gradient per channel, with no positional inputs.
+    # core/agents.wgsl's own IN_DIM: value + density-frame forward/lateral
+    # gradients per channel, with no positional inputs.
     architecture = normalize_architecture(architecture)
     in_dim = policy_input_dim(channels, architecture)
-    # Chemical deltas + heading(2), anisotropy/division bias(2),
+    # Chemical deltas + anisotropy/division bias(2),
     # growth direction(2), division drive(1), then architecture-specific tail.
     out_dim = sum(head.size for head in policy_heads(channels, architecture))
     fc1w_offset = 0
@@ -287,10 +285,10 @@ class AgentsGPU:
         )
 
         # Persistent per-particle state — owned here (not MpmCore, not
-        # EnvironmentGPU), zeroed at creation (randomized/reseeded
-        # properly once reset_heading() is called with a real rng — once
+        # EnvironmentGPU), zeroed at creation (reseeded
+        # properly once reset_state() is called with a real rng — once
         # per rollout, see training_sim.py's own TrainingRollout.__init__)
-        # and whenever reset_heading() is called again after that. Sized
+        # and whenever reset_state() is called again after that. Sized
         # to max_active_particles, NOT the single particle every rollout
         # actually starts with — growth (core/agents.wgsl's own
         # agentStep()) can write particleMeta[newIndex] for any newIndex
@@ -300,7 +298,7 @@ class AgentsGPU:
         # — same underlying need, smaller ceiling since this class has no
         # such interactive tool of its own).
         #
-        # rng/cooldown/heading/angularVelocity plus aligned neural RGBA —
+        # rng/cooldown/current channel-7 alignment plus aligned neural RGBA —
         # packed into one aligned per-particle buffer (112 bytes at C=8)
         # (core/agents.wgsl's own ParticleMeta struct), not four separate
         # buffers: this shader hit a REAL, confirmed CreateComputePipeline
@@ -321,8 +319,7 @@ class AgentsGPU:
         self._particle_meta_dtype = np.dtype([
             ("rng", "<u4"),
             ("cooldown", "<f4"),
-            ("heading", "<f4"),
-            ("angularVelocity", "<f4"),
+            ("alignment", "<f4", (2,)),
             ("color", "<f4", (4,)),
             ("divisionHazard", "<f4"),
             ("divisionThreshold", "<f4"),
@@ -369,9 +366,7 @@ class AgentsGPU:
                     "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
                     "SPATIAL_RANDOM_CELLS": SPATIAL_RANDOM_CELLS,
                     "MORPHOLOGY_GRADIENT_INPUT_SCALE": repr(MORPHOLOGY_GRADIENT_INPUT_SCALE),
-                    "GROWTH_DIRECTION_RESPONSE_RATE": repr(GROWTH_DIRECTION_RESPONSE_RATE),
                     "GROWTH_ANISOTROPY_RESPONSE_RATE": repr(GROWTH_ANISOTROPY_RESPONSE_RATE),
-                    "DIRECTION_CONFIDENCE_SCALE": repr(DIRECTION_CONFIDENCE_SCALE),
                     # WGSL wants lowercase `true`/`false` — Python's own
                     # str(bool) gives "True"/"False", invalid WGSL syntax,
                     # so this can't just be passed through as-is.
@@ -389,14 +384,14 @@ class AgentsGPU:
                     "POLICY_TAIL_DECODE": (
                         "out.color = vec3<f32>(0.5);\n"
                         "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
-                        "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 7u + s]);\n"
-                        "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 7u + PRIVATE_STATE_DIM + s]);\n"
+                        "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 5u + s]);\n"
+                        "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 5u + PRIVATE_STATE_DIM + s]);\n"
                         "  }"
                         if policy_has_recurrence(self.policy_architecture) else
                         "out.color = vec3<f32>(\n"
-                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 7u]),\n"
-                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 8u]),\n"
-                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 9u])\n"
+                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 5u]),\n"
+                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 6u]),\n"
+                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 7u])\n"
                         "  );\n"
                         "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
                         "    out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0;\n"
@@ -716,61 +711,13 @@ class AgentsGPU:
         raw = self.device.queue.read_buffer(self._agent_state_buffer, 0, 4)
         return int(np.frombuffer(raw, dtype=np.uint32)[0])
 
-    def reset_heading(self, seed: int, initial_positions: np.ndarray | None = None) -> None:
-        """Randomizes persistent heading state (uniform over [-pi, pi],
-        one independent draw per particle slot) and zeroes
-        angularVelocity/cooldown, EVERY slot up to max_active_particles
-        (not just the currently-active ones — growth can claim any of
-        them later in this same rollout, and agentStep() overwrites
-        whatever a claimed slot's own particleMeta already held anyway,
-        so pre-resetting the full range costs nothing extra and needs no
-        separate "which slots are real yet" bookkeeping here). Also
-        reseeds growth's own persistent per-particle rng (nonzero — see
-        core/agents.wgsl's own xorshift32() for why) — bundled into this
-        same method (despite the name) rather than a separate one since
-        every caller already calls this once per rollout, with a real
-        seed, at exactly the right time; matches this method's own
-        existing "resetHeading also resets angularVelocity" precedent for
-        outgrowing its own name slightly. Call at the start of every
-        rollout, same as agents.ts's own resetHeading() (simulation.ts's
-        own restartRollout() calls it every time a rollout restarts, for
-        the same reason: fresh policy-side state, not carried over from
-        whatever the previous rollout left it at). Heading is randomized
-        (not zeroed) so every particle in a rollout doesn't start out
-        facing an identical, seed-independent direction — via
-        _spawn_uniform01_batch(seed, 5 + slot_index) (index 5+, not 0 —
-        see training_sim.py's own seed_blob()/theta for what already
-        claims indices 0-4 off this same `seed`; see
-        _spawn_uniform01()'s own comment for why this stays a DIFFERENT
-        hash domain from the growth rng below despite both iterating the
-        same slot-index range), bit-exact with agents.ts's own
-        resetHeading() — not just a *plausible* replay the way this used
-        to be (numpy Generator vs TS mulberry32, an accepted gap this
-        project carried for a while: for THIS specific field it never
-        actually mattered in practice, since every slot's own pre-filled
-        heading here gets immediately overwritten either by
-        training_sim.py's own set_headings() call right after (slots 0/1)
-        or by growth itself copying from its own parent's live heading
-        the moment a slot is actually claimed (core/agents.wgsl's own
-        agentStep()) — but leaving that as a standing "doesn't matter
-        today" caveat was fragile, so it's bit-exact now too, same as
-        everything else this rollout's starting condition depends on).
-        angularVelocity stays zeroed regardless — a random *turn rate*
-        would just be an initial spin, not a meaningfully different
-        starting condition the way a random facing direction is. cooldown
-        is zeroed too — "not on cooldown," so a fresh rollout's own
-        starting particle can split as soon as its own hazard threshold
-        allow, same as before cooldown existed.
+    def reset_state(self, seed: int) -> None:
+        """Clear rollout-scoped neural/lifecycle state.
 
-        rng is seeded via `seed` through _growth_seed() instead (a
-        deliberately SEPARATE hash domain from heading's own
-        _spawn_uniform01_batch() above, despite both being bit-exact now
-        — see _growth_seed()'s own comment for why the two are never
-        meant to correlate): growth is a near-critical branching process
-        (agentStep()'s own split-decision logic), so even a merely-
-        correlated seed stream (as opposed to a genuinely independent
-        one) risks a systematic bias in which particles tend to split
-        together."""
+        Alignment starts at zero and is reconstructed from chemical channel
+        3's gradient by every agentStep; it is never randomized or
+        persisted as an independently controlled cell property.
+        """
         count = (self._agent_state_buffer.size - PARTICLE_META_BUFFER_OFFSET) // self._particle_meta_dtype.itemsize
         # One combined structured array, matching core/agents.wgsl's own
         # ParticleMeta struct exactly (see this class's own __init__
@@ -780,46 +727,8 @@ class AgentsGPU:
         # Threshold and fallback-angle randomness comes from a common spatial
         # field in WGSL, so numerical particle slot identity never enters it.
         particle_meta["rng"] = 0
-        particle_meta["heading"] = (
-            _spawn_uniform01_batch(seed, np.arange(count, dtype=np.uint32) + np.uint32(5)) * (2.0 * np.pi) - np.pi
-        ).astype(np.float32)
-        if initial_positions is not None:
-            initial_positions = np.asarray(initial_positions, dtype=np.float32)
-            n = min(len(initial_positions), count)
-            particle_meta["heading"][:n] = (
-                _spatial_uniform01_batch(seed, initial_positions[:n], _SPATIAL_HEADING_DOMAIN)
-                * (2.0 * np.pi) - np.pi
-            ).astype(np.float32)
-        # cooldown/angularVelocity are already 0.0 from np.zeros — "not on
-        # cooldown," "no spin."
         self.device.queue.write_buffer(self._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, particle_meta.tobytes())
         self.set_rollout_seed(seed)
-
-    def set_headings(self, headings: np.ndarray) -> None:
-        """Overwrites the FIRST len(headings) heading fields directly, a
-        small follow-up write on top of whatever reset_heading() above
-        just wrote there (every slot, independently randomized) — for
-        callers that need a handful of slots' own heading coordinated
-        with each other instead of independent (currently: training_sim.py's
-        own TrainingRollout, hardcoded 2-particle "back to back" start).
-        Not folded into reset_heading() itself, which stays a general,
-        per-slot-independent utility. Written as individual per-index
-        strided byte writes (heading is one f32 field inside
-        ParticleMeta's own aligned stride, not a standalone tightly-
-        packed array anymore) rather than one bulk write, to touch ONLY
-        the heading field — leaving rng/cooldown/angularVelocity exactly
-        as reset_heading() just set them, not overwritten with zeros.
-        Only ever called with a couple of headings in practice, so the
-        extra per-index write_buffer() calls cost nothing that matters."""
-        heading_offset = self._particle_meta_dtype.fields["heading"][1]
-        stride = self._particle_meta_dtype.itemsize
-        headings32 = headings.astype(np.float32)
-        for i, h in enumerate(headings32):
-            self.device.queue.write_buffer(
-                self._agent_state_buffer,
-                PARTICLE_META_BUFFER_OFFSET + i * stride + heading_offset,
-                np.array([h], dtype=np.float32),
-            )
 
     def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int, *, commit_lifecycle: bool = True) -> None:
         """Encodes the NN forward pass — reads environment's current

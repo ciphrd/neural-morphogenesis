@@ -42,7 +42,7 @@ struct ParticleRest {
   growthAngle: f32,
   growthAnisotropy: f32,
   divisionBias: f32,
-  growthFrameHeading: f32,
+  growthFrameAngle: f32,
   appearanceScale: f32,
   _padding: f32,
 }
@@ -375,12 +375,12 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       // Exact scalar-model equivalence while persistent anisotropy is zero.
       FgNew = Fg0 * sqrt(areaFactor);
     } else {
-      // The policy direction is expressed in the spatial/world frame.
-      // Pull it back through Fe's polar rotation so H acts objectively in
-      // Fg's intermediate configuration: rotating the whole body and its
-      // heading rotates the result rather than changing its material law.
+      // The policy direction is expressed in the agent's local frame. Rotate
+      // it through the channel-7-gradient heading captured by agents.wgsl,
+      // then pull that world axis back through Fe's polar rotation so H acts
+      // objectively in Fg's intermediate configuration.
       let r = polarDecompose(FeTrial).r;
-      let worldAngle = rest0.growthFrameHeading + rest0.growthAngle;
+      let worldAngle = rest0.growthFrameAngle + rest0.growthAngle;
       let worldDir = vec2<f32>(cos(worldAngle), sin(worldAngle));
       let n = vec2<f32>(
         r.x * worldDir.x + r.z * worldDir.y,
@@ -412,7 +412,7 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   // not a bare f32 to overwrite wholesale.
   particleRest[pi] = ParticleRest(
     FgNew, JpNew, rest0.cycleActive, rest0.growthAngle,
-    rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameHeading,
+    rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameAngle,
     appearanceScaleNew,
     rest0._padding
   );

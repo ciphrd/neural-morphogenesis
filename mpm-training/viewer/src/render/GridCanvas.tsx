@@ -74,6 +74,7 @@ interface GridCanvasProps {
   particleColorMode?: ParticleColorMode;
   particleAlpha?: number;
   directionalLineVisible?: boolean;
+  growthLineVisible?: boolean;
   particleRadiusPx?: number;
   /** Visualization-only multiplier for the signed mitosis drive. */
   mitosisSignalBoost?: number;
@@ -302,6 +303,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     particleColorMode = "white",
     particleAlpha = 1,
     directionalLineVisible = false,
+    growthLineVisible = false,
     particleRadiusPx,
     mitosisSignalBoost = 1,
     boundaryGradientScale = 0.01,
@@ -341,6 +343,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const particleColorModeRef = useRef(particleColorMode);
   const particleAlphaRef = useRef(particleAlpha);
   const directionalLineVisibleRef = useRef(directionalLineVisible);
+  const growthLineVisibleRef = useRef(growthLineVisible);
   const particleRadiusPxRef = useRef(particleRadiusPx);
   const mitosisSignalBoostRef = useRef(mitosisSignalBoost);
   const boundaryGradientScaleRef = useRef(boundaryGradientScale);
@@ -487,6 +490,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   particleColorModeRef.current = particleColorMode;
   particleAlphaRef.current = particleAlpha;
   directionalLineVisibleRef.current = directionalLineVisible;
+  growthLineVisibleRef.current = growthLineVisible;
   particleRadiusPxRef.current = particleRadiusPx;
   mitosisSignalBoostRef.current = mitosisSignalBoost;
   boundaryGradientScaleRef.current = boundaryGradientScale;
@@ -672,6 +676,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setParticleColorMode(particleColorModeRef.current);
       simulation.setParticleAlpha(particleAlphaRef.current);
       simulation.setDirectionalLineVisible(directionalLineVisibleRef.current);
+      simulation.setGrowthLineVisible(growthLineVisibleRef.current);
       simulation.setMitosisSignalBoost(mitosisSignalBoostRef.current);
       simulation.setBoundaryGradientScale(boundaryGradientScaleRef.current);
       simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
@@ -1002,6 +1007,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     simulationRef.current?.setDirectionalLineVisible(directionalLineVisible);
   }, [directionalLineVisible]);
+
+  useEffect(() => {
+    simulationRef.current?.setGrowthLineVisible(growthLineVisible);
+  }, [growthLineVisible]);
 
   useEffect(() => {
     simulationRef.current?.setMitosisSignalBoost(mitosisSignalBoost);

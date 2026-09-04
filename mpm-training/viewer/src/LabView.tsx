@@ -179,6 +179,7 @@ export function LabView() {
   const [particleColorMode, setParticleColorMode] = useState<ParticleColorMode>(VIEWER_DEFAULTS.rendering.particleColorMode)
   const [particleAlpha, setParticleAlpha] = useState(VIEWER_DEFAULTS.rendering.particleAlpha)
   const [directionalLineVisible, setDirectionalLineVisible] = useState(VIEWER_DEFAULTS.rendering.directionalLineVisible)
+  const [growthLineVisible, setGrowthLineVisible] = useState(VIEWER_DEFAULTS.rendering.growthLineVisible)
   const [mitosisSignalBoost, setMitosisSignalBoost] = useState(VIEWER_DEFAULTS.rendering.mitosisSignalBoost)
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(VIEWER_DEFAULTS.rendering.internalStateChannelStart)
   const [chemicalMemoryOpponentSubtraction, setChemicalMemoryOpponentSubtraction] = useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
@@ -411,7 +412,8 @@ export function LabView() {
           <label className="slider-row"><span>Shape</span><select className="select" value={particleShape} onChange={(event) => setParticleShape(event.target.value as ParticleShape)}><option value="dot">Dot</option><option value="triangle">Triangle</option></select></label>
           <label className="slider-row"><span>Color</span><select className="select" value={particleColorMode} onChange={(event) => setParticleColorMode(event.target.value as ParticleColorMode)}><option value="white">White</option><option value="neural-color">Neural RGB</option><option value="mitosis-drive">Mitosis drive</option><option value="neural-memory">Neural memory</option><option value="chemical-memory">Chemical memory</option><option value="boundary-value">Boundary value</option><option value="neurons">Neurons</option></select></label>
           <label className="slider-row"><span>Alpha</span><Slider min={0} max={1} step={0.01} value={particleAlpha} onChange={setParticleAlpha} /><span className="slider-value">{particleAlpha.toFixed(2)}</span></label>
-          <label className="checkbox-row"><input type="checkbox" checked={directionalLineVisible} onChange={(event) => setDirectionalLineVisible(event.target.checked)} />Directional line</label>
+          <label className="checkbox-row"><input type="checkbox" checked={directionalLineVisible} onChange={(event) => setDirectionalLineVisible(event.target.checked)} />Heading direction (red)</label>
+          <label className="checkbox-row"><input type="checkbox" checked={growthLineVisible} onChange={(event) => setGrowthLineVisible(event.target.checked)} />Growth direction (green)</label>
           {particleColorMode === "mitosis-drive" && (
             <label className="slider-row"><span>Signal boost</span><Slider min={1} max={10} step={0.1} value={mitosisSignalBoost} onChange={setMitosisSignalBoost} /><span className="slider-value">{mitosisSignalBoost.toFixed(1)}×</span></label>
           )}
@@ -432,7 +434,7 @@ export function LabView() {
           <label className="slider-row">
             <span>Background</span>
             <select className="select" value={fieldMode} onChange={(event) => setFieldMode(event.target.value as FieldMode)}>
-              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="substrate">Substrate</option><option value="gradient">Boundary gradient</option>
+              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="substrate">Substrate</option><option value="orientation">Orientation substrate (ch7)</option><option value="gradient">Boundary gradient</option>
             </select>
           </label>
           {fieldMode === "morphology" && <>
@@ -440,6 +442,7 @@ export function LabView() {
             <label className="checkbox-row"><input type="checkbox" checked={morphologyDensityVisible} onChange={(event) => setMorphologyDensityVisible(event.target.checked)} />Show morphology density (B)</label>
           </>}
           {fieldMode === "substrate" && config && <><div className="channel-window-control"><div className="channel-window-label"><span>RGB channels</span><span>{substrateChannelStart}–{Math.min(config.channels - 1, substrateChannelStart + 2)}</span></div><ChannelWindowSlider channels={config.channels} value={substrateChannelStart} onChange={setSubstrateChannelStart} /></div><label className="checkbox-row"><input type="checkbox" checked={substrateZeroIsBlack} onChange={(event) => setSubstrateZeroIsBlack(event.target.checked)} />Zero is black</label></>}
+          {fieldMode === "orientation" && <label className="checkbox-row"><input type="checkbox" checked={substrateZeroIsBlack} onChange={(event) => setSubstrateZeroIsBlack(event.target.checked)} />Zero is black</label>}
           <label className="slider-row"><span>Accent</span><Slider min={-2} max={2} step={0.01} value={accent} onChange={setAccent} /><span className="slider-value">{accent.toFixed(2)}</span></label>
           {fieldMode === "gradient" && <>
             <label className="checkbox-row"><input type="checkbox" checked={boundaryGradientZeroIsBlack} onChange={(event) => setBoundaryGradientZeroIsBlack(event.target.checked)} />Zero is black</label>
@@ -489,6 +492,7 @@ export function LabView() {
             particleColorMode={particleColorMode}
             particleAlpha={particleAlpha}
             directionalLineVisible={directionalLineVisible}
+            growthLineVisible={growthLineVisible}
             mitosisSignalBoost={mitosisSignalBoost}
             internalStateChannelStart={internalStateChannelStart}
             chemicalMemoryOpponentSubtraction={chemicalMemoryOpponentSubtraction}

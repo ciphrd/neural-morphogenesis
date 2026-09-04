@@ -13,7 +13,7 @@ from density import (
     validate_multiplier,
 )
 from raster import rasterize_points_sum
-from agents_gpu import _SPATIAL_HEADING_DOMAIN, _spatial_uniform01_batch
+from agents_gpu import _SPATIAL_DIVISION_DOMAIN, _spatial_uniform01_batch
 
 
 def main() -> None:
@@ -75,12 +75,12 @@ def main() -> None:
     spatial_points = np.array([
         [0.5001, 0.5001], [0.5002, 0.5003], [0.72, 0.31], [0.5001, 0.5001],
     ], dtype=np.float32)
-    spatial = _spatial_uniform01_batch(12345, spatial_points, _SPATIAL_HEADING_DOMAIN)
+    spatial = _spatial_uniform01_batch(12345, spatial_points, _SPATIAL_DIVISION_DOMAIN)
     # Same spatial cell/value regardless of numerical particle identity/order.
     assert spatial[0] == spatial[1] == spatial[3]
-    permuted = _spatial_uniform01_batch(12345, spatial_points[[2, 0]], _SPATIAL_HEADING_DOMAIN)
+    permuted = _spatial_uniform01_batch(12345, spatial_points[[2, 0]], _SPATIAL_DIVISION_DOMAIN)
     assert permuted[0] == spatial[2] and permuted[1] == spatial[0]
-    assert _spatial_uniform01_batch(54321, spatial_points[:1], _SPATIAL_HEADING_DOMAIN)[0] != spatial[0]
+    assert _spatial_uniform01_batch(54321, spatial_points[:1], _SPATIAL_DIVISION_DOMAIN)[0] != spatial[0]
     print("[PASS] density resolver, q=1 constants, spatial RNG, and validation")
 
 

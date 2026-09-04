@@ -50,7 +50,7 @@ def _probe(core: MpmCore, count: int) -> np.ndarray:
     """Returns [Je, g, cycleActive] without adding COPY_SRC to hot buffers."""
     shader = core.device.create_shader_module(
         code="""
-        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, _padding: f32, }
+        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, _padding: f32, }
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> rest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
@@ -197,7 +197,7 @@ def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
 
     def field_sum(rounds: int) -> float:
         environment.reset()
-        agents.reset_heading(23)
+        agents.reset_state(23)
         communication_dt = environment.set_communication_timestep(rounds, 1.0)
         agents.set_communication_timestep(communication_dt)
         encoder = device.create_command_encoder()
@@ -315,8 +315,7 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
         np.ones(1, dtype=np.float32),
     )
     agents.set_active_count(1)
-    agents.reset_heading(5)
-    agents.set_headings(np.array([0.0], dtype=np.float32))
+    agents.reset_state(5)
     layout = weight_layout(channels, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     # Give the first four channels saturated deltas. On the following round
@@ -324,8 +323,8 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     for channel in range(4):
         weights[layout["fc2b_offset"] + channel] = 20.0
     env_write_dim = channels
-    weights[layout["fc2b_offset"] + env_write_dim + 7] = 20.0
-    weights[layout["fc2b_offset"] + env_write_dim + 8] = -20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 5] = 20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 6] = -20.0
     # Blue stays at logit 0 -> sigmoid 0.5.
     agents.load_weights(weights)
 
@@ -490,7 +489,7 @@ def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
     )
     core.set_active_count(1)
     agents.set_active_count(1)
-    agents.reset_heading(23)
+    agents.reset_state(23)
     layout = weight_layout(channels, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     weights[layout["fc2b_offset"]] = 20.0
@@ -600,7 +599,7 @@ def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
     layout = weight_layout(channels, hidden)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     elastic_offset = channels * 3 + 3
-    color_start = channels + 7
+    color_start = channels + 5
     for component in range(3):
         weights[layout["fc1w_offset"] + component * layout["in_dim"] + elastic_offset + component] = 1.0
         weights[layout["fc2w_offset"] + (color_start + component) * hidden + component] = 1.0
@@ -622,8 +621,7 @@ def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
         )
         environment.reset()
         active_agents.set_active_count(1)
-        active_agents.reset_heading(29)
-        active_agents.set_headings(np.array([heading], dtype=np.float32))
+        active_agents.reset_state(29)
         encoder = device.create_command_encoder()
         core.encode_morphology(encoder)
         environment.encode_sense(encoder)
@@ -642,6 +640,9 @@ def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
     normalized = policy_elastic_strain_input(
         (fe @ fg)[None], fg[None], np.array([heading]), scale=scale
     )[0]
+    # An isolated particle has no channel-7-gradient frame. Volumetric strain is
+    # orientation-free; axial and shear perception are therefore suppressed.
+    normalized[1:] = 0.0
     expected_color = 1.0 / (1.0 + np.exp(-np.tanh(normalized)))
     actual_color = gpu_color(agents, fe @ fg, fg, heading)
     assert np.allclose(actual_color, expected_color, atol=2e-5), (actual_color, expected_color, normalized)
@@ -688,10 +689,10 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
     core.set_active_count(1)
     environment.reset()
     agents.set_active_count(1)
-    agents.reset_heading(7)
+    agents.reset_state(7)
     neutral_weights = np.zeros(agents._total_floats, dtype=np.float32)
     layout = weight_layout(8, 128)
-    neutral_weights[layout["fc2b_offset"] + 8 + 3] = -20.0
+    neutral_weights[layout["fc2b_offset"] + 8 + 1] = -20.0
     agents.load_weights(neutral_weights)
 
     encoder = device.create_command_encoder()
@@ -739,45 +740,57 @@ def check_conservative_split(device: wgpu.GPUDevice) -> None:
 
 
 
-def check_desired_heading_derives_angular_acceleration(device: wgpu.GPUDevice) -> None:
+def check_channel_seven_gradient_defines_alignment(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 32, 32, 1.0, 1.0)
+    environment = EnvironmentGPU(
+        device, 8, 32, 32, 1.0, 1.0,
+        chemical_communication_architecture=PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+    )
     agents = AgentsGPU(
         device, core, environment, 8, 128,
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
-        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
+        3, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
     )
+    positions = np.array([[0.42, 0.5], [0.58, 0.5]], dtype=np.float32)
     core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        np.array([[1.0, 0.0, 0.0, 1.0]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
+        positions,
+        np.zeros((2, 2), dtype=np.float32),
+        np.tile(np.array([1.0, 0.0, 0.0, 1.0], dtype=np.float32), (2, 1)),
+        np.zeros((2, 4), dtype=np.float32),
+        np.ones(2, dtype=np.float32),
     )
     environment.reset()
-    agents.set_active_count(1)
-    agents.reset_heading(31)
-    agents.set_headings(np.array([0.0], dtype=np.float32))
+    # Channel 7 has a ridge centered at x=0.5, so its gradient points right
+    # for the left particle and left for the right particle. All other
+    # chemical channels remain flat; morphology is deliberately symmetric.
+    field = np.zeros(environment.total_values, dtype=np.float32)
+    width = environment.channel_widths[7]
+    height = environment.channel_heights[7]
+    x = (np.arange(width, dtype=np.float32) + 0.5) / width
+    ridge = np.exp(-0.5 * ((x - 0.5) / 0.08) ** 2).astype(np.float32)
+    offset = environment.channel_offsets[7]
+    field[offset:offset + width * height] = np.tile(ridge, height)
+    device.queue.write_buffer(environment.buffers[0], 0, field)
+    agents.set_active_count(2)
+    agents.reset_state(31)
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Desired local heading points left (+lateral, +pi/2 from forward).
-    weights[layout["fc2b_offset"] + 8 + 1] = 20.0
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
+    core.encode_morphology(encoder)
     environment.encode_sense(encoder)
     agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
     device.queue.submit([encoder.finish()])
     raw = device.queue.read_buffer(
         agents._agent_state_buffer,
         PARTICLE_META_BUFFER_OFFSET,
-        agents._particle_meta_dtype.itemsize,
+        2 * agents._particle_meta_dtype.itemsize,
     )
-    meta = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)
-    # The proportional controller exceeds the configured 0.1 turn-rate cap,
-    # so one unit communication step lands exactly at that cap.
-    assert np.isclose(meta["angularVelocity"][0], 0.1, atol=2e-6), meta["angularVelocity"][0]
-    assert np.isclose(meta["heading"][0], 0.1, atol=2e-6), meta["heading"][0]
-    print("[PASS] desired heading vector derives bounded angular acceleration and persistent turn state")
+    alignment = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=2)["alignment"]
+    assert alignment[0, 0] > 0.0 and alignment[1, 0] < 0.0, alignment
+    assert np.all(np.abs(alignment[:, 1]) < np.abs(alignment[:, 0]) * 0.05), alignment
+    assert np.all(np.linalg.norm(alignment, axis=1) <= 1.0 + 1e-6), alignment
+    print("[PASS] agent alignment is the L2-clipped chemical-channel-7 gradient")
 
 
 def _polarized_split_case(
@@ -785,9 +798,14 @@ def _polarized_split_case(
     growth_direction_bias: float,
     polarity_bias: float = 20.0,
     directionality: float = 1.0,
+    defined_alignment: bool = True,
+    seed: int = 19,
 ) -> np.ndarray:
     core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
+    environment = EnvironmentGPU(
+        device, 8, 256, 256, 0.91, 1.0,
+        chemical_communication_architecture=PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+    )
     agents = AgentsGPU(
         device, core, environment, 8, 128,
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
@@ -807,23 +825,35 @@ def _polarized_split_case(
     device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.array([2.0]), np.ones(1)))
     core.set_active_count(1)
     environment.reset()
+    if defined_alignment:
+        # A +X channel-7 gradient defines the local frame, allowing the test
+        # to distinguish local-forward from local-backward growth outputs.
+        field = np.zeros(environment.total_values, dtype=np.float32)
+        width = environment.channel_widths[7]
+        height = environment.channel_heights[7]
+        x = (np.arange(width, dtype=np.float32) + 0.5) / width
+        wave = (10.0 * np.sin(2.0 * np.pi * (x - 0.5))).astype(np.float32)
+        offset = environment.channel_offsets[7]
+        field[offset:offset + width * height] = np.tile(wave, height)
+        device.queue.write_buffer(environment.buffers[0], 0, field)
     agents.set_active_count(1)
     agents.set_division_directionality(directionality)
-    agents.reset_heading(19)
-    agents.set_headings(np.array([0.0], dtype=np.float32))
+    agents.reset_state(seed)
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Division-bias target plus desired local growth direction.
-    weights[layout["fc2b_offset"] + 8 + 3] = polarity_bias
-    weights[layout["fc2b_offset"] + 8 + 4] = growth_direction_bias
+    # Division-bias target plus desired local-space growth direction.
+    weights[layout["fc2b_offset"] + 8 + 1] = polarity_bias
+    weights[layout["fc2b_offset"] + 8 + 2] = growth_direction_bias
     agents.load_weights(weights)
-    # Let the persistent growth-angle state settle before the division event.
+    # Run perception-only evaluations before the division event.
     for _ in range(16):
         encoder = device.create_command_encoder()
+        core.encode_morphology(encoder)
         environment.encode_sense(encoder)
         agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
         device.queue.submit([encoder.finish()])
     encoder = device.create_command_encoder()
+    core.encode_morphology(encoder)
     environment.encode_sense(encoder)
     agents.encode_step(encoder, environment.parity)
     device.queue.submit([encoder.finish()])
@@ -833,32 +863,47 @@ def _polarized_split_case(
     return core.read_positions()
 
 
-def check_division_always_uses_rear_facing_direction(device: wgpu.GPUDevice) -> None:
+def check_division_uses_growth_direction_or_spatial_fallback(device: wgpu.GPUDevice) -> None:
     positive = _polarized_split_case(device, 20.0)
     negative = _polarized_split_case(device, -20.0)
     unbiased = _polarized_split_case(device, 20.0, -20.0)
     globally_symmetric = _polarized_split_case(device, 20.0, directionality=0.0)
-    expected_rear_biased = np.array([[0.5, 0.5], [0.49, 0.5]], dtype=np.float32)
-    expected_symmetric = np.array([[0.505, 0.5], [0.495, 0.5]], dtype=np.float32)
-    assert np.allclose(positive, expected_rear_biased, atol=2e-6), positive
-    assert np.allclose(negative, expected_rear_biased, atol=2e-6), negative
-    assert np.allclose(unbiased, expected_symmetric, atol=2e-6), unbiased
-    assert np.allclose(globally_symmetric, expected_symmetric, atol=2e-6), globally_symmetric
-    assert positive[1, 0] < positive[0, 0] and negative[1, 0] < negative[0, 0]
-    print("[PASS] division places the daughter behind its parent's facing direction")
+    opposite_side = _polarized_split_case(device, 20.0, seed=20)
+    flat_positive = _polarized_split_case(device, 20.0, defined_alignment=False)
+    flat_negative = _polarized_split_case(device, -20.0, defined_alignment=False)
+    origin = np.array([0.5, 0.5], dtype=np.float32)
+    wrapped = lambda points: (points - origin + 0.5) % 1.0 - 0.5
+    positive_offset = wrapped(positive)
+    negative_offset = wrapped(negative)
+    assert np.allclose(positive, negative, atol=2e-6), (positive, negative)
+    assert np.linalg.norm(positive_offset[0]) < 2e-6
+    assert np.linalg.norm(negative_offset[0]) < 2e-6
+    assert np.isclose(abs(positive_offset[1, 0]), 0.01, atol=2e-6), positive_offset
+    assert abs(positive_offset[1, 1]) < 2e-6, positive_offset
+    opposite_side_offset = wrapped(opposite_side)
+    assert np.sign(opposite_side_offset[1, 0]) == -np.sign(positive_offset[1, 0])
+    for symmetric in (unbiased, globally_symmetric):
+        offsets = wrapped(symmetric)
+        assert np.allclose(offsets.mean(axis=0), 0.0, atol=2e-6), offsets
+        assert np.allclose(np.linalg.norm(offsets, axis=1), 0.005, atol=2e-6), offsets
+    assert np.allclose(flat_positive, flat_negative, atol=2e-6), (flat_positive, flat_negative)
+    print("[PASS] division follows neural growth direction and uses spatial fallback only for an undefined local frame")
 
 
-def check_boundary_gradient_does_not_change_rear_split(device: wgpu.GPUDevice) -> None:
-    """Boundary-tangent growth must not change rear-facing placement."""
+def check_morphology_gradient_does_not_override_growth_aligned_split(device: wgpu.GPUDevice) -> None:
+    """Ordinary morphology gradients must not override neural growth placement."""
     core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
+    environment = EnvironmentGPU(
+        device, 8, 256, 256, 0.91, 1.0,
+        chemical_communication_architecture=PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+    )
     agents = AgentsGPU(
         device, core, environment, 8, 128,
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
         6, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
     )
-    # This diagnostic deliberately exercises tangent-directed growth even for
-    # its small synthetic gradient; rear-facing placement must remain fixed.
+    # The morphology gradient is deliberately distinct from the channel-7
+    # frame; ordinary policy growth must remain the division axis.
     agents.set_boundary_tangent_min_gradient(1e-6)
     # Particle 0 is just to the right of a small cluster. Its morphology
     # gradient is nonzero, while a zeroed policy would otherwise request a
@@ -891,9 +936,18 @@ def check_boundary_gradient_does_not_change_rear_split(device: wgpu.GPUDevice) -
     device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(count), growth, cycle))
     core.set_active_count(count)
     environment.reset()
+    # Give channel 7 a vertical gradient that is deliberately distinct from
+    # the cluster's mostly horizontal morphology gradient.
+    field = np.zeros(environment.total_values, dtype=np.float32)
+    width = environment.channel_widths[7]
+    height = environment.channel_heights[7]
+    y = (np.arange(height, dtype=np.float32) + 0.5) / height
+    ridge = np.exp(-0.5 * ((y - 0.60) / 0.12) ** 2).astype(np.float32)
+    offset = environment.channel_offsets[7]
+    field[offset:offset + width * height] = np.repeat(ridge, width)
+    device.queue.write_buffer(environment.buffers[0], 0, field)
     agents.set_active_count(count)
-    agents.reset_heading(29)
-    agents.set_headings(np.zeros(count, dtype=np.float32))
+    agents.reset_state(29)
     agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
 
     encoder = device.create_command_encoder()
@@ -904,6 +958,15 @@ def check_boundary_gradient_does_not_change_rear_split(device: wgpu.GPUDevice) -
     grown_count = agents.read_grown_count()
     core.set_active_count(grown_count)
     assert grown_count == count + 1
+    raw_meta = device.queue.read_buffer(
+        agents._agent_state_buffer,
+        PARTICLE_META_BUFFER_OFFSET,
+        agents._particle_meta_dtype.itemsize,
+    )
+    alignment = np.frombuffer(
+        raw_meta, dtype=agents._particle_meta_dtype, count=1,
+    )["alignment"][0]
+    assert np.linalg.norm(alignment) > 1e-6, alignment
     morphology = core.read_morphology()
 
     def sample_morphology(field_position: np.ndarray) -> float:
@@ -931,10 +994,12 @@ def check_boundary_gradient_does_not_change_rear_split(device: wgpu.GPUDevice) -
     separation = daughters[1] - daughters[0]
     separation = (separation + 0.5) % 1.0 - 0.5
     assert np.isclose(np.linalg.norm(separation), 0.01, atol=2e-5), daughters
-    np.testing.assert_allclose(
-        separation / np.linalg.norm(separation), [-1.0, 0.0], atol=2e-5
+    split_axis = separation / np.linalg.norm(separation)
+    heading_axis = alignment / np.linalg.norm(alignment)
+    assert np.isclose(abs(np.dot(split_axis, heading_axis)), 1.0, atol=2e-5), (
+        split_axis, heading_axis,
     )
-    print("[PASS] morphology-tangent growth leaves rear-facing placement unchanged")
+    print("[PASS] morphology gradient does not override the neural growth-aligned division axis")
 
 
 def check_anisotropic_tensor_split(device: wgpu.GPUDevice) -> None:
@@ -963,7 +1028,7 @@ def check_anisotropic_tensor_split(device: wgpu.GPUDevice) -> None:
     core.set_active_count(1)
     environment.reset()
     agents.set_active_count(1)
-    agents.reset_heading(73)
+    agents.reset_state(73)
     agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
@@ -1100,7 +1165,10 @@ def check_growth_duration_is_substep_invariant(device: wgpu.GPUDevice) -> None:
 
 def check_persistent_growth_targets_drive_state_not_motion(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
+    environment = EnvironmentGPU(
+        device, 8, 256, 256, 0.91, 1.0,
+        chemical_communication_architecture=PERSISTENT_ENVIRONMENT_ARCHITECTURE,
+    )
     agents = AgentsGPU(
         device, core, environment, 8, 128,
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
@@ -1115,26 +1183,51 @@ def check_persistent_growth_targets_drive_state_not_motion(device: wgpu.GPUDevic
         np.ones(1, dtype=np.float32),
     )
     environment.reset()
+    # Supply a +Y channel-7 gradient while the NN requests a distinct local
+    # diagonal. The stored frame and local angle must remain separate.
+    field = np.zeros(environment.total_values, dtype=np.float32)
+    width = environment.channel_widths[7]
+    height = environment.channel_heights[7]
+    y = (np.arange(height, dtype=np.float32) + 0.5) / height
+    wave = (10.0 * np.sin(2.0 * np.pi * (y - 0.5))).astype(np.float32)
+    offset = environment.channel_offsets[7]
+    field[offset:offset + width * height] = np.repeat(wave, width)
+    device.queue.write_buffer(environment.buffers[0], 0, field)
     agents.set_active_count(1)
-    agents.reset_heading(11)
-    agents.set_headings(np.array([0.0], dtype=np.float32))
+    agents.reset_state(11)
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    weights[layout["fc2b_offset"] + 8 + 2] = 2.0
-    weights[layout["fc2b_offset"] + 8 + 3] = -2.0
-    weights[layout["fc2b_offset"] + 8 + 4] = 1.0
+    weights[layout["fc2b_offset"] + 8] = 2.0
+    weights[layout["fc2b_offset"] + 8 + 1] = -2.0
+    weights[layout["fc2b_offset"] + 8 + 2] = 1.0
+    weights[layout["fc2b_offset"] + 8 + 3] = 2.0
     agents.load_weights(weights)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
     agents.encode_step(encoder, environment.parity)
     device.queue.submit([encoder.finish()])
     state = core.read_rest_state()[0]
-    expected_anisotropy = (1 / (1 + np.exp(-2))) * (1 - np.exp(-1))
+    raw_meta = device.queue.read_buffer(
+        agents._agent_state_buffer,
+        PARTICLE_META_BUFFER_OFFSET,
+        agents._particle_meta_dtype.itemsize,
+    )
+    alignment = np.frombuffer(
+        raw_meta, dtype=agents._particle_meta_dtype, count=1,
+    )["alignment"][0]
+    expected_frame_angle = np.arctan2(alignment[1], alignment[0])
+    expected_anisotropy = (
+        (1 / (1 + np.exp(-2)))
+        * (1 - np.exp(-1))
+    )
     assert np.allclose(core.read_velocities(), initial_velocity, atol=1e-7)
-    assert np.isclose(state[6], 0.0, atol=2e-6), state
+    expected_growth_angle = np.arctan2(np.tanh(2.0), np.tanh(1.0))
+    assert np.isclose(state[6], expected_growth_angle, atol=2e-6), state
+    assert alignment[1] > 0.0 and abs(alignment[0]) < abs(alignment[1]) * 0.05, alignment
+    assert np.isclose(state[9], expected_frame_angle, atol=2e-6), (state, alignment)
     assert np.isclose(state[7], expected_anisotropy, atol=2e-6), state
     assert np.isclose(state[8], 1 / (1 + np.exp(2)), atol=2e-6), state
-    print("[PASS] desired growth vector and anisotropy target smoothly update persistent state")
+    print("[PASS] local growth direction follows the current NN output exactly without smoothing")
 
 
 def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
@@ -1237,10 +1330,10 @@ def _cycle_gate_case(
     core.set_active_count(1)
     environment.reset()
     agents.set_active_count(1)
-    agents.reset_heading(19)
+    agents.reset_state(19)
     layout = weight_layout(8, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    weights[layout["fc2b_offset"] + 8 + 6] = 20.0
+    weights[layout["fc2b_offset"] + 8 + 4] = 20.0
     agents.load_weights(weights)
     agents.set_growth_enabled(enabled)
     if runtime_cap is not None:
@@ -1299,13 +1392,13 @@ def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
         np.ones(1, dtype=np.float32),
     )
     agents.set_active_count(1)
-    agents.reset_heading(37)
+    agents.reset_state(37)
     layout = weight_layout(8, 128)
     inactive_weights = np.zeros(layout["total_floats"], dtype=np.float32)
     drive_weights = inactive_weights.copy()
     division_probability = 0.2
     drive_weights[
-        layout["fc2b_offset"] + 8 + 6
+        layout["fc2b_offset"] + 8 + 4
     ] = np.arctanh(division_probability)
     agents.load_weights(drive_weights)
     meta = np.frombuffer(
@@ -1377,13 +1470,13 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     )
     agents.set_active_count(1)
     agents.set_growth_enabled(False)
-    agents.reset_heading(31)
+    agents.reset_state(31)
     layout = weight_layout(1, 128, STATEFUL_128_ARCHITECTURE)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     # Common motion/growth outputs plus division drive occupy C+7 rows. Drive private channel 0
     # positively and open its gate; all other private channels remain still.
-    weights[layout["fc2b_offset"] + 8] = 1.0
-    weights[layout["fc2b_offset"] + 16] = 20.0
+    weights[layout["fc2b_offset"] + 6] = 1.0
+    weights[layout["fc2b_offset"] + 14] = 20.0
     agents.load_weights(weights)
     agents.set_communication_timestep(0.25)
 
@@ -1441,9 +1534,9 @@ def main() -> None:
     check_persistent_substrate_advection(device)
     check_elastic_strain_policy_inputs(device)
     check_conservative_split(device)
-    check_desired_heading_derives_angular_acceleration(device)
-    check_division_always_uses_rear_facing_direction(device)
-    check_boundary_gradient_does_not_change_rear_split(device)
+    check_channel_seven_gradient_defines_alignment(device)
+    check_division_uses_growth_direction_or_spatial_fallback(device)
+    check_morphology_gradient_does_not_override_growth_aligned_split(device)
     check_anisotropic_tensor_split(device)
     check_isotropic_increment_preserves_tensor_shape(device)
     check_directional_increment_and_objectivity(device)

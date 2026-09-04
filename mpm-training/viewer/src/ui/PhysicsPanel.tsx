@@ -160,28 +160,6 @@ export function physicsSliderSpecsFor(
       format: (v) => v.toFixed(3),
     },
     {
-      key: "maxAngularAccel",
-      label: "Max angular accel",
-      min: 0,
-      max: 10,
-      step: 0.001,
-      format: (v) => v.toFixed(3),
-    },
-    {
-      key: "angularDamping",
-      label: "Angular damping",
-      ...FRACTION_RANGE,
-      format: (v) => v.toFixed(3),
-    },
-    {
-      key: "maxAngularVelocity",
-      label: "Max angular velocity",
-      min: 0,
-      max: 2,
-      step: 0.001,
-      format: (v) => v.toFixed(3),
-    },
-    {
       key: "depositSigma",
       label: "Deposit sigma (world)",
       ...scaledRange(trained.depositSigma, 8, 0.01),
@@ -251,11 +229,10 @@ export function physicsSliderSpecsFor(
  * strafe's own maxAccel/maxStrafe/friction (strafe
  * drives MpmCore's own velocity directly — an acceleration, damped by
  * friction — see agents.wgsl's own module docstring for the full
- * history), the heading integrator's maxAngularAccel/angularDamping/
- * maxAngularVelocity, and depositSigma (the normalized-world cell-state Gaussian sigma — see
+ * history), and depositSigma (the normalized-world cell-state Gaussian sigma — see
  * agents.wgsl's own depositGaussian() for the exact kernel this drives,
  * replacing that shader's old flat 4-corner bilinear scatter),
- * growth's own splitDisplacement (rear-facing daughter separation) and
+ * growth's own splitDisplacement (growth-aligned daughter separation) and
  * divisionCooldown (macro steps a particle refuses
  * to split again for, right after splitting, whether as parent or child
  * — see agents.wgsl's own module docstring for the full growth design;

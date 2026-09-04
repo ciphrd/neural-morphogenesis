@@ -9,7 +9,7 @@ suite compares it checkpoint-by-checkpoint with the scalar file. The scalar
 file must remain unchanged as historical evidence.
 
 `tensor_growth_directional_strafe.json` uses the same saturated-growth
-scenario but sets the former local-forward strafe bias to 1. The physical
+scenario but sets the former strafe output to local-forward. The physical
 strafe scale remains zero: the output controls tensor anisotropy and signed
 division polarity. The child and the positional center of its daughter pair
 are biased toward `+n`, in proportion to the independent division-bias output. This is the

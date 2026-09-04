@@ -2,7 +2,7 @@
 
 The base scenario uses a saturated dedicated division-drive output to force
 every eligible particle into a cell cycle. The
-``--directional`` selects a constant local-forward axis and saturates the
+``--directional`` selects the local-forward axis and saturates the
 independent anisotropy and division-bias controls for comparison.
 
 Run from trainer/:
@@ -124,7 +124,7 @@ def main() -> None:
     parser.add_argument(
         "--directional",
         action="store_true",
-        help="bias the former local-forward strafe output to capture directional rather than isotropic tensor growth",
+        help="bias the former strafe output toward local-forward to capture directional rather than isotropic tensor growth",
     )
     args = parser.parse_args()
     output_path = DIRECTIONAL_OUTPUT if args.directional else ISOTROPIC_OUTPUT
@@ -135,16 +135,16 @@ def main() -> None:
     weights = np.zeros(agents._total_floats, dtype=np.float32)
     layout = weight_layout(CHEM_CHANNELS, HIDDEN_DIM)
     env_write_dim = CHEM_CHANNELS
-    weights[layout["fc2b_offset"] + env_write_dim + 6] = 20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 4] = 20.0
     if args.directional:
-        # Saturated anisotropy/polarity plus a constant local-forward axis.
-        weights[layout["fc2b_offset"] + env_write_dim + 2] = 20.0
-        weights[layout["fc2b_offset"] + env_write_dim + 3] = 20.0
-        weights[layout["fc2b_offset"] + env_write_dim + 4] = 1.0
+        # Saturated anisotropy/polarity plus a local-forward axis.
+        weights[layout["fc2b_offset"] + env_write_dim] = 20.0
+        weights[layout["fc2b_offset"] + env_write_dim + 1] = 20.0
+        weights[layout["fc2b_offset"] + env_write_dim + 2] = 1.0
     else:
         # A zero anisotropy logit targets 0.5; force the preserved isotropic
         # baseline's persistent state toward zero explicitly.
-        weights[layout["fc2b_offset"] + env_write_dim + 2] = -20.0
+        weights[layout["fc2b_offset"] + env_write_dim] = -20.0
     agents.load_weights(weights)
 
     core.set_material(

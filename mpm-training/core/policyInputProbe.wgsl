@@ -24,10 +24,10 @@ const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__
 struct ParticleRest {
   growthF: vec4<f32>, jp: f32, cycleActive: f32,
   growthAngle: f32, growthAnisotropy: f32,
-  divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, _padding: f32,
+  divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, _padding: f32,
 }
 struct ParticleMeta {
-  rng: u32, cooldown: f32, heading: f32, angularVelocity: f32,
+  rng: u32, cooldown: f32, alignment: vec2<f32>,
   color: vec4<f32>, divisionHazard: f32, divisionThreshold: f32,
   mitosisPropensity: f32,
   privateState: array<f32, 8>, chemicalState: array<f32, CHANNELS>,
@@ -112,11 +112,14 @@ fn elasticStrainInput(F: vec4<f32>, Fg: vec4<f32>, forward: vec2<f32>, lateral: 
   let bxx = Fe.x*Fe.x + Fe.y*Fe.y;
   let bxy = Fe.x*Fe.z + Fe.y*Fe.w;
   let byy = Fe.z*Fe.z + Fe.w*Fe.w;
-  let bf = vec2<f32>(bxx*forward.x+bxy*forward.y, bxy*forward.x+byy*forward.y);
-  let bl = vec2<f32>(bxx*lateral.x+bxy*lateral.y, bxy*lateral.x+byy*lateral.y);
-  let a = dot(forward, bf);
-  let b = dot(forward, bl);
-  let d = dot(lateral, bl);
+  let frameStrength = length(forward);
+  let unitForward = select(vec2<f32>(1.0,0.0), forward/max(frameStrength,1e-10), frameStrength>1e-10);
+  let unitLateral = vec2<f32>(-unitForward.y,unitForward.x);
+  let bf = vec2<f32>(bxx*unitForward.x+bxy*unitForward.y, bxy*unitForward.x+byy*unitForward.y);
+  let bl = vec2<f32>(bxx*unitLateral.x+bxy*unitLateral.y, bxy*unitLateral.x+byy*unitLateral.y);
+  let a = dot(unitForward, bf);
+  let b = dot(unitForward, bl);
+  let d = dot(unitLateral, bl);
   let midpoint = 0.5*(a+d);
   let radius = sqrt(max(0.25*(a-d)*(a-d)+b*b, 0.0));
   let e1 = 0.5*log(max(midpoint+radius, 1e-8));
@@ -128,7 +131,7 @@ fn elasticStrainInput(F: vec4<f32>, Fg: vec4<f32>, forward: vec2<f32>, lateral: 
     h00 = average + factor*(a-d); h11 = average - factor*(a-d); h01 = factor*2.0*b;
   }
   let invScale = 1.0/max(ELASTIC_SCALE, 1e-6);
-  return vec3<f32>(safeTanh((h00+h11)*invScale), safeTanh((h00-h11)*invScale), safeTanh(2.0*h01*invScale));
+  return vec3<f32>(safeTanh((h00+h11)*invScale), safeTanh((h00-h11)*invScale)*frameStrength, safeTanh(2.0*h01*invScale)*frameStrength);
 }
 
 @compute @workgroup_size(8)
@@ -146,15 +149,17 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
   let rest = particleRest[pi];
   let growthArea = rest.growthF.x*rest.growthF.w - rest.growthF.y*rest.growthF.z;
   output[baseOut+0u]=1.0; output[baseOut+1u]=pos.x; output[baseOut+2u]=pos.y;
-  output[baseOut+3u]=agentState.heading; output[baseOut+4u]=agentState.cooldown;
+  let alignmentStrength = length(agentState.alignment);
+  let heading = select(0.0, atan2(agentState.alignment.y, agentState.alignment.x), alignmentStrength > 1e-10);
+  output[baseOut+3u]=heading; output[baseOut+4u]=agentState.cooldown;
   output[baseOut+5u]=agentState.divisionHazard; output[baseOut+6u]=agentState.divisionThreshold;
   output[baseOut+7u]=rest.cycleActive; output[baseOut+8u]=growthArea;
   output[baseOut+9u]=rest.growthAngle;
   output[baseOut+10u]=rest.growthAnisotropy;
   output[baseOut+11u]=rest.divisionBias;
 
-  let cosH = cos(agentState.heading); let sinH = sin(agentState.heading);
-  let forward = vec2<f32>(cosH, sinH); let lateral = vec2<f32>(-sinH, cosH);
+  let forward = agentState.alignment;
+  let lateral = vec2<f32>(-forward.y, forward.x);
   let rawBase = baseOut + META_DIM;
   let inputBase = rawBase + IN_DIM;
   for (var c=0u; c<CHANNELS; c = c + 1u) {
@@ -168,8 +173,8 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
     output[inputBase+c] = normalizeChemicalValue(rawValue);
     let gx = sampleGrad(0u, c, k) * f32(FIELD_WIDTHS[c]) / f32(FIELD_MAX_WIDTH);
     let gy = sampleGrad(FIELD_TOTAL, c, k) * f32(FIELD_HEIGHTS[c]) / f32(FIELD_MAX_HEIGHT);
-    let rawForward = gx*cosH + gy*sinH;
-    let rawLateral = -gx*sinH + gy*cosH;
+    let rawForward = dot(vec2<f32>(gx, gy), forward);
+    let rawLateral = dot(vec2<f32>(gx, gy), lateral);
     output[rawBase+CHANNELS+c] = rawForward;
     output[rawBase+2u*CHANNELS+c] = rawLateral;
     output[inputBase+CHANNELS+c] = normalizeChemicalGradient(rawForward);
@@ -179,8 +184,8 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
   let mgx = 0.5*(sampleMorphology(mp+vec2<f32>(1.0,0.0))-sampleMorphology(mp-vec2<f32>(1.0,0.0)));
   let mgy = 0.5*(sampleMorphology(mp+vec2<f32>(0.0,1.0))-sampleMorphology(mp-vec2<f32>(0.0,1.0)));
   let rawOccupancy = sampleMorphology(mp);
-  let rawMorphForward = mgx*cosH + mgy*sinH;
-  let rawMorphLateral = -mgx*sinH + mgy*cosH;
+  let rawMorphForward = dot(vec2<f32>(mgx, mgy), forward);
+  let rawMorphLateral = dot(vec2<f32>(mgx, mgy), lateral);
   output[rawBase+3u*CHANNELS] = rawOccupancy;
   output[rawBase+3u*CHANNELS+1u] = rawMorphForward;
   output[rawBase+3u*CHANNELS+2u] = rawMorphLateral;

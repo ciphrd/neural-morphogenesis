@@ -18,6 +18,17 @@ an input to the neural policy. It is used only to evaluate morphology during
 evolution. The policy must discover chemical signaling and directional growth
 behaviors that produce a good target match.
 
+## Fitness
+
+Selection uses a pose-invariant bounded raster score at 256×256 resolution.
+Weighted Gaussian particle density is converted to occupancy with
+`1 - exp(-density / reference)` and compared to the target at four scales. The
+score separately measures missing coverage, outside spill, silhouette edges,
+and crowding. A coarse-to-fine rotation search reaches roughly 2.5-degree pose
+precision. Five snapshots across the final 10% of each rollout are combined as
+70% mean and 30% worst-snapshot fitness, so stable detail wins without reducing
+the entire late trajectory to one frame.
+
 ## Particle-density normalization
 
 Particle count is a numerical sampling choice. Use `--particle-densities` to
@@ -38,8 +49,8 @@ per-particle mass/rest area scale as `1/q`. Chemical and repulsion settings are
 resolved from the same preset. The chemical kernel and gradient normalization
 remain fixed in field-texel space; each particle contributes `1 / density` so
 the fixed-resolution field observes a comparable continuum concentration.
-A rollout-seeded world-space random field also supplies initial headings and
-lifecycle thresholds, so changing q no longer changes stochastic forcing merely
+A rollout-seeded world-space random field supplies lifecycle thresholds and
+flat-heading division fallbacks, so changing q no longer changes stochastic forcing merely
 because numerical particle slots were added or removed.
 Workers allocate once for the largest requested cap and switch density through
 runtime uniforms between rollouts.
@@ -62,10 +73,11 @@ Three signals have distinct responsibilities:
 1. **A dedicated neural output starts growth.** Its signed `[-1, 1]` value is
    clamped to `[0, 1]`; positive values are the per-macro-step probability of
    entering a cell cycle, while zero and negative values inhibit admission.
-2. **Neural targets control persistent growth geometry.** Two bounded outputs
-   propose a local growth direction, while a sigmoid proposes anisotropy; the
-   stored angle and anisotropy relax smoothly toward them. Another sigmoid
-   selects how strongly rear-facing division is polarized versus centered.
+2. **Neural outputs control growth geometry.** Two bounded outputs directly
+   set the local-space growth direction on every evaluation, while a sigmoid proposes
+   anisotropy; only anisotropy is temporally relaxed. The same direction is the
+   division axis, while another sigmoid selects how strongly daughter placement
+   is polarized versus centered.
 3. **The morphoelastic law supplies the amount of growth.** Once a cell cycle
    is active, a configured duration determines approximately how many mechanical
    macro steps it takes to double stress-free area. Elastic compression
@@ -74,16 +86,19 @@ Three signals have distinct responsibilities:
 
 The policy directly controls cycle admission but not the amount of growth in an
 active cycle. It may use any substrate values and gradients to choose its signed
-division drive, heading, growth direction, anisotropy, and division polarity.
+division drive, growth direction, anisotropy, and division polarity. Heading is
+not policy state: the local frame always follows the gradient of chemical
+channel 3. The morphology-gradient input lanes remain separate observations in
+that channel-3-relative frame.
 
 The current eight-channel policy has 30 inputs: 24 chemical value/gradient
-components, morphology occupancy and its two heading-relative gradient
-components, plus heading-relative elastic Hencky volume, axial, and shear
-strain. Its shared 128-unit tanh trunk feeds seven logical output heads: nine
-signed chemical delta rates, a two-component desired heading, growth anisotropy,
+components, morphology occupancy and its two heading-frame gradient
+components, plus heading-frame elastic Hencky volume, axial, and shear
+strain. Its shared 128-unit tanh trunk feeds six logical output heads: nine
+signed chemical delta rates, growth anisotropy,
 division bias, a two-component desired growth direction, a signed division
-drive, and three sigmoid RGB cell-color outputs (19 outputs total). The heads remain concatenated into one
-matrix for GPU inference and checkpoint compatibility, but use head-specific
+drive, and three sigmoid RGB cell-color outputs (17 outputs total). The heads remain concatenated into one
+matrix for GPU inference, but use head-specific
 initialization and mutation scales from `core/policy_parameters.json`.
 
 The CLI `--mutation-sigma` remains the global evolution step size. Each output
@@ -93,10 +108,9 @@ head multiplies it by a fixed sensitivity scale:
 | --- | --- | ---: |
 | shared trunk | zero | 1.00 |
 | chemical delta rates | neutral | 0.50 |
-| desired heading | local-forward | 0.20 |
 | growth anisotropy | sigmoid ≈ 0.20 | 0.15 |
 | division bias | sigmoid = 0.50 | 0.25 |
-| growth direction | local-forward | 0.20 |
+| growth direction | zero-centered local vector | 0.20 |
 | cell color | sigmoid = 0.50 | 0.50 |
 | private-state residual (`recurrent`) | neutral | 0.20 |
 | private-state gate (`recurrent`) | sigmoid ≈ 0.12 | 0.15 |
@@ -250,19 +264,20 @@ repeat neural_updates_per_macro communication rounds:
 
   for each active particle:
     inputs = []
+    alignment = channel_3_gradient / max(length(channel_3_gradient), 1)
 
     for each substrate channel:
         inputs += value at particle
-        inputs += gradient along particle heading
-        inputs += gradient perpendicular to heading
+        inputs += dot(gradient, alignment)
+        inputs += dot(gradient, perpendicular(alignment))
 
     inputs += morphology occupancy at particle
-    inputs += morphology gradient along particle heading
-    inputs += morphology gradient perpendicular to heading
+    inputs += dot(morphology_gradient, alignment)
+    inputs += dot(morphology_gradient, perpendicular(alignment))
 
     elastic_F = deformation_F * inverse(stress_free_growth_Fg)
     elastic_H = 0.5 * matrix_log(elastic_F * transpose(elastic_F))
-    elastic_H_local = rotate_tensor_into_heading_frame(elastic_H)
+    elastic_H_local = rotate_tensor_into_channel_3_gradient_frame(elastic_H)
     inputs += tanh(trace(elastic_H_local) / elastic_strain_scale)
     inputs += tanh((elastic_H_local.xx - elastic_H_local.yy) / elastic_strain_scale)
     inputs += tanh((2 * elastic_H_local.xy) / elastic_strain_scale)
@@ -273,15 +288,11 @@ repeat neural_updates_per_macro communication rounds:
     if cell-owned chemistry:
       particle.chemical_state += chemical_delta * communication_dt / channel_delta_timescale
       particle.chemical_state = clamp(particle.chemical_state, -1, 1)
-    update angular velocity and heading from the turning output,
-      scaled by communication_dt
-
-    raw_growth_direction = tanh(direction_x, direction_y)
+    raw_growth_direction = tanh(direction_forward, direction_lateral)
     local_growth_direction = normalize_or_zero(raw_growth_direction)
     growth_anisotropy = sigmoid(anisotropy_output)
     division_bias = sigmoid(polarity_output)
-    world_growth_direction = rotate(local_growth_direction, heading)
-    particle.growth_direction = world_growth_direction
+    particle.growth_direction = rotate(local_growth_direction, alignment)
     particle.growth_anisotropy = growth_anisotropy
     particle.division_bias = division_bias
     particle.color = sigmoid(red_output, green_output, blue_output)
@@ -421,9 +432,9 @@ perpendicular = area_factor ^ ((1 - strength) / 2)
 ```
 
 At `strength = 0`, this is isotropic. At `strength = 1`, the entire area
-increment is placed along the selected axis. The axis is transformed through
-the elastic rotation so that rotating the organism rotates the growth response
-without changing the material law.
+increment is placed along the selected axis. The local axis is first rotated by
+the channel-3-gradient heading, then transformed through the elastic rotation
+before applying the material update.
 
 The viewer's Growth panel exposes `global_anisotropy` from 0 to 1. It is a
 playback-only multiplier: 0 forces isotropic, blob-favoring rest growth, while
@@ -445,11 +456,16 @@ Division occurs when the parent's stress-free area reaches
 determinant(Fg) = 2
 ```
 
-Daughter placement always uses the direction behind the parent's current
-heading. The policy has no spawn-direction control. For split distance `d`:
+Daughter placement uses the current neural growth axis, transformed from
+agent-local space through the channel-3-gradient heading. The axis is
+undirected, so neural outputs `v` and `-v` are equivalent. Each division uses
+an unbiased rollout-seeded coin to select one of its two ends. In a flat
+channel-3 field, where the local frame is undefined, the axis is also selected
+from rollout-seeded spatial randomness. For split distance `d`:
 
 ```text
-n = -agent_forward
+axis = canonical_axis(world_growth_direction)
+n = random_choice(-axis, +axis)
 bias = division_bias * division_directionality
 
 half_offset = n * d / 2
@@ -459,17 +475,16 @@ parent_position   = old_position - half_offset + center_shift
 daughter_position = old_position + half_offset + center_shift
 ```
 
-With zero bias, the split is symmetric along the forward/rear axis. With full
-bias, the parent remains at the old position and the daughter is placed one
-split distance behind it. Intermediate values smoothly interpolate between
-those cases. Positions wrap around the toroidal simulation domain. The neural
-growth direction controls only the stress-free growth tensor and optional
-strafe acceleration.
+With zero bias, the split is symmetric along the growth axis. With full bias,
+the parent remains at the old position and the daughter is placed one split
+distance along a randomly selected end of the green growth axis. Intermediate values smoothly
+interpolate between those cases. Positions wrap around the toroidal simulation
+domain.
 
 The viewer's Growth panel exposes `division_directionality` from 0 to 1 as a
-playback-only polarization cap: 0 makes each rear-facing split center-preserving
-and symmetric, while 1 permits the policy's division bias to keep the parent in
-place and put the daughter the full split distance behind it.
+playback-only polarization cap: 0 makes each split center-preserving and
+symmetric, while 1 permits the policy's division bias to keep the parent in
+place and put the daughter the full split distance along either end of the growth axis.
 
 Division conserves mass and rest area:
 
@@ -487,7 +502,7 @@ daughter_F = parent_F * inverse(parent_Fg)
 
 This preserves the parent's elastic deformation `Fe`, so stress does not jump
 at division. The daughters also inherit the plastic state, APIC affine field,
-heading, angular velocity, and centered momentum. Both receive a division
+current channel-3 alignment and centered momentum. Both receive a division
 cooldown and independent random-number state.
 
 Visually, the existing daughter remains full-sized while the newly created
@@ -515,7 +530,7 @@ The visible organism is an emergent result of:
   toward a full `[0,1]` probability range;
 - **chemical feedback:** where particles write signals and how neighbors react;
 - **directional rest growth:** the accumulated tensor `Fg` of each particle;
-- **rear-facing division polarity:** whether the parent stays fixed or the
+- **growth-aligned division polarity:** whether the parent stays fixed or the
   daughter pair remains centered;
 - **elastic relaxation:** how neighboring material accommodates new rest area;
 - **plasticity:** which sufficiently large elastic deformations become
@@ -530,8 +545,8 @@ rest configurations are incompatible.
 
 The growth direction is recomputed every macro step. A particle can grow along
 different axes during one cell cycle, and `Fg` accumulates that history.
-Daughter placement is independent: it always uses the rear of the parent's
-current heading.
+Daughter placement is independent: it uses the rear of the current
+channel-3-gradient frame.
 
 ## Manual particle insertion
 
@@ -554,7 +569,7 @@ cap.
 ## Relevant implementation files
 
 - [`core/agents.wgsl`](core/agents.wgsl) — sensing, neural policy, chemical
-  writes, cell-cycle admission, rear-facing division, and daughter initialization.
+  writes, cell-cycle admission, growth-aligned division, and daughter initialization.
 - [`core/g2p.wgsl`](core/g2p.wgsl) — deformation update, plastic clamp, and
   tensor-valued `Fg` growth law.
 - [`core/p2g.wgsl`](core/p2g.wgsl) — effective grown mass/volume and elastic

@@ -51,7 +51,7 @@ from policy_parameters import (
 )
 
 META_NAMES = [
-    "valid", "position_x", "position_y", "heading", "cooldown",
+    "valid", "position_x", "position_y", "alignment_angle", "cooldown",
     "division_hazard", "division_threshold", "cycle_active",
     "growth_area", "growth_direction_angle", "growth_anisotropy",
     "division_bias",

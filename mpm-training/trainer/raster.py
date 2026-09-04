@@ -10,22 +10,13 @@ directly, on each generation's winning positions, to render the
 `..._agents.png` debug raster the dashboard shows next to
 `..._target.png` — a second, display-only use of the same function
 fitness scoring already calls, not a separate code path.
-Designed in conversation around a specific concern: raw Hamming (or IoU/
-Dice) distance on a hard 0/1 lattice gives population-based random search
-almost nothing to climb — a near-miss scores the same as a far-miss
-unless a point lands in the *exact* same cell as a target point, and that
-problem gets *worse*, not better, at higher raster resolution (exact-cell
-hits become rarer). Splatting each point as a small Gaussian "blob"
-(unnormalized — peak exactly 1 at the point itself, not a probability
-density) and comparing two rasters via mean squared error keeps a smooth,
-graded gradient while staying raster-based and fast.
-
-That MSE term alone only weakly discriminates *how far* outside the
-target shape a stray point landed (a flat, diluted per-pixel penalty —
-see build_target_distance_field()'s docstring). outside_shape_penalty(),
-scored against a precomputed Euclidean distance transform of the
-target's footprint, adds an explicit, unbounded, quadratically-growing
-penalty for that instead — training_raster_distance() combines both.
+Hard Hamming/IoU scoring gives evolutionary search almost nothing to climb: a
+near miss and a far miss both fail until a point enters the exact target cell.
+Candidate particles are therefore Gaussian-splatted into weighted density and
+smoothly saturated into bounded occupancy. A fine-to-coarse pyramid preserves
+the broad attraction basin while retaining high-resolution silhouette detail.
+Separate coverage, spill, boundary, and crowding terms prevent background
+dilution and stop density collapse from hiding behind occupancy saturation.
 
 Unlike envnca (whose own domain IS its simulation grid, in grid-pixel
 units), this project's particle positions and target points already
@@ -45,6 +36,8 @@ dominant cost otherwise, in envnca's own version of this file.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 
@@ -52,6 +45,25 @@ from scipy.ndimage import distance_transform_edt
 # cheap rotation grid search is enough for a per-candidate training
 # signal).
 TRAIN_NUM_ANGLES = 16
+FITNESS_MODEL_VERSION = 1
+
+# A fine-to-coarse image pyramid. The finest level supplies detailed
+# silhouette pressure while pooled levels keep a useful signal when a
+# candidate is still several pixels away from the target.
+FITNESS_PYRAMID_FACTORS = (1, 2, 4, 8)
+FITNESS_PYRAMID_WEIGHTS = (0.50, 0.25, 0.15, 0.10)
+
+
+@dataclass(frozen=True)
+class RasterFitnessBreakdown:
+    """Individually inspectable terms from one aligned raster score."""
+
+    total: float
+    coverage: float
+    spill: float
+    boundary: float
+    crowding: float
+    angle: float
 
 
 def _rotation_matrix(theta: float) -> np.ndarray:
@@ -242,6 +254,109 @@ def raster_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(diff * diff))
 
 
+def occupancy_reference(
+    target_raster: np.ndarray,
+    sigma: float,
+    expected_weighted_particles: float,
+    target_occupancy: float = 0.9,
+) -> float:
+    """Calibrate summed particle density into resolution-independent occupancy.
+
+    The target raster mass changes quadratically with resolution, while a
+    peak-one Gaussian's raster mass depends on sigma. Their ratio defines the
+    expected interior density for a full target, so increasing resolution can
+    sharpen the measurement without silently changing its density semantics.
+    """
+    if not np.isfinite(expected_weighted_particles) or expected_weighted_particles <= 0.0:
+        raise ValueError("expected_weighted_particles must be finite and positive")
+    if not 0.0 < target_occupancy < 1.0:
+        raise ValueError("target_occupancy must be strictly between zero and one")
+    radius = max(1, int(np.ceil(3.0 * sigma)))
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    kernel_mass = float(
+        np.exp(-(offsets[:, None] ** 2 + offsets[None, :] ** 2) / (2.0 * sigma * sigma)).sum()
+    )
+    target_mass = max(float(target_raster.sum()), np.finfo(np.float64).eps)
+    expected_density = expected_weighted_particles * kernel_mass / target_mass
+    return expected_density / -np.log1p(-target_occupancy)
+
+
+def bounded_occupancy(weighted_density: np.ndarray, reference: float) -> np.ndarray:
+    """Map additive particle density to a smooth occupancy field in [0, 1]."""
+    if not np.isfinite(reference) or reference <= 0.0:
+        raise ValueError("occupancy reference must be finite and positive")
+    return -np.expm1(-np.maximum(weighted_density, 0.0) / reference)
+
+
+def _average_pool(field: np.ndarray, factor: int) -> np.ndarray:
+    if factor == 1:
+        return field
+    height = field.shape[0] - field.shape[0] % factor
+    width = field.shape[1] - field.shape[1] % factor
+    if height == 0 or width == 0:
+        raise ValueError(f"pooling factor {factor} exceeds raster shape {field.shape}")
+    cropped = field[:height, :width]
+    return cropped.reshape(height // factor, factor, width // factor, factor).mean(axis=(1, 3))
+
+
+def _multiscale_shape_terms(
+    target: np.ndarray,
+    candidate: np.ndarray,
+    factors: tuple[int, ...] = FITNESS_PYRAMID_FACTORS,
+    weights: tuple[float, ...] = FITNESS_PYRAMID_WEIGHTS,
+) -> tuple[float, float]:
+    """Return target-normalized missing-coverage and outside-occupancy terms."""
+    if len(factors) != len(weights) or not factors:
+        raise ValueError("fitness pyramid factors and weights must have equal nonzero lengths")
+    weight_sum = float(sum(weights))
+    if weight_sum <= 0.0:
+        raise ValueError("fitness pyramid weights must sum to a positive value")
+
+    coverage = 0.0
+    spill = 0.0
+    eps = np.finfo(np.float64).eps
+    for factor, weight in zip(factors, weights):
+        t = _average_pool(target, factor)
+        c = _average_pool(candidate, factor)
+        target_mass = max(float(t.sum()), eps)
+        missing = np.maximum(t - c, 0.0)
+        coverage += weight * float(np.sum(t * missing * missing) / target_mass)
+        spill += weight * float(np.sum((1.0 - t) * c * c) / target_mass)
+    return coverage / weight_sum, spill / weight_sum
+
+
+def _boundary_loss(target: np.ndarray, candidate: np.ndarray, sampling_factor: int = 4) -> float:
+    """Compare silhouette edges after suppressing individual-particle grain.
+
+    The full-resolution occupancy deliberately preserves fine geometry, but its
+    individual Gaussian splats also create interior micro-edges. Pooling only
+    for this term makes it measure the tissue silhouette rather than particle
+    sampling noise; coverage still retains the full-resolution level.
+    """
+    target = _average_pool(target, sampling_factor)
+    candidate = _average_pool(candidate, sampling_factor)
+    target_dy, target_dx = np.gradient(target)
+    candidate_dy, candidate_dx = np.gradient(candidate)
+    target_edge = np.hypot(target_dx, target_dy)
+    candidate_edge = np.hypot(candidate_dx, candidate_dy)
+    denominator = max(float(np.sum(target_edge * target_edge)), np.finfo(np.float64).eps)
+    diff = target_edge - candidate_edge
+    return float(np.sum(diff * diff) / denominator)
+
+
+def _crowding_loss(
+    weighted_density: np.ndarray,
+    expected_density: float,
+    target_raster: np.ndarray,
+    tolerance: float = 2.0,
+) -> float:
+    """Robustly penalize density spikes without letting one pile-up dominate."""
+    relative = weighted_density / max(expected_density, np.finfo(np.float64).eps)
+    excess = np.maximum(relative - tolerance, 0.0)
+    target_mass = max(float(target_raster.sum()), np.finfo(np.float64).eps)
+    return float(np.sum(np.log1p(excess * excess)) / target_mass)
+
+
 def build_target_raster(
     target_points: np.ndarray,
     resolution: int,
@@ -363,7 +478,15 @@ def training_raster_distance(
     num_angles: int = TRAIN_NUM_ANGLES,
     track_best_raster: bool = False,
     particle_weight: float = 1.0,
-) -> float | tuple[float, np.ndarray | None]:
+    expected_weighted_particles: float | None = None,
+    target_occupancy: float = 0.9,
+    coverage_weight: float = 1.0,
+    spill_weight: float = 1.0,
+    boundary_weight: float = 0.25,
+    crowding_weight: float = 0.05,
+    alignment_refinement_steps: int = 2,
+    return_breakdown: bool = False,
+) -> float | tuple[float, np.ndarray | None] | tuple[float, np.ndarray | None, RasterFitnessBreakdown | None]:
     """Rotation-search fitness scoring, shaped exactly like
     alignment.training_alignment_distance (same coarse angle grid,
     analytic centroid-matching translation — see that function's own
@@ -373,18 +496,13 @@ def training_raster_distance(
     outside_shape_penalty() against precomputed target_raster /
     target_distance_field, instead of a KD-tree Chamfer distance.
 
-    The returned score is `coverage + outside_weight * penalty`:
-    coverage (raster_distance, against a *sum*-combined candidate raster
-    — see rasterize_points_sum()'s own docstring for why particles are
-    rasterized differently than the target) is what pulls particles
-    *into* the shape, spread across its whole footprint, and now also
-    genuinely apart from each other (a candidate clustered in one corner
-    of an otherwise-covered target, or piled onto a single point, scores
-    badly here); penalty (outside_shape_penalty) is what actually
-    punishes straying outside it, growing with distance rather than
-    MSE's flat per-pixel contribution. The best-scoring rotation is
-    chosen against this *combined* score, not coverage alone, so the
-    rotation search itself is already shaped by the outside penalty.
+    Weighted summed density is first mapped to bounded occupancy with
+    ``1 - exp(-density / reference)``. The reference is calibrated from the
+    target raster mass, Gaussian kernel mass, and desired represented particle
+    count, making target and candidate comparable across raster resolutions.
+    The score combines multiscale missing coverage, multiscale outside
+    occupancy plus physical outside distance, fine boundary disagreement, and
+    a robust raw-density crowding penalty.
 
     `track_best_raster`, off by default (the hot training path doesn't
     need it — one less array kept alive per call), returns the winning
@@ -395,25 +513,81 @@ def training_raster_distance(
     winner against, as opposed to the winner's raw (un-rotated) replay
     positions."""
     if points.shape[0] == 0 or target_points.shape[0] == 0:
+        if return_breakdown:
+            return float("inf"), None, None
         return (float("inf"), None) if track_best_raster else float("inf")
+
+    for name, value in (
+        ("coverage_weight", coverage_weight),
+        ("spill_weight", spill_weight),
+        ("boundary_weight", boundary_weight),
+        ("crowding_weight", crowding_weight),
+        ("outside_weight", outside_weight),
+    ):
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative")
+
+    desired_particles = (
+        float(expected_weighted_particles)
+        if expected_weighted_particles is not None
+        else float(points.shape[0]) * particle_weight
+    )
+    reference = occupancy_reference(target_raster, sigma, desired_particles, target_occupancy)
+    expected_density = reference * -np.log1p(-target_occupancy)
 
     centered = points - points.mean(axis=0)
     target_centroid = target_points.mean(axis=0)
 
     best = float("inf")
     best_raster: np.ndarray | None = None
-    for i in range(num_angles):
-        theta = 2.0 * np.pi * i / num_angles
+    best_breakdown: RasterFitnessBreakdown | None = None
+
+    def evaluate(theta: float) -> None:
+        nonlocal best, best_raster, best_breakdown
         rotated = centered @ _rotation_matrix(theta).T + target_centroid
-        candidate_raster = rasterize_points_sum(
+        candidate_density = rasterize_points_sum(
             rotated, resolution, extent, sigma, particle_weight=particle_weight
         )
-        coverage = raster_distance(target_raster, candidate_raster)
-        penalty = outside_shape_penalty(rotated, target_distance_field, extent)
-        dist = coverage + outside_weight * penalty
+        candidate_raster = bounded_occupancy(candidate_density, reference)
+        coverage, raster_spill = _multiscale_shape_terms(target_raster, candidate_raster)
+        distance_spill = outside_shape_penalty(rotated, target_distance_field, extent)
+        spill = raster_spill + outside_weight * distance_spill
+        boundary = _boundary_loss(target_raster, candidate_raster)
+        crowding = _crowding_loss(candidate_density, expected_density, target_raster)
+        dist = (
+            coverage_weight * coverage
+            + spill_weight * spill
+            + boundary_weight * boundary
+            + crowding_weight * crowding
+        )
         if dist < best:
             best = dist
-            if track_best_raster:
+            if track_best_raster or return_breakdown:
                 best_raster = candidate_raster
+            best_breakdown = RasterFitnessBreakdown(
+                total=dist,
+                coverage=coverage,
+                spill=spill,
+                boundary=boundary,
+                crowding=crowding,
+                angle=theta,
+            )
 
+    for i in range(num_angles):
+        evaluate(2.0 * np.pi * i / num_angles)
+
+    # Successive local thirds turn the cheap 16-angle search's 22.5-degree
+    # bins into roughly 2.5-degree pose precision with only four additional
+    # raster evaluations. That prevents orientation quantization from hiding
+    # the finer silhouette differences measured by the higher-resolution field.
+    if num_angles >= 4 and best_breakdown is not None:
+        step = 2.0 * np.pi / num_angles
+        for _ in range(max(0, alignment_refinement_steps)):
+            step /= 3.0
+            center_angle = best_breakdown.angle
+            evaluate(center_angle - step)
+            evaluate(center_angle + step)
+
+    if return_breakdown:
+        return best, best_raster, best_breakdown
     return (best, best_raster) if track_best_raster else best

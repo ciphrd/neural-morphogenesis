@@ -13,13 +13,11 @@ The hidden activation is bounded, monotonic tanh. This replaces the earlier
 experimental sine activation to make evolved responses smoother under input
 changes and mutation.
 
-Same architecture, and the same LOCAL (heading-relative) frame
-convention envnca's own agents use: heading is core/agents.wgsl's own
-persistent per-particle state (NOT derived from velocity — see that
-file's own module docstring for why), which that shader uses to rotate
-the sensed gradient into forward/lateral before this net ever sees it,
-and this net's two former strafe outputs are rotated back out to world
-frame by that same shader afterward — see core/agents.wgsl's own module docstring
+The LOCAL frame is constructed directly from chemical channel 7's gradient
+by core/agents.wgsl. It is not stored or controlled by the cell. The shader
+uses that frame to rotate sensed gradients in and growth-direction outputs
+back out to world space —
+see core/agents.wgsl's own module docstring
 for the exact rotation (training_sim.py, unlike an earlier revision, no
 longer does any of this itself — it only orchestrates GPU buffers/
 pipelines now).
@@ -33,13 +31,12 @@ pipelines now).
   is frame-agnostic; the gradient rotation and robust input normalization are
   entirely the caller's job.
 - Output: env_write (C) — retained ABI name for one bounded signed chemical
-  delta rate per channel — plus desired heading (2), anisotropy/polarity logits (2),
+  delta rate per channel — plus anisotropy/polarity logits (2),
   desired growth direction (2), and a signed division drive (1). Stateless-128 ends with RGB logits (3);
   stateful-64 instead ends with private-state residuals (8) and gates (8),
   all raw/local-frame. C=9 gives 33 inputs and 19 stateless outputs, or 41
-  inputs and 32 stateful outputs. The desired-heading vector is converted by the shader
-  into angular acceleration from its shortest local angular error; the two
-  former strafe channels encode a desired local growth direction.
+  inputs and 30 stateful outputs. The two
+  former strafe channels encode a desired local-space growth direction.
   The two former acceleration channels independently control tensor
   anisotropy and division bias through sigmoid.
 """
@@ -79,10 +76,10 @@ class UpdateRule(nn.Module):
     def reset_parameters(self) -> None:
         """Head-aware initialization shared conceptually with the browser.
 
-        Xavier gains keep vector/control heads conservative, while bias priors
-        start both directions forward, anisotropy near 0.2, and all remaining
-        scalar outputs neutral. Small per-head bias jitter preserves diversity
-        between freshly randomized policies.
+        Xavier gains keep vector/control heads conservative. Growth direction
+        is zero-centered in local space, anisotropy starts near 0.2, and all
+        remaining scalar outputs are neutral. Small per-head bias jitter
+        preserves diversity between freshly randomized policies.
         """
         trunk_gain, trunk_bias_jitter = trunk_initialization()
         nn.init.xavier_uniform_(self.input_layer.weight, gain=trunk_gain)
@@ -111,11 +108,10 @@ class UpdateRule(nn.Module):
         rotation of the gradients is the caller's job
         (training_sim.py/core/agents.wgsl); this method is frame-agnostic and
         simply concatenates the three channel blocks. Returns
-        (env_write, heading_target, growth_controls, direction, tail), all raw/un-squashed;
+        (env_write, growth_controls, direction, tail), all raw/un-squashed;
         tail is RGB for stateless-128 or concatenated state residual/gate for stateful-64
         and still in LOCAL frame — squashing (tanh for vectors and chemical deltas;
-        sigmoid for scalar controls), conversion of the heading target to
-        angular acceleration, and rotating growth direction to world frame are all training_sim.py's/core/agents.wgsl's
+        sigmoid for scalar controls), and rotating growth direction to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
         not transient spatial splat geometry), same division of responsibility
         envnca's own UpdateRule/Simulation split."""
@@ -127,7 +123,6 @@ class UpdateRule(nn.Module):
         x = torch.cat(inputs, dim=-1)
         hidden = self.activation(self.input_layer(x))
         env_write = self.heads["chemical"](hidden)
-        heading_target = self.heads["heading"](hidden)
         growth_controls = torch.cat(
             [
                 self.heads["anisotropy"](hidden),
@@ -142,7 +137,7 @@ class UpdateRule(nn.Module):
             if not policy_has_recurrence(self.architecture)
             else torch.cat([self.heads["stateDelta"](hidden), self.heads["stateGate"](hidden)], dim=-1)
         )
-        return env_write, heading_target, growth_controls, direction, tail
+        return env_write, growth_controls, direction, tail
 
     def concatenated_output_parameters(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return logical heads concatenated in the stable GPU output order."""

@@ -71,7 +71,7 @@ const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
 // growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-// growthFrameHeading, appearanceScale, padding — 48 bytes.
+// growthFrameAngle, appearanceScale, padding — 48 bytes.
 const REST_FIELDS = 12;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own

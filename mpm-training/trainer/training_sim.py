@@ -42,19 +42,15 @@ CAPTURE_OFFSETS snapshots near the end of a rollout, not every macro
 step — a fixed, small cost per rollout rather than one paid
 `macro_steps` times.
 
-Local-frame (heading-relative) sensing/action rotation, and the
-persistent per-particle heading/angularVelocity state that drives it
-(NOT derived from velocity — a real, confirmed source of chaotic spin
-before this class's own heading state was introduced) now live entirely
-inside AgentsGPU/core/agents.wgsl — see that file's own module docstring
-for the full reasoning (this module used to own that state as
-self.heading/self.angular_velocity numpy arrays, computing the rotation
-in torch every macro step; there's nothing left for this module to do
-there now).
+Local-frame sensing/action rotation now lives entirely inside
+AgentsGPU/core/agents.wgsl. The frame is reconstructed from the L2-clipped
+gradient of chemical channel 7 on every evaluation; there is no persistent heading
+or angular-velocity state.
 
-The two former strafe channels propose a local tensor-growth direction. The
-agent shader smoothly turns a persistent heading-relative growth angle toward
-that target and relaxes persistent anisotropy toward its sigmoid target; a
+The two former strafe channels directly set the local-space tensor-growth direction
+on every neural evaluation, without temporal smoothing. The agent shader rotates
+that direction through the current channel-7-gradient frame and
+relaxes persistent anisotropy toward its sigmoid target; a
 separate sigmoid controls signed division placement. MAX_STRAFE independently
 controls whether the reconstructed world direction also acts as physical
 acceleration and is zero by default.
@@ -158,9 +154,9 @@ class TrainingRollout:
     overhead; this constructor only seeds `core`'s particle buffers (one
     the configured initial particle count; --particles remains a growth cap) and
     resets `agents`/`environment`'s own persistent state back to a fresh
-    (empty field, randomized heading — see AgentsGPU.reset_heading()'s
+    (empty field and zero alignment cache — see AgentsGPU.reset_state()'s
     own docstring) starting point for this rollout — every bit of that
-    starting condition (packed-disk rotation, heading,
+    starting condition (packed-disk rotation,
     growth's own seed) is now a pure, bit-exact function of `seed` alone
     (see seed_blob()'s/agents_gpu._spawn_uniform01()'s own docstrings),
     no numpy Generator needed anywhere in this constructor anymore.
@@ -224,7 +220,7 @@ class TrainingRollout:
 
         environment.reset()
         agents.set_active_count(initial_count)
-        agents.reset_heading(seed, positions)
+        agents.reset_state(seed)
 
     def macro_step(self, substeps_per_macro: int, *, growth_enabled: bool = True) -> None:
         core = self.core

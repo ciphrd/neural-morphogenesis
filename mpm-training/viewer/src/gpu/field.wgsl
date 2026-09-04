@@ -388,7 +388,8 @@ fn substrateValue(c: u32, outputX: u32, outputY: u32) -> f32 {
 
 @group(0) @binding(8) var<storage, read> substrateGrid: array<f32>;
 @group(0) @binding(9) var substrateOutputTex: texture_storage_2d<rgba8unorm, write>;
-@group(0) @binding(21) var<uniform> substrateChannelStart: u32;
+// x: first RGB-window channel, y: isolate the orientation channel as grayscale.
+@group(0) @binding(21) var<uniform> substrateDisplay: vec4<u32>;
 // x: substrate zero-is-black, y: boundary-gradient zero-is-black.
 @group(0) @binding(23) var<uniform> backgroundZeroIsBlack: vec2<u32>;
 
@@ -405,10 +406,16 @@ fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let y = gid.y;
   if (x >= SUBSTRATE_WIDTH || y >= SUBSTRATE_HEIGHT) { return; }
 
-  let r = substrateValue(substrateChannelStart, x, y);
-  let g = substrateValue(min(substrateChannelStart + 1u, SUBSTRATE_CHANNELS - 1u), x, y);
-  let b = substrateValue(min(substrateChannelStart + 2u, SUBSTRATE_CHANNELS - 1u), x, y);
-  let color = vec3<f32>(substrateDisplayValue(r), substrateDisplayValue(g), substrateDisplayValue(b));
+  let channelStart = substrateDisplay.x;
+  let r = substrateValue(channelStart, x, y);
+  let g = substrateValue(min(channelStart + 1u, SUBSTRATE_CHANNELS - 1u), x, y);
+  let b = substrateValue(min(channelStart + 2u, SUBSTRATE_CHANNELS - 1u), x, y);
+  var color = vec3<f32>(substrateDisplayValue(r), substrateDisplayValue(g), substrateDisplayValue(b));
+  if (substrateDisplay.y != 0u) {
+    // Must match core/agents.wgsl's HEADING_CHANNEL fallback exactly.
+    let orientationChannel = min(7u, SUBSTRATE_CHANNELS - 1u);
+    color = vec3<f32>(substrateDisplayValue(substrateValue(orientationChannel, x, y)));
+  }
 
   textureStore(substrateOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(color, 1.0));
 }
