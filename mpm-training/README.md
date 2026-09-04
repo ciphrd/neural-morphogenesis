@@ -65,7 +65,7 @@ Three signals have distinct responsibilities:
 2. **Neural targets control persistent growth geometry.** Two bounded outputs
    propose a local growth direction, while a sigmoid proposes anisotropy; the
    stored angle and anisotropy relax smoothly toward them. Another sigmoid
-   selects how strongly rear-facing division is polarized versus centered.
+   selects how strongly growth-directed division is polarized versus centered.
 3. **The morphoelastic law supplies the amount of growth.** Once a cell cycle
    is active, a configured duration determines approximately how many mechanical
    macro steps it takes to double stress-free area. Elastic compression
@@ -80,7 +80,7 @@ The current eight-channel policy has 30 inputs: 24 chemical value/gradient
 components, morphology occupancy and its two heading-relative gradient
 components, plus heading-relative elastic Hencky volume, axial, and shear
 strain. Its shared 128-unit tanh trunk feeds seven logical output heads: nine
-signed chemical delta rates, a two-component desired heading, growth anisotropy,
+desired chemical-expression levels, a two-component desired heading, growth anisotropy,
 division bias, a two-component desired growth direction, a signed division
 drive, and three sigmoid RGB cell-color outputs (19 outputs total). The heads remain concatenated into one
 matrix for GPU inference and checkpoint compatibility, but use head-specific
@@ -91,20 +91,22 @@ head multiplies it by a fixed sensitivity scale:
 
 | Parameter bucket | Initial bias prior | Mutation multiplier |
 | --- | --- | ---: |
-| shared trunk | zero | 1.00 |
-| chemical delta rates | neutral | 0.50 |
+| shared trunk | zero-centered, ±0.5 random bias | 1.00 |
+| chemical expression targets | neutral | 0.50 |
 | desired heading | local-forward | 0.20 |
 | growth anisotropy | sigmoid ≈ 0.20 | 0.15 |
 | division bias | sigmoid = 0.50 | 0.25 |
 | growth direction | local-forward | 0.20 |
+| division drive | neutral | 0.25 |
 | cell color | sigmoid = 0.50 | 0.50 |
 | private-state residual (`recurrent`) | neutral | 0.20 |
 | private-state gate (`recurrent`) | sigmoid ≈ 0.12 | 0.15 |
 
-Small head-specific bias jitter prevents freshly initialized policies from
-being identical at zero input. Lower mutation multipliers on persistent
-direction and growth controls prevent a single mutation from causing a much
-larger behavioral jump than an equally sized trunk mutation.
+Random trunk bias and head-specific weight gains make freshly initialized
+policies behaviorally distinct even at neutral input, while the head bias
+centers retain sensible population-wide defaults. Lower mutation multipliers
+on persistent direction and growth controls prevent a single mutation from
+causing a much larger behavioral jump than an equally sized trunk mutation.
 
 ## Cell memory
 
@@ -160,8 +162,8 @@ Chemical memory is an independent run-level architecture selected with
 
 | Variant | Memory owner | Chemical-head meaning | Field lifecycle |
 | --- | --- | --- | --- |
-| `persistent-environment` | spatial environment | signed chemical delta rate | hold the field fixed through all neural rounds, then diffuse/decay once and add the final delta |
-| `cell-owned-projection` | each cell | signed chemical delta rate | integrate per-cell chemistry, then clear and rebuild the sensed field from cell state every round |
+| `persistent-environment` | spatial environment | desired expression level | hold the field fixed through all neural rounds, then diffuse/decay once and relax toward the final density-weighted target |
+| `cell-owned-projection` | each cell | desired expression level | relax per-cell chemistry toward the target, then clear and rebuild the sensed field from cell state every round |
 
 The cell-memory axis is selected independently with `--cell-memory`.
 For example, the earlier stateful persistent-field model is:
@@ -190,7 +192,7 @@ layout to the current nine-channel layout.
 The production nine-channel system uses a data-driven `3 / 3 / 3` transport
 layout from `core/chemical_channels.json`:
 
-| Channels | Scale | Native grid | Cell delta timescale | Field delta timescale | Base-decay exponent | Role |
+| Channels | Scale | Native grid | Cell relaxation time | Field response time | Base-decay exponent | Role |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | 0–2 | global | 64² | 24 | 24 | 0.05 | organism-wide coordination |
 | 3–5 | regional | 256² | 10 | 10 | 0.50 | body regions and repeated structures |
@@ -199,20 +201,20 @@ layout from `core/chemical_channels.json`:
 
 Channels are packed into common field, gradient, and deposit buffers, so this
 does not add agent-shader storage bindings. Each recorded channel profile owns
-its resolution scale, cell-delta timescale, field-delta timescale, decay exponent,
-diffusion multiplier, and deposit-sigma multiplier. Both temporal scales divide
-the corresponding signed delta rate, letting slow channels accumulate gradually
-instead of turning their output into a concentration target. The shader derives indexing and transport from generated arrays;
+its resolution scale, cell-relaxation time, field-response time, decay exponent,
+diffusion multiplier, and deposit-sigma multiplier. The two temporal scales
+control how quickly cellular expression and persistent substrate approach the
+desired level. The shader derives indexing and transport from generated arrays;
 adding a scale or moving a channel between scales is therefore a configuration
 change rather than another GPU architecture.
 
 When local-density limiting is enabled, every texel accumulates a matched
 chemical numerator `N` and represented-material density `D` from exactly the
-same kernel weights. Its effective source is `N / max(D, D_capacity)`: raw
-Gaussian deposition is preserved below capacity, while additional overlapping
-material cannot amplify the source above the density-weighted mean. Persistent
-decay and forcing are integrated with the exact constant-source leaky-system
-factor `(1-r)/(-log(r))`, where `r` is that channel's retention for the tick.
+same kernel weights. Cell-owned projection uses `N / max(D, D_capacity)`.
+Persistent-environment mode instead recovers the local desired level `N/D` and
+mixes the transported field toward it; `D/(D+D_capacity)` controls how strongly
+sparse kernel tails pull. This bounded target update can add or subtract and
+cannot drift through repeated accumulation.
 The integer atomic scale is derived from the live particle-capacity and
 projection bounds each round, retaining deterministic accumulation while
 avoiding the former fixed 1/4096 quantization.
@@ -223,8 +225,7 @@ channels can be long-lived without removing the existing control. Sobel
 gradients are converted back to the finest-grid convention before entering the
 policy, preventing coarse channels from receiving artificially larger neural
 inputs. New run/checkpoint metadata records the complete expanded profiles.
-Configurations without profiles retain the old homogeneous spatial layout;
-chemical-head outputs retain signed additive-delta semantics.
+Configurations without profiles retain the old homogeneous spatial layout.
 
 The three elastic lanes can be ablated without changing checkpoint dimensions
 through `ELASTIC_STRAIN_INPUTS_ENABLED`; it is currently enabled.
@@ -269,12 +270,13 @@ repeat neural_updates_per_macro communication rounds:
 
     outputs = neural_policy(inputs)
 
-    chemical_delta = clamp(chemical_output, -1, 1)
-    if cell-owned chemistry:
-      particle.chemical_state += chemical_delta * communication_dt / channel_delta_timescale
-      particle.chemical_state = clamp(particle.chemical_state, -1, 1)
-    update angular velocity and heading from the turning output,
-      scaled by communication_dt
+    chemical_target = clamp(chemical_output, -1, 1)
+    particle.chemical_state exponentially approaches chemical_target
+      using communication_dt and the channel relaxation time
+    if the local heading angle changed since the previous neural update:
+      rotate the persistent world heading target by that angular change
+    converge heading toward the world target with a first-order response,
+      capped by the maximum turn rate
 
     raw_growth_direction = tanh(direction_x, direction_y)
     local_growth_direction = normalize_or_zero(raw_growth_direction)
@@ -288,7 +290,7 @@ repeat neural_updates_per_macro communication rounds:
 
     if this is the final communication round:
       if persistent environment:
-        growth-deformed gaussian-splat the final signed chemical delta
+        growth-deformed gaussian-splat the final relaxed expression target
       growth_probability = clamp(remap(division_drive, division_chance_boost), 0, 1)
       decrement division cooldown
 
@@ -301,7 +303,7 @@ repeat neural_updates_per_macro communication rounds:
 
 if persistent environment:
   diffuse and decay the frozen substrate once
-  add the final neural round's deposits
+  move each supported texel toward the final density-weighted target
 
 propagate any newly divided particle count to the simulation
 
@@ -318,7 +320,7 @@ repeat MLS-MPM physics substeps:
 raw communication speed. `communication_speed` controls how much chemical,
 memory, orientation, and persistent-field time elapses before one mechanical
 tick. In persistent-environment mode every neural round sees the same frozen
-spatial field and only the final output is deposited; in cell-owned mode the
+spatial field and only the final relaxed target is applied; in cell-owned mode the
 projected chemistry can evolve between rounds. Raising the round count never
 multiplies the total integration time.
 
@@ -445,11 +447,11 @@ Division occurs when the parent's stress-free area reaches
 determinant(Fg) = 2
 ```
 
-Daughter placement always uses the direction behind the parent's current
-heading. The policy has no spawn-direction control. For split distance `d`:
+Daughter placement uses the persistent world-space direction selected by the
+NN growth head. For split distance `d`:
 
 ```text
-n = -agent_forward
+n = world_growth_direction
 bias = division_bias * division_directionality
 
 half_offset = n * d / 2
@@ -459,17 +461,18 @@ parent_position   = old_position - half_offset + center_shift
 daughter_position = old_position + half_offset + center_shift
 ```
 
-With zero bias, the split is symmetric along the forward/rear axis. With full
+With zero bias, the split is symmetric along the neural growth axis. With full
 bias, the parent remains at the old position and the daughter is placed one
-split distance behind it. Intermediate values smoothly interpolate between
-those cases. Positions wrap around the toroidal simulation domain. The neural
-growth direction controls only the stress-free growth tensor and optional
-strafe acceleration.
+split distance toward the neural growth direction. Intermediate values smoothly
+interpolate between those cases. Positions wrap around the toroidal simulation
+domain. The same neural direction controls the stress-free growth tensor,
+division placement, and optional strafe acceleration.
 
 The viewer's Growth panel exposes `division_directionality` from 0 to 1 as a
-playback-only polarization cap: 0 makes each rear-facing split center-preserving
-and symmetric, while 1 permits the policy's division bias to keep the parent in
-place and put the daughter the full split distance behind it.
+playback-only polarization cap: 0 makes each growth-directed split
+center-preserving and symmetric, while 1 permits the policy's division bias to
+keep the parent in place and put the daughter the full split distance toward
+the NN output.
 
 Division conserves mass and rest area:
 
@@ -487,7 +490,7 @@ daughter_F = parent_F * inverse(parent_Fg)
 
 This preserves the parent's elastic deformation `Fe`, so stress does not jump
 at division. The daughters also inherit the plastic state, APIC affine field,
-heading, angular velocity, and centered momentum. Both receive a division
+heading, persistent world heading target, previous local heading target, and centered momentum. Both receive a division
 cooldown and independent random-number state.
 
 Visually, the existing daughter remains full-sized while the newly created
@@ -515,7 +518,7 @@ The visible organism is an emergent result of:
   toward a full `[0,1]` probability range;
 - **chemical feedback:** where particles write signals and how neighbors react;
 - **directional rest growth:** the accumulated tensor `Fg` of each particle;
-- **rear-facing division polarity:** whether the parent stays fixed or the
+- **growth-directed division polarity:** whether the parent stays fixed or the
   daughter pair remains centered;
 - **elastic relaxation:** how neighboring material accommodates new rest area;
 - **plasticity:** which sufficiently large elastic deformations become
@@ -554,7 +557,7 @@ cap.
 ## Relevant implementation files
 
 - [`core/agents.wgsl`](core/agents.wgsl) — sensing, neural policy, chemical
-  writes, cell-cycle admission, rear-facing division, and daughter initialization.
+  writes, cell-cycle admission, growth-directed division, and daughter initialization.
 - [`core/g2p.wgsl`](core/g2p.wgsl) — deformation update, plastic clamp, and
   tensor-valued `Fg` growth law.
 - [`core/p2g.wgsl`](core/p2g.wgsl) — effective grown mass/volume and elastic

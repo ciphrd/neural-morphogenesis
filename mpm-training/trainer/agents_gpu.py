@@ -162,7 +162,7 @@ def weight_layout(
     # lateral gradient per channel, with no positional inputs.
     architecture = normalize_architecture(architecture)
     in_dim = policy_input_dim(channels, architecture)
-    # Chemical deltas + heading(2), anisotropy/division bias(2),
+    # Chemical expression targets + heading(2), anisotropy/division bias(2),
     # growth direction(2), division drive(1), then architecture-specific tail.
     out_dim = sum(head.size for head in policy_heads(channels, architecture))
     fc1w_offset = 0
@@ -718,8 +718,8 @@ class AgentsGPU:
 
     def reset_heading(self, seed: int, initial_positions: np.ndarray | None = None) -> None:
         """Randomizes persistent heading state (uniform over [-pi, pi],
-        one independent draw per particle slot) and zeroes
-        angularVelocity/cooldown, EVERY slot up to max_active_particles
+        one independent draw per particle slot), initializes the persistent
+        world target to that same angle, and zeroes cooldown, EVERY slot up to max_active_particles
         (not just the currently-active ones — growth can claim any of
         them later in this same rollout, and agentStep() overwrites
         whatever a claimed slot's own particleMeta already held anyway,
@@ -730,7 +730,7 @@ class AgentsGPU:
         same method (despite the name) rather than a separate one since
         every caller already calls this once per rollout, with a real
         seed, at exactly the right time; matches this method's own
-        existing "resetHeading also resets angularVelocity" precedent for
+        existing "resetHeading also resets heading control state" precedent for
         outgrowing its own name slightly. Call at the start of every
         rollout, same as agents.ts's own resetHeading() (simulation.ts's
         own restartRollout() calls it every time a rollout restarts, for
@@ -755,9 +755,8 @@ class AgentsGPU:
         agentStep()) — but leaving that as a standing "doesn't matter
         today" caveat was fragile, so it's bit-exact now too, same as
         everything else this rollout's starting condition depends on).
-        angularVelocity stays zeroed regardless — a random *turn rate*
-        would just be an initial spin, not a meaningfully different
-        starting condition the way a random facing direction is. cooldown
+        The legacy angularVelocity field is not a turn rate anymore; it stores
+        the world target and therefore starts equal to heading. cooldown
         is zeroed too — "not on cooldown," so a fresh rollout's own
         starting particle can split as soon as its own hazard threshold
         allow, same as before cooldown existed.
@@ -790,8 +789,10 @@ class AgentsGPU:
                 _spatial_uniform01_batch(seed, initial_positions[:n], _SPATIAL_HEADING_DOMAIN)
                 * (2.0 * np.pi) - np.pi
             ).astype(np.float32)
-        # cooldown/angularVelocity are already 0.0 from np.zeros — "not on
-        # cooldown," "no spin."
+        # The legacy angularVelocity lane now stores the persistent world-space
+        # heading target. Starting it at heading makes the initial controller
+        # error exactly zero. cooldown remains zero ("not on cooldown").
+        particle_meta["angularVelocity"] = particle_meta["heading"]
         self.device.queue.write_buffer(self._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, particle_meta.tobytes())
         self.set_rollout_seed(seed)
 
@@ -804,20 +805,25 @@ class AgentsGPU:
         own TrainingRollout, hardcoded 2-particle "back to back" start).
         Not folded into reset_heading() itself, which stays a general,
         per-slot-independent utility. Written as individual per-index
-        strided byte writes (heading is one f32 field inside
+        strided byte writes (heading and its target are f32 fields inside
         ParticleMeta's own aligned stride, not a standalone tightly-
         packed array anymore) rather than one bulk write, to touch ONLY
-        the heading field — leaving rng/cooldown/angularVelocity exactly
-        as reset_heading() just set them, not overwritten with zeros.
+        those two fields while leaving rng/cooldown unchanged.
         Only ever called with a couple of headings in practice, so the
         extra per-index write_buffer() calls cost nothing that matters."""
         heading_offset = self._particle_meta_dtype.fields["heading"][1]
+        target_offset = self._particle_meta_dtype.fields["angularVelocity"][1]
         stride = self._particle_meta_dtype.itemsize
         headings32 = headings.astype(np.float32)
         for i, h in enumerate(headings32):
             self.device.queue.write_buffer(
                 self._agent_state_buffer,
                 PARTICLE_META_BUFFER_OFFSET + i * stride + heading_offset,
+                np.array([h], dtype=np.float32),
+            )
+            self.device.queue.write_buffer(
+                self._agent_state_buffer,
+                PARTICLE_META_BUFFER_OFFSET + i * stride + target_offset,
                 np.array([h], dtype=np.float32),
             )
 

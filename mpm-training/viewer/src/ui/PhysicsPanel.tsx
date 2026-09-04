@@ -117,7 +117,7 @@ export function physicsSliderSpecsFor(
     },
     {
       key: "depositRate",
-      label: "Chemical delta rate",
+      label: "Chemical target response",
       ...scaledRange(trained.depositRate, 4),
       format: (v) => v.toFixed(3),
     },
@@ -155,27 +155,21 @@ export function physicsSliderSpecsFor(
     },
     {
       key: "maxEnvWrite",
-      label: "Chemical delta amplitude",
+      label: "Chemical target amplitude",
       ...scaledRange(trained.maxEnvWrite, 3),
       format: (v) => v.toFixed(3),
     },
     {
       key: "maxAngularAccel",
-      label: "Max angular accel",
+      label: "Heading response rate",
       min: 0,
       max: 10,
       step: 0.001,
       format: (v) => v.toFixed(3),
     },
     {
-      key: "angularDamping",
-      label: "Angular damping",
-      ...FRACTION_RANGE,
-      format: (v) => v.toFixed(3),
-    },
-    {
       key: "maxAngularVelocity",
-      label: "Max angular velocity",
+      label: "Max turn rate",
       min: 0,
       max: 2,
       step: 0.001,
@@ -247,15 +241,15 @@ export function physicsSliderSpecsFor(
 /** Collapsible "Physics" section (default closed) exposing every
  * live-adjustable simulation setting as a slider — gravity, damping, MPM
  * material (E/nu/hardening/elasticity), persistent substrate decay and deposit rate,
- * chemical delta amplitude,
+ * chemical target amplitude,
  * strafe's own maxAccel/maxStrafe/friction (strafe
  * drives MpmCore's own velocity directly — an acceleration, damped by
  * friction — see agents.wgsl's own module docstring for the full
- * history), the heading integrator's maxAngularAccel/angularDamping/
- * maxAngularVelocity, and depositSigma (the normalized-world cell-state Gaussian sigma — see
+ * history), the heading controller's response rate/turn-rate cap, and
+ * depositSigma (the normalized-world cell-state Gaussian sigma — see
  * agents.wgsl's own depositGaussian() for the exact kernel this drives,
  * replacing that shader's old flat 4-corner bilinear scatter),
- * growth's own splitDisplacement (rear-facing daughter separation) and
+ * growth's own splitDisplacement (growth-directed daughter separation) and
  * divisionCooldown (macro steps a particle refuses
  * to split again for, right after splitting, whether as parent or child
  * — see agents.wgsl's own module docstring for the full growth design;

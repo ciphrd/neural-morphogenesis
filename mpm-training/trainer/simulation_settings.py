@@ -123,7 +123,7 @@ DEPOSIT_DISTANCE = float(DEFAULT_RUN_SETTINGS["depositDistance"])
 # Normalized [0,1] world-domain sigma. Per-scale multipliers preserve this
 # physical unit when the shader projects onto differently sized native grids.
 DEPOSIT_SIGMA = float(DEFAULT_RUN_SETTINGS["depositSigma"])
-# Amplitude of the NN's signed chemical delta rate.
+# Amplitude of the NN's desired chemical-expression target.
 MAX_ENV_WRITE = float(DEFAULT_RUN_SETTINGS["maxEnvWrite"])
 
 # Behavior

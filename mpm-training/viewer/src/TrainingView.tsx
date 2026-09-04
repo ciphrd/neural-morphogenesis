@@ -31,6 +31,7 @@ import type {
 import { GridCanvas } from "./render/GridCanvas"
 import { createZip, downloadBlob } from "./render/zip"
 import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
+import { DevelopmentalFieldsPanel } from "./ui/DevelopmentalFieldsPanel"
 import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
@@ -176,6 +177,9 @@ export function TrainingView() {
   const [directionalLineVisible, setDirectionalLineVisible] = useState(
     VIEWER_DEFAULTS.rendering.directionalLineVisible
   )
+  const [splitDirectionLineVisible, setSplitDirectionLineVisible] = useState(
+    VIEWER_DEFAULTS.rendering.splitDirectionLineVisible
+  )
   const [boundaryGradientScale, setBoundaryGradientScale] = useState(
     VIEWER_DEFAULTS.rendering.boundaryGradientScale
   )
@@ -220,6 +224,9 @@ export function TrainingView() {
   )
   const [chemicalMemoryOpponentSubtraction, setChemicalMemoryOpponentSubtraction] =
     useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
+  const [developmentalSettings, setDevelopmentalSettings] = useState(() => ({
+    ...VIEWER_DEFAULTS.developmental,
+  }))
   // "Add"/"Move"/"Deform" interaction tools (render/GridCanvas.tsx's own
   // Tool type) — toggled on/off by clicking their own icon button again
   // (see the Tools section below), not reset by a run/generation change
@@ -818,6 +825,12 @@ export function TrainingView() {
           </details>
         </section>
 
+        <DevelopmentalFieldsPanel
+          value={developmentalSettings}
+          onChange={setDevelopmentalSettings}
+          onReseed={() => gridCanvasRef.current?.reseedDevelopmentalFields()}
+        />
+
         <section>
           <h2>Rendering</h2>
           <div className="slider-row">
@@ -966,7 +979,15 @@ export function TrainingView() {
               checked={directionalLineVisible}
               onChange={(e) => setDirectionalLineVisible(e.target.checked)}
             />
-            Directional line
+            Heading direction
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={splitDirectionLineVisible}
+              onChange={(e) => setSplitDirectionLineVisible(e.target.checked)}
+            />
+            Split direction
           </label>
           {particleColorMode === "mitosis-drive" && (
             <label className="slider-row">
@@ -1058,6 +1079,10 @@ export function TrainingView() {
               <option value="morphology">Policy morphology</option>
               <option value="substrate">Substrate</option>
               <option value="gradient">Boundary gradient</option>
+              <option value="developmental-ap">Developmental AP coordinate</option>
+              <option value="developmental-anterior">Developmental anterior</option>
+              <option value="developmental-posterior">Developmental posterior</option>
+              <option value="developmental-inhibitor">Developmental inhibitor</option>
             </select>
           </label>
           {fieldMode === "morphology" && (
@@ -1191,6 +1216,7 @@ export function TrainingView() {
             targetPoints={targetPoints}
             targetVisible={targetVisible}
             physics={physicsValues}
+            developmentalSettings={developmentalSettings}
             particleCap={frontendParticleCap}
             initialParticleCount={frontendInitialParticleCount}
             fieldMode={fieldMode}
@@ -1206,6 +1232,7 @@ export function TrainingView() {
             particleColorMode={particleColorMode}
             particleAlpha={particleAlpha}
             directionalLineVisible={directionalLineVisible}
+            splitDirectionLineVisible={splitDirectionLineVisible}
             zoom={zoom}
             autoZoom={autoZoomSettings}
             onEffectiveZoomChange={setEffectiveZoom}

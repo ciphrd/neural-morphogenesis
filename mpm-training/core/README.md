@@ -26,7 +26,7 @@ own module docstring.
 - `agents.wgsl` — the evolved policy's forward pass
   (specialized as stateless `Dense(128)` or eight-state `Dense(64)`, followed
   by concatenated logical heads), local/heading-frame sensing +
-  action, the persistent per-particle heading/angularVelocity integrator.
+  action, and the persistent per-particle world-heading target controller.
   Not part of the physics passes above — a training-loop concern, not
   MLS-MPM itself — but shares this directory so both consumers load the
   exact same shader.

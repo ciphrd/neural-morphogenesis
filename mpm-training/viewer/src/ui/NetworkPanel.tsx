@@ -436,7 +436,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       <div className="nn-block">
         <h3>Input</h3>
         <p className="hint">
-          Background: this channel's signed chemical delta, swept across the pad (its own value + every other
+          Background: this channel's desired chemical level, swept across the pad (its own value + every other
           channel held as set). Contrast is exaggerated independently per pad
           by stretching its observed min/max across Viridis. This shows
           response shape, not absolute output strength.
@@ -532,7 +532,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       {output && (
         <>
           <div className="nn-block">
-            <h3>Output — chemical delta</h3>
+            <h3>Output — desired chemical level</h3>
             <div className="nn-group">
               <span className="nn-group-label">Under particle</span>
               {Array.from({ length: channels }, (_, c) => (
@@ -550,9 +550,9 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
             <h3>Output — growth direction</h3>
             <div className="nn-group">
               <ActivationBar
-                label="derived turn"
-                value={output.angularAccel}
-                domain={maxAngularAccel}
+                label="local heading angle"
+                value={output.headingTargetAngle}
+                domain={Math.PI}
               />
               <ActivationBar label="heading forward" value={output.headingDirection[0]} domain={1} />
               <ActivationBar label="heading lateral" value={output.headingDirection[1]} domain={1} />

@@ -77,7 +77,7 @@ struct ParticleRest {
   divisionBias: f32,
   growthFrameHeading: f32,
   appearanceScale: f32,
-  _padding: f32,
+  previousHeadingTargetLocal: f32,
 }
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read_write> gridAccum: array<atomic<i32>>;

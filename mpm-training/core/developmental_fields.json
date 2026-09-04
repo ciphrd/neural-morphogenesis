@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "resolutionScale": 0.25,
+  "maximumResolution": 128,
+  "baseTimeStep": 0.05,
+  "minimumIntegrationSubsteps": 4,
+  "defaults": {
+    "enabled": true,
+    "timeScale": 1.0,
+    "seedOffset": 0.025,
+    "seedSigma": 0.009,
+    "activatorDiffusion": 0.0008,
+    "inhibitorDiffusion": 0.002,
+    "sourceProduction": 1.5,
+    "activatorDecay": 0.04,
+    "inhibitorProduction": 1.0,
+    "inhibitorDecay": 0.1,
+    "inhibitorSuppression": 1.0,
+    "occupancyHalfSaturation": 0.2,
+    "occupancyHillExponent": 4.0
+  }
+}

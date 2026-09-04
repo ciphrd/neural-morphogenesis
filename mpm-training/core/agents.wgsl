@@ -25,11 +25,11 @@
 //   senses/acts in, its action changes velocity, velocity *is* heading
 //   next step, nothing smooths it) and was a real, confirmed source of
 //   chaotic spin. Heading here is instead this shader's own persistent
-//   per-particle state (the `heading`/`angularVelocity` buffers below),
-//   driven toward the policy's desired heading by a proportional angular
-//   controller and second-order angularVelocity integrator with damping —
-//   accel -> velocity -> position already works, see agentStep()'s own
-//   comments below for the exact integration.
+//   per-particle state. The legacy `angularVelocity` storage lane now holds a
+//   persistent WORLD-space heading target. Changes in the policy's LOCAL
+//   target angle rotate that world target; a rate-limited first-order
+//   controller then converges heading to it. A constant local vector therefore
+//   requests one turn and stops instead of creating perpetual angular motion.
 // - No repulsion sampling. repulsion.wgsl already gives every particle a
 //   real repulsion force as part of MpmCore's own physics — there's no
 //   separate host-agent repulsion field to sense here the way envnca's
@@ -44,11 +44,12 @@
 //   work) in exchange for ruling out an arbitrary, physically
 //   unmotivated left/right turning bias by construction.
 //
-// Communication — the chemical head emits one signed delta rate per channel.
-// Cell-owned mode integrates it into persistent per-cell chemicalState and
-// projects the old synchronous state before each brain round. Persistent-
-// environment mode deposits only the final round's delta into its transported
-// spatial field. Per-channel temporal scales divide both delta rates.
+// Communication — the chemical head emits one bounded expression TARGET per
+// channel. Persistent per-cell chemicalState approaches it exponentially using
+// the channel relaxation time. Cell-owned mode projects the old synchronous
+// state before each brain round. Persistent-environment mode deposits the final
+// round's relaxed expression as a desired substrate concentration; the field
+// controller then adds or subtracts locally to approach it without saturation.
 //
 // Growth — each particle may spawn a copy of itself after completing its
 // tensor-growth cycle. Division always places the new daughter directly behind
@@ -125,8 +126,8 @@
 //
 // The policy proposes a local growth direction and anisotropy target;
 // agentStep() relaxes persistent angle/anisotropy states toward them. These
-// affect Fg (and optional strafe) only. A separate sigmoid controls how far the
-// rear-facing daughter pair's center shifts, but not its axis. physics.maxStrafe
+// affect Fg, split placement, and optional strafe. A separate sigmoid controls
+// how far the pair's center shifts along that NN-selected axis. physics.maxStrafe
 // remains an optional scale for applying the growth direction as physical
 // acceleration; it is zero by default and does not scale growth geometry.
 
@@ -154,8 +155,8 @@ const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__
 const GROWTH_DIRECTION_RESPONSE_RATE: f32 = __GROWTH_DIRECTION_RESPONSE_RATE__;
 const GROWTH_ANISOTROPY_RESPONSE_RATE: f32 = __GROWTH_ANISOTROPY_RESPONSE_RATE__;
 const DIRECTION_CONFIDENCE_SCALE: f32 = __DIRECTION_CONFIDENCE_SCALE__;
-// One signed chemical delta rate per channel. The legacy name is retained in
-// the checkpoint/output ABI.
+// One desired chemical-expression target per channel. The legacy name is
+// retained in the checkpoint/output ABI.
 const ENV_WRITE_DIM: u32 = CHANNELS;
 const OUT_DIM: u32 = __OUT_DIM__u;
 
@@ -200,9 +201,12 @@ const SPATIAL_RANDOM_CELLS: u32 = __SPATIAL_RANDOM_CELLS__u;
 struct AgentPhysics {
   maxAccel: f32,
   maxStrafe: f32,
-  // Amplitude of the policy's signed chemical delta rate.
+  // Amplitude of the policy's desired chemical-expression target.
   maxEnvWrite: f32,
+  // First-order heading response rate (1 / communication-time).
   maxAngularAccel: f32,
+  // Legacy uniform slot retained for serialized-settings / ABI compatibility.
+  // The first-order controller has no angular momentum to damp.
   angularDamping: f32,
   maxAngularVelocity: f32,
   // Legacy ABI slot. Centered deposits no longer use a directional offset.
@@ -313,6 +317,8 @@ struct ParticleMeta {
   rng: u32,
   cooldown: f32,
   heading: f32,
+  // Legacy field name retained to preserve the packed host ABI. This is the
+  // persistent WORLD-space heading target, not angular velocity.
   angularVelocity: f32,
   // Current neural cell color. vec4 keeps the packed record naturally
   // aligned while the alpha lane remains fixed at 1.
@@ -330,9 +336,9 @@ struct ParticleMeta {
   // Eight private neural-memory channels. Stateless policies leave these at
   // zero. Stateful policies sense them and apply gated residual updates.
   privateState: array<f32, PRIVATE_STATE_DIM>,
-  // Persistent chemical levels owned by this cell. Before every policy
+  // Persistent chemical expression owned by this cell. Before every policy
   // invocation splatChemicalState() projects these values into the transient
-  // substrate; agentStep() then integrates the chemical head's signed delta.
+  // substrate; agentStep() relaxes them toward the chemical head's target.
   chemicalState: array<f32, CHANNELS>,
 }
 // Pack growth's counter and particle metadata into one allocation. The
@@ -412,8 +418,9 @@ struct ParticleRest {
   // this with the same curve and compression response as rest area. It fills
   // the struct's former alignment lane, so the 48-byte ABI is unchanged.
   appearanceScale: f32,
-  // Explicit tail padding preserves the 48-byte storage ABI.
-  _padding: f32,
+  // Previous nonzero policy heading angle in the particle's LOCAL frame.
+  // Reuses the former tail-padding lane, so the 48-byte storage ABI is unchanged.
+  previousHeadingTargetLocal: f32,
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(12) var morphologyTexture: texture_2d<f32>;
@@ -811,7 +818,7 @@ fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // The bounded subset of the network's own raw output
-// this shader actually consumes — one signed chemical delta per channel +
+// this shader actually consumes — one chemical-expression target per channel +
 // desired heading, anisotropy/division-bias controls, and desired growth
 // direction (optionally also physical acceleration), all in LOCAL frame.
 struct PolicyOutput {
@@ -832,13 +839,6 @@ fn safeSigmoid(x: f32) -> f32 {
 
 fn wrapAngle(angle: f32) -> f32 {
   return atan2(sin(angle), cos(angle));
-}
-
-// Continuous confidence: a zero vector has no directional authority, while
-// increasingly decisive vectors approach one without a hard cutoff.
-fn directionConfidence(v: vec2<f32>) -> f32 {
-  let magnitude = length(v);
-  return magnitude / (magnitude + max(DIRECTION_CONFIDENCE_SCALE, 1e-6));
 }
 
 fn directionAngle(v: vec2<f32>) -> f32 {
@@ -968,7 +968,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the genuinely symmetric part of its response survives — see
   // simulation_settings.py's own CHIRALITY for the full reasoning.
   // Both desired-direction vectors have their lateral component un-mirrored.
-  // A scalar chemical delta has no handedness, so it is averaged
+  // A scalar chemical-expression target has no handedness, so it is averaged
   // channel-for-channel.
   if (CHIRALITY) {
     var mirroredInput = inputVec;
@@ -1004,24 +1004,29 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let communicationDt = max(stepMode.communicationDt, 0.0);
 
-  if (CELL_OWNED_CHEMISTRY) {
-    // The head is a rate, so subdividing one communication interval into more
-    // rounds preserves its elapsed-time scale. Slow channels still accumulate;
-    // they simply integrate a smaller delta per unit communication time.
-    for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-      let chemicalDelta = result.envWrite[c] * communicationDt
-        / max(FIELD_RELAXATION_TIMES[c], 1e-6);
-      agentState.particleMeta[pi].chemicalState[c] = clamp(
-        agentState.particleMeta[pi].chemicalState[c] + chemicalDelta,
-        -1.0,
-        1.0,
-      );
-    }
-  } else if (stepMode.commitLifecycle != 0u) {
-    // Persistent mode deliberates against a frozen field and deposits only the
-    // final neural round. Environment depositRate owns macro-time scaling.
+  // Exact exponential relaxation cannot overshoot and is invariant when one
+  // communication interval is subdivided into more neural rounds. The newly
+  // expressive random initializer now supplies broad targets; this controller
+  // no longer relies on repeatedly accumulating tiny near-zero deltas.
+  var expressedChemistry: array<f32, ENV_WRITE_DIM>;
+  for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
+    let expressionTarget = clamp(result.envWrite[c], -1.0, 1.0);
+    let expressionBlend = 1.0 - exp(
+      -communicationDt / max(FIELD_RELAXATION_TIMES[c], 1e-6)
+    );
+    let relaxed = mix(
+      agentState.particleMeta[pi].chemicalState[c], expressionTarget, expressionBlend
+    );
+    agentState.particleMeta[pi].chemicalState[c] = clamp(relaxed, -1.0, 1.0);
+    expressedChemistry[c] = agentState.particleMeta[pi].chemicalState[c];
+  }
+
+  if (!CELL_OWNED_CHEMISTRY && stepMode.commitLifecycle != 0u) {
+    // Persistent mode deposits the final neural round's relaxed expression as
+    // a TARGET. environment.wgsl uses the paired density plane to recover the
+    // local weighted mean and moves the transported field toward it.
     depositGaussian(
-      result.envWrite,
+      expressedChemistry,
       pos,
       particleRest[pi].growthF,
     );
@@ -1042,26 +1047,34 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
   }
 
-  // The NN proposes a LOCAL desired heading vector. Its shortest signed angle
-  // from local-forward becomes a proportional angular acceleration; the
-  // existing angularVelocity state below supplies inertia and damping.
-  let headingConfidence = directionConfidence(result.headingTargetLocal);
-  let desiredHeadingError = directionAngle(result.headingTargetLocal);
-  let angularAccel = clamp(
-    desiredHeadingError / PI * physics.maxAngularAccel * headingConfidence,
-    -physics.maxAngularAccel,
-    physics.maxAngularAccel,
-  );
+  // Treat the NN's LOCAL heading angle as a changeable control target, not an
+  // error to reapply forever. Only changes since the previous neural update
+  // rotate the persistent WORLD target. Thus a constant local (0, 1) requests
+  // one +90-degree turn; once heading reaches that target it stops. Magnitude
+  // only distinguishes a real target from the zero-vector sentinel.
+  let hasHeadingTarget = dot(result.headingTargetLocal, result.headingTargetLocal) > 1e-20;
+  if (hasHeadingTarget) {
+    let desiredHeadingTargetLocal = directionAngle(result.headingTargetLocal);
+    let targetDelta = wrapAngle(
+      desiredHeadingTargetLocal - particleRest[pi].previousHeadingTargetLocal
+    );
+    agentState.particleMeta[pi].angularVelocity = wrapAngle(
+      agentState.particleMeta[pi].angularVelocity + targetDelta
+    );
+    particleRest[pi].previousHeadingTargetLocal = desiredHeadingTargetLocal;
+  }
 
   // Growth polarity is a separate persistent angle RELATIVE to heading. The
   // policy supplies a desired local vector; the stored angle follows it by
-  // the shortest arc with an exponential, timestep-invariant response.
-  let growthConfidence = directionConfidence(result.growthTargetLocal);
+  // the shortest arc with an exponential, timestep-invariant response. Vector
+  // magnitude does not modulate that response: it only distinguishes a real
+  // target from the zero-vector sentinel, which preserves the stored angle.
+  let hasGrowthTarget = dot(result.growthTargetLocal, result.growthTargetLocal) > 1e-20;
   let desiredGrowthAngle = directionAngle(result.growthTargetLocal);
-  // Confidence belongs inside the continuous-time rate so communication
-  // supersampling does not change convergence over the same elapsed time.
-  let growthAngleBlend = 1.0 - exp(
-    -max(GROWTH_DIRECTION_RESPONSE_RATE, 0.0) * growthConfidence * communicationDt
+  let growthAngleBlend = select(
+    0.0,
+    1.0 - exp(-max(GROWTH_DIRECTION_RESPONSE_RATE, 0.0) * communicationDt),
+    hasGrowthTarget,
   );
   let growthAngleError = wrapAngle(desiredGrowthAngle - particleRest[pi].growthAngle);
   particleRest[pi].growthAngle = wrapAngle(
@@ -1090,8 +1103,8 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   let lifecycleMorphologyGradientMagnitude = length(lifecycleMorphologyGradient);
   if (forcedBoundaryTangent
       && lifecycleMorphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
-    // During a tangent-controlled Lab cycle, align morphoelastic growth with
-    // the local boundary tangent. Division placement remains rear-facing.
+    // During a tangent-controlled Lab cycle, align morphoelastic growth and
+    // division placement with the local boundary tangent.
     growthDirectionWorld = vec2<f32>(
       -lifecycleMorphologyGradient.y,
       lifecycleMorphologyGradient.x,
@@ -1102,7 +1115,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   } else if (forcedLifecycle && !forcedBoundaryTangent) {
     // Lock the persistent world-frame growth axis. g2p therefore grows Fg
     // along this direction and transfers its stress through the ordinary MPM
-    // grid before rear-facing division.
+    // grid before division along that same axis.
     growthDirectionWorld = normalize(physics.forcedDivisionDirection);
     growthWorldAngle = atan2(growthDirectionWorld.y, growthDirectionWorld.x);
     particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - headingVal);
@@ -1224,27 +1237,28 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     let newIndex = atomicAdd(&agentState.growthCount, 1u);
     if (newIndex < physics.maxActiveParticles) {
       let nextGeneration = agentState.particleMeta[pi].rng + 1u;
-      // Daughter placement has one permanent axis: directly behind the
-      // parent's current facing direction. Neural and morphology directions
-      // remain relevant to growthF, never to spawning.
-      let spawnDir = -forward;
+      // Spawn along the same persistent world-space direction selected by the
+      // NN growth head (or by an explicit Lab lifecycle override). At full
+      // polarization the daughter moves toward +spawnDir and the parent stays
+      // at its original position; at zero the pair straddles the old center.
+      let spawnDir = growthDirectionWorld;
       let polarization = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
         * clamp(stepMode.divisionDirectionality, 0.0, 1.0);
       var centerShift = spawnDir * (0.5 * physics.splitDisplacement) * polarization;
       // Scheduled Lab lifecycles keep the real conservative division path but
-      // center the rear-facing pair on the original particle. Production
-      // divisions retain their divisionBias-controlled rearward center shift.
+      // center the growth-aligned pair on the original particle. Production
+      // divisions retain their divisionBias-controlled directional shift.
       if (forcedLifecycle) {
         centerShift = vec2<f32>(0.0);
       }
       let halfOffset = spawnDir * (0.5 * physics.splitDisplacement);
       positions[pi] = fract(pos - halfOffset + centerShift);
       positions[newIndex] = fract(pos + halfOffset + centerShift);
-      // "A copy of itself": heading/angularVelocity copied from this
-      // particle's own CURRENT state (its pre-integration values — the
-      // integrator below hasn't run yet at this point in the function).
+      // "A copy of itself": heading/world target copied from this
+      // particle's own CURRENT state (its pre-controller heading — the
+      // convergence step below hasn't run yet at this point in the function).
       // Heading itself stays copied; the daughter starts facing the same way
-      // as its parent after being placed behind it.
+      // as its parent after being placed along the growth axis.
       agentState.particleMeta[newIndex].heading = headingVal;
       agentState.particleMeta[newIndex].angularVelocity = agentState.particleMeta[pi].angularVelocity;
       agentState.particleMeta[newIndex].color = agentState.particleMeta[pi].color;
@@ -1288,11 +1302,11 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
       let parentGrowthAnisotropy = particleRest[pi].growthAnisotropy;
       let parentDivisionBias = particleRest[pi].divisionBias;
       let parentGrowthFrameHeading = particleRest[pi].growthFrameHeading;
-      let parentPadding = particleRest[pi]._padding;
+      let parentHeadingTargetLocal = particleRest[pi].previousHeadingTargetLocal;
       let identity = vec4<f32>(1.0, 0.0, 0.0, 1.0);
       particleRest[pi] = ParticleRest(
         identity, parentJp, 0.0, parentGrowthAngle, parentGrowthAnisotropy,
-        parentDivisionBias, parentGrowthFrameHeading, 1.0, parentPadding
+        parentDivisionBias, parentGrowthFrameHeading, 1.0, parentHeadingTargetLocal
       );
       particleRest[newIndex] = ParticleRest(
         identity,
@@ -1303,7 +1317,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
         parentDivisionBias,
         parentGrowthFrameHeading,
         0.0,
-        parentPadding,
+        parentHeadingTargetLocal,
       );
     } else {
       particleRest[pi].cycleActive = 0.0;
@@ -1312,22 +1326,17 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   }
 
-  // Second-order heading integrator — angularAccel nudges angularVelocity,
-  // angularVelocity (after its own damping, applied here since nothing
-  // else bleeds it off between agentStep() invocations) nudges heading.
-  // Hard-clamped to maxAngularVelocity afterward — damping alone still
-  // lets angularVelocity settle at a nonzero steady state, which was
-  // still visibly too fast a spin (see simulation_settings.py's own
-  // comment on the exact bound); this clamp is the real turn-rate
-  // ceiling. Matches training_sim.py's own macro_step() exactly.
-  let roundDamping = pow(clamp(physics.angularDamping, 0.000001, 1.0), communicationDt);
-  let newAngularVelocity = clamp(
-    (agentState.particleMeta[pi].angularVelocity + angularAccel * communicationDt) * roundDamping,
-    -physics.maxAngularVelocity,
-    physics.maxAngularVelocity,
-  );
-  agentState.particleMeta[pi].angularVelocity = newAngularVelocity;
-  let newHeading = headingVal + newAngularVelocity * communicationDt;
+  // First-order target tracking has no angular momentum and therefore cannot
+  // coast or settle into a nonzero spin. maxAngularAccel is retained as the
+  // exponential response rate, while maxAngularVelocity remains a hard bound
+  // on heading change per unit communication time. angularDamping is now a
+  // legacy ABI/settings slot and deliberately has no effect.
+  let headingError = wrapAngle(agentState.particleMeta[pi].angularVelocity - headingVal);
+  let headingBlend = 1.0 - exp(-max(physics.maxAngularAccel, 0.0) * communicationDt);
+  let requestedHeadingDelta = headingError * headingBlend;
+  let maxHeadingDelta = max(physics.maxAngularVelocity, 0.0) * communicationDt;
+  let headingDelta = clamp(requestedHeadingDelta, -maxHeadingDelta, maxHeadingDelta);
+  let newHeading = wrapAngle(headingVal + headingDelta);
   agentState.particleMeta[pi].heading = newHeading;
   particleRest[pi].growthFrameHeading = newHeading;
   if (forcedLifecycle

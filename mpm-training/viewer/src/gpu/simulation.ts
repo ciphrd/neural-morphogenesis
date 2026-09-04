@@ -17,7 +17,7 @@
 //
 // Per macro step, in order:
 //   1. Clear the round's deposit scratch. Cell-owned mode then publishes each
-//      cell's chemistry; persistent mode leaves it ready for signed delta deposits.
+//      cell's chemistry; persistent mode leaves it ready for expression targets.
 //   2. environment.encodeSense() — materialize cell splats when applicable and
 //      compute the shared gradient over the architecture's current field.
 //   3. agents.encodeStep() — NN forward pass: reads that field and either
@@ -47,11 +47,12 @@
 import { Agents } from "./agents";
 import type { BloomSettings } from "./bloom";
 import { Deform, type DeformDirection, type DeformMode } from "./deform";
+import { DevelopmentalFields, DEFAULT_DEVELOPMENTAL_SETTINGS, type DevelopmentalSettings } from "./developmentalFields";
 import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
 import { Renderer, type FieldMode, type ParticleColorMode, type ParticleShape } from "./render";
-import { seedBlob, seedRows } from "./rng";
+import { seedBlob, seedRows, spatialUniform01 } from "./rng";
 import { chemicalCommunicationArchitectureFromConfig, physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig, type UpdateRuleWeights } from "./types";
 import coreConstants from "../../../core/constants.json";
 
@@ -75,6 +76,7 @@ export class GpuSimulation {
 
   private mpmCore: MpmCore | null = null;
   private environment: Environment | null = null;
+  private developmentalFields: DevelopmentalFields | null = null;
   private agents: Agents | null = null;
   private renderer: Renderer | null = null;
   // "Move Particles" tool's own pick/drag state (gpu/interact.ts) — a
@@ -94,6 +96,7 @@ export class GpuSimulation {
   // gets a brand-new Renderer instance; the user's own render-option
   // choices shouldn't reset just because that happened).
   private pendingFieldMode: FieldMode = "none";
+  private pendingDevelopmentalSettings: DevelopmentalSettings = { ...DEFAULT_DEVELOPMENTAL_SETTINGS };
   private pendingSubstrateChannelStart = 0;
   private pendingSubstrateZeroIsBlack = false;
   private pendingBoundaryGradientZeroIsBlack = false;
@@ -101,6 +104,7 @@ export class GpuSimulation {
   private pendingParticleColorMode: ParticleColorMode = "white";
   private pendingParticleAlpha = 1.0;
   private pendingDirectionalLineVisible = false;
+  private pendingSplitDirectionLineVisible = false;
   private pendingMitosisSignalBoost = 1.0;
   private pendingInternalStateChannelStart = 0;
   private pendingChemicalMemoryOpponentSubtraction = 0;
@@ -274,6 +278,8 @@ export class GpuSimulation {
       chemicalCommunicationArchitecture: chemicalCommunicationArchitectureFromConfig(config),
       channelProfiles: config.chemicalChannelProfiles,
     }, mpmCore.gridVel);
+    const developmentalFields = new DevelopmentalFields(this.device, mpmCore, config.fieldN);
+    developmentalFields.setSettings(this.pendingDevelopmentalSettings);
 
     const agents = new Agents(this.device, mpmCore, environment, {
       channels: config.channels,
@@ -317,7 +323,7 @@ export class GpuSimulation {
     mpmCore.setChemicalStateBuffer(agents.particleMetaState);
     agents.loadWeights(config.weights);
 
-    const renderer = new Renderer(this.device, this.format, mpmCore, environment, agents.particleMetaState);
+    const renderer = new Renderer(this.device, this.format, mpmCore, environment, developmentalFields, agents.particleMetaState);
     if (this.pendingCanvasSizePx) renderer.setCanvasSizePx(...this.pendingCanvasSizePx);
     if (this.pendingTargetPoints) renderer.setTargetPoints(this.pendingTargetPoints);
     renderer.setTargetVisible(this.pendingTargetVisible);
@@ -329,6 +335,7 @@ export class GpuSimulation {
     renderer.setParticleColorMode(this.pendingParticleColorMode);
     renderer.setParticleAlpha(this.pendingParticleAlpha);
     renderer.setDirectionalLineVisible(this.pendingDirectionalLineVisible);
+    renderer.setSplitDirectionLineVisible(this.pendingSplitDirectionLineVisible);
     renderer.setMitosisSignalBoost(this.pendingMitosisSignalBoost);
     renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart);
     renderer.setChemicalMemoryOpponentSubtraction(this.pendingChemicalMemoryOpponentSubtraction);
@@ -346,6 +353,7 @@ export class GpuSimulation {
 
     this.mpmCore = mpmCore;
     this.environment = environment;
+    this.developmentalFields = developmentalFields;
     this.agents = agents;
     this.renderer = renderer;
     this.interact = interact;
@@ -360,7 +368,7 @@ export class GpuSimulation {
    * Playback controls and the RAF loop's own loop-at-trained-steps
    * behavior both call. */
   restartRollout(): void {
-    if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
+    if (!this.mpmCore || !this.environment || !this.developmentalFields || !this.agents || !this.config) return;
     this.epoch++;
     const initialCount = Math.min(
       this.particleCap,
@@ -408,6 +416,10 @@ export class GpuSimulation {
     // for why they're safe to derive from the identical raw seed
     // without correlating) — see Agents.resetHeading()'s own docstring.
     this.agents.resetHeading(this.config.seed, scene.positions);
+    const founderX = scene.positions[0] ?? this.config.spawnX;
+    const founderY = scene.positions[1] ?? this.config.spawnY;
+    const founderHeading = (spatialUniform01(this.config.seed, founderX, founderY) * 2 - 1) * Math.PI;
+    this.developmentalFields.reset([founderX, founderY], founderHeading);
     this._currentStep = 0;
   }
 
@@ -522,10 +534,26 @@ export class GpuSimulation {
     this.environment.setAdvectionTimestep(
       this.mpmEnabled ? this.config.substepsPerMacro * coreConstants.DT : 0,
     );
+    this.developmentalFields?.setAdvectionTimestep(
+      this.mpmEnabled ? this.config.substepsPerMacro * coreConstants.DT : 0,
+    );
   }
 
   setPhysics(physics: PhysicsSettings): void {
     this.applyPhysics(physics);
+  }
+
+  setDevelopmentalSettings(settings: DevelopmentalSettings): void {
+    const shouldReseed = settings.enabled !== this.pendingDevelopmentalSettings.enabled
+      || settings.seedOffset !== this.pendingDevelopmentalSettings.seedOffset
+      || settings.seedSigma !== this.pendingDevelopmentalSettings.seedSigma;
+    this.pendingDevelopmentalSettings = { ...settings };
+    this.developmentalFields?.setSettings(this.pendingDevelopmentalSettings);
+    if (shouldReseed) this.developmentalFields?.reseed();
+  }
+
+  reseedDevelopmentalFields(): void {
+    this.developmentalFields?.reseed();
   }
 
   /** Playback-only live growth cap. Lowering it below the current count
@@ -585,7 +613,7 @@ export class GpuSimulation {
    * the time readGrownCount() resolves — see that field's own comment
    * for the exact restart-vs-in-flight-step race this prevents. */
   async step(): Promise<void> {
-    if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
+    if (!this.mpmCore || !this.environment || !this.developmentalFields || !this.agents || !this.config) return;
     const stepEpoch = this.epoch;
     const nextStep = this._currentStep + 1;
     const forcedLifecycle = this.scenario?.events.find((event) => {
@@ -606,6 +634,7 @@ export class GpuSimulation {
     );
     const encoder = this.device.createCommandEncoder();
     this.mpmCore.encodeMorphology(encoder);
+    this.developmentalFields.encodeStep(encoder);
     // Carry the persistent substrate through the preceding MPM motion before
     // this tick's first policy read. Divergent growth flow therefore expands
     // the substrate together with the material rather than leaving it behind.
@@ -628,8 +657,8 @@ export class GpuSimulation {
         finalRound
       );
     }
-    // Persistent mode consumes only the last NN output, merging it after the
-    // transported field has been sensed for this tick.
+    // Persistent mode consumes only the last relaxed NN target, pulling the
+    // transported field toward it after this tick's sensing.
     this.environment.encodeMergePersistent(encoder);
     this.agents.encodeReadGrownCount(encoder);
     this.device.queue.submit([encoder.finish()]);
@@ -724,6 +753,11 @@ export class GpuSimulation {
   setDirectionalLineVisible(visible: boolean): void {
     this.pendingDirectionalLineVisible = visible;
     this.renderer?.setDirectionalLineVisible(visible);
+  }
+
+  setSplitDirectionLineVisible(visible: boolean): void {
+    this.pendingSplitDirectionLineVisible = visible;
+    this.renderer?.setSplitDirectionLineVisible(visible);
   }
 
   setMitosisSignalBoost(boost: number): void {
@@ -859,12 +893,14 @@ export class GpuSimulation {
   private destroySimObjects(): void {
     this.mpmCore?.destroy();
     this.environment?.destroy();
+    this.developmentalFields?.destroy();
     this.agents?.destroy();
     this.renderer?.destroy();
     this.interact?.destroy();
     this.deform?.destroy();
     this.mpmCore = null;
     this.environment = null;
+    this.developmentalFields = null;
     this.agents = null;
     this.renderer = null;
     this.interact = null;

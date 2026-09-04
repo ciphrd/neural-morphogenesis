@@ -33,7 +33,7 @@ pipelines now).
   is frame-agnostic; the gradient rotation and robust input normalization are
   entirely the caller's job.
 - Output: env_write (C) — retained ABI name for one bounded signed chemical
-  delta rate per channel — plus desired heading (2), anisotropy/polarity logits (2),
+  expression target per channel — plus desired heading (2), anisotropy/polarity logits (2),
   desired growth direction (2), and a signed division drive (1). Stateless-128 ends with RGB logits (3);
   stateful-64 instead ends with private-state residuals (8) and gates (8),
   all raw/local-frame. C=9 gives 33 inputs and 19 stateless outputs, or 41
@@ -79,10 +79,10 @@ class UpdateRule(nn.Module):
     def reset_parameters(self) -> None:
         """Head-aware initialization shared conceptually with the browser.
 
-        Xavier gains keep vector/control heads conservative, while bias priors
-        start both directions forward, anisotropy near 0.2, and all remaining
-        scalar outputs neutral. Small per-head bias jitter preserves diversity
-        between freshly randomized policies.
+        Bias priors keep the population centered on forward directions,
+        anisotropy near 0.2, and neutral scalar controls. Random trunk bias and
+        head-aware Xavier gains provide phenotype diversity around those
+        defaults without forcing safety-sensitive outputs to saturation.
         """
         trunk_gain, trunk_bias_jitter = trunk_initialization()
         nn.init.xavier_uniform_(self.input_layer.weight, gain=trunk_gain)
@@ -113,7 +113,7 @@ class UpdateRule(nn.Module):
         simply concatenates the three channel blocks. Returns
         (env_write, heading_target, growth_controls, direction, tail), all raw/un-squashed;
         tail is RGB for stateless-128 or concatenated state residual/gate for stateful-64
-        and still in LOCAL frame — squashing (tanh for vectors and chemical deltas;
+        and still in LOCAL frame — squashing (tanh for vectors and chemical targets;
         sigmoid for scalar controls), conversion of the heading target to
         angular acceleration, and rotating growth direction to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,

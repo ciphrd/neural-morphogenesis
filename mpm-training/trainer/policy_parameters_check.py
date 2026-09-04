@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+import torch
 
 from evolve import get_weights, mutate, set_weights
 from policy_parameters import (
@@ -43,6 +44,45 @@ def main() -> None:
     initialized = random_flat_policy_weights(CHEM_CHANNELS, HIDDEN_DIM, np.random.default_rng(11))
     assert initialized.shape == flat.shape and initialized.dtype == np.float32
     print("[PASS] shared head-aware random initializer produces the canonical float32 layout")
+
+    # Evolution needs phenotype diversity before selection has had a chance to
+    # shape the population. Bias centers remain sensible defaults, while random
+    # trunk/head weights should produce a broad response even at neutral input.
+    zero_channels = torch.zeros((1, CHEM_CHANNELS), dtype=torch.float32)
+    zero_spatial = torch.zeros((1, 3), dtype=torch.float32)
+    growth_angles: list[float] = []
+    heading_angles: list[float] = []
+    anisotropies: list[float] = []
+    division_biases: list[float] = []
+    division_drives: list[float] = []
+    chemical_outputs: list[float] = []
+    init_rng = np.random.default_rng(101)
+    with torch.no_grad():
+        for _ in range(128):
+            model.load_flat_parameters(torch.from_numpy(
+                random_flat_policy_weights(CHEM_CHANNELS, HIDDEN_DIM, init_rng)
+            ))
+            chemical, heading, controls, growth, _tail = model(
+                zero_channels, zero_channels, zero_channels, zero_spatial, zero_spatial
+            )
+            heading_xy = torch.tanh(heading)[0].numpy()
+            growth_xy = torch.tanh(growth)[0].numpy()
+            heading_angles.append(float(np.arctan2(heading_xy[1], heading_xy[0])))
+            growth_angles.append(float(np.arctan2(growth_xy[1], growth_xy[0])))
+            chemical_outputs.extend(torch.tanh(chemical)[0].numpy().tolist())
+            anisotropies.append(float(torch.sigmoid(controls[0, 0])))
+            division_biases.append(float(torch.sigmoid(controls[0, 1])))
+            division_drives.append(float(torch.tanh(controls[0, 2])))
+
+    growth_degrees = np.abs(np.degrees(growth_angles))
+    heading_degrees = np.abs(np.degrees(heading_angles))
+    assert np.percentile(growth_degrees, 90) > 90.0, np.percentile(growth_degrees, [50, 90])
+    assert np.percentile(heading_degrees, 90) > 35.0, np.percentile(heading_degrees, [50, 90])
+    assert 0.15 < np.median(anisotropies) < 0.25, np.median(anisotropies)
+    assert 0.4 < np.median(division_biases) < 0.6, np.median(division_biases)
+    assert abs(np.median(division_drives)) < 0.1, np.median(division_drives)
+    assert 0.25 < np.percentile(np.abs(chemical_outputs), 90) < 0.75
+    print("[PASS] random policies are expressive around sensible output defaults")
 
     scales = mutation_scale_vector(CHEM_CHANNELS, HIDDEN_DIM)
     seed = 29

@@ -420,6 +420,54 @@ fn substrateFragment(in: QuadOut) -> @location(0) vec4<f32> {
   return textureSample(substrateTex, fieldSampler, in.uv);
 }
 
+// --- Experimental developmental coordinates ---
+// A separate positive-concentration bank: anterior, posterior, inhibitor.
+// The AP view uses their normalized difference and fades areas where neither
+// pole has meaningful influence, so numerical 0/0 never looks like a valid
+// midpoint coordinate.
+const DEVELOPMENTAL_N: u32 = __DEVELOPMENTAL_N__u;
+const DEVELOPMENTAL_PLANE: u32 = DEVELOPMENTAL_N * DEVELOPMENTAL_N;
+@group(0) @binding(24) var<storage, read> developmentalGrid: array<f32>;
+@group(0) @binding(25) var developmentalOutputTex: texture_storage_2d<rgba8unorm, write>;
+// 0=derived AP, 1=anterior, 2=posterior, 3=inhibitor.
+@group(0) @binding(26) var<uniform> developmentalDisplayMode: u32;
+@group(0) @binding(27) var developmentalTex: texture_2d<f32>;
+
+fn developmentalValue(c: u32, x: u32, y: u32) -> f32 {
+  return developmentalGrid[c * DEVELOPMENTAL_PLANE + y * DEVELOPMENTAL_N + x];
+}
+
+@compute @workgroup_size(16, 16)
+fn colorizeDevelopmental(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= DEVELOPMENTAL_N || gid.y >= DEVELOPMENTAL_N) { return; }
+  let a = max(developmentalValue(0u, gid.x, gid.y), 0.0);
+  let p = max(developmentalValue(1u, gid.x, gid.y), 0.0);
+  let inhibitor = max(developmentalValue(2u, gid.x, gid.y), 0.0);
+  var color = BG;
+  if (developmentalDisplayMode == 0u) {
+    let confidence = clamp(1.0 - exp(-4.0 * (a + p)), 0.0, 1.0);
+    let coordinate = clamp((p - a) / max(a + p, 1e-6), -1.0, 1.0);
+    let anteriorColor = vec3<f32>(0.10, 0.32, 0.82);
+    let middleColor = vec3<f32>(0.75, 0.75, 0.75);
+    let posteriorColor = vec3<f32>(0.82, 0.18, 0.10);
+    let mapped = select(
+      mix(middleColor, anteriorColor, -coordinate),
+      mix(middleColor, posteriorColor, coordinate),
+      coordinate >= 0.0
+    );
+    color = mix(BG, mapped, accentedMagnitude(confidence));
+  } else {
+    let value = select(select(inhibitor, p, developmentalDisplayMode == 2u), a, developmentalDisplayMode == 1u);
+    color = scalarColor(1.0 - exp(-4.0 * value));
+  }
+  textureStore(developmentalOutputTex, vec2<i32>(gid.xy), vec4<f32>(color, 1.0));
+}
+
+@fragment
+fn developmentalFragment(in: QuadOut) -> @location(0) vec4<f32> {
+  return textureSample(developmentalTex, fieldSampler, in.uv);
+}
+
 // --- Gradient background: a first step toward a "shape boundary"
 // visualization — the DIRECTION/magnitude of the REPULSION density
 // field's own spatial gradient (core/repulsion.wgsl's own densityAccum,

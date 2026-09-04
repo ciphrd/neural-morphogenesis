@@ -31,14 +31,16 @@ import { BLOOM_SCENE_FORMAT, BloomPostProcess, type BloomSettings } from "./bloo
 import { writeFloat32, ceilDiv } from "./gpuUtil";
 import { PARTICLE_META_BUFFER_OFFSET } from "./agents";
 import type { Environment } from "./environment";
+import type { DevelopmentalFields } from "./developmentalFields";
 import { DX, GRID_N, INV_DX, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
-export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "gradient";
+export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "gradient" | "developmental-ap" | "developmental-anterior" | "developmental-posterior" | "developmental-inhibitor";
 export type ParticleShape = "dot" | "triangle";
 export type ParticleColorMode = "white" | "neural-color" | "mitosis-drive" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
 
-const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "gradient">, number> = {
+type GridColorizedFieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear";
+const FIELD_MODE_CODE: Record<GridColorizedFieldMode, number> = {
   none: 0,
   density: 1,
   speed: 2,
@@ -57,6 +59,7 @@ const GRID_FIELD_MODES: ReadonlySet<FieldMode> = new Set(["density", "speed", "d
 const PARTICLE_COLOR = [1, 1, 1, 1]; // white — matches debug_images.py's GROWN_COLOR
 const TARGET_COLOR = [0.95, 0.4, 0.25, 0.8]; // warm accent, alpha-blended under the particles
 const HEADING_LINE_COLOR = [1, 0, 0, 1];
+const SPLIT_DIRECTION_LINE_COLOR = [0, 1, 0, 1];
 const HEADING_LINE_LENGTH_PX = 4;
 
 // mls-mpm/src/gpu/render.ts's own DEFAULT_POINT_RADIUS_PX is 1 — this
@@ -104,6 +107,9 @@ export class Renderer {
   private readonly headingLinePipeline: GPURenderPipeline;
   private readonly headingLineBindGroup: GPUBindGroup;
   private readonly headingLineColorUniform: GPUBuffer;
+  private readonly splitDirectionLinePipeline: GPURenderPipeline;
+  private readonly splitDirectionLineBindGroup: GPUBindGroup;
+  private readonly splitDirectionLineColorUniform: GPUBuffer;
 
   private readonly targetRadiusUniform: GPUBuffer;
   private readonly targetColorUniform: GPUBuffer;
@@ -114,6 +120,7 @@ export class Renderer {
 
   private particleColorMode: ParticleColorMode = "white";
   private directionalLineVisible = false;
+  private splitDirectionLineVisible = false;
   private mitosisSignalBoost = 1.0;
   private internalStateChannelStart = 0;
   private particleRadiusPx = DEFAULT_PARTICLE_RADIUS_PX;
@@ -166,6 +173,15 @@ export class Renderer {
   private readonly substratePresentBindGroup: GPUBindGroup;
   private readonly substrateDispatch: [number, number];
 
+  private readonly developmentalFields: DevelopmentalFields;
+  private readonly developmentalTexture: GPUTexture;
+  private readonly developmentalDisplayModeUniform: GPUBuffer;
+  private readonly developmentalColorizePipeline: GPUComputePipeline;
+  private readonly developmentalColorizeBindGroups: [GPUBindGroup, GPUBindGroup];
+  private readonly developmentalPresentPipeline: GPURenderPipeline;
+  private readonly developmentalPresentBindGroup: GPUBindGroup;
+  private readonly developmentalDispatch: [number, number];
+
   // --- gradient background (field.wgsl's own blurDensity/colorizeGradient) ---
   // Reads the REPULSION density field (mpmCore.densityTexture — the same
   // one "repulsion" mode's own repulsionFragment samples), not the
@@ -203,9 +219,10 @@ export class Renderer {
 
   private fieldMode: FieldMode = "none";
 
-  constructor(device: GPUDevice, format: GPUTextureFormat, mpmCore: MpmCore, environment: Environment, particleMetaState: GPUBuffer) {
+  constructor(device: GPUDevice, format: GPUTextureFormat, mpmCore: MpmCore, environment: Environment, developmentalFields: DevelopmentalFields, particleMetaState: GPUBuffer) {
     this.device = device;
     this.environment = environment;
+    this.developmentalFields = developmentalFields;
     this.bloom = new BloomPostProcess(device, format);
     const renderModule = device.createShaderModule({
       code: templateShader(renderSrc, { CHANNELS: environment.channels }),
@@ -416,14 +433,32 @@ export class Renderer {
       // WebGPU line-list rasterization is one device pixel wide.
       primitive: { topology: "line-list" },
     });
+    this.splitDirectionLinePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [directionalLineLayout, viewLayout] }),
+      vertex: { module: renderModule, entryPoint: "splitDirectionLineVertex" },
+      fragment: { module: renderModule, entryPoint: "headingLineFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
+      primitive: { topology: "line-list" },
+    });
     this.directionalLineStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.headingLineColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.splitDirectionLineColorUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     writeFloat32(device, this.headingLineColorUniform, 0, new Float32Array(HEADING_LINE_COLOR));
+    writeFloat32(device, this.splitDirectionLineColorUniform, 0, new Float32Array(SPLIT_DIRECTION_LINE_COLOR));
     this.headingLineBindGroup = device.createBindGroup({
       layout: directionalLineLayout,
       entries: [
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 2, resource: { buffer: this.headingLineColorUniform } },
+        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
+        { binding: 5, resource: { buffer: this.directionalLineStyleUniform } },
+      ],
+    });
+    this.splitDirectionLineBindGroup = device.createBindGroup({
+      layout: directionalLineLayout,
+      entries: [
+        { binding: 0, resource: { buffer: mpmCore.positions } },
+        { binding: 2, resource: { buffer: this.splitDirectionLineColorUniform } },
         { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
         { binding: 4, resource: { buffer: mpmCore.rest } },
         { binding: 5, resource: { buffer: this.directionalLineStyleUniform } },
@@ -441,6 +476,7 @@ export class Renderer {
         REPULSION_FIELD_N,
         CHANNELS: environment.channels,
         ...environment.layout.shaderConstants,
+        DEVELOPMENTAL_N: developmentalFields.size,
       }),
     });
     const nodes = GRID_N + 1;
@@ -611,6 +647,41 @@ export class Renderer {
       ],
     });
 
+    this.developmentalTexture = device.createTexture({
+      size: [developmentalFields.size, developmentalFields.size, 1],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.developmentalDisplayModeUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    writeFloat32(device, this.developmentalDisplayModeUniform, 0, new Uint32Array([0]));
+    this.developmentalColorizePipeline = device.createComputePipeline({
+      layout: "auto", compute: { module: fieldModule, entryPoint: "colorizeDevelopmental" },
+    });
+    this.developmentalColorizeBindGroups = [0, 1].map((p) => device.createBindGroup({
+      layout: this.developmentalColorizePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 13, resource: { buffer: this.accentUniform } },
+        { binding: 24, resource: { buffer: developmentalFields.buffers[p] } },
+        { binding: 25, resource: this.developmentalTexture.createView() },
+        { binding: 26, resource: { buffer: this.developmentalDisplayModeUniform } },
+      ],
+    })) as [GPUBindGroup, GPUBindGroup];
+    this.developmentalDispatch = [ceilDiv(developmentalFields.size, 16), ceilDiv(developmentalFields.size, 16)];
+    this.developmentalPresentPipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: fieldModule, entryPoint: "fieldVertex" },
+      fragment: { module: fieldModule, entryPoint: "developmentalFragment", targets: [{ format: BLOOM_SCENE_FORMAT }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.developmentalPresentBindGroup = device.createBindGroup({
+      layout: this.developmentalPresentPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 5, resource: fieldSampler },
+        { binding: 22, resource: { buffer: this.viewUniform } },
+        { binding: 27, resource: this.developmentalTexture.createView() },
+      ],
+    });
+
     // --- gradient background ---
     this.blurredDensityTexture = device.createTexture({
       size: [REPULSION_FIELD_N, REPULSION_FIELD_N, 1],
@@ -677,8 +748,13 @@ export class Renderer {
 
   setFieldMode(mode: FieldMode): void {
     this.fieldMode = mode;
-    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "gradient") {
-      writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode]]));
+    if (mode.startsWith("developmental-")) {
+      const code = mode === "developmental-anterior" ? 1
+        : mode === "developmental-posterior" ? 2
+        : mode === "developmental-inhibitor" ? 3 : 0;
+      writeFloat32(this.device, this.developmentalDisplayModeUniform, 0, new Uint32Array([code]));
+    } else if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "gradient") {
+      writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode as GridColorizedFieldMode]]));
     }
   }
 
@@ -761,6 +837,10 @@ export class Renderer {
 
   setDirectionalLineVisible(visible: boolean): void {
     this.directionalLineVisible = visible;
+  }
+
+  setSplitDirectionLineVisible(visible: boolean): void {
+    this.splitDirectionLineVisible = visible;
   }
 
   /** Camera zoom applied by every particle/target vertex shader. */
@@ -915,6 +995,12 @@ export class Renderer {
       computePass.setBindGroup(0, this.gradientColorizeBindGroup);
       computePass.dispatchWorkgroups(...this.gradientDispatch);
       computePass.end();
+    } else if (this.fieldMode.startsWith("developmental-")) {
+      const computePass = encoder.beginComputePass();
+      computePass.setPipeline(this.developmentalColorizePipeline);
+      computePass.setBindGroup(0, this.developmentalColorizeBindGroups[this.developmentalFields.parity]);
+      computePass.dispatchWorkgroups(...this.developmentalDispatch);
+      computePass.end();
     }
 
     const pass = encoder.beginRenderPass({
@@ -947,6 +1033,10 @@ export class Renderer {
     } else if (this.fieldMode === "gradient") {
       pass.setPipeline(this.gradientPresentPipeline);
       pass.setBindGroup(0, this.gradientPresentBindGroup);
+      pass.draw(6);
+    } else if (this.fieldMode.startsWith("developmental-")) {
+      pass.setPipeline(this.developmentalPresentPipeline);
+      pass.setBindGroup(0, this.developmentalPresentBindGroup);
       pass.draw(6);
     }
 
@@ -993,6 +1083,11 @@ export class Renderer {
         pass.setBindGroup(0, this.headingLineBindGroup);
         pass.draw(2, activeCount);
       }
+      if (this.splitDirectionLineVisible) {
+        pass.setPipeline(this.splitDirectionLinePipeline);
+        pass.setBindGroup(0, this.splitDirectionLineBindGroup);
+        pass.draw(2, activeCount);
+      }
     }
 
     pass.end();
@@ -1008,6 +1103,7 @@ export class Renderer {
     this.boundaryGradientScaleUniform.destroy();
     this.directionalLineStyleUniform.destroy();
     this.headingLineColorUniform.destroy();
+    this.splitDirectionLineColorUniform.destroy();
     this.targetRadiusUniform.destroy();
     this.targetColorUniform.destroy();
     this.targetPositions?.destroy();
@@ -1020,6 +1116,8 @@ export class Renderer {
     this.diagnosticsBuffer.destroy();
     this.substrateTexture.destroy();
     this.substrateChannelStartUniform.destroy();
+    this.developmentalTexture.destroy();
+    this.developmentalDisplayModeUniform.destroy();
     this.blurredDensityTexture.destroy();
     this.blurSigmaUniform.destroy();
     this.gradientTexture.destroy();

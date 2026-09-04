@@ -1,7 +1,7 @@
 // TS wrapper around environment.wgsl's two chemical lifecycles. Cell-owned
 // projection materializes per-cell state into buffer 0 each round; persistent
 // environment ping-pongs a spatial field through diffusion/decay and adds
-// the final neural round's signed deltas. Both expose the same parity-indexed sensing buffers.
+// the final neural round's density-weighted expression targets. Both expose the same parity-indexed sensing buffers.
 
 import environmentSrc from "../../../core/environment.wgsl?raw";
 import {
@@ -271,7 +271,7 @@ export class Environment {
     this._parity = 1 - this._parity;
   }
 
-  /** Add the final neural round's signed chemical deltas to the field. */
+  /** Relax the field toward the final neural round's expression targets. */
   encodeMergePersistent(encoder: GPUCommandEncoder): void {
     if (this.chemicalCommunicationArchitecture !== "persistent-environment") return;
     const pass = encoder.beginComputePass();

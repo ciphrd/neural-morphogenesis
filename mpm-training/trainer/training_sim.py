@@ -43,7 +43,7 @@ step — a fixed, small cost per rollout rather than one paid
 `macro_steps` times.
 
 Local-frame (heading-relative) sensing/action rotation, and the
-persistent per-particle heading/angularVelocity state that drives it
+persistent per-particle heading/world-target state that drives it
 (NOT derived from velocity — a real, confirmed source of chaotic spin
 before this class's own heading state was introduced) now live entirely
 inside AgentsGPU/core/agents.wgsl — see that file's own module docstring
@@ -268,8 +268,8 @@ class TrainingRollout:
                 self.environment.parity,
                 commit_lifecycle=final_round,
             )
-        # Persistent mode merges only the final neural round's signed delta deposits
-        # after the transported field has been sensed.
+        # Persistent mode uses only the final neural round's relaxed expression
+        # targets, pulling the transported field toward them after sensing.
         self.environment.encode_merge_persistent(encoder)
         core.device.queue.submit([encoder.finish()])
 

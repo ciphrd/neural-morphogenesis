@@ -47,7 +47,7 @@ struct ParticleRest {
   divisionBias: f32,
   growthFrameHeading: f32,
   appearanceScale: f32,
-  _padding: f32,
+  previousHeadingTargetLocal: f32,
 }
 
 struct ParticleMeta {
@@ -499,6 +499,22 @@ fn headingLineVertex(
   let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let heading = particleMeta[instanceIndex].heading;
   let direction = vec2<f32>(cos(heading), sin(heading));
+  let offset = select(vec2<f32>(0.0), direction * directionalLineStyle.y, vertexIndex == 1u);
+  return vec4<f32>(center + offset * viewStyle.x, 0.0, 1.0);
+}
+
+// The split axis is the persisted signed neural growth direction consumed by
+// core/agents.wgsl at division time. Keep this separate from heading so either
+// overlay can be inspected independently.
+@vertex
+fn splitDirectionLineVertex(
+  @builtin(vertex_index) vertexIndex: u32,
+  @builtin(instance_index) instanceIndex: u32,
+) -> @builtin(position) vec4<f32> {
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
+  let rest = particleRest[instanceIndex];
+  let worldAngle = rest.growthFrameHeading + rest.growthAngle;
+  let direction = vec2<f32>(cos(worldAngle), sin(worldAngle));
   let offset = select(vec2<f32>(0.0), direction * directionalLineStyle.y, vertexIndex == 1u);
   return vec4<f32>(center + offset * viewStyle.x, 0.0, 1.0);
 }

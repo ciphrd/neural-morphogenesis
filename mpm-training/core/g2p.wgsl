@@ -44,7 +44,7 @@ struct ParticleRest {
   divisionBias: f32,
   growthFrameHeading: f32,
   appearanceScale: f32,
-  _padding: f32,
+  previousHeadingTargetLocal: f32,
 }
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
@@ -414,6 +414,6 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     FgNew, JpNew, rest0.cycleActive, rest0.growthAngle,
     rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameHeading,
     appearanceScaleNew,
-    rest0._padding
+    rest0.previousHeadingTargetLocal
   );
 }

@@ -46,14 +46,12 @@ import { policyWeightsShapeError } from "./policyEval";
 const WORKGROUP = 64;
 
 // core/agents.wgsl's own ParticleMeta struct: four scalar state fields
-// followed by an aligned vec4 neural color. Only
-// rng/heading get their own named offset below — cooldown/
-// angularVelocity are only ever left at their zero-initialized default
-// by the TS side (see resetHeading()'s own comment), never written at a
-// specific offset the way rng/heading are.
+// followed by an aligned vec4 neural color. `angularVelocity` is a legacy
+// field name: that lane now stores the persistent world heading target.
 const particleMetaStride = (channels: number) => Math.ceil((76 + channels * 4) / 16) * 16;
 const PARTICLE_META_OFFSET_RNG = 0;
 const PARTICLE_META_OFFSET_HEADING = 8;
+const PARTICLE_META_OFFSET_HEADING_TARGET = 12;
 // AgentState places its runtime ParticleMeta array after one atomic u32 and
 // 63 padding u32s. 256 is also a legal standalone storage-binding offset.
 export const PARTICLE_META_BUFFER_OFFSET = 256;
@@ -96,7 +94,7 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
   // gradient per channel, with no positional inputs.
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  // Chemical deltas plus heading, growth controls/direction, a dedicated
+  // Chemical expression targets plus heading, growth controls/direction, a dedicated
   // signed division drive, and either private-state updates or RGB.
   const outDim = channels + (stateful ? 23 : 10);
   const fc1wOffset = 0;
@@ -654,7 +652,8 @@ export class Agents {
    * spawnUniform01(seed, 5+i) — index 5+, not 0: seedBlob()'s own 2
    * particles' x/y jitter claims 0-3, simulation.ts's own theta draw
    * claims 4, this is the next range over, bit-exact with
-   * agents_gpu.py's own reset_heading()), zeroes angularVelocity, and
+   * agents_gpu.py's own reset_heading()), initializes the persistent world
+   * heading target to the same angle, and
    * reseeds growth's own persistent per-particle rng (nonzero — see
    * core/agents.wgsl's own xorshift32() for why, via rng.ts's own
    * growthSeed() — a DELIBERATELY SEPARATE hash domain from heading's own
@@ -666,7 +665,7 @@ export class Agents {
    * restartRollout()). Bundled into this same method (despite the name)
    * rather than a separate one since every caller already calls this
    * once per rollout, at exactly the right time; matches this method's
-   * own existing "resetHeading also resets angularVelocity" precedent
+   * own existing "resetHeading also resets heading control state" precedent
    * for outgrowing its own name slightly. Heading is randomized (not
    * zeroed) so every particle doesn't start out facing an identical,
    * seed-independent direction — see agents_gpu.py's own reset_heading()
@@ -676,9 +675,8 @@ export class Agents {
    * slots 0/1, or growth copying from its own parent's live heading the
    * moment any other slot is actually claimed) — a standing "doesn't
    * matter today" caveat on an un-reproducible PRNG stream was fragile,
-   * not a real savings. angularVelocity stays zeroed regardless — a
-   * random *turn rate* would just be an initial spin, not a meaningfully
-   * different starting condition the way a random facing direction is.
+   * not a real savings. The legacy angularVelocity lane is now the world
+   * target, so matching it to heading gives every particle zero initial error.
    *
    * Single `seed` param (the raw rollout seed) — heading's own
    * spawnUniform01() domain and growth's own growthSeed() domain are
@@ -693,23 +691,26 @@ export class Agents {
     // ParticleMeta struct exactly (four scalar fields, vec4 color, then the
     // division hazard/threshold pair
     // — see this class's own constructor comment for
-    // why the state is packed into one buffer). cooldown/angularVelocity/color
-    // are left at 0 (ArrayBuffer's own zero-initialized default) — "not
-    // on cooldown," "no spin."
+    // why the state is packed into one buffer). cooldown/color are left at 0;
+    // the world heading target is explicitly matched to heading below.
     const buf = new ArrayBuffer(count * this.particleMetaStride);
     const view = new DataView(buf);
     for (let i = 0; i < count; i++) {
       const base = i * this.particleMetaStride;
       // Density model v3 uses this u32 as a lineage-generation counter.
       view.setUint32(base + PARTICLE_META_OFFSET_RNG, 0, true);
-      view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, (spawnUniform01(seed, 5 + i) * 2 - 1) * Math.PI, true);
+      const heading = (spawnUniform01(seed, 5 + i) * 2 - 1) * Math.PI;
+      view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, heading, true);
+      view.setFloat32(base + PARTICLE_META_OFFSET_HEADING_TARGET, heading, true);
     }
     if (initialPositions) {
       const initialCount = Math.min(initialPositions.length / 2, count);
       for (let i = 0; i < initialCount; i++) {
         const base = i * this.particleMetaStride;
         const u = spatialUniform01(seed, initialPositions[i * 2], initialPositions[i * 2 + 1]);
-        view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, (u * 2 - 1) * Math.PI, true);
+        const heading = (u * 2 - 1) * Math.PI;
+        view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, heading, true);
+        view.setFloat32(base + PARTICLE_META_OFFSET_HEADING_TARGET, heading, true);
       }
     }
     this.device.queue.writeBuffer(this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET, buf);
@@ -729,11 +730,11 @@ export class Agents {
    * utility. Individual per-index strided writes (heading is one f32
    * field inside ParticleMeta's own aligned stride now, not a
    * standalone tightly-packed array) so this touches ONLY the heading
-   * field, leaving rng/cooldown/angularVelocity exactly as
-   * resetHeading() just set them. */
+   * and persistent world-target fields, leaving rng/cooldown unchanged. */
   setHeadings(headings: Float32Array): void {
     headings.forEach((h, i) => {
       writeFloat32(this.device, this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET + i * this.particleMetaStride + PARTICLE_META_OFFSET_HEADING, new Float32Array([h]));
+      writeFloat32(this.device, this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET + i * this.particleMetaStride + PARTICLE_META_OFFSET_HEADING_TARGET, new Float32Array([h]));
     });
   }
 
@@ -741,7 +742,7 @@ export class Agents {
    * parity buffer (must match `parity`, see simulation.ts), writes the
    * policy's growth direction into MpmCore's particle-rest buffer,
    * optionally applies it to velocity through maxStrafe, and writes
-   * integrates or deposits signed chemical deltas. Does not submit. */
+   * relaxes persistent expression toward chemical targets. Does not submit. */
   encodeStep(encoder: GPUCommandEncoder, parity: number, commitLifecycle = true): void {
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.pipeline);

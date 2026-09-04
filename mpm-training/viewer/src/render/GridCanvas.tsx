@@ -4,6 +4,7 @@ import type { BloomSettings } from "../gpu/bloom";
 import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu/device";
 import type { FieldMode, ParticleColorMode, ParticleShape } from "../gpu/render";
 import { GpuSimulation, type SimulationScenario } from "../gpu/simulation";
+import { DEFAULT_DEVELOPMENTAL_SETTINGS, type DevelopmentalSettings } from "../gpu/developmentalFields";
 import { policyWeightsShapeError } from "../gpu/policyEval";
 import type { PhysicsSettings, SimulationConfig, UpdateRuleWeights } from "../gpu/types";
 import { CanvasRecorder } from "./canvasRecorder";
@@ -58,6 +59,7 @@ interface GridCanvasProps {
   // nothing has loaded yet. Applied via a plain uniform-buffer write
   // (GpuSimulation.setPhysics()), never a rebuild.
   physics: PhysicsSettings | null;
+  developmentalSettings?: DevelopmentalSettings;
   /** Playback-only growth/interaction cap; does not alter training. */
   particleCap?: number;
   /** Playback-only number of genuinely seeded agents. */
@@ -74,6 +76,7 @@ interface GridCanvasProps {
   particleColorMode?: ParticleColorMode;
   particleAlpha?: number;
   directionalLineVisible?: boolean;
+  splitDirectionLineVisible?: boolean;
   particleRadiusPx?: number;
   /** Visualization-only multiplier for the signed mitosis drive. */
   mitosisSignalBoost?: number;
@@ -140,6 +143,7 @@ export interface GridCanvasHandle {
    * (the winning rollout's own seed), this is a literal, deterministic
    * replay of the exact same rollout from the start. */
   restart(): void;
+  reseedDevelopmentalFields(): void;
   /** Overwrites the update rule's own weights/biases with a fresh random
    * init and restarts the rollout under it — see
    * GpuSimulation.randomizeWeights()'s own docstring. A later "Restart"
@@ -292,6 +296,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     targetPoints,
     targetVisible = true,
     physics,
+    developmentalSettings = DEFAULT_DEVELOPMENTAL_SETTINGS,
     particleCap,
     initialParticleCount,
     fieldMode = "none",
@@ -302,6 +307,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     particleColorMode = "white",
     particleAlpha = 1,
     directionalLineVisible = false,
+    splitDirectionLineVisible = false,
     particleRadiusPx,
     mitosisSignalBoost = 1,
     boundaryGradientScale = 0.01,
@@ -331,6 +337,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const configRef = useRef<SimulationConfig | null>(null);
   const scenarioRef = useRef(scenario);
   const physicsRef = useRef(physics);
+  const developmentalSettingsRef = useRef(developmentalSettings);
   const particleCapRef = useRef(particleCap);
   const initialParticleCountRef = useRef(initialParticleCount);
   const fieldModeRef = useRef(fieldMode);
@@ -341,6 +348,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const particleColorModeRef = useRef(particleColorMode);
   const particleAlphaRef = useRef(particleAlpha);
   const directionalLineVisibleRef = useRef(directionalLineVisible);
+  const splitDirectionLineVisibleRef = useRef(splitDirectionLineVisible);
   const particleRadiusPxRef = useRef(particleRadiusPx);
   const mitosisSignalBoostRef = useRef(mitosisSignalBoost);
   const boundaryGradientScaleRef = useRef(boundaryGradientScale);
@@ -477,6 +485,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
 
   configRef.current = config;
   physicsRef.current = physics;
+  developmentalSettingsRef.current = developmentalSettings;
   particleCapRef.current = particleCap;
   initialParticleCountRef.current = initialParticleCount;
   fieldModeRef.current = fieldMode;
@@ -487,6 +496,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   particleColorModeRef.current = particleColorMode;
   particleAlphaRef.current = particleAlpha;
   directionalLineVisibleRef.current = directionalLineVisible;
+  splitDirectionLineVisibleRef.current = splitDirectionLineVisible;
   particleRadiusPxRef.current = particleRadiusPx;
   mitosisSignalBoostRef.current = mitosisSignalBoost;
   boundaryGradientScaleRef.current = boundaryGradientScale;
@@ -511,6 +521,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       autoZoomTargetRef.current = effectiveZoomRef.current;
       autoZoomHardResetRef.current = true;
     },
+    reseedDevelopmentalFields: () => simulationRef.current?.reseedDevelopmentalFields(),
     randomizeWeights: () => {
       const weights = simulationRef.current?.randomizeWeights() ?? null;
       if (weights) {
@@ -665,6 +676,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       if (targetPoints) simulation.setTargetPoints(targetPoints);
       simulation.setTargetVisible(targetVisible);
       simulation.setFieldMode(fieldModeRef.current);
+      simulation.setDevelopmentalSettings(developmentalSettingsRef.current);
       simulation.setSubstrateChannelStart(substrateChannelStartRef.current);
       simulation.setSubstrateZeroIsBlack(substrateZeroIsBlackRef.current);
       simulation.setBoundaryGradientZeroIsBlack(boundaryGradientZeroIsBlackRef.current);
@@ -672,6 +684,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setParticleColorMode(particleColorModeRef.current);
       simulation.setParticleAlpha(particleAlphaRef.current);
       simulation.setDirectionalLineVisible(directionalLineVisibleRef.current);
+      simulation.setSplitDirectionLineVisible(splitDirectionLineVisibleRef.current);
       simulation.setMitosisSignalBoost(mitosisSignalBoostRef.current);
       simulation.setBoundaryGradientScale(boundaryGradientScaleRef.current);
       simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
@@ -953,6 +966,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [physics]);
 
   useEffect(() => {
+    simulationRef.current?.setDevelopmentalSettings(developmentalSettings);
+  }, [developmentalSettings]);
+
+  useEffect(() => {
     if (particleCap !== undefined) simulationRef.current?.setParticleCap(particleCap);
   }, [particleCap]);
 
@@ -1002,6 +1019,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     simulationRef.current?.setDirectionalLineVisible(directionalLineVisible);
   }, [directionalLineVisible]);
+
+  useEffect(() => {
+    simulationRef.current?.setSplitDirectionLineVisible(splitDirectionLineVisible);
+  }, [splitDirectionLineVisible]);
 
   useEffect(() => {
     simulationRef.current?.setMitosisSignalBoost(mitosisSignalBoost);

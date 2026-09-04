@@ -82,7 +82,7 @@ export interface RunSettings {
   depositDensityReference?: number;
   maxAccel: number;
   maxStrafe: number;
-  /** Amplitude of the signed neural chemical delta rate. */
+  /** Amplitude of the neural chemical-expression target. */
   maxEnvWrite: number;
   maxAngularAccel: number;
   angularDamping: number;

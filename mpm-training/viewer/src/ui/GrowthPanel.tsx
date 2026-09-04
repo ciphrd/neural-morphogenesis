@@ -133,7 +133,7 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
     key: "divisionDirectionality",
     label: "Division polarization",
-    hint: "Controls rearward one-sided placement. 1× can keep the parent fixed and place the daughter fully behind it; 0 keeps the rear-facing pair centered and symmetric.",
+    hint: "Controls one-sided placement along the NN growth direction. 1× can keep the parent fixed and place the daughter fully toward that output; 0 keeps the pair centered and symmetric.",
     min: 0,
     max: 1,
     step: 0.01,
@@ -142,7 +142,7 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
     key: "boundaryTangentMinGradient",
     label: "Tangent flat-gradient threshold",
-    hint: "For Lab tangent-growth scenarios, morphology gradients at or below this value are treated as flat. This affects the growth tensor, not rear-facing spawn placement.",
+    hint: "For Lab tangent-growth scenarios, morphology gradients at or below this value are treated as flat. Above it, the tangent directs both growth and spawn placement.",
     min: 0,
     max: TANGENT_SLIDER_MAX,
     step: 0.000001,
@@ -161,7 +161,7 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
  * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
  * growthDuration controls the policy-driven cell cycle;
  * growthAnisotropy controls tensor directionality and divisionDirectionality
- * controls how strongly rear-facing splits are polarized;
+ * controls how strongly growth-directed splits are polarized;
  * boundaryTangentMinGradient controls Lab tangent-growth diagnostics.
  * Same live-uniform-write path as every
  * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
@@ -239,7 +239,7 @@ export function GrowthPanel({
                 {isTangentThreshold && (
                   <label
                     className="checkbox-row"
-                    title="When disabled, diagnostic growth uses the neural growth axis instead of the morphology-boundary tangent. Rear-facing spawning is unchanged."
+                    title="When disabled, diagnostic growth and spawning use the neural growth axis instead of the morphology-boundary tangent."
                   >
                     <input
                       type="checkbox"

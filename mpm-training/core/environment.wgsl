@@ -3,7 +3,7 @@
 // replaces gridCurrent from persistent per-cell chemistry every brain round;
 // persistent-environment first transports a ping-pong spatial field with the
 // preceding MPM motion, keeps it fixed throughout a macro tick's neural rounds,
-// then adds the cells' final signed chemical deltas. TOROIDAL, matching
+// then relaxes toward the cells' final expression targets. TOROIDAL, matching
 // envnca's own version exactly: MpmCore's own MLS-MPM domain has no
 // walls either now (gridUpdate.wgsl's own module docstring — a
 // particle's 3x3 P2G/G2P stencil wraps at the domain edge, not clamps),
@@ -119,19 +119,25 @@ fn resolvedDeposit(i: u32) -> f32 {
   return numerator / max(density, capacity);
 }
 
-fn channelRetention(c: u32) -> f32 {
-  return pow(clamp(physics.decay, 0.0, 1.0), FIELD_DECAY_EXPONENTS[c]);
+fn depositDensity(i: u32) -> f32 {
+  let depositScale = f32(max(atomicLoad(&depositScratch[DEPOSIT_SCALE_INDEX]), 1));
+  return max(
+    f32(atomicLoad(&depositScratch[FIELD_TOTAL + i])) / depositScale,
+    0.0,
+  );
 }
 
-// Exact integral factor for constant forcing under dC/dt=-lambda*C+source
-// over the same interval whose retention is exp(-lambda*dt). depositRate
-// already contains dt, so the dimensionless multiplier is (1-r)/(-log r).
-fn decayIntegratedSourceFactor(c: u32) -> f32 {
-  let retention = channelRetention(c);
-  if (retention <= 0.0) { return 0.0; }
-  let loss = -log(retention);
-  if (loss < 1e-6) { return 1.0; }
-  return (1.0 - retention) / loss;
+fn depositTarget(i: u32, density: f32) -> f32 {
+  let depositScale = f32(max(atomicLoad(&depositScratch[DEPOSIT_SCALE_INDEX]), 1));
+  let numerator = f32(atomicLoad(&depositScratch[i])) / depositScale;
+  if (physics.normalizeDeposits < 0.5) {
+    return clamp(numerator, -1.0, 1.0);
+  }
+  return clamp(numerator / max(density, 1e-6), -1.0, 1.0);
+}
+
+fn channelRetention(c: u32) -> f32 {
+  return pow(clamp(physics.decay, 0.0, 1.0), FIELD_DECAY_EXPONENTS[c]);
 }
 
 // Builds the sensed chemical field from this communication round's cell
@@ -148,10 +154,11 @@ fn materializeSplat(
   gridCurrent[i] = resolvedDeposit(i);
 }
 
-// Persistent-environment only: add the final neural round's signed policy
-// delta after transport/diffusion/decay. Matching-kernel density normalization
-// keeps the rate stable across local particle density. FIELD_RESPONSE_TIMES
-// gives each scale its own accumulation speed without changing spatial units.
+// Persistent-environment only: interpret the final neural round's relaxed cell
+// expression as a desired concentration, not an additive source. The matching
+// density plane recovers the local weighted target. Density confidence makes
+// sparse kernel tails act gently, while supported regions converge decisively.
+// Pointwise mix performs either addition or subtraction and cannot overshoot.
 @compute @workgroup_size(256)
 fn mergeDeposit(
   @builtin(global_invocation_id) gid: vec3<u32>,
@@ -159,11 +166,22 @@ fn mergeDeposit(
 ) {
   let i = flatDispatchIndex(gid, workgroups);
   if (i >= FIELD_TOTAL) { return; }
+  let density = depositDensity(i);
+  if (density <= 0.0) { return; }
+  let desiredConcentration = depositTarget(i, density);
+  let reference = max(physics.depositDensityReference, 0.0);
+  let confidence = select(
+    1.0,
+    density / max(density + reference, 1e-6),
+    physics.normalizeDeposits >= 0.5,
+  );
   let c = channelForIndex(i);
-  gridCurrent[i] = gridCurrent[i]
-    + resolvedDeposit(i) * max(physics.depositRate, 0.0)
-      * decayIntegratedSourceFactor(c)
-      / max(FIELD_RESPONSE_TIMES[c], 1e-6);
+  let response = 1.0 - exp(
+    -max(physics.depositRate, 0.0) / max(FIELD_RESPONSE_TIMES[c], 1e-6)
+  );
+  gridCurrent[i] = mix(
+    gridCurrent[i], desiredConcentration, clamp(response * confidence, 0.0, 1.0)
+  );
 }
 
 fn blurWeight(dy: i32, dx: i32) -> f32 {

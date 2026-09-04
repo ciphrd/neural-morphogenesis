@@ -14,13 +14,12 @@
 // combining the two responses.
 
 import { policyHasRecurrence, type PolicyArchitecture, type UpdateRuleWeights } from "./types";
-import coreConstants from "../../../core/constants.json";
 
 export interface PolicyOutput {
-  /** One signed chemical delta rate per channel. */
+  /** One desired chemical-expression level per channel. */
   envWrite: Float32Array;
   headingDirection: [number, number];
-  angularAccel: number;
+  headingTargetAngle: number;
   anisotropy: number;
   divisionBias: number;
   divisionDrive: number;
@@ -63,7 +62,7 @@ export function policyWeightsShapeError(
   const receivedOut = Array.isArray(fc2w) ? fc2w.length : "missing";
   return (
     `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
-    `(chemical deltas plus a dedicated division drive and growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
+    `(chemical targets plus a dedicated division drive and growth/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
     "The current first layer includes three elastic Hencky-strain inputs; restart the training backend and retrain older checkpoints."
   );
 }
@@ -94,7 +93,7 @@ export function evalPolicy(
   channels: number,
   hiddenDim: number,
   maxEnvWrite: number,
-  maxAngularAccel: number,
+  _maxAngularAccel: number,
   _maxStrafe: number,
   architecture: PolicyArchitecture = "stateless-128",
 ): PolicyOutput {
@@ -127,11 +126,9 @@ export function evalPolicy(
   const headingDirection: [number, number] = headingMagnitude > 1e-12
     ? [headingRawX / headingMagnitude, headingRawY / headingMagnitude]
     : [0, 0];
-  const headingConfidence = headingMagnitude / (
-    headingMagnitude + coreConstants.DIRECTION_CONFIDENCE_SCALE
-  );
-  const angularAccel = Math.atan2(headingRawY, headingRawX) / Math.PI
-    * maxAngularAccel * headingConfidence;
+  const headingTargetAngle = headingMagnitude > 1e-12
+    ? Math.atan2(headingRawY, headingRawX)
+    : 0;
   const anisotropy = safeSigmoid(outVec[envWriteDim + 2]);
   const divisionBias = safeSigmoid(outVec[envWriteDim + 3]);
   const rawX = safeTanh(outVec[envWriteDim + 4]);
@@ -159,5 +156,5 @@ export function evalPolicy(
       safeSigmoid(outVec[envWriteDim + 9]),
     ];
   }
-  return { envWrite, headingDirection, angularAccel, anisotropy, divisionBias, divisionDrive, direction, color, stateDelta, stateGate };
+  return { envWrite, headingDirection, headingTargetAngle, anisotropy, divisionBias, divisionDrive, direction, color, stateDelta, stateGate };
 }

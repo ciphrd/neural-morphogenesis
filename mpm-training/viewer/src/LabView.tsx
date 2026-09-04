@@ -16,6 +16,7 @@ import { pickRecordingFormat } from "./render/canvasRecorder"
 import type { DeformSettings, GridCanvasHandle, Tool } from "./render/GridCanvas"
 import { GridCanvas } from "./render/GridCanvas"
 import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
+import { DevelopmentalFieldsPanel } from "./ui/DevelopmentalFieldsPanel"
 import { GrowthPanel } from "./ui/GrowthPanel"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { Slider } from "./ui/Slider"
@@ -179,6 +180,7 @@ export function LabView() {
   const [particleColorMode, setParticleColorMode] = useState<ParticleColorMode>(VIEWER_DEFAULTS.rendering.particleColorMode)
   const [particleAlpha, setParticleAlpha] = useState(VIEWER_DEFAULTS.rendering.particleAlpha)
   const [directionalLineVisible, setDirectionalLineVisible] = useState(VIEWER_DEFAULTS.rendering.directionalLineVisible)
+  const [splitDirectionLineVisible, setSplitDirectionLineVisible] = useState(VIEWER_DEFAULTS.rendering.splitDirectionLineVisible)
   const [mitosisSignalBoost, setMitosisSignalBoost] = useState(VIEWER_DEFAULTS.rendering.mitosisSignalBoost)
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(VIEWER_DEFAULTS.rendering.internalStateChannelStart)
   const [chemicalMemoryOpponentSubtraction, setChemicalMemoryOpponentSubtraction] = useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
@@ -192,6 +194,7 @@ export function LabView() {
   const [accent, setAccent] = useState(VIEWER_DEFAULTS.rendering.accent)
   const [blur, setBlur] = useState(VIEWER_DEFAULTS.rendering.blur)
   const [gradientExponent, setGradientExponent] = useState(VIEWER_DEFAULTS.rendering.gradientExponent)
+  const [developmentalSettings, setDevelopmentalSettings] = useState(() => ({ ...VIEWER_DEFAULTS.developmental }))
   const [deformSettings, setDeformSettings] = useState<DeformSettings>(() => ({
     ...VIEWER_DEFAULTS.tools.deform,
   }))
@@ -384,6 +387,11 @@ export function LabView() {
             </div>
           ))}
         </section>
+        <DevelopmentalFieldsPanel
+          value={developmentalSettings}
+          onChange={setDevelopmentalSettings}
+          onReseed={() => canvasRef.current?.reseedDevelopmentalFields()}
+        />
         <section>
           <h2>Rendering</h2>
           <div className="slider-row">
@@ -411,7 +419,8 @@ export function LabView() {
           <label className="slider-row"><span>Shape</span><select className="select" value={particleShape} onChange={(event) => setParticleShape(event.target.value as ParticleShape)}><option value="dot">Dot</option><option value="triangle">Triangle</option></select></label>
           <label className="slider-row"><span>Color</span><select className="select" value={particleColorMode} onChange={(event) => setParticleColorMode(event.target.value as ParticleColorMode)}><option value="white">White</option><option value="neural-color">Neural RGB</option><option value="mitosis-drive">Mitosis drive</option><option value="neural-memory">Neural memory</option><option value="chemical-memory">Chemical memory</option><option value="boundary-value">Boundary value</option><option value="neurons">Neurons</option></select></label>
           <label className="slider-row"><span>Alpha</span><Slider min={0} max={1} step={0.01} value={particleAlpha} onChange={setParticleAlpha} /><span className="slider-value">{particleAlpha.toFixed(2)}</span></label>
-          <label className="checkbox-row"><input type="checkbox" checked={directionalLineVisible} onChange={(event) => setDirectionalLineVisible(event.target.checked)} />Directional line</label>
+          <label className="checkbox-row"><input type="checkbox" checked={directionalLineVisible} onChange={(event) => setDirectionalLineVisible(event.target.checked)} />Heading direction</label>
+          <label className="checkbox-row"><input type="checkbox" checked={splitDirectionLineVisible} onChange={(event) => setSplitDirectionLineVisible(event.target.checked)} />Split direction</label>
           {particleColorMode === "mitosis-drive" && (
             <label className="slider-row"><span>Signal boost</span><Slider min={1} max={10} step={0.1} value={mitosisSignalBoost} onChange={setMitosisSignalBoost} /><span className="slider-value">{mitosisSignalBoost.toFixed(1)}×</span></label>
           )}
@@ -432,7 +441,7 @@ export function LabView() {
           <label className="slider-row">
             <span>Background</span>
             <select className="select" value={fieldMode} onChange={(event) => setFieldMode(event.target.value as FieldMode)}>
-              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="substrate">Substrate</option><option value="gradient">Boundary gradient</option>
+              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="substrate">Substrate</option><option value="gradient">Boundary gradient</option><option value="developmental-ap">Developmental AP coordinate</option><option value="developmental-anterior">Developmental anterior</option><option value="developmental-posterior">Developmental posterior</option><option value="developmental-inhibitor">Developmental inhibitor</option>
             </select>
           </label>
           {fieldMode === "morphology" && <>
@@ -480,6 +489,7 @@ export function LabView() {
             targetPoints={null}
             targetVisible={false}
             physics={physics}
+            developmentalSettings={developmentalSettings}
             zoom={zoom}
             autoZoom={autoZoomSettings}
             onEffectiveZoomChange={setEffectiveZoom}
@@ -489,6 +499,7 @@ export function LabView() {
             particleColorMode={particleColorMode}
             particleAlpha={particleAlpha}
             directionalLineVisible={directionalLineVisible}
+            splitDirectionLineVisible={splitDirectionLineVisible}
             mitosisSignalBoost={mitosisSignalBoost}
             internalStateChannelStart={internalStateChannelStart}
             chemicalMemoryOpponentSubtraction={chemicalMemoryOpponentSubtraction}

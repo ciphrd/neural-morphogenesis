@@ -1,5 +1,6 @@
 import type { FieldMode, ParticleColorMode, ParticleShape } from "./gpu/render"
 import type { DeformSettings, Tool } from "./render/GridCanvas"
+import { DEFAULT_DEVELOPMENTAL_SETTINGS, type DevelopmentalSettings } from "./gpu/developmentalFields"
 
 interface ViewerDefaults {
   playback: {
@@ -28,6 +29,7 @@ interface ViewerDefaults {
     particleColorMode: ParticleColorMode
     particleAlpha: number
     directionalLineVisible: boolean
+    splitDirectionLineVisible: boolean
     boundaryGradientScale: number
     zoom: number
     autoZoom: {
@@ -63,6 +65,7 @@ interface ViewerDefaults {
   lab: {
     scenario: "boundary-tangent" | "vertical" | "repeated-top-row"
   }
+  developmental: DevelopmentalSettings
 }
 
 /**
@@ -94,6 +97,7 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
     particleColorMode: "neural-memory",
     particleAlpha: 0.4,
     directionalLineVisible: false,
+    splitDirectionLineVisible: false,
     boundaryGradientScale: 0.01,
     zoom: 1,
     autoZoom: {
@@ -130,4 +134,5 @@ export const VIEWER_DEFAULTS: ViewerDefaults = {
   lab: {
     scenario: "boundary-tangent",
   },
+  developmental: { ...DEFAULT_DEVELOPMENTAL_SETTINGS },
 }
