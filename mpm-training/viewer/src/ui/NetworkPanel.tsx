@@ -11,9 +11,7 @@ interface NetworkPanelProps {
    * picking those three fields apart at every call site. null before
    * the first generation loads. */
   config: SimulationConfig | null
-  /** maxEnvWrite/maxAngularAccel give their output bars' true domains.
-   * The local-space growth vector is normalized for display; anisotropy
-   * and division bias are independent [0,1] targets. */
+  /** maxEnvWrite/maxAngularAccel give their output bars' true domains. */
   physics: PhysicsSettings | null
 }
 
@@ -547,31 +545,21 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           </div>
 
           <div className="nn-block">
-            <h3>Output — growth direction</h3>
+            <h3>Output — local growth vector</h3>
             <div className="nn-group">
               <ActivationBar
                 label="local forward"
-                value={output.direction[0]}
+                value={output.growthVector[0]}
                 domain={1}
               />
               <ActivationBar
                 label="local lateral"
-                value={output.direction[1]}
+                value={output.growthVector[1]}
                 domain={1}
               />
               <ActivationBar
-                label="anisotropy"
-                value={output.anisotropy}
-                domain={1}
-              />
-              <ActivationBar
-                label="division bias"
-                value={output.divisionBias}
-                domain={1}
-              />
-              <ActivationBar
-                label="division drive"
-                value={output.divisionDrive}
+                label="magnitude"
+                value={Math.min(1, Math.hypot(...output.growthVector))}
                 domain={1}
               />
             </div>

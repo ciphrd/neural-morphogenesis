@@ -47,10 +47,7 @@ export function mutatePolicyWeights(
 
   const headScales = [
     ...repeatedScale("chemical", channels),
-    ...repeatedScale("anisotropy", 1),
-    ...repeatedScale("division", 1),
-    ...repeatedScale("growthDirection", 2),
-    ...repeatedScale("divisionDrive", 1),
+    ...repeatedScale("growthVector", 2),
     ...(policyHasRecurrence(architecture)
       ? [
           ...repeatedScale("stateDelta", 8),

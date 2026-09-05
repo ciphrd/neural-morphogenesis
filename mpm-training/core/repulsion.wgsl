@@ -49,7 +49,7 @@
 // by entering AFTER the mass-weighted average rather than before it.
 // That does eliminate cancellation — but it also caps the push's
 // effective SPATIAL resolution at the physics grid's own cell size
-// (GRID_N=64, DX≈0.0156), coarser than both the density field's own
+// (GRID_N=128, DX≈0.0078), coarser than the density field's own
 // resolution (FIELD_N=256, texel≈0.0039) and, critically, coarser than
 // core/agents.wgsl's own SPLIT_DISPLACEMENT (0.01): two particles that
 // share the same 3x3 B-spline node stencil (any pair less than ~1

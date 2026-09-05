@@ -5,7 +5,7 @@ import { randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
 import { MAX_PARTICLES } from "./gpu/mpmCore"
 import { mutatePolicyWeights } from "./gpu/policyMutation"
-import type { FieldMode, ParticleColorMode, ParticleShape } from "./gpu/render"
+import { MAX_ZOOM, type FieldMode, type ParticleColorMode, type ParticleShape } from "./gpu/render"
 import type {
   CellMemory,
   ChemicalCommunicationArchitecture,
@@ -24,19 +24,19 @@ import { fetchRunState } from "./net/runs"
 import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
 import { pickRecordingFormat } from "./render/canvasRecorder"
-import { createSampleAtlas } from "./render/sampleAtlas"
 import type {
   DeformSettings,
   GridCanvasHandle,
   Tool,
 } from "./render/GridCanvas"
 import { GridCanvas } from "./render/GridCanvas"
+import { createSampleAtlas } from "./render/sampleAtlas"
 import { createZip, downloadBlob } from "./render/zip"
 import { ChannelWindowSlider } from "./ui/ChannelWindowSlider"
 import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
-import { PolicyWeightControl } from "./ui/PolicyWeightControl"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
+import { PolicyWeightControl } from "./ui/PolicyWeightControl"
 import { RunPicker } from "./ui/RunPicker"
 import type {
   SampleSweepRequest,
@@ -146,11 +146,11 @@ export function TrainingView() {
   const [substrateZeroIsBlack, setSubstrateZeroIsBlack] = useState(
     VIEWER_DEFAULTS.rendering.substrateZeroIsBlack
   )
-  const [boundaryGradientZeroIsBlack, setBoundaryGradientZeroIsBlack] = useState(
-    VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack
+  const [boundaryGradientZeroIsBlack, setBoundaryGradientZeroIsBlack] =
+    useState(VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack)
+  const [morphologyGradientVisible, setMorphologyGradientVisible] = useState(
+    VIEWER_DEFAULTS.rendering.morphologyGradientVisible
   )
-  const [morphologyGradientVisible, setMorphologyGradientVisible] =
-    useState(VIEWER_DEFAULTS.rendering.morphologyGradientVisible)
   const [morphologyDensityVisible, setMorphologyDensityVisible] = useState(
     VIEWER_DEFAULTS.rendering.morphologyDensityVisible
   )
@@ -171,11 +171,15 @@ export function TrainingView() {
   const [gradientExponent, setGradientExponent] = useState(
     VIEWER_DEFAULTS.rendering.gradientExponent
   )
-  const [particleShape, setParticleShape] =
-    useState<ParticleShape>(VIEWER_DEFAULTS.rendering.particleShape)
-  const [particleColorMode, setParticleColorMode] =
-    useState<ParticleColorMode>(VIEWER_DEFAULTS.rendering.particleColorMode)
-  const [particleAlpha, setParticleAlpha] = useState(VIEWER_DEFAULTS.rendering.particleAlpha)
+  const [particleShape, setParticleShape] = useState<ParticleShape>(
+    VIEWER_DEFAULTS.rendering.particleShape
+  )
+  const [particleColorMode, setParticleColorMode] = useState<ParticleColorMode>(
+    VIEWER_DEFAULTS.rendering.particleColorMode
+  )
+  const [particleAlpha, setParticleAlpha] = useState(
+    VIEWER_DEFAULTS.rendering.particleAlpha
+  )
   const [directionalLineVisible, setDirectionalLineVisible] = useState(
     VIEWER_DEFAULTS.rendering.directionalLineVisible
   )
@@ -224,8 +228,10 @@ export function TrainingView() {
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(
     VIEWER_DEFAULTS.rendering.internalStateChannelStart
   )
-  const [chemicalMemoryOpponentSubtraction, setChemicalMemoryOpponentSubtraction] =
-    useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
+  const [
+    chemicalMemoryOpponentSubtraction,
+    setChemicalMemoryOpponentSubtraction,
+  ] = useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
   // "Add"/"Move"/"Deform" interaction tools (render/GridCanvas.tsx's own
   // Tool type) — toggled on/off by clicking their own icon button again
   // (see the Tools section below), not reset by a run/generation change
@@ -256,9 +262,8 @@ export function TrainingView() {
   const [particleDensityOverride, setParticleDensityOverride] = useState<
     number | null
   >(null)
-  const [substrateResolutionOverride, setSubstrateResolutionOverride] = useState<
-    number | null
-  >(null)
+  const [substrateResolutionOverride, setSubstrateResolutionOverride] =
+    useState<number | null>(null)
   useEffect(() => {
     setChemicalArchitectureOverride(null)
     setChiralityOverride(null)
@@ -272,42 +277,48 @@ export function TrainingView() {
     1
   const effectiveParticleDensity =
     particleDensityOverride ?? defaultParticleDensity
+  // Population controls are expressed at the run's q=1 reference density.
+  // The actual numerical sampling population scales with q, just like the
+  // trainer's density resolver. Previously playback undid this scaling and
+  // changed only mass/spacing, so a 4x selection could never look 4x denser.
+  const densityScaledParticleCap = Math.min(
+    MAX_PARTICLES,
+    Math.max(2, Math.floor(frontendParticleCap * effectiveParticleDensity + 0.5))
+  )
+  const densityScaledInitialParticleCount = Math.min(
+    densityScaledParticleCap,
+    Math.max(
+      1,
+      Math.floor(frontendInitialParticleCount * effectiveParticleDensity + 0.5)
+    )
+  )
   const defaultSubstrateResolution =
     VIEWER_DEFAULTS.playback.substrateResolution ?? activeConfig?.fieldN ?? 256
   const effectiveSubstrateResolution =
     substrateResolutionOverride ?? defaultSubstrateResolution
   const effectiveChirality =
     chiralityOverride ?? activeConfig?.chirality ?? true
-  const playbackConfig = useMemo(
-    () => {
-      if (!activeConfig) return null
-      const densityResolved = configAtDensity(
-        {
-          ...activeConfig,
-          fieldN: effectiveSubstrateResolution,
-          chemicalCommunicationArchitecture:
-            chemicalArchitectureOverride ??
-            chemicalCommunicationArchitectureFromConfig(activeConfig),
-          chirality: effectiveChirality,
-        },
-        effectiveParticleDensity
-      )
-      // Playback population is an explicit viewer control. Density currently
-      // changes numerical physics/chemistry only, never count or seed count.
-      return {
-        ...densityResolved,
-        particles: activeConfig.particles,
-        initialParticleCount: activeConfig.initialParticleCount,
-      }
-    },
-    [
-      activeConfig,
-      chemicalArchitectureOverride,
-      effectiveChirality,
-      effectiveParticleDensity,
-      effectiveSubstrateResolution,
-    ]
-  )
+  const playbackConfig = useMemo(() => {
+    if (!activeConfig) return null
+    const densityResolved = configAtDensity(
+      {
+        ...activeConfig,
+        fieldN: effectiveSubstrateResolution,
+        chemicalCommunicationArchitecture:
+          chemicalArchitectureOverride ??
+          chemicalCommunicationArchitectureFromConfig(activeConfig),
+        chirality: effectiveChirality,
+      },
+      effectiveParticleDensity
+    )
+    return densityResolved
+  }, [
+    activeConfig,
+    chemicalArchitectureOverride,
+    effectiveChirality,
+    effectiveParticleDensity,
+    effectiveSubstrateResolution,
+  ])
   useEffect(() => {
     const maxStart = Math.max(0, (activeConfig?.channels ?? 3) - 3)
     setSubstrateChannelStart((start) => Math.min(start, maxStart))
@@ -355,9 +366,8 @@ export function TrainingView() {
   useEffect(() => {
     setMutation(null)
   }, [brainSelectionKey])
-  const mutatedWeights = mutation?.selectionKey === brainSelectionKey
-    ? mutation.weights
-    : null
+  const mutatedWeights =
+    mutation?.selectionKey === brainSelectionKey ? mutation.weights : null
   const activeBrainConfig = useMemo(() => {
     if (!previewConfig || !mutatedWeights) return previewConfig
     return { ...previewConfig, weights: mutatedWeights }
@@ -437,7 +447,11 @@ export function TrainingView() {
     )
     setFrontendInitialParticleCount(initialCount)
     setFrontendInitialParticleCountInput(String(initialCount))
-  }, [viewingRunId, activeConfig?.particles, activeConfig?.initialParticleCount])
+  }, [
+    viewingRunId,
+    activeConfig?.particles,
+    activeConfig?.initialParticleCount,
+  ])
   // null = following this generation's own trained physics/growth values;
   // non-null once either live-control panel's sliders have been touched.
   // Reset whenever the run or the generation
@@ -509,7 +523,8 @@ export function TrainingView() {
 
   const handleSampleSweep = async (request: SampleSweepRequest) => {
     const canvas = gridCanvasRef.current
-    if (!canvas || !physicsValues || !activeConfig || !weightedPreviewConfig) return
+    if (!canvas || !physicsValues || !activeConfig || !weightedPreviewConfig)
+      return
     const combinations: Array<Partial<Record<SweepParameterKey, number>>> = []
     const visit = (
       axisIndex: number,
@@ -552,13 +567,13 @@ export function TrainingView() {
         "repulsionMaxDelta",
       ] as const satisfies readonly (keyof PhysicsSettings)[]
       const samples = combinations.map((combination) => {
-        const density = combination.particleDensityMultiplier
-          ?? effectiveParticleDensity
-        const substrateResolution = combination.substrateResolution
-          ?? effectiveSubstrateResolution
+        const density =
+          combination.particleDensityMultiplier ?? effectiveParticleDensity
+        const substrateResolution =
+          combination.substrateResolution ?? effectiveSubstrateResolution
         const resolvedConfig = configAtDensity(
           { ...weightedPreviewConfig, fieldN: substrateResolution },
-          density,
+          density
         )
         const physics = { ...basePhysics }
         if (combination.particleDensityMultiplier !== undefined) {
@@ -568,8 +583,8 @@ export function TrainingView() {
         }
         for (const axis of request.axes) {
           if (
-            axis.key !== "particleDensityMultiplier"
-            && axis.key !== "substrateResolution"
+            axis.key !== "particleDensityMultiplier" &&
+            axis.key !== "substrateResolution"
           ) {
             physics[axis.key] = combination[axis.key]!
           }
@@ -577,11 +592,16 @@ export function TrainingView() {
         return {
           config: resolvedConfig,
           physics,
-          particleCap: frontendParticleCap,
-          initialParticleCount: frontendInitialParticleCount,
+          particleCap: Math.min(
+            MAX_PARTICLES,
+            Math.max(2, Math.floor(frontendParticleCap * density + 0.5))
+          ),
+          initialParticleCount: Math.max(
+            1,
+            Math.floor(frontendInitialParticleCount * density + 0.5)
+          ),
           particleDensityMultiplier: density,
-          particleRadiusPx:
-            particleRadiusPx / Math.sqrt(density),
+          particleRadiusPx: particleRadiusPx / Math.sqrt(density),
           filename: `${request.axes.map((axis) => `${keyLabel(axis.key)}=${valueLabel(combination[axis.key]!)}`).join(",")}.png`,
         }
       })
@@ -601,7 +621,9 @@ export function TrainingView() {
         captures.push({
           filename: "atlas.png",
           blob: await createSampleAtlas({
-            images: captures.filter((capture) => capture.filename.endsWith(".png")),
+            images: captures.filter((capture) =>
+              capture.filename.endsWith(".png")
+            ),
             rows: secondAxis
               ? {
                   label: firstAxis.label,
@@ -630,12 +652,11 @@ export function TrainingView() {
     }
   }
 
-  const particleStateChannelCount = particleColorMode === "neural-memory"
-    ? 8
-    : (activeConfig?.channels ?? 1)
+  const particleStateChannelCount =
+    particleColorMode === "neural-memory" ? 8 : (activeConfig?.channels ?? 1)
   const particleStateChannelStart = Math.min(
     Math.max(0, particleStateChannelCount - 3),
-    internalStateChannelStart,
+    internalStateChannelStart
   )
 
   return (
@@ -673,212 +694,229 @@ export function TrainingView() {
 
         <section>
           <details className="settings-category">
-          <summary>Simulation</summary>
-          <div className="stat-row">
-            <span>Cell memory</span>
-            <select
-              className="select"
-              aria-label="Cell memory"
-              value={displayedCellMemory}
-              disabled={!activeConfig}
-              onChange={(event) =>
-                setPolicyExploration({
-                  cellMemory: event.target.value as CellMemory,
-                  hiddenWidth: displayedHiddenWidth,
-                  variant: 0,
-                })
-              }
-            >
-              <option value="none">None</option>
-              <option value="recurrent">Recurrent</option>
-            </select>
-          </div>
-          <div className="stat-row">
-            <span>Hidden layer</span>
-            <select
-              className="select"
-              aria-label="Hidden layer width"
-              value={displayedHiddenWidth}
-              disabled={!activeConfig}
-              onChange={(event) =>
-                setPolicyExploration({
-                  cellMemory: displayedCellMemory,
-                  hiddenWidth: Number(event.target.value),
-                  variant: 0,
-                })
-              }
-            >
-              {[16, 32, 64, 128, 256].map((width) => (
-                <option key={width} value={width}>
-                  {width}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="stat-row">
-            <span>Brain source</span>
-            <button
-              className="select simulation-control-button"
-              disabled={!policyExploration}
-              onClick={() => setPolicyExploration(null)}
-              title="Restore the selected generation's trained brain"
-              aria-label="Restore trained brain"
-            >
-              {policyExploration
-                ? `Seeded random #${policyExploration.variant + 1} ↺`
-                : "Trained"}
-            </button>
-          </div>
-          <div className="stat-row">
-            <span>Chemical architecture</span>
-            <select
-              className="select"
-              aria-label="Chemical architecture"
-              value={
-                playbackConfig?.chemicalCommunicationArchitecture ??
-                "cell-owned-projection"
-              }
-              disabled={!activeConfig}
-              onChange={(event) => {
-                const selected = event.target
-                  .value as ChemicalCommunicationArchitecture
-                const trained = activeConfig
-                  ? chemicalCommunicationArchitectureFromConfig(activeConfig)
-                  : "cell-owned-projection"
-                setChemicalArchitectureOverride(
-                  selected === trained ? null : selected
-                )
-              }}
-            >
-              <option value="cell-owned-projection">
-                Cell-owned projection
-              </option>
-              <option value="persistent-environment">
-                Persistent environment
-              </option>
-            </select>
-          </div>
-          <div className="stat-row">
-            <span>Particle density</span>
-            <select
-              className="select"
-              aria-label="Particle density"
-              value={effectiveParticleDensity}
-              disabled={!activeConfig}
-              onChange={(event) => {
-                const selected = Number(event.target.value)
-                setParticleDensityOverride(
-                  selected === defaultParticleDensity ? null : selected
-                )
-                setPhysicsOverride(null)
-              }}
-            >
-              {Array.from(new Set([0.5, 1, 2, 4, effectiveParticleDensity]))
-                .sort((a, b) => a - b)
-                .map((density) => (
-                  <option key={density} value={density}>
-                    {density}×
+            <summary>Simulation</summary>
+            <div className="stat-row">
+              <span>Cell memory</span>
+              <select
+                className="select"
+                aria-label="Cell memory"
+                value={displayedCellMemory}
+                disabled={!activeConfig}
+                onChange={(event) =>
+                  setPolicyExploration({
+                    cellMemory: event.target.value as CellMemory,
+                    hiddenWidth: displayedHiddenWidth,
+                    variant: 0,
+                  })
+                }
+              >
+                <option value="none">None</option>
+                <option value="recurrent">Recurrent</option>
+              </select>
+            </div>
+            <div className="stat-row">
+              <span>Hidden layer</span>
+              <select
+                className="select"
+                aria-label="Hidden layer width"
+                value={displayedHiddenWidth}
+                disabled={!activeConfig}
+                onChange={(event) =>
+                  setPolicyExploration({
+                    cellMemory: displayedCellMemory,
+                    hiddenWidth: Number(event.target.value),
+                    variant: 0,
+                  })
+                }
+              >
+                {[16, 32, 64, 128, 256].map((width) => (
+                  <option key={width} value={width}>
+                    {width}
                   </option>
                 ))}
-            </select>
-          </div>
-          <div className="stat-row">
-            <span>Substrate resolution</span>
-            <select
-              className="select"
-              aria-label="Substrate resolution"
-              value={effectiveSubstrateResolution}
-              disabled={!activeConfig}
-              title="Changing substrate resolution rebuilds and restarts playback"
-              onChange={(event) => {
-                const selected = Number(event.target.value)
-                setSubstrateResolutionOverride(
-                  selected === defaultSubstrateResolution ? null : selected
-                )
-              }}
-            >
-              {Array.from(new Set([64, 128, 256, 512, 1024, 2048, effectiveSubstrateResolution]))
-                .sort((a, b) => a - b)
-                .map((resolution) => (
-                  <option key={resolution} value={resolution}>
-                    {resolution}×{resolution}
-                  </option>
-                ))}
-            </select>
-          </div>
-          <label
-            className="checkbox-row"
-            title="Changing chirality rebuilds and restarts playback"
-          >
-            <input
-              type="checkbox"
-              checked={effectiveChirality}
-              disabled={!activeConfig}
-              onChange={(event) => {
-                const trained = activeConfig?.chirality ?? true
-                const selected = event.target.checked
-                setChiralityOverride(selected === trained ? null : selected)
-              }}
-            />
-            Chirality
-          </label>
-          <label className="slider-row">
-            <span>Playback particle cap</span>
-            <Slider
-              min={2}
-              max={MAX_PARTICLES}
-              step={1}
-              value={frontendParticleCap}
-              disabled={!activeConfig}
-              onChange={(value) => {
-                const cap = Math.floor(value)
-                setFrontendParticleCap(cap)
-                if (frontendInitialParticleCount > cap) {
-                  setFrontendInitialParticleCount(cap)
-                  setFrontendInitialParticleCountInput(String(cap))
+              </select>
+            </div>
+            <div className="stat-row">
+              <span>Brain source</span>
+              <button
+                className="select simulation-control-button"
+                disabled={!policyExploration}
+                onClick={() => setPolicyExploration(null)}
+                title="Restore the selected generation's trained brain"
+                aria-label="Restore trained brain"
+              >
+                {policyExploration
+                  ? `Seeded random #${policyExploration.variant + 1} ↺`
+                  : "Trained"}
+              </button>
+            </div>
+            <div className="stat-row">
+              <span>Chemical architecture</span>
+              <select
+                className="select"
+                aria-label="Chemical architecture"
+                value={
+                  playbackConfig?.chemicalCommunicationArchitecture ??
+                  "cell-owned-projection"
                 }
-              }}
-            />
-            <span className="slider-value playback-cap-value">
-              {frontendParticleCap.toLocaleString()}
-            </span>
-          </label>
-          <label className="slider-row">
-            <span>Initial agents</span>
-            <input
-              className="number-input"
-              type="number"
-              min={1}
-              max={frontendParticleCap}
-              step={1}
-              value={frontendInitialParticleCountInput}
-              onChange={(e) => {
-                setFrontendInitialParticleCountInput(e.currentTarget.value)
-                const value = e.currentTarget.valueAsNumber
-                if (
-                  Number.isFinite(value) &&
-                  value >= 1 &&
-                  value <= frontendParticleCap
-                ) {
-                  setFrontendInitialParticleCount(Math.floor(value))
-                }
-              }}
-              onBlur={(e) => {
-                const value = e.currentTarget.valueAsNumber
-                const count = Math.min(
-                  frontendParticleCap,
-                  Math.max(
-                    1,
-                    Number.isFinite(value)
-                      ? Math.floor(value)
-                      : frontendInitialParticleCount
+                disabled={!activeConfig}
+                onChange={(event) => {
+                  const selected = event.target
+                    .value as ChemicalCommunicationArchitecture
+                  const trained = activeConfig
+                    ? chemicalCommunicationArchitectureFromConfig(activeConfig)
+                    : "cell-owned-projection"
+                  setChemicalArchitectureOverride(
+                    selected === trained ? null : selected
                   )
+                }}
+              >
+                <option value="cell-owned-projection">
+                  Cell-owned projection
+                </option>
+                <option value="persistent-environment">
+                  Persistent environment
+                </option>
+              </select>
+            </div>
+            <div className="stat-row">
+              <span>Particle density</span>
+              <select
+                className="select"
+                aria-label="Particle density"
+                value={effectiveParticleDensity}
+                disabled={!activeConfig}
+                onChange={(event) => {
+                  const selected = Number(event.target.value)
+                  setParticleDensityOverride(
+                    selected === defaultParticleDensity ? null : selected
+                  )
+                  setPhysicsOverride(null)
+                }}
+              >
+                {Array.from(new Set([0.5, 1, 2, 4, effectiveParticleDensity]))
+                  .sort((a, b) => a - b)
+                  .map((density) => (
+                    <option key={density} value={density}>
+                      {density}×
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <div className="stat-row">
+              <span>Substrate resolution</span>
+              <select
+                className="select"
+                aria-label="Substrate resolution"
+                value={effectiveSubstrateResolution}
+                disabled={!activeConfig}
+                title="Changing substrate resolution rebuilds and restarts playback"
+                onChange={(event) => {
+                  const selected = Number(event.target.value)
+                  setSubstrateResolutionOverride(
+                    selected === defaultSubstrateResolution ? null : selected
+                  )
+                }}
+              >
+                {Array.from(
+                  new Set([
+                    64,
+                    128,
+                    256,
+                    512,
+                    1024,
+                    2048,
+                    effectiveSubstrateResolution,
+                  ])
                 )
-                setFrontendInitialParticleCountInput(String(count))
-                setFrontendInitialParticleCount(count)
-              }}
-            />
-          </label>
+                  .sort((a, b) => a - b)
+                  .map((resolution) => (
+                    <option key={resolution} value={resolution}>
+                      {resolution}×{resolution}
+                    </option>
+                  ))}
+              </select>
+            </div>
+            <label
+              className="checkbox-row"
+              title="Changing chirality rebuilds and restarts playback"
+            >
+              <input
+                type="checkbox"
+                checked={effectiveChirality}
+                disabled={!activeConfig}
+                onChange={(event) => {
+                  const trained = activeConfig?.chirality ?? true
+                  const selected = event.target.checked
+                  setChiralityOverride(selected === trained ? null : selected)
+                }}
+              />
+              Chirality
+            </label>
+            <label className="slider-row">
+              <span>Playback sample cap (at 1×)</span>
+              <Slider
+                min={2}
+                max={MAX_PARTICLES}
+                step={1}
+                value={frontendParticleCap}
+                disabled={!activeConfig}
+                onChange={(value) => {
+                  const cap = Math.floor(value)
+                  setFrontendParticleCap(cap)
+                  if (frontendInitialParticleCount > cap) {
+                    setFrontendInitialParticleCount(cap)
+                    setFrontendInitialParticleCountInput(String(cap))
+                  }
+                }}
+              />
+              <span className="slider-value playback-cap-value">
+                {effectiveParticleDensity === 1
+                  ? frontendParticleCap.toLocaleString()
+                  : `${frontendParticleCap.toLocaleString()} → ${densityScaledParticleCap.toLocaleString()}`}
+              </span>
+            </label>
+            <label className="slider-row">
+              <span>Initial samples (at 1×)</span>
+              <input
+                className="number-input"
+                type="number"
+                min={1}
+                max={frontendParticleCap}
+                step={1}
+                value={frontendInitialParticleCountInput}
+                onChange={(e) => {
+                  setFrontendInitialParticleCountInput(e.currentTarget.value)
+                  const value = e.currentTarget.valueAsNumber
+                  if (
+                    Number.isFinite(value) &&
+                    value >= 1 &&
+                    value <= frontendParticleCap
+                  ) {
+                    setFrontendInitialParticleCount(Math.floor(value))
+                  }
+                }}
+                onBlur={(e) => {
+                  const value = e.currentTarget.valueAsNumber
+                  const count = Math.min(
+                    frontendParticleCap,
+                    Math.max(
+                      1,
+                      Number.isFinite(value)
+                        ? Math.floor(value)
+                        : frontendInitialParticleCount
+                    )
+                  )
+                  setFrontendInitialParticleCountInput(String(count))
+                  setFrontendInitialParticleCount(count)
+                }}
+              />
+              {effectiveParticleDensity !== 1 && (
+                <span className="slider-value">
+                  → {densityScaledInitialParticleCount.toLocaleString()}
+                </span>
+              )}
+            </label>
           </details>
         </section>
 
@@ -896,7 +934,7 @@ export function TrainingView() {
             </label>
             <Slider
               min={1}
-              max={8}
+              max={MAX_ZOOM}
               step={0.05}
               value={zoom}
               disabled={autoZoomEnabled}
@@ -916,7 +954,10 @@ export function TrainingView() {
                 type="checkbox"
                 checked={bloom.enabled}
                 onChange={(event) =>
-                  setBloom((value) => ({ ...value, enabled: event.target.checked }))
+                  setBloom((value) => ({
+                    ...value,
+                    enabled: event.target.checked,
+                  }))
                 }
               />
               Bloom
@@ -930,9 +971,13 @@ export function TrainingView() {
                     max={3}
                     step={0.05}
                     value={bloom.intensity}
-                    onChange={(intensity) => setBloom((value) => ({ ...value, intensity }))}
+                    onChange={(intensity) =>
+                      setBloom((value) => ({ ...value, intensity }))
+                    }
                   />
-                  <span className="slider-value">{bloom.intensity.toFixed(2)}</span>
+                  <span className="slider-value">
+                    {bloom.intensity.toFixed(2)}
+                  </span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom threshold</span>
@@ -941,9 +986,13 @@ export function TrainingView() {
                     max={1}
                     step={0.01}
                     value={bloom.threshold}
-                    onChange={(threshold) => setBloom((value) => ({ ...value, threshold }))}
+                    onChange={(threshold) =>
+                      setBloom((value) => ({ ...value, threshold }))
+                    }
                   />
-                  <span className="slider-value">{bloom.threshold.toFixed(2)}</span>
+                  <span className="slider-value">
+                    {bloom.threshold.toFixed(2)}
+                  </span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom radius</span>
@@ -952,9 +1001,13 @@ export function TrainingView() {
                     max={8}
                     step={0.25}
                     value={bloom.radiusPx}
-                    onChange={(radiusPx) => setBloom((value) => ({ ...value, radiusPx }))}
+                    onChange={(radiusPx) =>
+                      setBloom((value) => ({ ...value, radiusPx }))
+                    }
                   />
-                  <span className="slider-value">{bloom.radiusPx.toFixed(2)}px</span>
+                  <span className="slider-value">
+                    {bloom.radiusPx.toFixed(2)}px
+                  </span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom levels</span>
@@ -963,7 +1016,9 @@ export function TrainingView() {
                     max={10}
                     step={1}
                     value={bloom.levels}
-                    onChange={(levels) => setBloom((value) => ({ ...value, levels }))}
+                    onChange={(levels) =>
+                      setBloom((value) => ({ ...value, levels }))
+                    }
                   />
                   <span className="slider-value">{bloom.levels}</span>
                 </label>
@@ -974,9 +1029,13 @@ export function TrainingView() {
                     max={1}
                     step={0.01}
                     value={bloom.scatter}
-                    onChange={(scatter) => setBloom((value) => ({ ...value, scatter }))}
+                    onChange={(scatter) =>
+                      setBloom((value) => ({ ...value, scatter }))
+                    }
                   />
-                  <span className="slider-value">{bloom.scatter.toFixed(2)}</span>
+                  <span className="slider-value">
+                    {bloom.scatter.toFixed(2)}
+                  </span>
                 </label>
               </>
             )}
@@ -997,7 +1056,9 @@ export function TrainingView() {
             <select
               className="select"
               value={particleShape}
-              onChange={(e) => setParticleShape(e.target.value as ParticleShape)}
+              onChange={(e) =>
+                setParticleShape(e.target.value as ParticleShape)
+              }
             >
               <option value="dot">Dot</option>
               <option value="triangle">Triangle</option>
@@ -1008,11 +1069,13 @@ export function TrainingView() {
             <select
               className="select"
               value={particleColorMode}
-              onChange={(e) => setParticleColorMode(e.target.value as ParticleColorMode)}
+              onChange={(e) =>
+                setParticleColorMode(e.target.value as ParticleColorMode)
+              }
             >
               <option value="white">White</option>
               <option value="neural-color">Neural RGB</option>
-              <option value="mitosis-drive">Mitosis drive</option>
+              <option value="mitosis-drive">Growth magnitude</option>
               <option value="neural-memory">Neural memory</option>
               <option value="chemical-memory">Chemical memory</option>
               <option value="boundary-value">Boundary value</option>
@@ -1021,7 +1084,13 @@ export function TrainingView() {
           </label>
           <label className="slider-row">
             <span>Alpha</span>
-            <Slider min={0} max={1} step={0.01} value={particleAlpha} onChange={setParticleAlpha} />
+            <Slider
+              min={0}
+              max={1}
+              step={0.01}
+              value={particleAlpha}
+              onChange={setParticleAlpha}
+            />
             <span className="slider-value">{particleAlpha.toFixed(2)}</span>
           </label>
           <label className="checkbox-row">
@@ -1042,9 +1111,17 @@ export function TrainingView() {
           </label>
           {particleColorMode === "mitosis-drive" && (
             <label className="slider-row">
-              <span>Signal boost</span>
-              <Slider min={1} max={10} step={0.1} value={mitosisSignalBoost} onChange={setMitosisSignalBoost} />
-              <span className="slider-value">{mitosisSignalBoost.toFixed(1)}×</span>
+              <span>Magnitude boost</span>
+              <Slider
+                min={1}
+                max={10}
+                step={0.1}
+                value={mitosisSignalBoost}
+                onChange={setMitosisSignalBoost}
+              />
+              <span className="slider-value">
+                {mitosisSignalBoost.toFixed(1)}×
+              </span>
             </label>
           )}
           {(particleColorMode === "neural-memory" ||
@@ -1085,7 +1162,7 @@ export function TrainingView() {
               )}
               {particleColorMode === "neural-memory" &&
                 previewConfig &&
-                  cellMemoryFromConfig(previewConfig) !== "recurrent" && (
+                cellMemoryFromConfig(previewConfig) !== "recurrent" && (
                   <p className="hint">
                     Neural memory is disabled, so these channels remain zero.
                   </p>
@@ -1128,6 +1205,7 @@ export function TrainingView() {
               <option value="shear">Shear</option>
               <option value="repulsion">Repulsion field</option>
               <option value="morphology">Policy morphology</option>
+              <option value="growth">Integrated growth</option>
               <option value="substrate">Substrate</option>
               <option value="orientation">Orientation substrate (ch7)</option>
               <option value="gradient">Boundary gradient</option>
@@ -1164,7 +1242,10 @@ export function TrainingView() {
                   <span>RGB channels</span>
                   <span>
                     {substrateChannelStart}–
-                    {Math.min(activeConfig.channels - 1, substrateChannelStart + 2)}
+                    {Math.min(
+                      activeConfig.channels - 1,
+                      substrateChannelStart + 2
+                    )}
                   </span>
                 </div>
                 <ChannelWindowSlider
@@ -1174,14 +1255,22 @@ export function TrainingView() {
                 />
               </div>
               <label className="checkbox-row">
-                <input type="checkbox" checked={substrateZeroIsBlack} onChange={(e) => setSubstrateZeroIsBlack(e.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={substrateZeroIsBlack}
+                  onChange={(e) => setSubstrateZeroIsBlack(e.target.checked)}
+                />
                 Zero is black
               </label>
             </>
           )}
           {fieldMode === "orientation" && (
             <label className="checkbox-row">
-              <input type="checkbox" checked={substrateZeroIsBlack} onChange={(e) => setSubstrateZeroIsBlack(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={substrateZeroIsBlack}
+                onChange={(e) => setSubstrateZeroIsBlack(e.target.checked)}
+              />
               Zero is black
             </label>
           )}
@@ -1212,7 +1301,13 @@ export function TrainingView() {
           {fieldMode === "gradient" && (
             <>
               <label className="checkbox-row">
-                <input type="checkbox" checked={boundaryGradientZeroIsBlack} onChange={(e) => setBoundaryGradientZeroIsBlack(e.target.checked)} />
+                <input
+                  type="checkbox"
+                  checked={boundaryGradientZeroIsBlack}
+                  onChange={(e) =>
+                    setBoundaryGradientZeroIsBlack(e.target.checked)
+                  }
+                />
                 Zero is black
               </label>
               <label className="slider-row">
@@ -1270,8 +1365,8 @@ export function TrainingView() {
             targetPoints={targetPoints}
             targetVisible={targetVisible}
             physics={physicsValues}
-            particleCap={frontendParticleCap}
-            initialParticleCount={frontendInitialParticleCount}
+            particleCap={densityScaledParticleCap}
+            initialParticleCount={densityScaledInitialParticleCount}
             fieldMode={fieldMode}
             substrateChannelStart={substrateChannelStart}
             substrateZeroIsBlack={substrateZeroIsBlack}
@@ -1294,7 +1389,9 @@ export function TrainingView() {
             mitosisSignalBoost={mitosisSignalBoost}
             boundaryGradientScale={boundaryGradientScale}
             internalStateChannelStart={internalStateChannelStart}
-            chemicalMemoryOpponentSubtraction={chemicalMemoryOpponentSubtraction}
+            chemicalMemoryOpponentSubtraction={
+              chemicalMemoryOpponentSubtraction
+            }
             tool={tool}
             deformSettings={deformSettings}
             onStep={(step, particles) => {
@@ -1313,7 +1410,7 @@ export function TrainingView() {
             {/* Live count, not the cap — grows as growth splits. */}
             <span>
               {activeConfig
-                ? `${cellCount} / ${frontendParticleCap} cells`
+                ? `${cellCount} / ${densityScaledParticleCap} samples`
                 : "— cells"}
             </span>
           </div>
@@ -1329,64 +1426,64 @@ export function TrainingView() {
               <div className="tool-settings-panel">
                 <h3>Deform</h3>
                 <>
-                    <label className="checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={deformSettings.direction === "outward"}
-                        onChange={(e) =>
-                          setDeformSettings((s) => ({
-                            ...s,
-                            direction: e.target.checked ? "outward" : "inward",
-                          }))
-                        }
-                      />
-                      {deformSettings.direction === "outward"
-                        ? "Push outward (explode)"
-                        : "Pull inward (implode)"}
-                    </label>
-                    <label className="slider-row">
-                      <span>Strength</span>
-                      <Slider
-                        min={0}
-                        max={2}
-                        step={0.01}
-                        value={deformSettings.strength}
-                        onChange={(v) =>
-                          setDeformSettings((s) => ({ ...s, strength: v }))
-                        }
-                      />
-                      <span className="slider-value">
-                        {deformSettings.strength.toFixed(2)}
-                      </span>
-                    </label>
-                    <label className="slider-row">
-                      <span>Radius</span>
-                      <Slider
-                        min={0.01}
-                        max={0.5}
-                        step={0.01}
-                        value={deformSettings.radius}
-                        onChange={(v) =>
-                          setDeformSettings((s) => ({ ...s, radius: v }))
-                        }
-                      />
-                      <span className="slider-value">
-                        {deformSettings.radius.toFixed(2)}
-                      </span>
-                    </label>
-                    <label className="checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={deformSettings.mode === "deformation"}
-                        onChange={(e) =>
-                          setDeformSettings((s) => ({
-                            ...s,
-                            mode: e.target.checked ? "deformation" : "velocity",
-                          }))
-                        }
-                      />
-                      Direct deformation (F) edit
-                    </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={deformSettings.direction === "outward"}
+                      onChange={(e) =>
+                        setDeformSettings((s) => ({
+                          ...s,
+                          direction: e.target.checked ? "outward" : "inward",
+                        }))
+                      }
+                    />
+                    {deformSettings.direction === "outward"
+                      ? "Push outward (explode)"
+                      : "Pull inward (implode)"}
+                  </label>
+                  <label className="slider-row">
+                    <span>Strength</span>
+                    <Slider
+                      min={0}
+                      max={2}
+                      step={0.01}
+                      value={deformSettings.strength}
+                      onChange={(v) =>
+                        setDeformSettings((s) => ({ ...s, strength: v }))
+                      }
+                    />
+                    <span className="slider-value">
+                      {deformSettings.strength.toFixed(2)}
+                    </span>
+                  </label>
+                  <label className="slider-row">
+                    <span>Radius</span>
+                    <Slider
+                      min={0.01}
+                      max={0.5}
+                      step={0.01}
+                      value={deformSettings.radius}
+                      onChange={(v) =>
+                        setDeformSettings((s) => ({ ...s, radius: v }))
+                      }
+                    />
+                    <span className="slider-value">
+                      {deformSettings.radius.toFixed(2)}
+                    </span>
+                  </label>
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={deformSettings.mode === "deformation"}
+                      onChange={(e) =>
+                        setDeformSettings((s) => ({
+                          ...s,
+                          mode: e.target.checked ? "deformation" : "velocity",
+                        }))
+                      }
+                    />
+                    Direct deformation (F) edit
+                  </label>
                 </>
               </div>
             )}

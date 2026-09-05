@@ -39,7 +39,7 @@ from simulation_settings import (
 
 from environment_gpu import EnvironmentGPU, ceil_div
 from density import SPATIAL_RANDOM_CELLS
-from mpm_core import MpmCore, REPULSION_FIELD_N
+from mpm_core import GRID_N, INV_DX, NODE_COUNT, MpmCore, REPULSION_FIELD_N
 from shader_template import load_core_shader
 from policy_parameters import (
     CELL_OWNED_PROJECTION_ARCHITECTURE,
@@ -160,8 +160,7 @@ def weight_layout(
     # gradients per channel, with no positional inputs.
     architecture = normalize_architecture(architecture)
     in_dim = policy_input_dim(channels, architecture)
-    # Chemical deltas + anisotropy/division bias(2),
-    # growth direction(2), division drive(1), then architecture-specific tail.
+    # Chemical deltas + local 2-D growth vector, then architecture-specific tail.
     out_dim = sum(head.size for head in policy_heads(channels, architecture))
     fc1w_offset = 0
     fc1b_offset = fc1w_offset + hidden_dim * in_dim
@@ -384,14 +383,14 @@ class AgentsGPU:
                     "POLICY_TAIL_DECODE": (
                         "out.color = vec3<f32>(0.5);\n"
                         "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
-                        "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 5u + s]);\n"
-                        "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 5u + PRIVATE_STATE_DIM + s]);\n"
+                            "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 2u + s]);\n"
+                            "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]);\n"
                         "  }"
                         if policy_has_recurrence(self.policy_architecture) else
                         "out.color = vec3<f32>(\n"
-                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 5u]),\n"
-                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 6u]),\n"
-                        "    safeSigmoid(outVec[ENV_WRITE_DIM + 7u])\n"
+                            "    safeSigmoid(outVec[ENV_WRITE_DIM + 2u]),\n"
+                            "    safeSigmoid(outVec[ENV_WRITE_DIM + 3u]),\n"
+                            "    safeSigmoid(outVec[ENV_WRITE_DIM + 4u])\n"
                         "  );\n"
                         "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
                         "    out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0;\n"
@@ -449,7 +448,6 @@ class AgentsGPU:
                     {"binding": 5, "resource": {"buffer": environment.deposit_scratch, "offset": 0, "size": environment.deposit_scratch.size}},
                     {"binding": 6, "resource": {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size}},
                     {"binding": 7, "resource": {"buffer": self._agent_state_buffer, "offset": 0, "size": self._agent_state_buffer.size}},
-                    {"binding": 8, "resource": {"buffer": core.C, "offset": 0, "size": core.C.size}},
                     {"binding": 9, "resource": {"buffer": core.velocities, "offset": 0, "size": core.velocities.size}},
                     # core.F/core.rest — same buffers core/p2g.wgsl and
                     # core/g2p.wgsl already read/write every physics substep
@@ -469,6 +467,54 @@ class AgentsGPU:
 
         self._communication_bind_groups = [bind_group(0, 0), bind_group(1, 0)]
         self._commit_bind_groups = [bind_group(0, 1), bind_group(1, 1)]
+
+        # Growth lives on the MPM grid. MpmCore owns this shared buffer because
+        # g2p consumes it directly; Agents only populates it from NN vectors.
+        self._growth_field = core.growth_field
+        growth_module = device.create_shader_module(code=load_core_shader(
+            "growthField.wgsl",
+            {
+                "CHANNELS": channels,
+                "GRID_N": GRID_N,
+                "INV_DX": INV_DX,
+                "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
+            },
+        ))
+        entry_points = (
+            "clearGrowthField", "scatterGrowthIntent", "proposeResample", "commitResample",
+        )
+        self._growth_pipelines = [
+            device.create_compute_pipeline(
+                layout=wgpu.AutoLayoutMode.auto,
+                compute={"module": growth_module, "entry_point": entry},
+            )
+            for entry in entry_points
+        ]
+        resources = {
+            0: {"buffer": core.positions, "offset": 0, "size": core.positions.size},
+            1: {"buffer": core.active_count_uniform, "offset": 0, "size": core.active_count_uniform.size},
+            2: {"buffer": core.rest, "offset": 0, "size": core.rest.size},
+            3: {"buffer": self._agent_state_buffer, "offset": 0, "size": self._agent_state_buffer.size},
+            4: {"buffer": core.C, "offset": 0, "size": core.C.size},
+            5: {"buffer": core.velocities, "offset": 0, "size": core.velocities.size},
+            6: {"buffer": core.F, "offset": 0, "size": core.F.size},
+            7: core.morphology_texture.create_view(),
+            8: {"buffer": self._growth_field, "offset": 0, "size": self._growth_field.size},
+            9: {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size},
+        }
+        binding_sets = (
+            (8,), (0, 1, 2, 8), (0, 1, 2, 3, 7, 8, 9), tuple(range(10)),
+        )
+        self._growth_bind_groups = [
+            device.create_bind_group(
+                layout=pipeline.get_bind_group_layout(0),
+                entries=[{"binding": binding, "resource": resources[binding]} for binding in bindings],
+            )
+            for pipeline, bindings in zip(self._growth_pipelines, binding_sets)
+        ]
+        self._growth_dispatches = (
+            ceil_div(7 * NODE_COUNT, 256), None, None, None,
+        )
 
     @property
     def max_active_particles(self) -> int:
@@ -536,12 +582,10 @@ class AgentsGPU:
         )
 
     def set_growth_enabled(self, enabled: bool) -> None:
-        """Controls whether agentStep may start new cell cycles.
+        """Enable publication of neural growth vectors (uniform byte 44).
 
-        Byte offset 44 is AgentPhysics.growthEnabled, the twelfth f32.
-        Existing cycles continue to g=2 and divide after this is false,
-        which makes the rollout tail a settling window rather than an
-        abrupt cancellation of already accumulated growth.
+        Disabling immediately publishes zero intent. Already-created rest
+        volume remains, so rollout tails settle mechanically without shrinking.
         """
         self.device.queue.write_buffer(
             self._physics_uniform,
@@ -568,7 +612,7 @@ class AgentsGPU:
             )
 
     def set_division_directionality(self, strength: float) -> None:
-        """Cap policy-polarized daughter placement; 0 is symmetric."""
+        """Retained settings ABI slot; continuous-vector growth ignores it."""
         self._division_directionality = max(0.0, min(1.0, float(strength)))
         for buffer in self._step_mode_uniforms:
             self.device.queue.write_buffer(
@@ -728,6 +772,9 @@ class AgentsGPU:
         # field in WGSL, so numerical particle slot identity never enters it.
         particle_meta["rng"] = 0
         self.device.queue.write_buffer(self._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, particle_meta.tobytes())
+        self.device.queue.write_buffer(
+            self._growth_field, 0, np.zeros(self._growth_field.size // 4, dtype=np.int32)
+        )
         self.set_rollout_seed(seed)
 
     def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int, *, commit_lifecycle: bool = True) -> None:
@@ -742,6 +789,19 @@ class AgentsGPU:
         p.set_bind_group(0, groups[parity])
         p.dispatch_workgroups(self._dispatch)
         p.end()
+        if commit_lifecycle:
+            self.encode_growth_field(encoder)
+
+    def encode_growth_field(self, encoder: wgpu.GPUCommandEncoder) -> None:
+        """Splat continuous growth intent and refine oversized quadrature samples."""
+        for pipeline, bind_group, fixed_dispatch in zip(
+            self._growth_pipelines, self._growth_bind_groups, self._growth_dispatches
+        ):
+            p = encoder.begin_compute_pass()
+            p.set_pipeline(pipeline)
+            p.set_bind_group(0, bind_group)
+            p.dispatch_workgroups(self._dispatch if fixed_dispatch is None else fixed_dispatch)
+            p.end()
 
     def encode_splat_chemical_state(self, encoder: wgpu.GPUCommandEncoder) -> None:
         """Publish persistent cell chemistry into the cleared transient field."""

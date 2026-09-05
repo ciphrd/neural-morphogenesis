@@ -61,7 +61,7 @@ export interface RunSettings {
   internalStateSpeed?: number;
   /** Cap on policy-polarized daughter placement: 0 symmetric, 1 full. */
   divisionDirectionality?: number;
-  /** Blend signed division drive toward the full [-1,1] -> [0,1] remap. */
+  /** Legacy checkpoint field; ignored by continuous-vector growth. */
   divisionDriveBoost?: number;
   elasticStrainScale?: number;
   elasticStrainInputsEnabled?: boolean;
@@ -108,7 +108,7 @@ export interface RunSettings {
   /** Legacy run field, converted to a duration when growthDuration is absent. */
   growthRate?: number;
   growthMax: number;
-  /** Cap on policy-directed rest-growth anisotropy. */
+  /** Blend integrated tensor growth from isotropic (0) to directional (1). */
   growthAnisotropy?: number;
   /** Elastic areal-compression interval that smoothly suppresses growth. */
   growthCompressionStart?: number;
@@ -290,7 +290,7 @@ export interface PhysicsSettings {
   morphologyBlurSigma: number;
   /** Half-saturation density used by rho/(rho + reference). */
   morphologyDensityReference: number;
-  /** Gradient magnitude below which tangent division falls back to the policy. */
+  /** Gradient magnitude below which Lab tangent growth falls back to the policy. */
   boundaryTangentMinGradient: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;

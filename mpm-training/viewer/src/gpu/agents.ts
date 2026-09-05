@@ -32,12 +32,13 @@
 // parent-state inheritance) needed those 2 slots freed to fit at all.
 
 import agentsSrc from "../../../core/agents.wgsl?raw";
+import growthFieldSrc from "../../../core/growthField.wgsl?raw";
 import coreConstants from "../../../core/constants.json";
 import densityModel from "../../../core/density.json";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
 import type { Environment } from "./environment";
-import { MAX_PARTICLES, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
+import { GRID_N, INV_DX, MAX_PARTICLES, NODE_COUNT, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { policyHasRecurrence, type ChemicalCommunicationArchitecture, type PolicyArchitecture, type UpdateRuleWeights } from "./types";
 import policyParameters from "../../../core/policy_parameters.json";
 import { policyWeightsShapeError } from "./policyEval";
@@ -90,9 +91,9 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
   // gradient per channel, with no positional inputs.
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  // Chemical deltas plus growth controls/direction, a dedicated
-  // signed division drive, and either private-state updates or RGB.
-  const outDim = channels + (stateful ? 21 : 8);
+  // Chemical deltas plus a two-component local growth vector and either
+  // private-state updates or RGB.
+  const outDim = channels + (stateful ? 18 : 5);
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -171,10 +172,7 @@ export function randomWeights(
   const fc1b = Array.from({ length: hiddenDim }, () => randomSymmetric(trunk.biasJitter, random));
   const common = [
     [channels, policyParameters.heads.chemical],
-    [1, policyParameters.heads.anisotropy],
-    [1, policyParameters.heads.division],
-    [2, policyParameters.heads.growthDirection],
-    [1, policyParameters.heads.divisionDrive],
+    [2, policyParameters.heads.growthVector],
   ] as const;
   const specs = policyHasRecurrence(architecture)
     ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const]
@@ -205,6 +203,10 @@ export class Agents {
   private readonly communicationBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly commitBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly stepModeUniforms: [GPUBuffer, GPUBuffer];
+  private readonly growthField: GPUBuffer;
+  private readonly growthPipelines: readonly GPUComputePipeline[];
+  private readonly growthBindGroup: GPUBindGroup;
+  private readonly growthDispatches: readonly (number | null)[];
   // Assigned via setActiveCount() in the constructor (also growth's own
   // baseline write), not directly — `!` tells TS's definite-assignment
   // check that's fine, it just can't see through the method call itself.
@@ -338,8 +340,8 @@ export class Agents {
           ? "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { inputVec[3u * CHANNELS + 6u + s] = tanh(agentState.particleMeta[pi].privateState[s]); }"
           : "",
         POLICY_TAIL_DECODE: policyHasRecurrence(this.policyArchitecture)
-          ? "out.color = vec3<f32>(0.5); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 5u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 5u + PRIVATE_STATE_DIM + s]); }"
-          : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 5u]), safeSigmoid(outVec[ENV_WRITE_DIM + 6u]), safeSigmoid(outVec[ENV_WRITE_DIM + 7u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
+          ? "out.color = vec3<f32>(0.5); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 2u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]); }"
+          : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 2u]), safeSigmoid(outVec[ENV_WRITE_DIM + 3u]), safeSigmoid(outVec[ENV_WRITE_DIM + 4u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
         ELASTIC_STRAIN_INPUTS_ENABLED: config.elasticStrainInputsEnabled ? "true" : "false",
         MORPHOLOGY_SAMPLER_DECLARATION: filterableMorphology
           ? "@group(0) @binding(14) var morphologySampler: sampler;"
@@ -383,7 +385,6 @@ export class Agents {
           { binding: 5, resource: { buffer: environment.depositScratch } },
           { binding: 6, resource: { buffer: this.physicsUniform } },
           { binding: 7, resource: { buffer: this.agentStateBuffer } },
-          { binding: 8, resource: { buffer: mpmCore.C } },
           { binding: 9, resource: { buffer: mpmCore.velocities } },
           // mpmCore.F/rest — same buffers ../core/'s own p2g.wgsl/g2p.wgsl
           // already read/write every physics substep — see
@@ -402,6 +403,66 @@ export class Agents {
     ) as [GPUBindGroup, GPUBindGroup];
     this.communicationBindGroups = bindGroups(0);
     this.commitBindGroups = bindGroups(1);
+
+    this.growthField = mpmCore.growthField;
+    const growthModule = device.createShaderModule({
+      code: templateShader(growthFieldSrc, {
+        CHANNELS: config.channels,
+        GRID_N,
+        INV_DX,
+        MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
+      }),
+    });
+    const growthEntries = [
+      "clearGrowthField", "scatterGrowthIntent", "proposeResample", "commitResample",
+    ] as const;
+    // Keep one stable ABI for every growth pass. With `layout: "auto"`, WebGPU
+    // infers a different layout per entry point and removes bindings that an
+    // entry point does not reach. That made this host-side resource table
+    // brittle whenever the optimizer eliminated a formerly-used binding.
+    const growthBindGroupLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        {
+          binding: 7,
+          visibility: GPUShaderStage.COMPUTE,
+          texture: { sampleType: "unfilterable-float", viewDimension: "2d" },
+        },
+        { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      ],
+    });
+    const growthPipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [growthBindGroupLayout],
+    });
+    this.growthPipelines = growthEntries.map((entryPoint) =>
+      device.createComputePipeline({ layout: growthPipelineLayout, compute: { module: growthModule, entryPoint } })
+    );
+    const resources = new Map<number, GPUBindingResource>([
+      [0, { buffer: mpmCore.positions }],
+      [1, { buffer: mpmCore.activeCountUniform }],
+      [2, { buffer: mpmCore.rest }],
+      [3, { buffer: this.agentStateBuffer }],
+      [4, { buffer: mpmCore.C }],
+      [5, { buffer: mpmCore.velocities }],
+      [6, { buffer: mpmCore.F }],
+      [7, mpmCore.morphologyTexture.createView()],
+      [8, { buffer: this.growthField }],
+      [9, { buffer: this.physicsUniform }],
+    ]);
+    this.growthBindGroup = device.createBindGroup({
+      layout: growthBindGroupLayout,
+      entries: Array.from(resources, ([binding, resource]) => ({ binding, resource })),
+    });
+    this.growthDispatches = [
+      ceilDiv(7 * NODE_COUNT, 256), null, null, null,
+    ];
   }
 
   /** Exposed so Renderer's own triangle-shape pipeline can point each
@@ -412,6 +473,13 @@ export class Agents {
    * heading and neural color fields. */
   get particleMetaState(): GPUBuffer {
     return this.agentStateBuffer;
+  }
+
+  /** Viewer-only access to the spatially integrated growth decision field.
+   * The renderer reads it after the growth passes have completed; it never
+   * mutates the field or participates in admission. */
+  get integratedGrowthField(): GPUBuffer {
+    return this.growthField;
   }
 
   loadWeights(weights: UpdateRuleWeights): void {
@@ -658,6 +726,7 @@ export class Agents {
       view.setUint32(base + PARTICLE_META_OFFSET_RNG, 0, true);
     }
     this.device.queue.writeBuffer(this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET, buf);
+    this.device.queue.writeBuffer(this.growthField, 0, new Uint32Array(this.growthField.size / 4));
     this.setRolloutSeed(seed);
   }
 
@@ -672,6 +741,19 @@ export class Agents {
     pass.setBindGroup(0, (commitLifecycle ? this.commitBindGroups : this.communicationBindGroups)[parity]);
     pass.dispatchWorkgroups(this.dispatch);
     pass.end();
+    if (commitLifecycle) this.encodeGrowthField(encoder);
+  }
+
+  /** Spatially average policy intent, grow continuum volume, then insert at
+   * the lowest-density available target claimed by the whole material. */
+  private encodeGrowthField(encoder: GPUCommandEncoder): void {
+    for (let i = 0; i < this.growthPipelines.length; i++) {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.growthPipelines[i]);
+      pass.setBindGroup(0, this.growthBindGroup);
+      pass.dispatchWorkgroups(this.growthDispatches[i] ?? this.dispatch);
+      pass.end();
+    }
   }
 
   /** Publishes each cell's persistent chemical state into the cleared,

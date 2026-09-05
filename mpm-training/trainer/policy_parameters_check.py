@@ -45,7 +45,7 @@ def main() -> None:
     assert initialized.shape == flat.shape and initialized.dtype == np.float32
     print("[PASS] shared head-aware random initializer produces the canonical float32 layout")
 
-    growth_head = next(head for head in policy_heads(CHEM_CHANNELS) if head.name == "growthDirection")
+    growth_head = next(head for head in policy_heads(CHEM_CHANNELS) if head.name == "growthVector")
     assert growth_head.bias_center == (0.0, 0.0)
     # The local direction prior must not privilege the heading's forward axis.
     # With a silent trunk, independent symmetric jitter should populate all
@@ -55,12 +55,12 @@ def main() -> None:
         candidate = random_flat_policy_weights(CHEM_CHANNELS, HIDDEN_DIM, np.random.default_rng(seed))
         layout = weight_layout(CHEM_CHANNELS, HIDDEN_DIM)
         biases = candidate[layout["fc2b_offset"]:]
-        directions.append(biases[CHEM_CHANNELS + 2:CHEM_CHANNELS + 4])
+        directions.append(biases[CHEM_CHANNELS:CHEM_CHANNELS + 2])
     directions = np.asarray(directions)
     assert set(zip(directions[:, 0] > 0, directions[:, 1] > 0)) == {
         (False, False), (False, True), (True, False), (True, True)
     }
-    print("[PASS] growth-direction initialization is zero-centered with no local-forward prior")
+    print("[PASS] growth-vector initialization is zero-centered with no local-forward prior")
 
     scales = mutation_scale_vector(CHEM_CHANNELS, HIDDEN_DIM)
     seed = 29
@@ -79,7 +79,7 @@ def main() -> None:
     stateful_random = random_flat_policy_weights(
         CHEM_CHANNELS, stateful_hidden, np.random.default_rng(31), STATEFUL_ARCHITECTURE
     )
-    assert stateful_flat.size == stateful_random.size == 4638
+    assert stateful_flat.size == stateful_random.size
     assert [head.name for head in policy_heads(CHEM_CHANNELS, STATEFUL_ARCHITECTURE)][-2:] == [
         "stateDelta", "stateGate"
     ]
@@ -87,13 +87,16 @@ def main() -> None:
         stateful_flat, sigma, np.random.default_rng(32), STATEFUL_ARCHITECTURE
     )
     assert stateful_mutated.shape == stateful_flat.shape
-    print("[PASS] stateful-64 has 41 inputs, 30 outputs, 4638 parameters, and state-head mutation buckets")
+    stateful_layout = weight_layout(CHEM_CHANNELS, stateful_hidden, STATEFUL_ARCHITECTURE)
+    assert stateful_flat.size == stateful_layout["total_floats"]
+    print("[PASS] stateful-64 layout matches the shared continuous-vector policy specification")
 
     recurrent_128 = UpdateRule(CHEM_CHANNELS, STATEFUL_128_ARCHITECTURE)
     recurrent_128_flat = get_weights(recurrent_128)
     assert policy_hidden_dim(STATEFUL_128_ARCHITECTURE) == 128
-    assert recurrent_128_flat.size == 9246
-    print("[PASS] recurrent policy keeps 128 hidden units and has 9246 parameters")
+    recurrent_layout = weight_layout(CHEM_CHANNELS, 128, STATEFUL_128_ARCHITECTURE)
+    assert recurrent_128_flat.size == recurrent_layout["total_floats"]
+    print("[PASS] recurrent policy keeps 128 hidden units and the shared output layout")
 
     assert CHEMICAL_COMMUNICATION_ARCHITECTURES == (
         PERSISTENT_ENVIRONMENT_ARCHITECTURE,

@@ -20,6 +20,12 @@ const GRID_N: u32 = __GRID_N__u;
 const INV_DX: f32 = __INV_DX__;
 const DT: f32 = __DT__;
 const CHEMICAL_CHANNELS: u32 = __CHEMICAL_CHANNELS__u;
+const GROWTH_FIELD_CHANNELS: u32 = 7u;
+const GROWTH_CH_TENSOR_XX: u32 = 2u;
+const GROWTH_CH_TENSOR_XY: u32 = 3u;
+const GROWTH_CH_TENSOR_YY: u32 = 4u;
+const GROWTH_CH_WEIGHT: u32 = 5u;
+const GROWTH_FIELD_SCALE: f32 = 8192.0;
 // Channel 7 in one-based UI language: the channel immediately before the
 // final (index 7) growth-admission channel.
 const FLUIDITY_CHANNEL: u32 = 6u;
@@ -100,6 +106,9 @@ struct ChemicalState {
   particles: array<ParticleChemical>,
 }
 @group(0) @binding(8) var<storage, read> chemicalState: ChemicalState;
+// Volume-weighted vector/tensor field scattered once per neural macro step by
+// growthField.wgsl and held constant across this macro step's physics substeps.
+@group(0) @binding(9) var<storage, read_write> growthField: array<atomic<i32>>;
 
 fn matMul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
   return vec4<f32>(
@@ -128,6 +137,25 @@ fn matInverse(m: vec4<f32>) -> vec4<f32> {
 
 fn identityPlusScaled(m: vec4<f32>, s: f32) -> vec4<f32> {
   return vec4<f32>(1.0 + s * m.x, s * m.y, s * m.z, 1.0 + s * m.w);
+}
+
+// Exact exponential of a symmetric 2x2 matrix. This keeps a positive growth
+// tensor positive and makes det(exp(A)) = exp(trace(A)) without a time-step
+// dependent Euler approximation.
+fn symmetricExp(m: vec4<f32>) -> vec4<f32> {
+  let traceHalf = 0.5 * (m.x + m.w);
+  let diagonal = 0.5 * (m.x - m.w);
+  let offDiagonal = 0.5 * (m.y + m.z);
+  let radius = sqrt(diagonal * diagonal + offDiagonal * offDiagonal);
+  let radialScale = select(1.0, sinh(radius) / radius, radius > 1e-7);
+  let traceScale = exp(traceHalf);
+  let c = cosh(radius);
+  return traceScale * vec4<f32>(
+    c + radialScale * diagonal,
+    radialScale * offDiagonal,
+    radialScale * offDiagonal,
+    c - radialScale * diagonal,
+  );
 }
 
 struct Polar {
@@ -237,7 +265,6 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let rest0 = particleRest[pi];
   let Jp0 = rest0.jp;
   let Fg0 = rest0.growthF;
-  let g0 = max(matDet(Fg0), 1e-6); // det(Fg): grown rest-area ratio
 
   // base = floor(y - 0.5), fx = y - base, landing in [0.5, 1.5) — must
   // match p2g.wgsl's own note on this exactly (G2P has to gather from
@@ -249,6 +276,9 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var v = vec2<f32>(0.0, 0.0);
   var C = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  // Symmetric world-space growth-rate tensor (xx, xy, yy), gathered with
+  // exactly the same quadratic basis as velocity.
+  var growthTensor = vec3<f32>(0.0);
 
   for (var i: u32 = 0u; i < 3u; i = i + 1u) {
     for (var j: u32 = 0u; j < 3u; j = j + 1u) {
@@ -266,6 +296,17 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       v = v + wgv;
       // APIC affine velocity field: C += 4*inv_dx * outer(w*grid_v, dpos).
       C = C + (4.0 * INV_DX) * vec4<f32>(wgv.x * dpos.x, wgv.x * dpos.y, wgv.y * dpos.x, wgv.y * dpos.y);
+
+      let growthBase = nodeIndex * GROWTH_FIELD_CHANNELS;
+      let representedWeight = f32(atomicLoad(&growthField[growthBase + GROWTH_CH_WEIGHT])) / GROWTH_FIELD_SCALE;
+      if (representedWeight > 1e-8) {
+        let nodeTensor = vec3<f32>(
+          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XX])),
+          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XY])),
+          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_YY])),
+        ) / (GROWTH_FIELD_SCALE * representedWeight);
+        growthTensor = growthTensor + wgt * nodeTensor;
+      }
     }
   }
 
@@ -323,14 +364,10 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let JpNew = clamp(Jp0 * oldJe / newJe, 0.6, 20.0);
 
-  // POLICY-DRIVEN GROWTH. agentStep probabilistically starts a cell cycle
-  // from its dedicated signed division drive and latches cycleActive. Once
-  // active, Fg grows independently of pre-existing dilation. Holding F
-  // fixed while g increases makes Fe compressive; the constitutive force
-  // then expands the compatible body. This is growth followed by elastic
-  // relaxation, rather than the old circular repulsion -> dilation ->
-  // growth ratchet.
-  var gNew = g0;
+  // CONTINUOUS FIELD-DRIVEN GROWTH. The MPM-grid tensor is a smooth,
+  // represented-volume-normalized continuum quantity. Its trace is the local
+  // areal growth command; its eigenvectors/eigenvalues describe directional
+  // coherence. No stochastic admission or per-sample growth event exists.
   var FgNew = Fg0;
   // A newborn's visible disc area follows the exact normalized rest-area
   // growth curve: exp(rate*t)-1 goes from 0 to 1 over the same interval in
@@ -345,7 +382,8 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       1.0,
     );
   }
-  if (rest0.cycleActive > 0.5 && material.growthRate > 0.0) {
+  let fieldRate = max(growthTensor.x + growthTensor.z, 0.0);
+  if (fieldRate > 1e-8 && material.growthRate > 0.0) {
     let compression = max(0.0, -log(max(newJe, 1e-6)));
     var pressureGate = 0.0;
     if (material.growthCompressionStop > material.growthCompressionStart) {
@@ -361,46 +399,23 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let feedback = clamp(material.growthCompressionFeedback, 0.0, 1.0);
     let effectiveGrowthRate = material.growthRate * mix(1.0, pressureGate, feedback);
-    gNew = min(
-      g0 * exp(effectiveGrowthRate * DT),
-      2.0
+    // The global anisotropy control interpolates between isotropic growth and
+    // the integrated tensor without changing its trace (hence total material
+    // creation). The NN itself still outputs only one two-component vector.
+    let anisotropy = clamp(material.growthAnisotropy, 0.0, 1.0);
+    let isotropic = 0.5 * fieldRate;
+    let worldRate = vec4<f32>(
+      mix(isotropic, growthTensor.x, anisotropy),
+      growthTensor.y * anisotropy,
+      growthTensor.y * anisotropy,
+      mix(isotropic, growthTensor.z, anisotropy),
     );
-    let areaFactor = gNew / g0;
-    let signalStrength = clamp(
-      rest0.growthAnisotropy * material.growthAnisotropy,
-      0.0,
-      1.0
-    );
-    if (signalStrength < 1e-6) {
-      // Exact scalar-model equivalence while persistent anisotropy is zero.
-      FgNew = Fg0 * sqrt(areaFactor);
-    } else {
-      // The policy direction is expressed in the agent's local frame. Rotate
-      // it through the channel-7-gradient heading captured by agents.wgsl,
-      // then pull that world axis back through Fe's polar rotation so H acts
-      // objectively in Fg's intermediate configuration.
-      let r = polarDecompose(FeTrial).r;
-      let worldAngle = rest0.growthFrameAngle + rest0.growthAngle;
-      let worldDir = vec2<f32>(cos(worldAngle), sin(worldAngle));
-      let n = vec2<f32>(
-        r.x * worldDir.x + r.z * worldDir.y,
-        r.y * worldDir.x + r.w * worldDir.y
-      );
-      // det(H)=areaFactor exactly. signalStrength=0 is isotropic;
-      // signalStrength=1 places the full area increment along n while the
-      // perpendicular rest stretch stays unchanged.
-      let logArea = log(max(areaFactor, 1.0));
-      let parallel = exp(0.5 * logArea * (1.0 + signalStrength));
-      let perpendicular = exp(0.5 * logArea * (1.0 - signalStrength));
-      let delta = parallel - perpendicular;
-      let H = vec4<f32>(
-        perpendicular + delta * n.x * n.x,
-        delta * n.x * n.y,
-        delta * n.y * n.x,
-        perpendicular + delta * n.y * n.y
-      );
-      FgNew = matMul(H, Fg0);
-    }
+    // Fg lives in the intermediate material configuration. Pull the world
+    // tensor back through Fe's elastic rotation before exponentiating it.
+    let rotation = polarDecompose(FeTrial).r;
+    let materialRate = matMul(matMul(matTranspose(rotation), worldRate), rotation);
+    let increment = symmetricExp(materialRate * (effectiveGrowthRate * DT));
+    FgNew = matMul(increment, Fg0);
   }
 
   particlePos[pi] = newPos;

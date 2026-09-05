@@ -66,7 +66,7 @@ export const MAX_PARTICLES: number = coreConstants.MAX_PARTICLES;
 // own (unrelated) FIELD_N in gpu/environment.ts.
 export const REPULSION_FIELD_N: number = coreConstants.FIELD_N;
 
-const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
+export const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
 const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
@@ -136,6 +136,8 @@ export class MpmCore {
   // velocity. Neither is written by anything outside MpmCore itself.
   readonly gridAccum: GPUBuffer;
   readonly gridVel: GPUBuffer;
+  /** Continuous growth tensor/vector accumulator on the MPM node grid. */
+  readonly growthField: GPUBuffer;
 
   private readonly gravityUniform: GPUBuffer;
   // Public — fieldDiagnostics.wgsl's own scatterDiagnostics pass needs
@@ -212,6 +214,10 @@ export class MpmCore {
 
     this.gridAccum = device.createBuffer({ size: NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage: GPUBufferUsage.STORAGE });
     this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
+    this.growthField = device.createBuffer({
+      size: NODE_COUNT * 7 * f32,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
 
     this.gravityUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     // 64 bytes — fourteen material/growth/fluidity floats plus padding,
@@ -273,6 +279,7 @@ export class MpmCore {
         { binding: 6, resource: { buffer: this.activeCountUniform } },
         { binding: 7, resource: { buffer: this.materialUniform } },
         { binding: 8, resource: { buffer: this.chemicalStateFallback } },
+        { binding: 9, resource: { buffer: this.growthField } },
       ],
     });
 
@@ -579,6 +586,7 @@ export class MpmCore {
         { binding: 6, resource: { buffer: this.activeCountUniform } },
         { binding: 7, resource: { buffer: this.materialUniform } },
         { binding: 8, resource: { buffer } },
+        { binding: 9, resource: { buffer: this.growthField } },
       ],
     });
   }
@@ -683,6 +691,7 @@ export class MpmCore {
     this.rest.destroy();
     this.gridAccum.destroy();
     this.gridVel.destroy();
+    this.growthField.destroy();
     this.gravityUniform.destroy();
     this.materialUniform.destroy();
     this.activeCountUniform.destroy();

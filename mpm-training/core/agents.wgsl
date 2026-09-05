@@ -45,13 +45,16 @@
 // environment mode deposits only the final round's delta into its transported
 // spatial field. Per-channel temporal scales divide both delta rates.
 //
-// Growth — each particle may spawn a copy of itself after completing its
-// tensor-growth cycle. The policy's local growth-direction output controls both
-// the morphoelastic growth axis and the daughter-placement axis. Growth
-// admission integrates persistent hazard from a
-// dedicated signed policy output: positive values are interpreted as a
-// per-macro-step probability, while zero and negative values inhibit division.
-// See agentStep()'s own comment for the exact split logic.
+// Growth integration and adaptive resampling live in growthField.wgsl. This
+// module publishes one bounded 2-D growth vector per material sample. Its
+// magnitude is the requested local growth rate and its direction is rotated
+// from the sample's sensed local frame into world space before publication.
+//
+// MPM particles are material samples, not cells. Growth therefore changes the
+// continuum rest volume independently of sample count. The local neural vector
+// is splatted and volume-normalized on the MPM grid; g2p exponentiates the
+// resulting tensor into growthF every physics substep. There is no stochastic
+// admission, angular bin, range, cooldown, or per-sample division event.
 //
 // A new particle claims the next free slot via an atomic counter
 // (`agentState.growthCount`, binding 7) — physics.maxActiveParticles caps
@@ -78,25 +81,16 @@
 // activation lag is a far cheaper, and imperceptible-at-training-scale,
 // price.
 //
-// Division is conservative grow-then-split. The substrate probabilistically
-// starts a cell cycle; g2p increases the parent's stress-free area and mass
-// to the division target; agentStep then replaces it with two baseline
-// daughters. Their F is rescaled so Fe and stress are continuous. APIC
-// velocities remain centered around the pre-split velocity, preserving total
-// linear momentum even when a directional signal deliberately shifts the
-// daughters' positional center toward +n.
+// Sample creation is adaptive quadrature refinement only. An oversized sample
+// conservatively transfers one baseline rest volume to a new sample while
+// preserving elastic, chemical, and neural state. If no slot is available,
+// continuum growth still proceeds; only numerical resolution stops increasing.
 //
-// agentState.particleMeta (binding 7, byte offset 256) packs lifecycle state,
-// the current two-component channel-7-gradient alignment cache, and neural
-// state into one struct/buffer. `rng` is retained as the ABI name
-// but stores lineage generation in density model v3; lifecycle randomness is
-// sampled from a rollout-seeded world-space field, never particle slot. cooldown is
-// macro steps remaining before this slot can split again, counted down
-// every step, reset to physics.divisionCooldown on BOTH the parent and
-// the new child whenever a split succeeds (without this, a particle
-// sitting on a strong, stable deposit could keep splitting every single
-// step it's eligible, producing a burst of children from one spot
-// rather than growth actually spreading out over time/distance).
+// agentState.particleMeta (binding 7, byte offset 256) packs retained ABI
+// bookkeeping, the channel-7-gradient alignment cache, and neural state into
+// one struct/buffer. `rng` now acts as a refinement lineage generation;
+// cooldown/hazard/threshold fields remain layout-compatible but are not part
+// of the continuous growth decision.
 // Packed into ONE struct/buffer, not four separate ones, specifically to
 // keep this shader's own storage buffer count under the 10-per-stage
 // hardware ceiling Chrome's own Dawn backend reports on real browser
@@ -115,10 +109,9 @@
 // Bound directly to MpmCore's own positions/velocities/activeCount
 // buffers (see simulation.ts/agents_gpu.py).
 //
-// The policy proposes a local-space growth direction and anisotropy target;
-// agentStep() applies direction immediately and relaxes anisotropy toward its
-// target. A separate sigmoid controls how far the daughter pair's center shifts
-// along that direction, but not its axis. physics.maxStrafe
+// The policy proposes a signed local-space growth vector. Its magnitude is the
+// rate; v and -v share an axial growth tensor but point refinement toward
+// opposite sides. physics.maxStrafe
 // remains an optional scale for applying the growth direction as physical
 // acceleration; it is zero by default and does not scale growth geometry.
 
@@ -204,18 +197,17 @@ struct AgentPhysics {
   // Legacy ABI slot. Centered deposits no longer use a directional offset.
   depositDistance: f32,
   // World-domain (same [0,1]^2 units as `positions`, NOT field-pixels
-  // like depositDistance) separation of a newly split daughter pair along
-  // the current growth direction — see this file's own module docstring/agentStep()'s
-  // own growth comment. trainer/simulation_settings.py's own
+  // like depositDistance) radial spacing of newly emitted material samples.
+  // trainer/simulation_settings.py's own
   // SPLIT_DISPLACEMENT is the starting value.
   splitDisplacement: f32,
-  // Macro steps a particle refuses to split again for, right after
-  // splitting (either as the parent OR as the new child — see
+  // Macro steps a particle refuses to emit again for, right after
+  // growth (either as the source OR as a new sample — see
   // agentStep()'s own growth comment) — counted down once per macro
   // step in the `cooldown` buffer below, regardless of whether this
   // step's own split draw would otherwise have succeeded.
   // trainer/simulation_settings.py's own DIVISION_COOLDOWN is the
-  // starting value; 0 disables cooldown entirely (a particle can split
+  // starting value; 0 disables cooldown entirely (a particle can emit
   // again the very next step, this shader's own behavior before
   // cooldown existed).
   divisionCooldown: f32,
@@ -234,9 +226,7 @@ struct AgentPhysics {
   // themselves are evaluated in world space, so changing field resolution no
   // longer changes the physical deposit footprint.
   depositSigma: f32,
-  // Host-controlled gate for STARTING new cell cycles. Already-active
-  // cycles are allowed to finish, so switching this off creates a clean
-  // settling phase rather than stranding partly-grown cells.
+  // Host-controlled gate for admitting new material-emission events.
   growthEnabled: f32,
   // Legacy wire-layout slots. Spawn position remains part of rollout
   // initialization, but is deliberately no longer exposed to the policy.
@@ -279,7 +269,7 @@ struct AgentPhysics {
   // Live gain on chemical concentration inputs. 1 uses their natural [-1,1]
   // scale; 0 removes values while leaving gradients intact.
   chemicalValueInputMultiplier: f32,
-  // Blends division drive from its signed meaning toward a full probability
+  // Blends growth drive from its signed meaning toward a full probability
   // remap: 0 keeps drive unchanged; 1 maps [-1,1] to [0,1].
   divisionDriveBoost: f32,
   _physicsPadding2: f32,
@@ -307,13 +297,13 @@ struct ParticleMeta {
   // Current neural cell color. vec4 keeps the packed record naturally
   // aligned while the alpha lane remains fixed at 1.
   color: vec4<f32>,
-  // Integrated division clock. Positive growth signal adds hazard; the
-  // particle starts a cycle when it crosses an exponentially-distributed
+  // Integrated growth clock. Positive growth signal adds hazard; the
+  // particle emits material when it crosses an exponentially-distributed
   // threshold. Unlike a fresh Bernoulli draw, sub-threshold drive is not
   // discarded when the signal later changes or temporarily vanishes.
   divisionHazard: f32,
   divisionThreshold: f32,
-  // Neural mitosis drive after the global division-drive remapping. This is
+  // Neural growth drive after the global drive remapping. This is
   // signed at zero boost and shifts toward [0,1] as boost approaches one.
   // Kept explicitly so rendering reads the value used by the simulation.
   mitosisPropensity: f32,
@@ -384,21 +374,21 @@ struct ParticleRest {
   // because there was nowhere else to put it, which entangled two
   // unrelated meanings; `growthF` above is now that home.
   jp: f32,
-  // Cell-cycle latch. The policy's dedicated division drive probabilistically
-  // sets this to 1; g2p advances growth until division and both daughters reset it.
+  // One-step growth-event latch. The policy's dedicated growth drive
+  // probabilistically sets this to 1; additive emission resets it immediately.
   cycleActive: f32,
   // Persistent growth polarity, stored as one angle relative to the
   // particle's heading rather than an instantly-overwritten world vector.
   growthAngle: f32,
   // Persistent anisotropy relaxed toward the policy's sigmoid target.
   growthAnisotropy: f32,
-  // Instantaneous sigmoid strength used when division places a daughter.
+  // Normalized angular fan spread. The legacy field name preserves the ABI.
   divisionBias: f32,
   // Heading frame captured for physics passes, which do not bind ParticleMeta.
   // Together with growthAngle it reconstructs the world-space growth axis.
   growthFrameAngle: f32,
-  // Rendering-only newborn area fraction. Seeded cells start at 1; mitosis
-  // leaves the parent full-sized and starts the new daughter at 0. g2p grows
+  // Rendering-only newborn area fraction. Seeded samples start at 1; growth
+  // leaves the source full-sized and starts each new sample at 0. g2p grows
   // this with the same curve and compression response as rest area. It fills
   // the struct's former alignment lane, so the 48-byte ABI is unchanged.
   appearanceScale: f32,
@@ -414,8 +404,7 @@ struct StepMode {
   // Host sets this to communicationSpeed / neuralUpdatesPerMacro.
   communicationDt: f32,
   stateUpdateSpeed: f32,
-  // Global cap on the policy's polarized daughter placement. 0 restores
-  // center-preserving symmetric division; 1 grants full policy authority.
+  // Global cap on the policy's angular fan: 0 is a ray, 1 permits 360 degrees.
   divisionDirectionality: f32,
   _padding0: f32,
   _padding1: f32,
@@ -803,16 +792,11 @@ fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
   depositGaussian(levels, positions[pi], particleRest[pi].growthF);
 }
 
-// The bounded subset of the network's own raw output
-// this shader actually consumes — one signed chemical delta per channel +
-// anisotropy/division-bias controls and desired growth
-// direction (optionally also physical acceleration), all in LOCAL frame.
+// The bounded subset of the network's raw output: one signed chemical delta
+// per channel plus one continuous 2-D growth vector in LOCAL frame.
 struct PolicyOutput {
   envWrite: array<f32, ENV_WRITE_DIM>,
-  anisotropyTarget: f32,
-  divisionBias: f32,
-  growthTargetLocal: vec2<f32>,
-  divisionDrive: f32,
+  growthVectorLocal: vec2<f32>,
   color: vec3<f32>,
   stateDelta: array<f32, PRIVATE_STATE_DIM>,
   stateGate: array<f32, PRIVATE_STATE_DIM>,
@@ -820,17 +804,6 @@ struct PolicyOutput {
 
 fn safeSigmoid(x: f32) -> f32 {
   return 1.0 / (1.0 + exp(-clamp(x, -20.0, 20.0)));
-}
-
-fn wrapAngle(angle: f32) -> f32 {
-  return atan2(sin(angle), cos(angle));
-}
-
-fn directionAngle(v: vec2<f32>) -> f32 {
-  if (dot(v, v) <= 1e-20) {
-    return 0.0;
-  }
-  return atan2(v.y, v.x);
 }
 
 // One full Dense(HIDDEN_DIM) -> tanh -> Dense(OUT_DIM) forward pass,
@@ -864,12 +837,9 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
     out.envWrite[c] = safeTanh(outVec[c]) * physics.maxEnvWrite;
   }
-  out.anisotropyTarget = safeSigmoid(outVec[ENV_WRITE_DIM]);
-  out.divisionBias = safeSigmoid(outVec[ENV_WRITE_DIM + 1u]);
-  out.growthTargetLocal = vec2<f32>(
-    safeTanh(outVec[ENV_WRITE_DIM + 2u]), safeTanh(outVec[ENV_WRITE_DIM + 3u])
+  out.growthVectorLocal = vec2<f32>(
+    safeTanh(outVec[ENV_WRITE_DIM]), safeTanh(outVec[ENV_WRITE_DIM + 1u])
   );
-  out.divisionDrive = safeTanh(outVec[ENV_WRITE_DIM + 4u]);
   __POLICY_TAIL_DECODE__
   return out;
 }
@@ -982,13 +952,10 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
       result.envWrite[c] = (result.envWrite[c] + mirrored.envWrite[c]) * 0.5;
     }
-    result.anisotropyTarget = (result.anisotropyTarget + mirrored.anisotropyTarget) * 0.5;
-    result.divisionBias = (result.divisionBias + mirrored.divisionBias) * 0.5;
-    result.growthTargetLocal = vec2<f32>(
-      (result.growthTargetLocal.x + mirrored.growthTargetLocal.x) * 0.5,
-      (result.growthTargetLocal.y - mirrored.growthTargetLocal.y) * 0.5
+    result.growthVectorLocal = vec2<f32>(
+      (result.growthVectorLocal.x + mirrored.growthVectorLocal.x) * 0.5,
+      (result.growthVectorLocal.y - mirrored.growthVectorLocal.y) * 0.5
     );
-    result.divisionDrive = (result.divisionDrive + mirrored.divisionDrive) * 0.5;
     result.color = (result.color + mirrored.color) * 0.5;
     for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
       result.stateDelta[s] = (result.stateDelta[s] + mirrored.stateDelta[s]) * 0.5;
@@ -1036,54 +1003,37 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
   }
 
-  // The policy's current local-space vector is the growth direction directly. There
-  // is deliberately no temporal interpolation or gradient-strength-dependent
-  // angular rate: every neural evaluation replaces the cached angle, and the
-  // final communication round is what the following physics pass consumes.
-  particleRest[pi].growthAngle = directionAngle(result.growthTargetLocal);
-
-  let anisotropyBlend = 1.0 - exp(
-    -max(GROWTH_ANISOTROPY_RESPONSE_RATE, 0.0) * communicationDt
-  );
-  // Anisotropy is policy authority, independent of how strong the external
-  // orientation gradient happens to be at this resolution.
-  particleRest[pi].growthAnisotropy = clamp(
-    particleRest[pi].growthAnisotropy
-      + (result.anisotropyTarget - particleRest[pi].growthAnisotropy) * anisotropyBlend,
-    0.0,
-    1.0,
-  );
-  particleRest[pi].divisionBias = result.divisionBias;
-  particleRest[pi].growthFrameAngle = alignmentAngle;
-
   let forcedLifecycle = pi >= physics.forcedLifecycleIndex
     && pi <= physics.forcedLifecycleEndIndex;
   let forcedBoundaryTangent = forcedLifecycle
     && length(physics.forcedDivisionDirection) < 0.5;
-  var growthWorldAngle = alignmentAngle + particleRest[pi].growthAngle;
-  var growthDirectionWorld = vec2<f32>(cos(growthWorldAngle), sin(growthWorldAngle));
+  // The raw proposal can also drive optional motility/strafe. Material growth
+  // itself is selected from the integrated field in growthField.wgsl.
+  // A vanishing heading gradient has the same deterministic world-X fallback
+  // as the former angle representation; it must not erase growth magnitude.
+  let growthForward = vec2<f32>(cos(alignmentAngle), sin(alignmentAngle));
+  let growthLateral = vec2<f32>(-growthForward.y, growthForward.x);
+  var growthVectorWorld = growthForward * result.growthVectorLocal.x
+    + growthLateral * result.growthVectorLocal.y;
   let lifecycleMorphologyGradient = vec2<f32>(morphologyGx, morphologyGy);
   let lifecycleMorphologyGradientMagnitude = length(lifecycleMorphologyGradient);
   if (forcedBoundaryTangent
       && lifecycleMorphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
     // During a tangent-controlled Lab cycle, align morphoelastic growth and
     // daughter placement with the local boundary tangent.
-    growthDirectionWorld = vec2<f32>(
+    let forcedMagnitude = max(length(growthVectorWorld), select(0.0, 1.0, physics.forcedCycleAdmission != 0u));
+    growthVectorWorld = vec2<f32>(
       -lifecycleMorphologyGradient.y,
       lifecycleMorphologyGradient.x,
-    ) / lifecycleMorphologyGradientMagnitude;
-    growthWorldAngle = atan2(growthDirectionWorld.y, growthDirectionWorld.x);
-    particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - alignmentAngle);
-    particleRest[pi].growthFrameAngle = alignmentAngle;
+    ) / lifecycleMorphologyGradientMagnitude * forcedMagnitude;
   } else if (forcedLifecycle && !forcedBoundaryTangent) {
     // Lock the persistent world-frame growth axis. g2p therefore grows Fg
     // along this direction and transfers its stress through the ordinary MPM
     // grid before division along the same axis.
-    growthDirectionWorld = normalize(physics.forcedDivisionDirection);
-    growthWorldAngle = atan2(growthDirectionWorld.y, growthDirectionWorld.x);
-    particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - alignmentAngle);
-    particleRest[pi].growthFrameAngle = alignmentAngle;
+    let forcedMagnitude = max(length(growthVectorWorld), select(0.0, 1.0, physics.forcedCycleAdmission != 0u));
+    growthVectorWorld = normalize(physics.forcedDivisionDirection) * forcedMagnitude;
   }
+  growthVectorWorld *= select(0.0, 1.0, physics.growthEnabled > 0.5);
   agentState.particleMeta[pi].color = vec4<f32>(result.color, 1.0);
 
   if (stepMode.commitLifecycle != 0u) {
@@ -1096,218 +1046,15 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   // during this macro step's own physics substeps (see
   // training_sim.py's/simulation.ts's own step ordering: agentStep()
   // always runs before those substeps).
-  velocities[pi] = (velocities[pi] + growthDirectionWorld * (physics.maxStrafe * alignmentStrength)) * physics.friction;
-
-  // Grow-then-divide cell cycle. A dedicated signed neural output supplies
-  // the bounded per-macro-step division drive: positive values are
-  // probabilities while zero/negative values inhibit admission. Convert it to
-  // cumulative hazard, h=-log(1-p), so a constant signal retains the event
-  // probability while partial drive persists instead of being discarded.
-  // g2p grows Fg until g=2 after admission; only then is one grown parent
-  // replaced by two baseline daughters.
-  let divisionDriveBoost = clamp(physics.divisionDriveBoost, 0.0, 1.0);
-  let remappedDivisionDrive = mix(
-    result.divisionDrive,
-    0.5 * (result.divisionDrive + 1.0),
-    divisionDriveBoost,
-  );
-  agentState.particleMeta[pi].mitosisPropensity = clamp(remappedDivisionDrive, -1.0, 1.0);
-  let splitProb = clamp(remappedDivisionDrive, 0.0, 1.0);
-  let mechanicalGate = mechanicalGrowthGate(particleF[pi], particleRest[pi].growthF);
-  // Division cooldown — counted down every step regardless of whether
-  // the division clock would otherwise cross (so it's a clean
-  // macro-step countdown, independent of the stochastic threshold),
-  // clamped at 0 rather than going negative. Gates admission below;
-  // see AgentPhysics's own
-  // divisionCooldown field comment for the full reasoning.
-  let cooldownNow = max(agentState.particleMeta[pi].cooldown - 1.0, 0.0);
-  agentState.particleMeta[pi].cooldown = cooldownNow;
-  // A cycle admitted while capacity still existed can be overtaken by
-  // other divisions and find the population cap full on a later macro
-  // step. Close that now-unfulfillable cycle before g2p runs. Preserve
-  // its current growth exactly: rolling g back would delete already
-  // accumulated rest area/mass and require a compensating F change,
-  // while letting the latch remain active would keep injecting growth
-  // forever even though this particle can never obtain a daughter slot.
-  if (activeCount >= physics.maxActiveParticles && particleRest[pi].cycleActive > 0.5) {
-    particleRest[pi].cycleActive = 0.0;
-  }
-  // Never start a cycle that cannot produce a daughter. This matters at
-  // the population cap: without it, every terminal particle could grow
-  // to g=2 despite having no free slot, doubling rest mass/area after
-  // the visible particle count had already stopped changing.
-  let lifecycleEligible =
-    physics.growthEnabled > 0.5 &&
-    activeCount < physics.maxActiveParticles &&
-    particleRest[pi].cycleActive < 0.5 &&
-    cooldownNow <= 0.0;
-  if (
-    forcedLifecycle &&
-    physics.forcedCycleAdmission != 0u &&
-    activeCount < physics.maxActiveParticles &&
-    particleRest[pi].cycleActive < 0.5 &&
-    cooldownNow <= 0.0
-  ) {
-    // This is the scenario's only synthetic action: admit the exact same
-    // persistent cycle the policy's division hazard would admit. Everything from
-    // Fg growth onward remains the production grow-then-divide path.
-    particleRest[pi].cycleActive = 1.0;
-    agentState.particleMeta[pi].divisionHazard = 0.0;
-    agentState.particleMeta[pi].divisionThreshold = 0.0;
-  }
-  if (lifecycleEligible) {
-    // A zero threshold is the reset sentinel. Draw once per prospective
-    // cycle, not once per tick. -log(1-u) is Exp(1); top 24 RNG bits match
-    // the precision convention used for the division-angle draw below.
-    if (agentState.particleMeta[pi].divisionThreshold <= 0.0) {
-      let u = spatialUniform01(pos, agentState.particleMeta[pi].rng, 0x54485245u);
-      agentState.particleMeta[pi].divisionThreshold = max(-log(max(1.0 - u, 1e-7)), 1e-7);
-    }
-    var hazardIncrement = -log(max(1.0 - splitProb, 1e-7));
-    // Preserve exact p=1 behavior: a saturated division drive admits
-    // immediately even for the vanishingly rare Exp(1) threshold >16.1.
-    if (splitProb >= 1.0) {
-      hazardIncrement = agentState.particleMeta[pi].divisionThreshold + 1.0;
-    }
-    agentState.particleMeta[pi].divisionHazard =
-      agentState.particleMeta[pi].divisionHazard + hazardIncrement * mechanicalGate;
-    if (agentState.particleMeta[pi].divisionHazard >= agentState.particleMeta[pi].divisionThreshold) {
-      particleRest[pi].cycleActive = 1.0;
-      agentState.particleMeta[pi].divisionHazard = 0.0;
-      agentState.particleMeta[pi].divisionThreshold = 0.0;
-    }
-  }
-
-  let divisionTarget = 2.0;
-  if (
-    activeCount < physics.maxActiveParticles &&
-    particleRest[pi].cycleActive > 0.5 &&
-    mechanicalGate > 1e-4 &&
-    matDet(particleRest[pi].growthF) >= divisionTarget * 0.9999
-  ) {
-    // atomicAdd returns the OLD value — the slot THIS particle just
-    // claimed. Never gated before the add (that would need a compare-
-    // exchange loop to stay race-free against every OTHER agent that
-    // might also split this exact step) — instead a claim landing at or
-    // past physics.maxActiveParticles is simply never written below (this
-    // buffer is sized to the much larger MAX_PARTICLES — see
-    // mpm_core.py's own module docstring — so an over-claimed index is
-    // never actually out of bounds, just wasted atomic traffic on a step
-    // where many agents split near the cap at once); trainer/
-    // training_sim.py's/gpu/simulation.ts's own readback separately
-    // clamps the *reported* activeCount to physics.maxActiveParticles
-    // regardless of how high this atomic itself climbs.
-    let newIndex = atomicAdd(&agentState.growthCount, 1u);
-    if (newIndex < physics.maxActiveParticles) {
-      let nextGeneration = agentState.particleMeta[pi].rng + 1u;
-      // Daughter placement follows the same undirected world-space axis used
-      // by anisotropic growth. Canonicalizing its sign makes NN outputs v and
-      // -v physically equivalent; a separate unbiased lineage coin chooses
-      // which end receives the new daughter.
-      var splitAxis = normalize(growthDirectionWorld);
-      if (splitAxis.x < -1e-10
-          || (abs(splitAxis.x) <= 1e-10 && splitAxis.y < 0.0)) {
-        splitAxis = -splitAxis;
-      }
-      // A flat channel-7 field uses a deterministic rollout-seeded random
-      // axis because the agent-local frame is genuinely undefined there.
-      if (alignmentStrength <= 1e-10) {
-        let fallbackAxisAngle = spatialUniform01(pos, nextGeneration, 0x44495245u) * PI;
-        splitAxis = vec2<f32>(cos(fallbackAxisAngle), sin(fallbackAxisAngle));
-      }
-      let splitSide = select(
-        -1.0,
-        1.0,
-        spatialUniform01(pos, nextGeneration, 0x53494445u) >= 0.5,
-      );
-      let spawnDir = splitAxis * splitSide;
-      let polarization = clamp(particleRest[pi].divisionBias, 0.0, 1.0)
-        * clamp(stepMode.divisionDirectionality, 0.0, 1.0);
-      var centerShift = spawnDir * (0.5 * physics.splitDisplacement) * polarization;
-      // Scheduled Lab lifecycles keep the real conservative division path but
-      // center the pair on the original particle. Production divisions retain
-      // their divisionBias-controlled shift along the growth direction.
-      if (forcedLifecycle) {
-        centerShift = vec2<f32>(0.0);
-      }
-      let halfOffset = spawnDir * (0.5 * physics.splitDisplacement);
-      positions[pi] = fract(pos - halfOffset + centerShift);
-      positions[newIndex] = fract(pos + halfOffset + centerShift);
-      // Cache the same externally derived alignment until the daughter's own
-      // next evaluation reconstructs it at its new position.
-      agentState.particleMeta[newIndex].alignment = forward;
-      agentState.particleMeta[newIndex].color = agentState.particleMeta[pi].color;
-      agentState.particleMeta[newIndex].divisionHazard = 0.0;
-      agentState.particleMeta[newIndex].divisionThreshold = 0.0;
-      agentState.particleMeta[newIndex].mitosisPropensity = 0.0;
-      for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {
-        agentState.particleMeta[newIndex].privateState[s] = agentState.particleMeta[pi].privateState[s];
-      }
-      for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-        agentState.particleMeta[newIndex].chemicalState[c] = agentState.particleMeta[pi].chemicalState[c];
-      }
-      // Both daughters advance the same lineage generation. Their next
-      // thresholds come from their world-space cells, not q-dependent slots.
-      agentState.particleMeta[pi].rng = nextGeneration;
-      agentState.particleMeta[newIndex].rng = nextGeneration;
-      // BOTH the parent (this slot, `pi`) and the new child go on
-      // cooldown — a freshly split child immediately splitting again
-      // would defeat the whole point of throttling growth, same as a
-      // parent that just split shouldn't either.
-      agentState.particleMeta[pi].cooldown = physics.divisionCooldown;
-      agentState.particleMeta[newIndex].cooldown = physics.divisionCooldown;
-      // Preserve velocity and elastic/plastic state. Returning each
-      // daughter to Fg=I requires Fdaughter=Fparent*inverse(Fgparent),
-      // which preserves Fe exactly while one det(Fg)=2 weight becomes two
-      // det(Fg)=1 weights. This remains correct for anisotropic Fg.
-      let parentVelocity = velocities[pi];
-      let parentC = particleC[pi];
-      let affineOffsetVelocity = vec2<f32>(
-        parentC.x * halfOffset.x + parentC.y * halfOffset.y,
-        parentC.z * halfOffset.x + parentC.w * halfOffset.y,
-      );
-      velocities[pi] = parentVelocity - affineOffsetVelocity;
-      velocities[newIndex] = parentVelocity + affineOffsetVelocity;
-      particleC[newIndex] = parentC;
-      let daughterF = matMul(particleF[pi], matInverse(particleRest[pi].growthF));
-      particleF[pi] = daughterF;
-      particleF[newIndex] = daughterF;
-      let parentJp = particleRest[pi].jp;
-      let parentGrowthAngle = particleRest[pi].growthAngle;
-      let parentGrowthAnisotropy = particleRest[pi].growthAnisotropy;
-      let parentDivisionBias = particleRest[pi].divisionBias;
-      let parentGrowthFrameAngle = particleRest[pi].growthFrameAngle;
-      let parentPadding = particleRest[pi]._padding;
-      let identity = vec4<f32>(1.0, 0.0, 0.0, 1.0);
-      particleRest[pi] = ParticleRest(
-        identity, parentJp, 0.0, parentGrowthAngle, parentGrowthAnisotropy,
-        parentDivisionBias, parentGrowthFrameAngle, 1.0, parentPadding
-      );
-      particleRest[newIndex] = ParticleRest(
-        identity,
-        parentJp,
-        0.0,
-        parentGrowthAngle,
-        parentGrowthAnisotropy,
-        parentDivisionBias,
-        parentGrowthFrameAngle,
-        0.0,
-        parentPadding,
-      );
-    } else {
-      particleRest[pi].cycleActive = 0.0;
-      agentState.particleMeta[pi].cooldown = physics.divisionCooldown;
-    }
-  }
-  }
-
-  particleRest[pi].growthFrameAngle = alignmentAngle;
-  if (forcedLifecycle
-      && (!forcedBoundaryTangent
-          || lifecycleMorphologyGradientMagnitude > physics.boundaryTangentMinGradient)) {
-    // Re-express the selected fixed or boundary-tangent world direction in the
-    // channel-7-gradient frame for the following g2p pass.
-    particleRest[pi].growthAngle = wrapAngle(growthWorldAngle - alignmentAngle);
+  velocities[pi] = (velocities[pi] + growthVectorWorld * physics.maxStrafe) * physics.friction;
+  // These two legacy ABI slots now store the world-space vector components.
+  // growthField.wgsl splats them with the same quadratic kernel as MPM.
+  particleRest[pi].cycleActive = growthVectorWorld.x;
+  particleRest[pi].growthAngle = growthVectorWorld.y;
+  particleRest[pi].growthAnisotropy = 0.0;
+  particleRest[pi].divisionBias = 0.0;
+  particleRest[pi].growthFrameAngle = 0.0;
+  agentState.particleMeta[pi].mitosisPropensity = length(growthVectorWorld);
   }
 
 }

@@ -50,7 +50,7 @@ import { Deform, type DeformDirection, type DeformMode } from "./deform";
 import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
-import { Renderer, type FieldMode, type ParticleColorMode, type ParticleShape } from "./render";
+import { MAX_ZOOM, Renderer, type FieldMode, type ParticleColorMode, type ParticleShape } from "./render";
 import { seedBlob, seedRows } from "./rng";
 import { chemicalCommunicationArchitectureFromConfig, physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig, type UpdateRuleWeights } from "./types";
 import coreConstants from "../../../core/constants.json";
@@ -318,7 +318,14 @@ export class GpuSimulation {
     mpmCore.setChemicalStateBuffer(agents.particleMetaState);
     agents.loadWeights(config.weights);
 
-    const renderer = new Renderer(this.device, this.format, mpmCore, environment, agents.particleMetaState);
+    const renderer = new Renderer(
+      this.device,
+      this.format,
+      mpmCore,
+      environment,
+      agents.particleMetaState,
+      mpmCore.growthField,
+    );
     if (this.pendingCanvasSizePx) renderer.setCanvasSizePx(...this.pendingCanvasSizePx);
     if (this.pendingTargetPoints) renderer.setTargetPoints(this.pendingTargetPoints);
     renderer.setTargetVisible(this.pendingTargetVisible);
@@ -787,7 +794,7 @@ export class GpuSimulation {
   }
 
   setZoom(zoom: number): void {
-    this.pendingZoom = Math.min(8, Math.max(1, zoom));
+    this.pendingZoom = Math.min(MAX_ZOOM, Math.max(1, zoom));
     this.renderer?.setZoom(this.pendingZoom);
   }
 

@@ -269,13 +269,13 @@ def main() -> int:
     baseline = random_flat_policy_weights(CHEM_CHANNELS, hidden, rng, POLICY_ARCHITECTURE)
     layout = weight_layout(CHEM_CHANNELS, hidden, POLICY_ARCHITECTURE)
     heads = policy_heads(CHEM_CHANNELS, POLICY_ARCHITECTURE)
-    division_drive_row = 0
+    growth_vector_row = 0
     for head in heads:
-        if head.name == "divisionDrive":
+        if head.name == "growthVector":
             break
-        division_drive_row += head.size
+        growth_vector_row += head.size
     hidden_index = int(np.random.default_rng(args.policy_seed + 1).integers(hidden))
-    parameter_index = layout["fc2w_offset"] + division_drive_row * hidden + hidden_index
+    parameter_index = layout["fc2w_offset"] + growth_vector_row * hidden + hidden_index
     perturbed = baseline.copy()
     old_value = float(perturbed[parameter_index])
     perturbed[parameter_index] = np.float32(perturbed[parameter_index] + np.float32(args.epsilon))
@@ -341,8 +341,8 @@ def main() -> int:
         "parameter": {
             "flat_index": parameter_index,
             "tensor": "fc2.weight",
-            "output_head": "divisionDrive",
-            "output_row": division_drive_row,
+            "output_head": "growthVector.x",
+            "output_row": growth_vector_row,
             "hidden_input": hidden_index,
             "baseline_value": old_value,
             "requested_delta": args.epsilon,
@@ -399,7 +399,7 @@ Blue is the baseline output; orange is the one-weight-perturbed output.
 - Random policy seed: `{args.policy_seed}`
 - Rollout seed: `{args.rollout_seed}`
 - Architecture: `{POLICY_ARCHITECTURE}` ({hidden} hidden units, {CHEM_CHANNELS} chemical channels)
-- Changed parameter: flat index `{parameter_index}`, `fc2.weight[divisionDrive, hidden {hidden_index}]`
+- Changed parameter: flat index `{parameter_index}`, `fc2.weight[growthVector.x, hidden {hidden_index}]`
 - Baseline value: `{old_value:.10g}`
 - Perturbed value: `{float(perturbed[parameter_index]):.10g}`
 - Requested delta: `{args.epsilon:.10g}`; actual float32 delta: `{actual_delta:.10g}`

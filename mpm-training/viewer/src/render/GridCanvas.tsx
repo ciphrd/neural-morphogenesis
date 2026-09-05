@@ -2,7 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useSta
 import type { DeformDirection, DeformMode } from "../gpu/deform";
 import type { BloomSettings } from "../gpu/bloom";
 import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu/device";
-import type { FieldMode, ParticleColorMode, ParticleShape } from "../gpu/render";
+import { MAX_ZOOM, type FieldMode, type ParticleColorMode, type ParticleShape } from "../gpu/render";
 import { GpuSimulation, type SimulationScenario } from "../gpu/simulation";
 import { policyWeightsShapeError } from "../gpu/policyEval";
 import type { PhysicsSettings, SimulationConfig, UpdateRuleWeights } from "../gpu/types";
@@ -76,7 +76,7 @@ interface GridCanvasProps {
   directionalLineVisible?: boolean;
   growthLineVisible?: boolean;
   particleRadiusPx?: number;
-  /** Visualization-only multiplier for the signed mitosis drive. */
+  /** Visualization-only multiplier for growth-vector magnitude. */
   mitosisSignalBoost?: number;
   /** Boundary diagnostic half-activation gradient g0. */
   boundaryGradientScale?: number;
@@ -1171,7 +1171,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
                 const fitFraction = Math.min(1, Math.max(0.05, auto.fitFraction));
                 const padding = Math.max(1, auto.padding);
                 const target = Math.min(
-                  8,
+                  MAX_ZOOM,
                   Math.max(1, fitFraction / (centeredExtent * padding)),
                 );
                 autoZoomTargetRef.current = target;

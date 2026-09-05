@@ -18,10 +18,7 @@ import { policyHasRecurrence, type PolicyArchitecture, type UpdateRuleWeights } 
 export interface PolicyOutput {
   /** One signed chemical delta rate per channel. */
   envWrite: Float32Array;
-  anisotropy: number;
-  divisionBias: number;
-  divisionDrive: number;
-  direction: [number, number];
+  growthVector: [number, number];
   color: [number, number, number];
   stateDelta: Float32Array;
   stateGate: Float32Array;
@@ -38,7 +35,7 @@ export function policyWeightsShapeError(
 ): string | null {
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  const outDim = channels + (stateful ? 21 : 8);
+  const outDim = channels + (stateful ? 18 : 5);
   const fc1w = weights?.fc1w;
   const fc1b = weights?.fc1b;
   const fc2w = weights?.fc2w;
@@ -60,7 +57,7 @@ export function policyWeightsShapeError(
   const receivedOut = Array.isArray(fc2w) ? fc2w.length : "missing";
   return (
     `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
-    `(chemical deltas plus growth controls, a dedicated division drive, and state/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
+    `(chemical deltas plus a 2-D growth vector and state/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
     "The current policy has no learned heading head; restart the training backend and retrain older checkpoints."
   );
 }
@@ -106,7 +103,7 @@ export function evalPolicy(
   }
 
   const stateful = policyHasRecurrence(architecture);
-  const outDim = channels + (stateful ? 21 : 8);
+  const outDim = channels + (stateful ? 18 : 5);
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -118,32 +115,27 @@ export function evalPolicy(
   const envWriteDim = channels;
   const envWrite = new Float32Array(envWriteDim);
   for (let k = 0; k < envWriteDim; k++) envWrite[k] = safeTanh(outVec[k]) * maxEnvWrite;
-  const anisotropy = safeSigmoid(outVec[envWriteDim]);
-  const divisionBias = safeSigmoid(outVec[envWriteDim + 1]);
-  const rawX = safeTanh(outVec[envWriteDim + 2]);
-  const rawY = safeTanh(outVec[envWriteDim + 3]);
-  const divisionDrive = safeTanh(outVec[envWriteDim + 4]);
-  const magnitude = Math.hypot(rawX, rawY);
-  const direction: [number, number] = magnitude > 1e-6
-    ? [rawX / magnitude, rawY / magnitude]
-    : [0, 0];
+  const growthVector: [number, number] = [
+    safeTanh(outVec[envWriteDim]),
+    safeTanh(outVec[envWriteDim + 1]),
+  ];
   const stateDelta = new Float32Array(8);
   const stateGate = new Float32Array(8);
   let color: [number, number, number];
   if (stateful) {
     for (let i = 0; i < 8; i++) {
-      stateDelta[i] = safeTanh(outVec[envWriteDim + 5 + i]);
-      stateGate[i] = safeSigmoid(outVec[envWriteDim + 13 + i]);
+      stateDelta[i] = safeTanh(outVec[envWriteDim + 2 + i]);
+      stateGate[i] = safeSigmoid(outVec[envWriteDim + 10 + i]);
     }
     // The inspector evaluates a zero private state. Live RGB is derived after
     // applying the residual update to each particle's actual persistent state.
     color = [0.5, 0.5, 0.5];
   } else {
     color = [
-      safeSigmoid(outVec[envWriteDim + 5]),
-      safeSigmoid(outVec[envWriteDim + 6]),
-      safeSigmoid(outVec[envWriteDim + 7]),
+      safeSigmoid(outVec[envWriteDim + 2]),
+      safeSigmoid(outVec[envWriteDim + 3]),
+      safeSigmoid(outVec[envWriteDim + 4]),
     ];
   }
-  return { envWrite, anisotropy, divisionBias, divisionDrive, direction, color, stateDelta, stateGate };
+  return { envWrite, growthVector, color, stateDelta, stateGate };
 }

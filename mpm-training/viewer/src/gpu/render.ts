@@ -7,7 +7,7 @@
 //
 // Field modes: "none" | "density" | "speed" | "deformation" | "pressure"
 // | "shear" | "repulsion" | "morphology" | "substrate" | "orientation"
-// | "gradient".
+// | "gradient" | "growth".
 // This extends the set mls-mpm/src/gpu/render.ts exposes with chemical field
 // views and "gradient" (this project's own chemical field/repulsion density; mls-
 // mpm has no equivalent of). "deformation"/"pressure"/"shear" read
@@ -32,14 +32,15 @@ import { BLOOM_SCENE_FORMAT, BloomPostProcess, type BloomSettings } from "./bloo
 import { writeFloat32, ceilDiv } from "./gpuUtil";
 import { PARTICLE_META_BUFFER_OFFSET } from "./agents";
 import type { Environment } from "./environment";
-import { DX, GRID_N, INV_DX, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
+import { DX, GRID_N, INV_DX, NODE_COUNT, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
-export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "gradient";
+export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "gradient" | "growth";
 export type ParticleShape = "dot" | "triangle";
 export type ParticleColorMode = "white" | "neural-color" | "mitosis-drive" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
+export const MAX_ZOOM = 32;
 
-const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "orientation" | "gradient">, number> = {
+const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "orientation" | "gradient" | "growth">, number> = {
   none: 0,
   density: 1,
   speed: 2,
@@ -207,9 +208,25 @@ export class Renderer {
   private readonly gradientExponentUniform: GPUBuffer;
   private readonly gradientDispatch: [number, number];
 
+  // --- integrated growth-intent background ---
+  private readonly growthTexture: GPUTexture;
+  private readonly growthColorizePipeline: GPUComputePipeline;
+  private readonly growthColorizeBindGroup: GPUBindGroup;
+  private readonly growthPresentBindGroup: GPUBindGroup;
+  private readonly growthVectorPipeline: GPURenderPipeline;
+  private readonly growthVectorBindGroup: GPUBindGroup;
+  private readonly growthDispatch: [number, number];
+
   private fieldMode: FieldMode = "none";
 
-  constructor(device: GPUDevice, format: GPUTextureFormat, mpmCore: MpmCore, environment: Environment, particleMetaState: GPUBuffer) {
+  constructor(
+    device: GPUDevice,
+    format: GPUTextureFormat,
+    mpmCore: MpmCore,
+    environment: Environment,
+    particleMetaState: GPUBuffer,
+    integratedGrowthField: GPUBuffer,
+  ) {
     this.device = device;
     this.environment = environment;
     this.bloom = new BloomPostProcess(device, format);
@@ -700,6 +717,51 @@ export class Renderer {
       ],
     });
 
+    // --- integrated growth-intent background ---
+    this.growthTexture = device.createTexture({
+      size: [nodes, nodes, 1],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.growthColorizePipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module: fieldModule, entryPoint: "colorizeGrowth" },
+    });
+    this.growthColorizeBindGroup = device.createBindGroup({
+      layout: this.growthColorizePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 13, resource: { buffer: this.accentUniform } },
+        { binding: 24, resource: { buffer: integratedGrowthField } },
+        { binding: 25, resource: this.growthTexture.createView() },
+      ],
+    });
+    this.growthDispatch = [ceilDiv(nodes, 16), ceilDiv(nodes, 16)];
+    this.growthPresentBindGroup = device.createBindGroup({
+      layout: this.fieldPresentPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 4, resource: this.growthTexture.createView() },
+        { binding: 5, resource: fieldSampler },
+        { binding: 22, resource: { buffer: this.viewUniform } },
+      ],
+    });
+    this.growthVectorPipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: fieldModule, entryPoint: "growthVectorVertex" },
+      fragment: {
+        module: fieldModule,
+        entryPoint: "growthVectorFragment",
+        targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }],
+      },
+      primitive: { topology: "triangle-list" },
+    });
+    this.growthVectorBindGroup = device.createBindGroup({
+      layout: this.growthVectorPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 22, resource: { buffer: this.viewUniform } },
+        { binding: 24, resource: { buffer: integratedGrowthField } },
+      ],
+    });
+
     this.setCanvasSizePx(512, 512);
   }
 
@@ -711,7 +773,7 @@ export class Renderer {
       4,
       new Uint32Array([mode === "orientation" ? 1 : 0]),
     );
-    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "orientation" && mode !== "gradient") {
+    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "orientation" && mode !== "gradient" && mode !== "growth") {
       writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode]]));
     }
   }
@@ -804,7 +866,7 @@ export class Renderer {
   /** Camera zoom applied by every particle/target vertex shader. */
   setZoom(zoom: number): void {
     writeFloat32(this.device, this.viewUniform, 0, new Float32Array([
-      Math.min(8, Math.max(1, zoom)),
+      Math.min(MAX_ZOOM, Math.max(1, zoom)),
     ]));
   }
 
@@ -953,6 +1015,12 @@ export class Renderer {
       computePass.setBindGroup(0, this.gradientColorizeBindGroup);
       computePass.dispatchWorkgroups(...this.gradientDispatch);
       computePass.end();
+    } else if (this.fieldMode === "growth") {
+      const computePass = encoder.beginComputePass();
+      computePass.setPipeline(this.growthColorizePipeline);
+      computePass.setBindGroup(0, this.growthColorizeBindGroup);
+      computePass.dispatchWorkgroups(...this.growthDispatch);
+      computePass.end();
     }
 
     const pass = encoder.beginRenderPass({
@@ -986,6 +1054,13 @@ export class Renderer {
       pass.setPipeline(this.gradientPresentPipeline);
       pass.setBindGroup(0, this.gradientPresentBindGroup);
       pass.draw(6);
+    } else if (this.fieldMode === "growth") {
+      pass.setPipeline(this.fieldPresentPipeline);
+      pass.setBindGroup(0, this.growthPresentBindGroup);
+      pass.draw(6);
+      pass.setPipeline(this.growthVectorPipeline);
+      pass.setBindGroup(0, this.growthVectorBindGroup);
+      pass.draw(9, NODE_COUNT);
     }
 
     if (this.targetVisible && this.targetBindGroup && this.targetCount > 0) {
@@ -1068,6 +1143,7 @@ export class Renderer {
     this.blurSigmaUniform.destroy();
     this.gradientTexture.destroy();
     this.gradientExponentUniform.destroy();
+    this.growthTexture.destroy();
     this.bloom.destroy();
   }
 }

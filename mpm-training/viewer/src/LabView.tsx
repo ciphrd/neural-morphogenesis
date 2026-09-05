@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
-import type { FieldMode, ParticleColorMode, ParticleShape } from "./gpu/render"
+import { MAX_ZOOM, type FieldMode, type ParticleColorMode, type ParticleShape } from "./gpu/render"
 import type { CellMemory, ChemicalCommunicationArchitecture, PhysicsSettings } from "./gpu/types"
 import {
   cellMemoryFromConfig,
@@ -390,7 +390,7 @@ export function LabView() {
           <div className="slider-row">
             <span>Zoom</span>
             <label className="auto-zoom-toggle"><input type="checkbox" checked={autoZoomEnabled} onChange={(event) => setAutoZoomEnabled(event.target.checked)} />Auto</label>
-            <Slider min={1} max={8} step={0.05} value={zoom} disabled={autoZoomEnabled} onChange={(value) => { setZoom(value); setEffectiveZoom(value) }} />
+            <Slider min={1} max={MAX_ZOOM} step={0.05} value={zoom} disabled={autoZoomEnabled} onChange={(value) => { setZoom(value); setEffectiveZoom(value) }} />
             <span className="slider-value">{(autoZoomEnabled ? effectiveZoom : zoom).toFixed(2)}×</span>
           </div>
           <details className="settings-category">
@@ -410,12 +410,12 @@ export function LabView() {
             <span className="slider-value">{particleRadiusPx}px</span>
           </label>
           <label className="slider-row"><span>Shape</span><select className="select" value={particleShape} onChange={(event) => setParticleShape(event.target.value as ParticleShape)}><option value="dot">Dot</option><option value="triangle">Triangle</option></select></label>
-          <label className="slider-row"><span>Color</span><select className="select" value={particleColorMode} onChange={(event) => setParticleColorMode(event.target.value as ParticleColorMode)}><option value="white">White</option><option value="neural-color">Neural RGB</option><option value="mitosis-drive">Mitosis drive</option><option value="neural-memory">Neural memory</option><option value="chemical-memory">Chemical memory</option><option value="boundary-value">Boundary value</option><option value="neurons">Neurons</option></select></label>
+          <label className="slider-row"><span>Color</span><select className="select" value={particleColorMode} onChange={(event) => setParticleColorMode(event.target.value as ParticleColorMode)}><option value="white">White</option><option value="neural-color">Neural RGB</option><option value="mitosis-drive">Growth magnitude</option><option value="neural-memory">Neural memory</option><option value="chemical-memory">Chemical memory</option><option value="boundary-value">Boundary value</option><option value="neurons">Neurons</option></select></label>
           <label className="slider-row"><span>Alpha</span><Slider min={0} max={1} step={0.01} value={particleAlpha} onChange={setParticleAlpha} /><span className="slider-value">{particleAlpha.toFixed(2)}</span></label>
           <label className="checkbox-row"><input type="checkbox" checked={directionalLineVisible} onChange={(event) => setDirectionalLineVisible(event.target.checked)} />Heading direction (red)</label>
           <label className="checkbox-row"><input type="checkbox" checked={growthLineVisible} onChange={(event) => setGrowthLineVisible(event.target.checked)} />Growth direction (green)</label>
           {particleColorMode === "mitosis-drive" && (
-            <label className="slider-row"><span>Signal boost</span><Slider min={1} max={10} step={0.1} value={mitosisSignalBoost} onChange={setMitosisSignalBoost} /><span className="slider-value">{mitosisSignalBoost.toFixed(1)}×</span></label>
+            <label className="slider-row"><span>Magnitude boost</span><Slider min={1} max={10} step={0.1} value={mitosisSignalBoost} onChange={setMitosisSignalBoost} /><span className="slider-value">{mitosisSignalBoost.toFixed(1)}×</span></label>
           )}
           {(particleColorMode === "neural-memory" || particleColorMode === "chemical-memory") && (
             <>
@@ -434,9 +434,10 @@ export function LabView() {
           <label className="slider-row">
             <span>Background</span>
             <select className="select" value={fieldMode} onChange={(event) => setFieldMode(event.target.value as FieldMode)}>
-              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="substrate">Substrate</option><option value="orientation">Orientation substrate (ch7)</option><option value="gradient">Boundary gradient</option>
+              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="growth">Integrated growth</option><option value="substrate">Substrate</option><option value="orientation">Orientation substrate (ch7)</option><option value="gradient">Boundary gradient</option>
             </select>
           </label>
+          {fieldMode === "growth" && <p className="hint">Brightness shows regional drive or accumulated admission credit. Direction cycles right=red, up=yellow, left=cyan, down=violet; green is broad or ambiguous.</p>}
           {fieldMode === "morphology" && <>
             <label className="checkbox-row"><input type="checkbox" checked={morphologyGradientVisible} onChange={(event) => setMorphologyGradientVisible(event.target.checked)} />Show morphology gradient (R/G)</label>
             <label className="checkbox-row"><input type="checkbox" checked={morphologyDensityVisible} onChange={(event) => setMorphologyDensityVisible(event.target.checked)} />Show morphology density (B)</label>

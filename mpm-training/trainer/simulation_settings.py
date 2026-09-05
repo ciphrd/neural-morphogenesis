@@ -194,7 +194,7 @@ MORPHOLOGY_DENSITY_REFERENCE = float(DEFAULT_RUN_SETTINGS["morphologyDensityRefe
 # is exactly what produces a single-substep MLS-MPM stability violation
 # — confirmed empirically to blow up to NaN with REPULSION_STRENGTH>=100
 # and zero growth/elasticity involved). ~1/3 of DX/DT (core/
-# constants.json's own DX=0.015625, DT=0.0000625 => DX/DT=250, the
+# constants.json's own DX=0.0078125, DT=0.00003125 => DX/DT=250, the
 # theoretical "moves exactly one grid cell in one substep" bound for
 # velocity) — comfortable margin below that bound, not tuned to the edge.
 REPULSION_MAX_DELTA = float(DEFAULT_RUN_SETTINGS["repulsionMaxDelta"])

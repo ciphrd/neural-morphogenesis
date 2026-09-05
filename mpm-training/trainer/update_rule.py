@@ -31,14 +31,11 @@ pipelines now).
   is frame-agnostic; the gradient rotation and robust input normalization are
   entirely the caller's job.
 - Output: env_write (C) — retained ABI name for one bounded signed chemical
-  delta rate per channel — plus anisotropy/polarity logits (2),
-  desired growth direction (2), and a signed division drive (1). Stateless-128 ends with RGB logits (3);
+  delta rate per channel — plus one continuous local 2-D growth vector whose
+  magnitude is growth rate. Stateless-128 ends with RGB logits (3);
   stateful-64 instead ends with private-state residuals (8) and gates (8),
-  all raw/local-frame. C=9 gives 33 inputs and 19 stateless outputs, or 41
-  inputs and 30 stateful outputs. The two
-  former strafe channels encode a desired local-space growth direction.
-  The two former acceleration channels independently control tensor
-  anisotropy and division bias through sigmoid.
+  all raw/local-frame. The widths are C+5 stateless outputs or C+18 stateful
+  outputs.
 """
 from __future__ import annotations
 
@@ -76,9 +73,8 @@ class UpdateRule(nn.Module):
     def reset_parameters(self) -> None:
         """Head-aware initialization shared conceptually with the browser.
 
-        Xavier gains keep vector/control heads conservative. Growth direction
-        is zero-centered in local space, anisotropy starts near 0.2, and all
-        remaining scalar outputs are neutral. Small per-head bias jitter
+        Xavier gains keep the vector head conservative. Growth is zero-centered
+        in local space and the remaining outputs are neutral. Small head bias jitter
         preserves diversity between freshly randomized policies.
         """
         trunk_gain, trunk_bias_jitter = trunk_initialization()
@@ -101,17 +97,17 @@ class UpdateRule(nn.Module):
         morphology: torch.Tensor,
         elastic_strain: torch.Tensor,
         private_state: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Chemical tensors are (N, C); morphology is (N, 3) containing
         occupancy, forward gradient, and lateral gradient; elastic_strain is
         (N, 3): volumetric, axial, and shear Hencky strain. The local-frame
         rotation of the gradients is the caller's job
         (training_sim.py/core/agents.wgsl); this method is frame-agnostic and
         simply concatenates the three channel blocks. Returns
-        (env_write, growth_controls, direction, tail), all raw/un-squashed;
+        (env_write, growth_vector, tail), all raw/un-squashed;
         tail is RGB for stateless-128 or concatenated state residual/gate for stateful-64
         and still in LOCAL frame — squashing (tanh for vectors and chemical deltas;
-        sigmoid for scalar controls), and rotating growth direction to world frame are all training_sim.py's/core/agents.wgsl's
+        and rotating the growth vector to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
         not transient spatial splat geometry), same division of responsibility
         envnca's own UpdateRule/Simulation split."""
@@ -123,21 +119,13 @@ class UpdateRule(nn.Module):
         x = torch.cat(inputs, dim=-1)
         hidden = self.activation(self.input_layer(x))
         env_write = self.heads["chemical"](hidden)
-        growth_controls = torch.cat(
-            [
-                self.heads["anisotropy"](hidden),
-                self.heads["division"](hidden),
-                self.heads["divisionDrive"](hidden),
-            ],
-            dim=-1,
-        )
-        direction = self.heads["growthDirection"](hidden)
+        growth_vector = self.heads["growthVector"](hidden)
         tail = (
             self.heads["color"](hidden)
             if not policy_has_recurrence(self.architecture)
             else torch.cat([self.heads["stateDelta"](hidden), self.heads["stateGate"](hidden)], dim=-1)
         )
-        return env_write, growth_controls, direction, tail
+        return env_write, growth_vector, tail
 
     def concatenated_output_parameters(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Return logical heads concatenated in the stable GPU output order."""

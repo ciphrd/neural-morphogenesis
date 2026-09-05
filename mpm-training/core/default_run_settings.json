@@ -13,7 +13,7 @@
   "chemicalProjectionWeight": 1.0,
   "macroSteps": 160,
   "growthSteps": null,
-  "substepsPerMacro": 16,
+  "substepsPerMacro": 32,
   "gravity": 0.0,
   "spawnX": 0.5,
   "spawnY": 0.5,

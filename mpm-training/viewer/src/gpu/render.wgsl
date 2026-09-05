@@ -47,7 +47,7 @@ struct ParticleRest {
   divisionBias: f32,
   growthFrameAngle: f32,
   appearanceScale: f32,
-  _padding: f32,
+  resampleAngle: f32,
 }
 
 struct ParticleMeta {
@@ -133,8 +133,8 @@ fn targetFragment(in: VOut) -> @location(0) vec4<f32> {
 }
 
 // --- growth-neuron activation dots ------------------------------------------
-// Hue encodes the normalized growth direction and saturation/brightness
-// increases with the independent anisotropy output. This reads ParticleRest
+// Hue encodes the growth-vector direction and saturation/brightness
+// increases with its magnitude. This reads ParticleRest
 // directly, exactly like the directional-arrow pass below.
 
 struct ActivationDotOut {
@@ -154,8 +154,7 @@ fn activationParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(in
   );
   out.uv = offset;
   let rest = particleRest[instanceIndex];
-  let worldAngle = rest.growthFrameAngle + rest.growthAngle;
-  out.activation = vec2<f32>(cos(worldAngle), sin(worldAngle)) * rest.growthAnisotropy;
+  out.activation = vec2<f32>(rest.cycleActive, rest.growthAngle);
   return out;
 }
 
@@ -209,7 +208,7 @@ fn activationParticleFragment(in: ActivationDotOut) -> @location(0) vec4<f32> {
 // GPUBuffer. ---
 
 // x: alpha, y: saturation amplification, z: contrast around sigmoid neutral,
-// w: visualization-only gain for the signed mitosis drive.
+// w: visualization-only gain for growth-vector magnitude.
 @group(0) @binding(7) var<uniform> neuralColorStyle: vec4<f32>;
 struct InternalStateStyle {
   channels: vec4<u32>,
@@ -283,10 +282,7 @@ fn neuralColorParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> 
   return vec4<f32>(boosted, viewStyle.z);
 }
 
-// --- mitosis propensity dots ----------------------------------------------
-//
-// This is the neural division drive after the simulation's global boost
-// remapping. At zero boost it spans [-1,1]; full boost shifts it to [0,1].
+// --- growth-magnitude dots -------------------------------------------------
 
 const BERLIN = array<vec3<f32>, 17>(
   vec3<f32>(0.62108, 0.69018, 0.99951),
@@ -324,12 +320,12 @@ fn mitosisPropensityParticleVertex(@builtin(vertex_index) vertexIndex: u32, @bui
     0.0, 1.0
   );
   out.uv = offset;
-  let boostedDrive = clamp(
+  let boostedMagnitude = clamp(
     particleMeta[instanceIndex].mitosisPropensity * neuralColorStyle.w,
-    -1.0,
+    0.0,
     1.0,
   );
-  out.color = berlin(boostedDrive * 0.5 + 0.5);
+  out.color = berlin(boostedMagnitude);
   return out;
 }
 
@@ -512,11 +508,7 @@ fn headingLineFragment() -> @location(0) vec4<f32> {
   return vec4<f32>(pointColor.rgb, viewStyle.z);
 }
 
-// Effective world-space anisotropic-growth axis consumed by g2p: the NN's
-// local axis rotated through the current channel-7-gradient frame.
-// Isotropic growth has no meaningful axis, so collapse its line to the particle center.
-// Draw through both sides of the particle because v and -v are physically
-// equivalent; division independently chooses either end with equal probability.
+// World-space continuous growth vector written by the neural policy.
 @vertex
 fn growthLineVertex(
   @builtin(vertex_index) vertexIndex: u32,
@@ -524,14 +516,9 @@ fn growthLineVertex(
 ) -> @builtin(position) vec4<f32> {
   let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let rest = particleRest[instanceIndex];
-  let worldAngle = rest.growthFrameAngle + rest.growthAngle;
-  let direction = vec2<f32>(cos(worldAngle), sin(worldAngle));
-  let hasDirectionalGrowth = rest.growthAnisotropy > 1e-6;
-  let axisEnd = select(-1.5, 1.5, vertexIndex == 1u);
-  let offset = select(
-    vec2<f32>(0.0),
-    direction * directionalLineStyle.y * axisEnd,
-    hasDirectionalGrowth,
-  );
+  let vector = vec2<f32>(rest.cycleActive, rest.growthAngle);
+  let magnitude = min(length(vector), 1.0);
+  let direction = select(vec2<f32>(0.0), vector / max(length(vector), 1e-8), magnitude > 1e-8);
+  let offset = select(vec2<f32>(0.0), direction * directionalLineStyle.y * 1.5 * magnitude, vertexIndex == 1u);
   return vec4<f32>(center + offset * viewStyle.x, 0.0, 1.0);
 }

@@ -598,3 +598,143 @@ fn colorizeGradient(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn gradientFragment(in: QuadOut) -> @location(0) vec4<f32> {
   return textureSample(gradientTex, fieldSampler, in.uv);
 }
+
+// --- Integrated growth-intent background ---
+//
+// This reads core/growthField.wgsl's live MPM-node accumulator directly.
+// Brightness is continuous areal growth rate. Hue follows the signed vector
+// when coherent and otherwise the principal axis of the positive tensor.
+const GROWTH_NODE_STRIDE: u32 = GRID_N + 1u;
+const GROWTH_FIELD_CHANNELS: u32 = 7u;
+
+// The simulation writes these values atomically in its own shader module. This
+// visualization module only reads the completed field, so expose it as ordinary
+// read-only integers. That also makes the buffer legal to consume in a vertex
+// stage on every WebGPU implementation.
+@group(0) @binding(24) var<storage, read> integratedGrowthField: array<i32>;
+@group(0) @binding(25) var growthOutputTex: texture_storage_2d<rgba8unorm, write>;
+
+fn cyclicDirectionColor(angle: f32) -> vec3<f32> {
+  let phase = vec3<f32>(angle, angle - 2.0943951, angle + 2.0943951);
+  return vec3<f32>(0.5) + 0.5 * cos(phase);
+}
+
+@compute @workgroup_size(16, 16)
+fn colorizeGrowth(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x > GRID_N || gid.y > GRID_N) { return; }
+  let node = gid.x * GROWTH_NODE_STRIDE + gid.y;
+  let base = node * GROWTH_FIELD_CHANNELS;
+  let sampleWeight = f32(max(integratedGrowthField[base + 5u], 0));
+  let vector = vec2<f32>(
+    f32(integratedGrowthField[base]),
+    f32(integratedGrowthField[base + 1u]),
+  ) / max(sampleWeight, 1.0);
+  let tensor = vec3<f32>(
+    f32(max(integratedGrowthField[base + 2u], 0)),
+    f32(integratedGrowthField[base + 3u]),
+    f32(max(integratedGrowthField[base + 4u], 0)),
+  ) / max(sampleWeight, 1.0);
+  let averageDrive = clamp(tensor.x + tensor.z, 0.0, 1.0);
+  let signedStrength = clamp(length(vector) / max(averageDrive, 1e-8), 0.0, 1.0);
+  let axialStrength = clamp(
+    sqrt((tensor.x - tensor.z) * (tensor.x - tensor.z) + 4.0 * tensor.y * tensor.y)
+      / max(averageDrive, 1e-8), 0.0, 1.0);
+  var angle = 0.5 * atan2(2.0 * tensor.y, tensor.x - tensor.z);
+  if (signedStrength > 0.05) {
+    angle = atan2(vector.y, vector.x);
+  }
+  let directionalStrength = max(signedStrength, axialStrength);
+  let neutralGrowth = vec3<f32>(0.10, 0.72, 0.24);
+  let directionalGrowth = cyclicDirectionColor(angle);
+  let signalColor = mix(neutralGrowth, directionalGrowth, directionalStrength);
+
+  let intensity = accentedMagnitude(averageDrive);
+  let color = mix(BG, signalColor, intensity);
+  textureStore(growthOutputTex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(color, 1.0));
+}
+
+// --- Integrated growth vector glyphs ---------------------------------------
+//
+// Render actual arrows rather than encoding direction through color alone.
+// Every arrow is a thin shaft quad joined to one filled triangular arrowhead.
+// Every non-zero grid vector is drawn at every zoom level. Glyph size is
+// capped in screen space below, so zoom never changes which vectors exist.
+struct GrowthVectorOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) strength: f32,
+}
+
+fn growthVectorAt(node: u32) -> vec2<f32> {
+  let base = node * GROWTH_FIELD_CHANNELS;
+  let weight = f32(max(integratedGrowthField[base + 5u], 0));
+  return vec2<f32>(
+    f32(integratedGrowthField[base]),
+    f32(integratedGrowthField[base + 1u]),
+  ) / max(weight, 1.0);
+}
+
+fn arrowSegmentVertex(
+  vertex: u32,
+  start: vec2<f32>,
+  finish: vec2<f32>,
+  halfWidth: f32,
+) -> vec2<f32> {
+  let along = finish - start;
+  let normal = normalize(vec2<f32>(-along.y, along.x)) * halfWidth;
+  let corners = array<vec2<f32>, 6>(
+    start - normal, finish - normal, finish + normal,
+    start - normal, finish + normal, start + normal,
+  );
+  return corners[vertex];
+}
+
+@vertex
+fn growthVectorVertex(
+  @builtin(vertex_index) vertexIndex: u32,
+  @builtin(instance_index) instanceIndex: u32,
+) -> GrowthVectorOut {
+  let nodeX = instanceIndex / NODES;
+  let nodeY = instanceIndex % NODES;
+  let zoom = max(fieldViewZoom, 1.0);
+  let vector = growthVectorAt(instanceIndex);
+  let magnitude = length(vector);
+  let strength = clamp(magnitude, 0.0, 1.0);
+  let direction = select(vec2<f32>(1.0, 0.0), vector / max(magnitude, 1e-8), magnitude > 1e-8);
+
+  let center = vec2<f32>(f32(nodeX), f32(nodeY)) / f32(GRID_N) * 2.0 - vec2<f32>(1.0);
+  let glyphSpacing = 2.0 / f32(GRID_N);
+  // Magnitude is encoded geometrically. A field magnitude of 0.12 reaches the
+  // full display length; weaker vectors remain linearly shorter. The screen-
+  // space cap only prevents a glyph from ballooning at extreme zoom.
+  let displayedMagnitude = clamp(magnitude / 0.12, 0.0, 1.0);
+  let arrowLength = min(glyphSpacing * 0.62 * displayedMagnitude, 0.085 / zoom);
+  let shaftHalfWidth = min(glyphSpacing * 0.020, 0.003 / zoom);
+  let tail = center;
+  let tip = center + direction * arrowLength;
+  let headBase = tip - direction * arrowLength * 0.32;
+  let perpendicular = vec2<f32>(-direction.y, direction.x);
+  let headWidth = arrowLength * 0.15;
+  var p = vec2<f32>(2.0);
+  if (vertexIndex < 6u) {
+    p = arrowSegmentVertex(vertexIndex, tail, headBase, shaftHalfWidth);
+  } else {
+    // The head's base spans across the shaft endpoint, so there is no seam.
+    let head = array<vec2<f32>, 3>(
+      headBase + perpendicular * headWidth,
+      headBase - perpendicular * headWidth,
+      tip,
+    );
+    p = head[vertexIndex - 6u];
+  }
+  // Collapse absent/filtered glyphs to a harmless point outside clip space.
+  p = select(vec2<f32>(2.0), p, strength > 1e-5);
+  var out: GrowthVectorOut;
+  out.position = vec4<f32>(p * zoom, 0.0, 1.0);
+  out.strength = strength;
+  return out;
+}
+
+@fragment
+fn growthVectorFragment(in: GrowthVectorOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(vec3<f32>(0.60, 1.0, 0.66), 0.95);
+}

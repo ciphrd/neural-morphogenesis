@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthAnisotropy" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "divisionDirectionality" | "divisionDriveBoost" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  "growthDuration" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 export interface GrowthSliderSpec {
@@ -50,18 +50,9 @@ function activeTangentThreshold(value: number): number {
 // run happened to be trained with.
 export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
-    key: "divisionDriveBoost",
-    label: "Division chance boost",
-    hint: "Blends the signed neural division drive toward a probability mapping. At 0, outputs at or below zero cannot start growth. At 1, neural [-1,1] maps to [0,1], so a zero output gives 50% division chance per tick.",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    format: (v) => `${(100 * v).toFixed(0)}%`,
-  },
-  {
     key: "neuralUpdatesPerMacro",
     label: "Neural updates / tick",
-    hint: "Neural evaluations before one MLS-MPM update. Memory and turning are timestep-scaled. Persistent substrate stays frozen and uses only the final output; cell-owned chemistry can evolve between rounds. Lifecycle and division commit only on the final round.",
+    hint: "Neural evaluations before one MLS-MPM update. Memory and turning are timestep-scaled. Persistent substrate stays frozen and uses only the final output; cell-owned chemistry can evolve between rounds. Material emission commits only on the final round.",
     min: 1,
     max: 16,
     step: 1,
@@ -87,21 +78,12 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   },
   {
     key: "growthDuration",
-    label: "Growth duration",
-    hint: "Approximate mechanical ticks required to double stress-free area. Larger values give agents more communication rounds before division. 0 = growth off.",
+    label: "Growth timescale / fade duration",
+    hint: "Mechanical ticks for a unit-magnitude field to double stress-free material area; also controls how quickly a new refinement sample reaches full visual size.",
     min: 0,
     max: 160,
     step: 1,
     format: (v) => `${v.toFixed(0)} ticks`,
-  },
-  {
-    key: "growthAnisotropy",
-    label: "Growth anisotropy",
-    hint: "Caps policy-directed rest-growth elongation. 1× grants full policy authority; 0 makes mechanical growth isotropic.",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    format: (v) => `${v.toFixed(2)}×`,
   },
   {
     key: "growthCompressionFeedback",
@@ -131,18 +113,9 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
     format: (v) => `${(100 * v).toFixed(1)}%`,
   },
   {
-    key: "divisionDirectionality",
-    label: "Division polarization",
-    hint: "Controls one-sided placement along the green growth axis. 1× can keep the parent fixed and place the daughter at a randomly selected end; 0 keeps the pair centered and symmetric.",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    format: (v) => `${v.toFixed(2)}×`,
-  },
-  {
     key: "boundaryTangentMinGradient",
     label: "Tangent flat-gradient threshold",
-    hint: "For Lab tangent-growth scenarios, morphology gradients at or below this value are treated as flat. Above it, both growth and division follow the boundary tangent.",
+    hint: "For Lab tangent-growth scenarios, morphology gradients at or below this value are treated as flat. Above it, growth follows the boundary tangent.",
     min: 0,
     max: TANGENT_SLIDER_MAX,
     step: 0.000001,
@@ -151,17 +124,12 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
 ]
 
 /** Collapsible "Growth" section (default closed), sibling to
- * PhysicsPanel — the knobs behind this project's own kinematic growth
- * model (the multiplicative decomposition F = Fe*Fg, see
- * ../../../core/g2p.wgsl's own substrate-driven growth block and
- * ../../../core/agents.wgsl's own ParticleRest.growthF field).
+ * PhysicsPanel — controls for additive material-sample growth.
  *
  * Split into its own section rather than appended to PhysicsPanel's own
  * flat list because these controls behave as a group:
  * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
- * growthDuration controls the policy-driven cell cycle;
- * growthAnisotropy controls tensor directionality and divisionDirectionality
- * controls how strongly growth-aligned splits are polarized;
+ * growthDuration controls refinement-sample rendering fade;
  * boundaryTangentMinGradient controls Lab tangent-growth diagnostics.
  * Same live-uniform-write path as every
  * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
@@ -239,7 +207,7 @@ export function GrowthPanel({
                 {isTangentThreshold && (
                   <label
                     className="checkbox-row"
-                    title="When disabled, diagnostic growth uses the neural growth axis instead of the morphology-boundary tangent. Rear-facing spawning is unchanged."
+                    title="When disabled, diagnostic growth uses the neural growth direction instead of the morphology-boundary tangent."
                   >
                     <input
                       type="checkbox"

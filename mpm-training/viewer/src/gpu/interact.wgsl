@@ -73,12 +73,12 @@ fn beginGrab(@builtin(global_invocation_id) gid: vec3<u32>) {
 // frame, not once per substep, so there's no accumulated-nudge history
 // to add onto). SET, not added to, every call — still a "let go and it
 // just falls" tool, not a throw.
-// Empirically: this project's own DT (core/constants.json) is 0.0000625,
+// Empirically: this project's own DT (core/constants.json) is 0.00003125,
 // and dragTo() gets one shot at velocity per RENDERED FRAME, consumed by
 // however many substeps run per macro step (--substeps-per-macro, as
 // little as 1 on some configs) before the next dragTo() overwrites it
 // again — so closing even a modest gap in one substep needs a gain on
-// the order of 1/DT (~16000), not a "reasonable-looking" small number the
+// the order of 1/DT (~32000), not a "reasonable-looking" small number the
 // way attract.wgsl's own additive per-substep nudge does.
 const DRAG_GAIN: f32 = 2000.0;
 

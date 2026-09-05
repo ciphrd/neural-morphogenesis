@@ -7,11 +7,13 @@ channels, and support two selectable chemical-memory architectures: a
 diffusing/decaying persistent world field, or persistent cell-owned chemistry
 projected into a transient world field before each brain invocation.
 
-Growth uses a conservative morphoelastic **grow-then-divide** model. It does
-not insert overlapping particles and rely on repulsion to create space.
-Instead, a particle first accumulates stress-free rest area, elasticity moves
-the material toward that enlarged rest configuration, and the fully grown
-particle is finally replaced by two baseline particles.
+Growth treats MPM particles as material samples rather than cells. Each policy
+emits one local 2-D growth vector, which is volume-weighted and smoothly splatted
+onto the MPM grid. Its magnitude grows stress-free material continuously; new
+samples are added only when needed to resolve the enlarged material.
+
+See [`GROWTH_MODEL.md`](GROWTH_MODEL.md) for the design rationale and the
+contrast with the former division-based abstraction.
 
 The target training shape does not directly affect the simulation and is not
 an input to the neural policy. It is used only to evaluate morphology during
@@ -68,25 +70,23 @@ See `DENSITY_MODEL.md` for the scaling rationale and
 
 ## What drives growth
 
-Three signals have distinct responsibilities:
+Growth is deliberately split across three layers:
 
-1. **A dedicated neural output starts growth.** Its signed `[-1, 1]` value is
-   clamped to `[0, 1]`; positive values are the per-macro-step probability of
-   entering a cell cycle, while zero and negative values inhibit admission.
-2. **Neural outputs control growth geometry.** Two bounded outputs directly
-   set the local-space growth direction on every evaluation, while a sigmoid proposes
-   anisotropy; only anisotropy is temporally relaxed. The same direction is the
-   division axis, while another sigmoid selects how strongly daughter placement
-   is polarized versus centered.
-3. **The morphoelastic law supplies the amount of growth.** Once a cell cycle
-   is active, a configured duration determines approximately how many mechanical
-   macro steps it takes to double stress-free area. Elastic compression
-   smoothly lengthens this duration and fully pauses growth above the
-   configured arrest threshold; releasing compression resumes the cycle.
+1. **Policies propose a local 2-D vector.** Magnitude is requested growth rate;
+   direction is the preferred growth orientation.
+2. **The MPM grid integrates the proposal.** The same quadratic B-spline kernel
+   used by mechanics accumulates a represented-volume-normalized vector and
+   positive growth tensor. More numerical samples therefore do not create more
+   material.
+3. **Continuum volume grows first.** G2P continuously exponentiates the smooth
+   tensor into each sample's rest deformation `Fg`.
+4. **Resampling restores precision.** When one sample represents two baseline
+   volumes, one volume is conservatively transferred to a new sample placed
+   toward low morphology density. Nearby insertions atomically share targets.
 
-The policy directly controls cycle admission but not the amount of growth in an
-active cycle. It may use any substrate values and gradients to choose its signed
-division drive, growth direction, anisotropy, and division polarity. Heading is
+The policy therefore controls where and how strongly tissue wants to grow,
+while the integration layer decides how that request is represented numerically.
+Heading is
 not policy state: the local frame always follows the gradient of chemical
 channel 3. The morphology-gradient input lanes remain separate observations in
 that channel-3-relative frame.
@@ -94,10 +94,8 @@ that channel-3-relative frame.
 The current eight-channel policy has 30 inputs: 24 chemical value/gradient
 components, morphology occupancy and its two heading-frame gradient
 components, plus heading-frame elastic Hencky volume, axial, and shear
-strain. Its shared 128-unit tanh trunk feeds six logical output heads: nine
-signed chemical delta rates, growth anisotropy,
-division bias, a two-component desired growth direction, a signed division
-drive, and three sigmoid RGB cell-color outputs (17 outputs total). The heads remain concatenated into one
+strain. Its shared 128-unit tanh trunk feeds chemical deltas, a two-component
+local growth vector, and either RGB or recurrent state outputs. The heads remain concatenated into one
 matrix for GPU inference, but use head-specific
 initialization and mutation scales from `core/policy_parameters.json`.
 
@@ -108,9 +106,7 @@ head multiplies it by a fixed sensitivity scale:
 | --- | --- | ---: |
 | shared trunk | zero | 1.00 |
 | chemical delta rates | neutral | 0.50 |
-| growth anisotropy | sigmoid ≈ 0.20 | 0.15 |
-| division bias | sigmoid = 0.50 | 0.25 |
-| growth direction | zero-centered local vector | 0.20 |
+| growth vector | zero-centered local vector | 0.20 |
 | cell color | sigmoid = 0.50 | 0.50 |
 | private-state residual (`recurrent`) | neutral | 0.20 |
 | private-state gate (`recurrent`) | sigmoid ≈ 0.12 | 0.15 |
@@ -126,10 +122,10 @@ Training supports two explicit behaviors selected with `--cell-memory`. Both
 new variants keep the same 128-unit hidden layer so memory does not silently
 change network capacity:
 
-| Variant | Inputs | Hidden width | Outputs | Parameters at C=8 |
+| Variant | Inputs | Hidden width | Outputs | Parameters at C=9 |
 | --- | ---: | ---: | ---: | ---: |
-| `none` | 30 | 128 | 17 | 6,161 |
-| `recurrent` | 38 | 128 | 30 | 8,862 |
+| `none` | 33 | 128 | 14 | 6,158 |
+| `recurrent` | 41 | 128 | 27 | 8,859 |
 
 The recurrent controller adds eight private values to every particle. Each
 communication round senses `tanh(state)` and emits eight residual candidates
@@ -288,33 +284,24 @@ repeat neural_updates_per_macro communication rounds:
     if cell-owned chemistry:
       particle.chemical_state += chemical_delta * communication_dt / channel_delta_timescale
       particle.chemical_state = clamp(particle.chemical_state, -1, 1)
-    raw_growth_direction = tanh(direction_forward, direction_lateral)
-    local_growth_direction = normalize_or_zero(raw_growth_direction)
-    growth_anisotropy = sigmoid(anisotropy_output)
-    division_bias = sigmoid(polarity_output)
-    particle.growth_direction = rotate(local_growth_direction, alignment)
-    particle.growth_anisotropy = growth_anisotropy
-    particle.division_bias = division_bias
     particle.color = sigmoid(red_output, green_output, blue_output)
 
     if this is the final communication round:
       if persistent environment:
         growth-deformed gaussian-splat the final signed chemical delta
-      growth_probability = clamp(remap(division_drive, division_chance_boost), 0, 1)
-      decrement division cooldown
+      particle.world_growth_vector = rotate_to_world(tanh(local_growth_vector))
 
-      if growth is enabled
-       and population is below the particle cap
-       and this particle is not already growing
-       and its cooldown is finished
-       and division_hazard crosses its persistent random threshold:
-          particle.cell_cycle_active = true
+volume-weighted B-spline splat vectors and outer-product tensors to MPM nodes
+normalize the field by represented material volume
+when a sample represents two baseline volumes:
+  atomically claim a low-density target
+  conservatively move one represented volume into a new numerical sample
 
 if persistent environment:
   diffuse and decay the frozen substrate once
   add the final neural round's deposits
 
-propagate any newly divided particle count to the simulation
+propagate the expanded material-sample count to the simulation
 
 repeat MLS-MPM physics substeps:
     splat the particle density field
@@ -322,7 +309,8 @@ repeat MLS-MPM physics substeps:
     particle-to-grid transfer, including elastic stress
     update grid velocities
     grid-to-particle transfer
-    update position, velocity, deformation, and stress-free growth
+    update position, velocity, and deformation
+    continuously exponentiate the gathered growth tensor into Fg
 ```
 
 `neural_updates_per_macro` controls agent-state deliberation resolution, not
@@ -333,29 +321,19 @@ spatial field and only the final output is deposited; in cell-owned mode the
 projected chemistry can evolve between rounds. Raising the round count never
 multiplies the total integration time.
 
-A daughter created during the agent pass participates in that macro step's
-physics. It begins running its own neural policy on the following macro step.
+A sample created during the agent pass participates after the host publishes
+the updated active count. It begins running its own neural policy on the
+following macro step.
 
-Growth admission uses a persistent stochastic clock rather than discarding a
-new Bernoulli draw every macro step. Before updating it, the bounded final-channel
-signal advances the clock directly:
+## Historical per-sample growth geometry (superseded)
 
-```text
-p = clamp(last_chemical, 0, 1)
-division_hazard += -log(1 - p)
-threshold = exponential_random(mean=1)  # drawn once per prospective cycle
+> The direction/spread scheme below documents the previous experiment. It is
+> no longer used, and its policy checkpoints have a different output shape; see
+> [`GROWTH_MODEL.md`](GROWTH_MODEL.md) for the active field-integrated model.
 
-if division_hazard >= threshold:
-    begin_cell_cycle()
-    division_hazard = 0
-    threshold = unset
-```
-
-Thus zero signal never advances the clock, weak or intermittent signal retains
-its accumulated contribution, and saturated signal preserves immediate
-admission. Parent and daughter clocks reset independently after division.
-
-## Morphoelastic deformation model
+Policy growth uses the `F = Fe Fg` tensor machinery to physically expand the
+continuum before adding numerical samples. The target area is determined by the
+fan size, and the following emission step partitions that grown rest material.
 
 Each particle stores a full 2D growth tensor `Fg` and uses the multiplicative
 decomposition
@@ -382,7 +360,7 @@ g  = determinant(Fg)   # stress-free area multiplier
 Je = determinant(Fe)   # elastic area multiplier
 ```
 
-For a particle in an active cell cycle:
+For a sample preparing an admitted growth event:
 
 ```text
 log_area_per_substep = ln(2) / (growth_duration * substeps_per_macro)
@@ -392,17 +370,17 @@ effective_log_area = log_area_per_substep * mix(1, pressure_gate, feedback_stren
 
 new_g = min(
     g * exp(effective_log_area),
-    division_area
+    1 + emitted_sample_count
 )
 
 area_factor = new_g / g
-strength = neural_growth_anisotropy * global_anisotropy
+strength = (1 - normalized_spread) * global_anisotropy
 ```
 
 `growth_duration` is measured in macro/controller updates, not physics time.
 Consequently, changing `substeps_per_macro` for numerical stability does not
-change how many opportunities agents have to sense, communicate, and reorient
-before division. A duration of 48 gives an uncompressed particle approximately
+change how many opportunities agents have to sense and communicate before
+emission. A duration of 48 gives an uncompressed particle approximately
 48 policy evaluations per doubling; zero disables growth. Its trained value is
 the backend constant `GROWTH_DURATION_MACRO_STEPS` in
 `trainer/simulation_settings.py`. The backend sends that initial value to the
@@ -410,9 +388,9 @@ viewer, whose Growth-panel slider is a playback-only override.
 
 The default contact-inhibition thresholds are both `0.10`, selecting a hard
 cutoff at 10% elastic areal compression. Setting the start below the stop
-restores a smooth slowdown interval. The same gate suppresses new
-cycle hazard and prevents final mitosis while compressed. It never rolls back
-accumulated `Fg`: a quiescent cell continues from the same state after pressure
+restores a smooth slowdown interval. The same gate suppresses new growth
+hazard and prevents final emission while compressed. It never rolls back
+accumulated `Fg`: a quiescent sample continues from the same state after pressure
 release. `feedback_strength=0` is the exact pressure-independent compatibility
 and ablation mode. Since `Je` is a continuum deformation ratio rather than a
 raw neighbor count, this feedback remains meaningful across particle-density
@@ -436,117 +414,88 @@ increment is placed along the selected axis. The local axis is first rotated by
 the channel-3-gradient heading, then transformed through the elastic rotation
 before applying the material update.
 
-The viewer's Growth panel exposes `global_anisotropy` from 0 to 1. It is a
-playback-only multiplier: 0 forces isotropic, blob-favoring rest growth, while
-1 preserves the neural policy's full per-particle anisotropy.
+The existing global anisotropy multiplier remains a playback compatibility
+control: 0 forces isotropic rest growth, while 1 lets spread range continuously
+from directional growth for a ray to isotropic growth for a full circle.
 
 The tensor increment treats `n` and `-n` identically because an axial stretch
-depends on `n n^T`. The sign is retained and used during division.
+depends on `n n^T`. The sign is retained for one-sided sample placement.
 
 Increasing `Fg` while initially holding `F` fixed makes `Fe` temporarily
 compressive. The MLS-MPM constitutive force then expands the material toward
 the new rest state. This is the mechanism that changes the organism's physical
 shape before a new particle is inserted.
 
-## Conservative division and daughter placement
+## Legacy directional fan emission (inactive)
 
-Division occurs when the parent's stress-free area reaches
+The current neural direction is a signed vector transformed from agent-local
+space through the channel-3-gradient frame. Unlike the old axial model, `v`
+and `-v` grow into opposite regions. If that local frame is undefined, a
+rollout-seeded spatial direction supplies an unbiased fallback.
 
-```text
-determinant(Fg) = 2
-```
-
-Daughter placement uses the current neural growth axis, transformed from
-agent-local space through the channel-3-gradient heading. The axis is
-undirected, so neural outputs `v` and `-v` are equivalent. Each division uses
-an unbiased rollout-seeded coin to select one of its two ends. In a flat
-channel-3 field, where the local frame is undefined, the axis is also selected
-from rollout-seeded spatial randomness. For split distance `d`:
+For radial sample spacing `d`, normalized spread `s`, and the playback cap `m`:
 
 ```text
-axis = canonical_axis(world_growth_direction)
-n = random_choice(-axis, +axis)
-bias = division_bias * division_directionality
+spread = s * m * 2*pi
+angular_spacing = pi/3
+sample_count = max(1, ceil(spread / angular_spacing))
 
-half_offset = n * d / 2
-center_shift = bias * half_offset
-
-parent_position   = old_position - half_offset + center_shift
-daughter_position = old_position + half_offset + center_shift
+for j in 0 .. sample_count:
+    t = (j + 0.5) / sample_count - 0.5
+    angle = direction_angle + spread * t
+    new_position = source_position + d * [cos(angle), sin(angle)]
 ```
 
-With zero bias, the split is symmetric along the growth axis. With full bias,
-the parent remains at the old position and the daughter is placed one split
-distance along a randomly selected end of the green growth axis. Intermediate values smoothly
-interpolate between those cases. Positions wrap around the toroidal simulation
-domain.
+The `pi/3` step follows from chord spacing at radius `d`: six points cover a
+full circle with neighboring points one nominal spacing apart. Using stratum
+centers avoids duplicating the two endpoints at 360 degrees. Narrow cones emit
+one point; a half-circle emits three; a full circle emits six. Positions wrap
+around the toroidal domain.
 
-The viewer's Growth panel exposes `division_directionality` from 0 to 1 as a
-playback-only polarization cap: 0 makes each split center-preserving and
-symmetric, while 1 permits the policy's division bias to keep the parent in
-place and put the daughter the full split distance along either end of the growth axis.
+Each event atomically reserves a contiguous block with a capped
+compare/exchange loop. Concurrent fans can be partially truncated at capacity,
+but the published active count never exceeds initialized storage.
 
-Division conserves mass and rest area:
+Before emission, the source grows to stress-free area `1 + sample_count` using
+the existing `F = Fe Fg` mechanics. Spread controls the rest-growth shape:
+narrow cones expand strongly along their direction, while a full-circle fan is
+isotropic. At the target area, that continuum material is partitioned into the
+source plus the emitted baseline samples. Every sample receives `Fg = identity`
+and `F = Fe`, preserving stress while conserving total rest area and mass.
 
-```text
-before: one parent with det(Fg) = 2 and mass = 2 * base_mass
-after:  two particles with det(Fg) = 1 and mass = base_mass each
-```
-
-Both daughters return to `Fg = identity`, while their total deformation is
-set to
-
-```text
-daughter_F = parent_F * inverse(parent_Fg)
-```
-
-This preserves the parent's elastic deformation `Fe`, so stress does not jump
-at division. The daughters also inherit the plastic state, APIC affine field,
-current channel-3 alignment and centered momentum. Both receive a division
-cooldown and independent random-number state.
-
-Visually, the existing daughter remains full-sized while the newly created
-daughter emerges from zero size. Its visible area follows the same exponential
-curve as stress-free volume growth, reaching full
-size after one `growth_duration`. The renderer applies the square root of that
-area fraction to particle radius. This appearance ramp does not alter physical
-mass, deformation, stress, chemistry, or the conservative split described
-above. Seeded and manually placed particles start at full size.
-
-A cell's transient chemical substrate footprint is deformed by its stress-free
-growth tensor `Fg`. Its projected area therefore expands continuously with the
-represented material (and along the same axis for anisotropic growth). At
-division the area-2 parent projection becomes two area-1 daughter projections;
-the rendering-only newborn fade does not temporarily remove the daughter's
-chemistry. Persistent internal chemical state remains unscaled.
+The source position is not displaced by the partition. New samples inherit its
+plastic state, APIC affine field, locally sampled velocity, chemical state,
+color, and recurrent neural memory. If capacity truncates a fan, the source
+retains the remaining un-sampled rest area. Only rendering starts new samples
+at zero area and fades them to full size over `growth_duration`. Both source and
+emitted samples receive the growth cooldown.
 
 
 ## What determines the final morphology
 
 The visible organism is an emergent result of:
 
-- **neural growth admission:** where the policy produces positive division drive;
-  the viewer's division-chance boost can continuously remap its signed range
-  toward a full `[0,1]` probability range;
+- **neural growth field:** where the integrated vector magnitude requests
+  continuous rest-volume growth;
 - **chemical feedback:** where particles write signals and how neighbors react;
-- **directional rest growth:** the accumulated tensor `Fg` of each particle;
-- **growth-aligned division polarity:** whether the parent stays fixed or the
-  daughter pair remains centered;
+- **directional material growth:** the tensor formed by neighboring growth
+  vectors, with a global isotropy/anisotropy material control;
+- **adaptive resampling:** where extra quadrature points are introduced as
+  represented volume grows;
 - **elastic relaxation:** how neighboring material accommodates new rest area;
 - **plasticity:** which sufficiently large elastic deformations become
   permanent;
 - **repulsion:** bounded local separation of overlapping particles;
-- **damping and friction:** removal of kinetic energy after growth events.
+- **damping and friction:** removal of kinetic energy during expansion.
 
 There is no global rest-shape mesh. Each particle owns a local `Fg`, while
 particles are coupled through the MLS-MPM grid. Neighboring particles can
 therefore retain residual elastic stress when their growth tensors or local
 rest configurations are incompatible.
 
-The growth direction is recomputed every macro step. A particle can grow along
-different axes during one cell cycle, and `Fg` accumulates that history.
-Daughter placement is independent: it uses the rear of the current
-channel-3-gradient frame.
+The growth vector is recomputed every macro step, while `Fg` continuously
+accumulates the integrated history. Refinement placement prefers lower local
+morphology density and uses the signed vector only as a fallback axis.
 
 ## Manual particle insertion
 
@@ -569,7 +518,9 @@ cap.
 ## Relevant implementation files
 
 - [`core/agents.wgsl`](core/agents.wgsl) — sensing, neural policy, chemical
-  writes, cell-cycle admission, growth-aligned division, and daughter initialization.
+  writes, and local-to-world growth-vector publication.
+- [`core/growthField.wgsl`](core/growthField.wgsl) — MPM-grid integration and
+  conservative adaptive resampling.
 - [`core/g2p.wgsl`](core/g2p.wgsl) — deformation update, plastic clamp, and
   tensor-valued `Fg` growth law.
 - [`core/p2g.wgsl`](core/p2g.wgsl) — effective grown mass/volume and elastic
@@ -580,8 +531,8 @@ cap.
   rollout with the same ordering as the browser.
 - [`trainer/simulation_settings.py`](trainer/simulation_settings.py) — current
   policy, material, growth, damping, and repulsion defaults.
-- [`trainer/growth_check.py`](trainer/growth_check.py) — analytical and GPU
-  regression checks for growth and conservative division.
+- [`trainer/continuous_growth_check.py`](trainer/continuous_growth_check.py) —
+  focused GPU checks for continuous growth and conservative resampling.
 - [`trainer/capture_policy_inputs.py`](trainer/capture_policy_inputs.py) —
   records exact raw policy inputs for stable particle slots during a headless
   rollout and writes an offline HTML dashboard plus its source JSON.
@@ -647,9 +598,8 @@ pooled across all channels (and both directions for gradients). A value equal
 to its scale maps to approximately `0.762`, while large outliers approach `±1`
 smoothly.
 
-Chemical inputs influence division only through the network. A separate signed
-policy output drives persistent division hazard, so no chemical channel has a
-hard-coded growth role.
+Chemical inputs influence growth only through the network; no chemical channel
+has a hard-coded growth role.
 
 New policy-input reports store both `raw_inputs` and normalized `inputs`; the
 HTML dashboard's **Input space** selector switches every trace, heatmap, and

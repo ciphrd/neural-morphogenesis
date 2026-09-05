@@ -167,13 +167,13 @@ export function physicsSliderSpecsFor(
     },
     {
       key: "splitDisplacement",
-      label: "Split displacement",
+      label: "Growth sample spacing",
       ...scaledRange(trained.splitDisplacement, 3),
       format: (v) => v.toFixed(4),
     },
     {
       key: "divisionCooldown",
-      label: "Division cooldown",
+      label: "Growth cooldown",
       ...scaledRange(trained.divisionCooldown, 3),
       format: (v) => v.toFixed(1),
     },

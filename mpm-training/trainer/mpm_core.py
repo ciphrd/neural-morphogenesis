@@ -219,6 +219,10 @@ class MpmCore:
             size=NODE_COUNT * 2 * f32,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
+        self.growth_field = device.create_buffer(
+            size=NODE_COUNT * 7 * f32,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
+        )
 
         # Purely a GPU-sync barrier for step()'s own chunking — see
         # _MAX_SUBSTEPS_PER_SUBMIT's docstring. STORAGE|COPY_SRC (not
@@ -311,6 +315,7 @@ class MpmCore:
                 {"binding": 6, "resource": {"buffer": self.active_count_uniform, "offset": 0, "size": self.active_count_uniform.size}},
                 {"binding": 7, "resource": {"buffer": self.material_uniform, "offset": 0, "size": self.material_uniform.size}},
                 {"binding": 8, "resource": {"buffer": self.chemical_state_fallback, "offset": 0, "size": self.chemical_state_fallback.size}},
+                {"binding": 9, "resource": {"buffer": self.growth_field, "offset": 0, "size": self.growth_field.size}},
             ],
         )
 
