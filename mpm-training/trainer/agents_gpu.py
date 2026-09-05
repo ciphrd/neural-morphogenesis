@@ -213,6 +213,7 @@ class AgentsGPU:
         growth_compression_feedback: float = GROWTH_COMPRESSION_FEEDBACK,
         division_drive_boost: float = DIVISION_DRIVE_BOOST,
     ) -> None:
+        self.unresolved_samples = 0
         self.device = device
         self.channels = channels
         self.hidden_dim = hidden_dim
@@ -282,6 +283,8 @@ class AgentsGPU:
         self.device.queue.write_buffer(
             self._physics_uniform, 96, np.array([0xFFFFFFFF], dtype=np.uint32)
         )
+        self._forced_growth_field_override = False
+        self.set_forced_growth_field_override(False)
 
         # Persistent per-particle state — owned here (not MpmCore, not
         # EnvironmentGPU), zeroed at creation (reseeded
@@ -481,7 +484,8 @@ class AgentsGPU:
             },
         ))
         entry_points = (
-            "clearGrowthField", "scatterGrowthIntent", "proposeResample", "commitResample",
+            "clearGrowthField", "scatterGrowthIntent", "enforceGrowthField",
+            "commitResample", "stopGrowthAtCapacity",
         )
         self._growth_pipelines = [
             device.create_compute_pipeline(
@@ -498,12 +502,12 @@ class AgentsGPU:
             4: {"buffer": core.C, "offset": 0, "size": core.C.size},
             5: {"buffer": core.velocities, "offset": 0, "size": core.velocities.size},
             6: {"buffer": core.F, "offset": 0, "size": core.F.size},
-            7: core.morphology_texture.create_view(),
             8: {"buffer": self._growth_field, "offset": 0, "size": self._growth_field.size},
             9: {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size},
         }
         binding_sets = (
-            (8,), (0, 1, 2, 8), (0, 1, 2, 3, 7, 8, 9), tuple(range(10)),
+            (3, 8), (0, 1, 2, 6, 8, 9), (8, 9),
+            (0, 1, 2, 3, 4, 5, 6, 9), (3, 8, 9),
         )
         self._growth_bind_groups = [
             device.create_bind_group(
@@ -513,7 +517,9 @@ class AgentsGPU:
             for pipeline, bindings in zip(self._growth_pipelines, binding_sets)
         ]
         self._growth_dispatches = (
-            ceil_div(7 * NODE_COUNT, 256), None, None, None,
+            ceil_div(10 * NODE_COUNT, 256),
+            None, ceil_div(NODE_COUNT, 256), None,
+            ceil_div(10 * NODE_COUNT, 256),
         )
 
     @property
@@ -580,6 +586,15 @@ class AgentsGPU:
                 dtype=np.float32,
             ),
         )
+
+    def set_material_area_budget(self, area: float) -> None:
+        """Maximum grown rest area in world units; zero means no physical limit.
+
+        Numerical capacity still pauses growth as an explicit safety boundary.
+        """
+        if not np.isfinite(area) or area < 0:
+            raise ValueError("material area budget must be finite and nonnegative")
+        self.device.queue.write_buffer(self._physics_uniform, 124, np.array([area], np.float32))
 
     def set_growth_enabled(self, enabled: bool) -> None:
         """Enable publication of neural growth vectors (uniform byte 44).
@@ -724,6 +739,15 @@ class AgentsGPU:
             np.array([start, stop, strength], dtype=np.float32),
         )
 
+    def set_forced_growth_field_override(self, enabled: bool) -> None:
+        """Toggle the Lab-only radial-inward grid field at byte offset 120."""
+        self._forced_growth_field_override = bool(enabled)
+        self.device.queue.write_buffer(
+            self._physics_uniform,
+            120,
+            np.array([1 if enabled else 0], dtype=np.uint32),
+        )
+
     def set_active_count(self, active_count: int) -> None:
         """Updates this class's own agentStep() dispatch size AND
         growth's own atomic "next free slot" counter (core/agents.wgsl's
@@ -752,8 +776,10 @@ class AgentsGPU:
         run — same "reading anything back necessarily waits for the
         queue's own timeline to catch up" property mpm_core.py's own
         step() already relies on for its per-chunk sync."""
-        raw = self.device.queue.read_buffer(self._agent_state_buffer, 0, 4)
-        return int(np.frombuffer(raw, dtype=np.uint32)[0])
+        raw = self.device.queue.read_buffer(self._agent_state_buffer, 0, 8)
+        status = np.frombuffer(raw, dtype=np.uint32)
+        self.unresolved_samples = int(status[1])
+        return int(status[0])
 
     def reset_state(self, seed: int) -> None:
         """Clear rollout-scoped neural/lifecycle state.
@@ -793,10 +819,12 @@ class AgentsGPU:
             self.encode_growth_field(encoder)
 
     def encode_growth_field(self, encoder: wgpu.GPUCommandEncoder) -> None:
-        """Splat continuous growth intent and refine oversized quadrature samples."""
-        for pipeline, bind_group, fixed_dispatch in zip(
+        """Splat growth intent and conservatively refine under-resolved footprints."""
+        for index, (pipeline, bind_group, fixed_dispatch) in enumerate(zip(
             self._growth_pipelines, self._growth_bind_groups, self._growth_dispatches
-        ):
+        )):
+            if index == 2 and not self._forced_growth_field_override:
+                continue
             p = encoder.begin_compute_pass()
             p.set_pipeline(pipeline)
             p.set_bind_group(0, bind_group)

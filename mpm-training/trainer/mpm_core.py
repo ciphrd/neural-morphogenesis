@@ -89,18 +89,20 @@ WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass
 # growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-# growthFrameAngle, appearanceScale, padding — 48 bytes.
-REST_FIELDS = 12
+# growthFrameAngle, appearanceScale, quadratureWeight, domain(4) — 64 bytes.
+REST_FIELDS = 16
 REST_GROWTH_F = slice(0, 4)
 REST_JP = 4
 REST_CYCLE_ACTIVE = 5
 REST_APPEARANCE_SCALE = 10
+REST_QUADRATURE_WEIGHT = 11
 
 
 def _pack_rest(jp: np.ndarray) -> np.ndarray:
     """Expands a flat (count,) Jp array into ParticleRest's own
-    (count, 12) tensor-rest layout, defaulting growthF=I (baseline rest
-    configuration), cycleActive=0, direction/controls=0, and padding=0.
+    (count, 16) tensor-rest layout, defaulting growthF=I (baseline rest
+    configuration), cycleActive=0, direction/controls=0, appearanceScale=1,
+    and quadratureWeight=1.
 
     Exists so load_scene()/reset_growth_buffers() can keep their original
     scalar-Jp signatures — every scene seeder in this project
@@ -113,6 +115,7 @@ def _pack_rest(jp: np.ndarray) -> np.ndarray:
     packed[:, 3] = 1.0
     packed[:, REST_JP] = jp
     packed[:, REST_APPEARANCE_SCALE] = 1.0
+    packed[:, REST_QUADRATURE_WEIGHT] = 1.0
     return packed
 
 SNOW_YIELD_LOW = 1.0 - 2.5e-2
@@ -220,7 +223,7 @@ class MpmCore:
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         self.growth_field = device.create_buffer(
-            size=NODE_COUNT * 7 * f32,
+            size=NODE_COUNT * 10 * f32,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
         )
 
@@ -373,6 +376,7 @@ class MpmCore:
                 {"binding": 1, "resource": {"buffer": self.positions, "offset": 0, "size": self.positions.size}},
                 {"binding": 2, "resource": {"buffer": self.active_count_uniform, "offset": 0, "size": self.active_count_uniform.size}},
                 {"binding": 3, "resource": {"buffer": self.splat_params_uniform, "offset": 0, "size": self.splat_params_uniform.size}},
+                {"binding": 8, "resource": {"buffer": self.rest, "offset": 0, "size": self.rest.size}},
             ],
         )
 
@@ -487,6 +491,7 @@ class MpmCore:
         F: np.ndarray,
         C: np.ndarray,
         Jp: np.ndarray,
+        domain: np.ndarray | None = None,
     ) -> None:
         """Writes a scene into the head of every particle buffer and
         updates activeCount — mirrors mpm.ts's own loadScene()."""
@@ -501,7 +506,12 @@ class MpmCore:
         # tensor layout — growthF=I and cycleActive=0 for
         # genuinely-seeded particles, which unlike growth-spawned
         # children have no ramp to serve.
-        self.device.queue.write_buffer(self.rest, 0, _pack_rest(np.asarray(Jp, dtype=np.float32)))
+        packed = _pack_rest(np.asarray(Jp, dtype=np.float32))
+        if domain is not None:
+            packed[:, 12:16] = np.asarray(domain, dtype=np.float32).reshape(count, 4)
+            packed[:, 8] = (4.0 * np.linalg.det(packed[:, 12:16].reshape(-1, 2, 2))
+                            / np.linalg.det(np.asarray(F).reshape(-1, 2, 2)))
+        self.device.queue.write_buffer(self.rest, 0, packed)
         self.set_active_count(count)
 
     def set_active_count(self, count: int) -> None:
@@ -522,7 +532,7 @@ class MpmCore:
 
     def reset_growth_buffers(self, max_active: int) -> None:
         """Zero/identity-fills velocities/F/C/ParticleRest for [0, max_active) —
-        call once per rollout, after load_scene(). Every rollout starts
+        call once per rollout, before load_scene(). Every rollout starts
         with its configured number of real particles (see training_sim.py's own module
         docstring for why --particles is a growth CAP now, not a fixed
         starting count) — every slot beyond those particles is destined to
@@ -781,7 +791,7 @@ class MpmCore:
 
         Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,growthAngle,
         growthAnisotropy,divisionBias,growthFrameAngle,appearanceScale,
-        padding]``.
+        quadratureWeight]``.
         This is diagnostic-only: COPY_SRC is present on the buffer, but the
         normal simulation path performs no readback. Keeping the raw layout
         visible here also makes scalar-vs-tensor growth snapshots explicit

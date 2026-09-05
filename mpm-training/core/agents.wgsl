@@ -272,8 +272,9 @@ struct AgentPhysics {
   // Blends growth drive from its signed meaning toward a full probability
   // remap: 0 keeps drive unchanged; 1 maps [-1,1] to [0,1].
   divisionDriveBoost: f32,
-  _physicsPadding2: f32,
-  _physicsPadding3: f32,
+  // Lab-only growth-grid override; consumed by growthField.wgsl.
+  forcedGrowthFieldMode: u32,
+  materialAreaBudget: f32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -383,17 +384,18 @@ struct ParticleRest {
   // Persistent anisotropy relaxed toward the policy's sigmoid target.
   growthAnisotropy: f32,
   // Normalized angular fan spread. The legacy field name preserves the ABI.
-  divisionBias: f32,
+  divisionBias: f32, // Original world area (legacy ABI name).
   // Heading frame captured for physics passes, which do not bind ParticleMeta.
   // Together with growthAngle it reconstructs the world-space growth axis.
   growthFrameAngle: f32,
-  // Rendering-only newborn area fraction. Seeded samples start at 1; growth
-  // leaves the source full-sized and starts each new sample at 0. g2p grows
-  // this with the same curve and compression response as rest area. It fills
-  // the struct's former alignment lane, so the 48-byte ABI is unchanged.
+  // Rendering-only appearance fraction. Adaptive refinement copies it to both
+  // weighted sites; quadratureWeight below conserves their combined disc area.
   appearanceScale: f32,
-  // Explicit tail padding preserves the 48-byte storage ABI.
-  _padding: f32,
+  // Numerical quadrature weight. Refinement divides this between samples;
+  // material growth never changes it. q * det(growthF) is represented area.
+  quadratureWeight: f32,
+  // Transported world-space half edges, row major. Independent of plastic F.
+  domain: vec4<f32>,
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(12) var morphologyTexture: texture_2d<f32>;
@@ -703,6 +705,7 @@ fn depositGaussian(
   envWrite: array<f32, ENV_WRITE_DIM>,
   centerWorldPos: vec2<f32>,
   growthF: vec4<f32>,
+  quadratureWeight: f32,
 ) {
   _ = publishDepositScale();
   let growthDet = max(abs(matDet(growthF)), 1e-6);
@@ -730,7 +733,8 @@ fn depositGaussian(
       physics.depositSigma * FIELD_DEPOSIT_SIGMA_MULTIPLIERS[c], 1e-8
     );
     let sigmaNative = sigmaWorld * max(fieldDimensions.x, fieldDimensions.y);
-    let projectionScale = growthDet * physics.chemicalProjectionWeight;
+    let projectionScale = max(quadratureWeight, 1e-6) * growthDet
+      * physics.chemicalProjectionWeight;
 
     // A Gaussian narrower than half a native texel is not meaningfully
     // resolved. Cloud-in-cell is its mass-conserving, motion-continuous limit
@@ -775,6 +779,18 @@ fn depositGaussian(
   }
 }
 
+__DOMAIN_FUNCTIONS__
+
+// Integrate a fixed-world chemical kernel over the transported domain. Growth
+// scales material amount; it no longer enlarges the kernel a second time.
+fn depositDomain(envWrite: array<f32, ENV_WRITE_DIM>, pos: vec2<f32>, rest: ParticleRest) {
+  let representedArea = max(rest.quadratureWeight, 1e-6) * max(matDet(rest.growthF), 1e-6);
+  for (var k = 0u; k < domainQuadratureCount(rest.domain); k++) {
+    let q = domainQuadrature(rest.domain, k);
+    depositGaussian(envWrite, pos+q.xy, vec4<f32>(1.0, 0.0, 0.0, 1.0), representedArea*q.z);
+  }
+}
+
 // Rebuild contribution pass, deliberately separate from agentStep so every
 // cell publishes its OLD state before any cell's brain can update it.
 @compute @workgroup_size(64)
@@ -789,7 +805,7 @@ fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
   // chemistry are fully present immediately after division; growthF controls
   // the projection footprint before division so the substrate follows the
   // continuously growing material.
-  depositGaussian(levels, positions[pi], particleRest[pi].growthF);
+  depositDomain(levels, positions[pi], particleRest[pi]);
 }
 
 // The bounded subset of the network's raw output: one signed chemical delta
@@ -981,11 +997,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   } else if (stepMode.commitLifecycle != 0u) {
     // Persistent mode deliberates against a frozen field and deposits only the
     // final neural round. Environment depositRate owns macro-time scaling.
-    depositGaussian(
-      result.envWrite,
-      pos,
-      particleRest[pi].growthF,
-    );
+    depositDomain(result.envWrite, pos, particleRest[pi]);
   }
 
   if (STATEFUL) {
@@ -1052,7 +1064,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   particleRest[pi].cycleActive = growthVectorWorld.x;
   particleRest[pi].growthAngle = growthVectorWorld.y;
   particleRest[pi].growthAnisotropy = 0.0;
-  particleRest[pi].divisionBias = 0.0;
+  // divisionBias stores original world area; preserve it across policy updates.
   particleRest[pi].growthFrameAngle = 0.0;
   agentState.particleMeta[pi].mitosisPropensity = length(growthVectorWorld);
   }

@@ -605,7 +605,7 @@ fn gradientFragment(in: QuadOut) -> @location(0) vec4<f32> {
 // Brightness is continuous areal growth rate. Hue follows the signed vector
 // when coherent and otherwise the principal axis of the positive tensor.
 const GROWTH_NODE_STRIDE: u32 = GRID_N + 1u;
-const GROWTH_FIELD_CHANNELS: u32 = 7u;
+const GROWTH_FIELD_CHANNELS: u32 = 10u;
 
 // The simulation writes these values atomically in its own shader module. This
 // visualization module only reads the completed field, so expose it as ordinary

@@ -853,7 +853,7 @@ export function TrainingView() {
               />
               Chirality
             </label>
-            <label className="slider-row">
+            <label className="slider-row playback-cap-row">
               <span>Playback sample cap (at 1×)</span>
               <Slider
                 min={2}

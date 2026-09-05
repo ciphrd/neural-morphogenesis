@@ -56,7 +56,9 @@ import { chemicalCommunicationArchitectureFromConfig, physicsSettingsFromConfig,
 import coreConstants from "../../../core/constants.json";
 
 export interface SimulationScenario {
-  initialLayout: { kind: "rows"; rows: number; columns: number };
+  initialLayout:
+    | { kind: "rows"; rows: number; columns: number }
+    | { kind: "blob"; count: number };
   events: Array<{
     step: number;
     type: "split";
@@ -67,6 +69,8 @@ export interface SimulationScenario {
     direction?: readonly [number, number];
   }>;
   suppressNaturalGrowth?: boolean;
+  /** Lab-only analytic override applied at every MPM growth-grid node. */
+  growthFieldOverride?: "radial-inward";
 }
 
 export class GpuSimulation {
@@ -196,6 +200,11 @@ export class GpuSimulation {
    * (core/agents.wgsl's own agentStep()), so this changes every macro
    * step, unlike config.particles which is only the CAP. 0 before the
    * first rebuild(). */
+  get samplingStatus(): { atCapacity: boolean; unresolvedSamples: number } {
+    return { atCapacity: this.particleCount >= this.particleCap,
+      unresolvedSamples: this.agents?.unresolvedSamples ?? 0 };
+  }
+
   get particleCount(): number {
     return this.mpmCore?.activeCount ?? 0;
   }
@@ -388,12 +397,15 @@ export class GpuSimulation {
           spacing: this.config.splitDisplacement,
         })
       : seedBlob({
-          count: initialCount,
+          count: this.scenario?.initialLayout.kind === "blob"
+            ? this.scenario.initialLayout.count
+            : initialCount,
           centerX: this.config.spawnX,
           centerY: this.config.spawnY,
           spacing: this.config.splitDisplacement,
           seed: this.config.seed,
         });
+    this.mpmCore.resetGrowthBuffers(this.particleCap);
     this.mpmCore.loadScene(scene);
     // Every slot beyond the genuinely seeded particles is destined to become
     // a real particle via growth, at some unknown point in this rollout
@@ -401,7 +413,6 @@ export class GpuSimulation {
     // has to run every rollout (not just once, ever) despite seedBlob()
     // already giving genuinely-seeded particles these exact same fresh
     // defaults.
-    this.mpmCore.resetGrowthBuffers(this.particleCap);
     this.environment.reset();
     // Every rollout — same "run-constant in practice today, but a
     // rollout-scoped setter regardless" convention this method's own
@@ -456,6 +467,10 @@ export class GpuSimulation {
     const growthCompressionFeedback = Math.max(
       0, Math.min(1, physics.growthCompressionFeedback ?? 1.0),
     );
+    const growthSpeedMultiplier = Math.max(0, physics.growthSpeedMultiplier ?? 1.0);
+    const effectiveGrowthDuration = growthSpeedMultiplier > 0
+      ? physics.growthDuration / growthSpeedMultiplier
+      : 0;
     this.mpmCore.setMaterial(
       physics.materialE,
       physics.materialNu,
@@ -463,7 +478,7 @@ export class GpuSimulation {
       physics.materialElasticity,
       // Controller ticks per uncompressed area doubling. MpmCore derives
       // the shader's internal per-substep rate from this and the run cadence.
-      physics.growthDuration,
+      effectiveGrowthDuration,
       physics.growthMax ?? 2.0,
       physics.growthAnisotropy ?? 1.0,
       this.config.substepsPerMacro,
@@ -474,7 +489,9 @@ export class GpuSimulation {
       growthCompressionFeedback,
       physics.materialFluidity,
     );
-    this.growthDuration = physics.growthDuration;
+    // Lab event admission and newborn fade must follow the same effective
+    // timescale as the material-rate uniform, not the unscaled run setting.
+    this.growthDuration = effectiveGrowthDuration;
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
     this.mpmCore.setSplatRadius(physics.splatRadius);
     this.mpmCore.setMorphology(
@@ -502,6 +519,7 @@ export class GpuSimulation {
       growthCompressionStop,
       growthCompressionFeedback,
     );
+    this.agents.setMaterialAreaBudget(physics.materialAreaBudget ?? 0);
     this.agents.setPhysics({
       maxAccel: physics.maxAccel,
       maxStrafe: physics.maxStrafe,
@@ -606,6 +624,9 @@ export class GpuSimulation {
       forcedLifecycle?.direction ?? null,
       nextStep === admissionStep,
       forcedLifecycle?.particleCount ?? 1,
+    );
+    this.agents.setForcedGrowthFieldOverride(
+      this.scenario?.growthFieldOverride ?? null,
     );
     this.agents.setGrowthEnabled(
       !this.scenario?.suppressNaturalGrowth && this.growthIsEnabled(),

@@ -128,7 +128,9 @@ export function seedRows(config: {
       F[index * 4 + 3] = 1;
     }
   }
-  return { count, positions, velocities, F, C, Jp };
+  const domain = new Float32Array(count * 4);
+  for (let i = 0; i < count; i++) { domain[i * 4] = spacing / 2; domain[i * 4 + 3] = spacing / 2; }
+  return { count, positions, velocities, F, C, Jp, domain };
 }
 
 /** Circular clipping of a perfect hexagonal lattice, mirrored by
@@ -190,5 +192,12 @@ export function seedBlob(config: SeedBlobConfig) {
   const C = new Float32Array(count * 4); // zero
   const Jp = new Float32Array(count).fill(1);
 
-  return { count, positions, velocities, F, C, Jp };
+  const domain = new Float32Array(count * 4);
+  const a = packedSpacing / 2;
+  const b = packedSpacing / 4;
+  const d = packedSpacing * Math.sqrt(3) / 4;
+  for (let i = 0; i < count; i++) {
+    domain.set([cosTheta*a, cosTheta*b-sinTheta*d, sinTheta*a, sinTheta*b+cosTheta*d], i*4);
+  }
+  return { count, positions, velocities, F, C, Jp, domain };
 }

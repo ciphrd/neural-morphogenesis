@@ -70,29 +70,47 @@ const REPEATED_TOP_ROW_SPLIT_SCENARIO: SimulationScenario = {
   suppressNaturalGrowth: true,
 }
 
-type LabScenarioId = "boundary-tangent" | "vertical" | "repeated-top-row"
+const RADIAL_INWARD_CIRCLE_SCENARIO: SimulationScenario = {
+  initialLayout: { kind: "blob", count: 127 },
+  events: [],
+  suppressNaturalGrowth: true,
+  growthFieldOverride: "radial-inward",
+}
+
+type LabScenarioId = "boundary-tangent" | "vertical" | "repeated-top-row" | "radial-inward-circle"
 
 export function LabView() {
   const { latest } = useTrainingSocket(TRAIN_WS_URL, TRAIN_API_URL)
   const [scenarioId, setScenarioId] = useState<LabScenarioId>(
     VIEWER_DEFAULTS.lab.scenario
   )
-  const scenario = scenarioId === "repeated-top-row"
-    ? REPEATED_TOP_ROW_SPLIT_SCENARIO
-    : scenarioId === "vertical"
-      ? VERTICAL_SPLIT_SCENARIO
-      : BOUNDARY_TANGENT_SCENARIO
-  const scenarioParticleCap = scenarioId === "repeated-top-row" ? 81 : 20
-  const scenarioMinimumSteps = scenarioId === "repeated-top-row" ? 750 : 240
+  const scenario = scenarioId === "radial-inward-circle"
+    ? RADIAL_INWARD_CIRCLE_SCENARIO
+    : scenarioId === "repeated-top-row"
+      ? REPEATED_TOP_ROW_SPLIT_SCENARIO
+      : scenarioId === "vertical"
+        ? VERTICAL_SPLIT_SCENARIO
+        : BOUNDARY_TANGENT_SCENARIO
+  const scenarioInitialCount = scenario.initialLayout.kind === "blob"
+    ? scenario.initialLayout.count
+    : scenario.initialLayout.rows * scenario.initialLayout.columns
+  const scenarioParticleCap = scenarioId === "radial-inward-circle"
+    ? 1024
+    : scenarioId === "repeated-top-row" ? 81 : 20
+  const scenarioMinimumSteps = scenarioId === "radial-inward-circle"
+    ? 600
+    : scenarioId === "repeated-top-row" ? 750 : 240
   const scenarioAxisLabel = scenarioId === "boundary-tangent"
     ? "Local boundary-tangent axis"
-    : "Fixed vertical axis"
+    : scenarioId === "radial-inward-circle"
+      ? "Every growth-grid node points toward center"
+      : "Fixed vertical axis"
   const baseConfig = useMemo(() => latest ? {
     ...latest,
     particles: scenarioParticleCap,
-    initialParticleCount: 18,
+    initialParticleCount: scenarioInitialCount,
     macroSteps: Math.max(scenarioMinimumSteps, latest.macroSteps),
-  } : null, [latest, scenarioParticleCap, scenarioMinimumSteps])
+  } : null, [latest, scenarioInitialCount, scenarioParticleCap, scenarioMinimumSteps])
   const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
     useState<ChemicalCommunicationArchitecture | null>(null)
   const [chiralityOverride, setChiralityOverride] = useState<boolean | null>(null)
@@ -132,8 +150,8 @@ export function LabView() {
         chemicalArchitectureOverride ?? chemicalCommunicationArchitectureFromConfig(baseConfig),
       chirality: effectiveChirality,
     }, effectiveParticleDensity)
-    return { ...densityResolved, particles: scenarioParticleCap, initialParticleCount: 18 }
-  }, [baseConfig, chemicalArchitectureOverride, effectiveChirality, effectiveParticleDensity, effectiveSubstrateResolution, scenarioParticleCap])
+    return { ...densityResolved, particles: scenarioParticleCap, initialParticleCount: scenarioInitialCount }
+  }, [baseConfig, chemicalArchitectureOverride, effectiveChirality, effectiveParticleDensity, effectiveSubstrateResolution, scenarioInitialCount, scenarioParticleCap])
   const config = useMemo(() => {
     if (!playbackConfig || !policyExploration) return playbackConfig
     const policyArchitecture = policyArchitectureForCellMemory(policyExploration.cellMemory)
@@ -234,12 +252,13 @@ export function LabView() {
             <option value="boundary-tangent">2 × 9 — boundary-tangent splits</option>
             <option value="vertical">2 × 9 — vertical splits</option>
             <option value="repeated-top-row">2 × 9 — grow seven vertical rows</option>
+            <option value="radial-inward-circle">Circle — enforced inward growth grid</option>
           </select>
         </section>
         <section>
           <h2>Initial state</h2>
-          <div className="stat-row"><span>Cells</span><span>18</span></div>
-          <div className="stat-row"><span>Layout</span><span>2 rows × 9</span></div>
+          <div className="stat-row"><span>Cells</span><span>{scenarioInitialCount}</span></div>
+          <div className="stat-row"><span>Layout</span><span>{scenario.initialLayout.kind === "blob" ? "Circular hex lattice" : `${scenario.initialLayout.rows} rows × ${scenario.initialLayout.columns}`}</span></div>
           <div className="stat-row"><span>Spacing</span><span>Split distance</span></div>
         </section>
         <section>
@@ -371,6 +390,9 @@ export function LabView() {
         </section>
         <section>
           <h2>Events</h2>
+          {scenario.events.length === 0 && (
+            <p className="hint">The radial-inward vector field is enforced continuously on every growth-grid node; its magnitude drives compatible isotropic area growth so the planar circle should remain continuous.</p>
+          )}
           {scenario.events.map((event, eventIndex) => (
             <div key={`${event.step}-${event.particleIndex}`} className={`lab-event${step >= event.step ? " is-complete" : ""}`}>
               <span className="lab-event-step">{event.step}</span>
@@ -508,7 +530,7 @@ export function LabView() {
             blur={blur}
             gradientExponent={gradientExponent}
             particleCap={scenarioParticleCap}
-            initialParticleCount={18}
+            initialParticleCount={scenarioInitialCount}
             deformSettings={deformSettings}
             tool={tool}
             loopAtTrainedSteps={false}

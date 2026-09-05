@@ -27,7 +27,7 @@ def _rest_state(
     appearance_scale: np.ndarray | None = None,
 ) -> np.ndarray:
     count = len(jp)
-    out = np.zeros((count, 12), dtype=np.float32)
+    out = np.zeros((count, 16), dtype=np.float32)
     if growth_f is None:
         root = np.sqrt(np.asarray(growth, dtype=np.float32))
         out[:, 0] = root
@@ -44,6 +44,7 @@ def _rest_state(
     if division_bias is not None:
         out[:, 8] = np.asarray(division_bias, dtype=np.float32)
     out[:, 10] = 1.0 if appearance_scale is None else np.asarray(appearance_scale, dtype=np.float32)
+    out[:, 11] = 1.0
     return out
 
 
@@ -51,7 +52,7 @@ def _probe(core: MpmCore, count: int) -> np.ndarray:
     """Returns [Je, g, cycleActive] without adding COPY_SRC to hot buffers."""
     shader = core.device.create_shader_module(
         code="""
-        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, _padding: f32, }
+        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, quadratureWeight: f32, domain: vec4<f32>, }
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> rest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
@@ -1609,12 +1610,15 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     agents.reset_state(31)
     layout = weight_layout(1, 128, STATEFUL_128_ARCHITECTURE)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Narrow spread keeps the inheritance assertion to one emitted sample.
-    weights[layout["fc2b_offset"] + 2] = -20.0
-    # Common motion/growth outputs plus division drive occupy C+7 rows. Drive private channel 0
-    # positively and open its gate; all other private channels remain still.
-    weights[layout["fc2b_offset"] + 6] = 1.0
-    weights[layout["fc2b_offset"] + 14] = 20.0
+    # Resolve logical head offsets instead of the retired motion/division ABI.
+    from policy_parameters import policy_heads
+    head_offsets = {}
+    offset = 0
+    for head in policy_heads(1, STATEFUL_128_ARCHITECTURE):
+        head_offsets[head.name] = offset
+        offset += head.size
+    weights[layout["fc2b_offset"] + head_offsets["stateDelta"]] = 1.0
+    weights[layout["fc2b_offset"] + head_offsets["stateGate"]] = 20.0
     agents.load_weights(weights)
     agents.set_communication_timestep(0.25)
 
@@ -1665,16 +1669,9 @@ def main() -> None:
     check_morphology_occupancy(device)
     check_single_cell_rollout_seed(device)
     check_supersampled_communication_rounds(device)
-    # Event/cycle/daughter regressions above remain as historical executable
-    # documentation. The active model's invariants live in the focused suite.
-    from continuous_growth_check import (
-        check_conservative_resampling,
-        check_continuous_volume,
-        check_field_normalization_and_opposition,
-    )
-    check_continuous_volume(device)
-    check_field_normalization_and_opposition(device)
-    check_conservative_resampling(device)
+    check_stateful_private_memory(device)
+    from continuous_growth_check import main as check_domains
+    check_domains()
 
 
 if __name__ == "__main__":

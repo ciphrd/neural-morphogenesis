@@ -74,10 +74,12 @@ struct ParticleRest {
   cycleActive: f32,
   growthAngle: f32,
   growthAnisotropy: f32,
-  divisionBias: f32,
+  divisionBias: f32, // Original world area (legacy ABI name).
   growthFrameAngle: f32,
   appearanceScale: f32,
-  _padding: f32,
+  quadratureWeight: f32,
+  // Transported world-space half edges, row major. Independent of plastic F.
+  domain: vec4<f32>,
 }
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read_write> gridAccum: array<atomic<i32>>;
@@ -208,6 +210,8 @@ fn quadraticWeights(fx: vec2<f32>) -> array<vec2<f32>, 3> {
   return w;
 }
 
+__DOMAIN_FUNCTIONS__
+
 @compute @workgroup_size(64)
 fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
@@ -247,45 +251,38 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   // comment for the full rationale.
   let Fg = rest.growthF;
   let g = max(matDet(Fg), 1e-6); // det(Fg): grown rest-area ratio
+  let q = max(rest.quadratureWeight, 1e-6);
   let Fe = matMul(F, matInverse(Fg));
   let Je = matDet(Fe);
   let polar = polarDecompose(Fe);
   let r = polar.r;
 
-  // http://mpm.graphics Paragraph after Eqn. 176 / Eqn. 52.
-  let Dinv = 4.0 * INV_DX * INV_DX;
-
-  // A growing cell owns proportionally more rest area and mass.  This is
-  // what makes grow-then-divide conservative: immediately before mitosis
-  // one parent has g=2, and immediately after it is replaced by two
-  // daughters with g=1, so total mass, rest area, stress weight and
-  // momentum are continuous across the split.  Growth itself makes Fe
-  // compressive and therefore supplies the mechanical expansion; no
-  // post-division mass fade or repulsion-driven volume creation is needed.
-  let volEff = material.particleVolume * g;
-  let massEff = material.particleMass * g;
+  let volEff = material.particleVolume * q * g;
+  let massEff = material.particleMass * q * g;
 
   let PF = matAddScaledIdentity(2.0 * mu * matMul(Fe - r, matTranspose(Fe)), lambda * (Je - 1.0) * Je);
-  let stress = -(DT * volEff * Dinv) * PF;
-  // Fused APIC momentum + MLS-MPM stress contribution (taichi MLS-MPM/CPIC
-  // notes, Eqn. 29).
-  let affine = stress + massEff * C;
-
-  for (var i: u32 = 0u; i < 3u; i = i + 1u) {
-    for (var j: u32 = 0u; j < 3u; j = j + 1u) {
-      let ni = wrapIndex(base.x + i32(i));
-      let nj = wrapIndex(base.y + i32(j));
-
-      let dpos = (vec2<f32>(f32(i), f32(j)) - fx) * DX;
-      let wgt = w[i].x * w[j].y;
-      let affineDpos = vec2<f32>(affine.x * dpos.x + affine.y * dpos.y, affine.z * dpos.x + affine.w * dpos.y);
-      let momentum = wgt * (vel * massEff + affineDpos);
-      let massContribution = wgt * massEff;
-
-      let nodeIndex = (ni * (GRID_N + 1u) + nj) * CHANNELS;
-      atomicAdd(&gridAccum[nodeIndex + CH_MOM_X], i32(round(momentum.x * SCALE)));
-      atomicAdd(&gridAccum[nodeIndex + CH_MOM_Y], i32(round(momentum.y * SCALE)));
-      atomicAdd(&gridAccum[nodeIndex + CH_MASS], i32(round(massContribution * SCALE)));
+  // Domain-integrated basis gradients derive from elastic virtual work.
+  // APIC uses the affine velocity about the domain center at each GRID node.
+  for (var k = 0u; k < domainQuadratureCount(rest.domain); k++) {
+    let quadrature = domainQuadrature(rest.domain, k);
+    let samplePos = pos + quadrature.xy;
+    let sampleBase = vec2<i32>(floor(samplePos * INV_DX - vec2<f32>(0.5)));
+    let sampleFx = samplePos * INV_DX - vec2<f32>(sampleBase);
+    let sampleW = quadraticWeights(sampleFx);
+    for (var i = 0u; i < 3u; i++) {
+      for (var j = 0u; j < 3u; j++) {
+        let node = sampleBase + vec2<i32>(i32(i), i32(j));
+        let dpos = vec2<f32>(node) * DX - pos;
+        let wgt = quadrature.z * sampleW[i].x * sampleW[j].y;
+        let gradient = quadrature.z * domainBasisGradient(sampleFx, i, j, INV_DX);
+        let affineVelocity = vel + vec2<f32>(C.x*dpos.x+C.y*dpos.y, C.z*dpos.x+C.w*dpos.y);
+        let force = -volEff * vec2<f32>(PF.x*gradient.x+PF.y*gradient.y, PF.z*gradient.x+PF.w*gradient.y);
+        let momentum = massEff * wgt * affineVelocity + DT * force;
+        let nodeIndex = (wrapIndex(node.x) * (GRID_N+1u) + wrapIndex(node.y)) * CHANNELS;
+        atomicAdd(&gridAccum[nodeIndex + CH_MOM_X], i32(round(momentum.x * SCALE)));
+        atomicAdd(&gridAccum[nodeIndex + CH_MOM_Y], i32(round(momentum.y * SCALE)));
+        atomicAdd(&gridAccum[nodeIndex + CH_MASS], i32(round(massEff * wgt * SCALE)));
+      }
     }
   }
 }

@@ -89,6 +89,8 @@ from simulation_settings import (
     GROWTH_COMPRESSION_STOP,
     GROWTH_ANISOTROPY_AUTHORITY,
     GROWTH_MAX,
+    MATERIAL_AREA_BUDGET,
+    GROWTH_MODEL_VERSION,
     INTERNAL_STATE_SPEED,
     MASS_RAMP_MACRO_STEPS,
     MORPHOLOGY_BLUR_SIGMA,
@@ -507,6 +509,8 @@ async def _training_loop_body() -> None:
         "growthCompressionStart": GROWTH_COMPRESSION_START,
         "growthCompressionStop": GROWTH_COMPRESSION_STOP,
         "growthCompressionFeedback": GROWTH_COMPRESSION_FEEDBACK,
+        "growthModelVersion": GROWTH_MODEL_VERSION,
+        "materialAreaBudget": MATERIAL_AREA_BUDGET,
         "growthMax": GROWTH_MAX,
         "growthAnisotropy": GROWTH_ANISOTROPY_AUTHORITY,
         # simulation_settings.py's own MPM_ENABLED (that constant's own

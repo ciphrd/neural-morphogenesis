@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Growth capacity regression</title>
+<pre id="out">Running browser WebGPU capacity regression…</pre>
+<script type="module">
+// Open /capacity-check.html on the viewer dev server. This exercises the
+// browser's actual controller/chemistry/physics path, independently of playback.
+import { acquireGpuDevice } from './src/gpu/device.ts';
+import { GpuSimulation } from './src/gpu/simulation.ts';
+import { randomWeights } from './src/gpu/agents.ts';
+import defaults from '../core/default_run_settings.json';
+
+const out = document.getElementById('out');
+const log = (s) => { out.textContent += '\n' + s; };
+try {
+  const result = await acquireGpuDevice();
+  if (!result.ok) throw Error(result.reason);
+  let gpuError = null;
+  result.device.addEventListener('uncapturederror', (event) => { gpuError = event.error; });
+  const sim = new GpuSimulation(result.device, navigator.gpu.getPreferredCanvasFormat());
+  sim.loadGeneration({ ...defaults, particles: 8943, initialParticleCount: 37, seed: 17,
+    weights: randomWeights(9, 128, 'stateful-128', 17) });
+  let cappedSteps = 0;
+  for (let step = 0; step < 1500; step++) {
+    await sim.step();
+    const positions = await sim.readPositionSamples(8943);
+    if (gpuError) throw gpuError;
+    if (!positions.every(Number.isFinite)) throw Error(`Invalid position at step ${step}, count ${sim.particleCount}`);
+    if (sim.samplingStatus.atCapacity) cappedSteps++;
+    if (step % 100 === 0) log(`Step ${step}: ${sim.particleCount} samples; positions finite`);
+  }
+  if (cappedSteps < 100) throw Error(`Only ${cappedSteps} capped steps; insufficient coverage`);
+  log(`PASS: ${cappedSteps} steps at capacity, all positions finite.`);
+  result.device.destroy();
+} catch (error) {
+  log(`FAIL: ${error.stack ?? error}`);
+}
+</script>

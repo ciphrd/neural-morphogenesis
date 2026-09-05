@@ -49,7 +49,7 @@
 // by entering AFTER the mass-weighted average rather than before it.
 // That does eliminate cancellation — but it also caps the push's
 // effective SPATIAL resolution at the physics grid's own cell size
-// (GRID_N=128, DX≈0.0078), coarser than the density field's own
+// (GRID_N=256, DX≈0.0039), coarser than the density field's own
 // resolution (FIELD_N=256, texel≈0.0039) and, critically, coarser than
 // core/agents.wgsl's own SPLIT_DISPLACEMENT (0.01): two particles that
 // share the same 3x3 B-spline node stencil (any pair less than ~1
@@ -165,6 +165,22 @@ struct SplatParams {
 @group(0) @binding(1) var<storage, read> particlePos: array<vec2<f32>>;
 @group(0) @binding(2) var<uniform> activeCount: u32;
 @group(0) @binding(3) var<uniform> splatParams: SplatParams;
+struct ParticleRest {
+  growthF: vec4<f32>,
+  jp: f32,
+  cycleActive: f32,
+  growthAngle: f32,
+  growthAnisotropy: f32,
+  divisionBias: f32, // Original world area (legacy ABI name).
+  growthFrameAngle: f32,
+  appearanceScale: f32,
+  quadratureWeight: f32,
+  // Transported world-space half edges, row major. Independent of plastic F.
+  domain: vec4<f32>,
+}
+@group(0) @binding(8) var<storage, read> particleRest: array<ParticleRest>;
+
+fn matDet(m: vec4<f32>) -> f32 { return m.x * m.w - m.y * m.z; }
 
 // Euclidean modulo, i32 in/out (textureLoad wants signed texel
 // coordinates, unlike core/p2g.wgsl's/g2p.wgsl's own u32-returning
@@ -175,12 +191,16 @@ fn wrapFieldIndex(i: i32) -> i32 {
   return ((i % n) + n) % n;
 }
 
+__DOMAIN_FUNCTIONS__
+
 @compute @workgroup_size(64)
 fn splatDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
   if (pi >= activeCount) { return; }
 
-  let pos = particlePos[pi];
+  for (var k = 0u; k < domainQuadratureCount(particleRest[pi].domain); k++) {
+  let quadrature = domainQuadrature(particleRest[pi].domain, k);
+  let pos = particlePos[pi] + quadrature.xy;
   let texPos = pos * f32(FIELD_N); // continuous texel-space position
   let baseI = i32(floor(texPos.x));
   let baseJ = i32(floor(texPos.y));
@@ -207,10 +227,17 @@ fn splatDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
       let delta = texPos - texelCenter;
       let d2 = dot(delta, delta);
       let idx = u32(wrapFieldIndex(ti)) * FIELD_N + u32(wrapFieldIndex(tj));
-      let weight = exp(-d2 / (2.0 * sigma2));
+      // Density is material occupancy, not numerical sample count. A
+      // conservative quadrature split must therefore leave this field
+      // unchanged apart from the improved spatial placement of its children.
+      let representedArea = max(particleRest[pi].quadratureWeight, 1e-6)
+        * max(abs(matDet(particleRest[pi].growthF)), 1e-6);
+      let weight = representedArea * quadrature.z * exp(-d2 / (2.0 * sigma2));
       atomicAdd(&densityAccum[idx], i32(round(weight * SCALE)));
     }
   }
+}
+
 }
 
 // --- densityAccum (fixed-point) -> densityTexture (r32float) ---

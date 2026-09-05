@@ -187,6 +187,7 @@ export function randomWeights(
 }
 
 export class Agents {
+  unresolvedSamples = 0;
   private readonly device: GPUDevice;
   private readonly channels: number;
   private readonly hiddenDim: number;
@@ -207,6 +208,7 @@ export class Agents {
   private readonly growthPipelines: readonly GPUComputePipeline[];
   private readonly growthBindGroup: GPUBindGroup;
   private readonly growthDispatches: readonly (number | null)[];
+  private forcedGrowthFieldOverride = false;
   // Assigned via setActiveCount() in the constructor (also growth's own
   // baseline write), not directly — `!` tells TS's definite-assignment
   // check that's fine, it just can't see through the method call itself.
@@ -260,6 +262,7 @@ export class Agents {
       config.growthCompressionFeedback ?? 1.0,
     );
     this.setForcedDivisionControl(null, [1, 0], false);
+    this.setForcedGrowthFieldOverride(null);
 
     // Persistent per-particle state — owned here (not MpmCore, not
     // Environment), zeroed at creation and whenever resetState() is
@@ -297,7 +300,7 @@ export class Agents {
     // be (STORAGE and MAP_READ are mutually exclusive usages in WebGPU)
     // — encodeReadGrownCount() copies into this every macro step,
     // readGrownCount() maps/reads/unmaps it asynchronously afterward.
-    this.grownCountStaging = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    this.grownCountStaging = device.createBuffer({ size: 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     // Rollouts start with their configured initial particle count and grow
     // via splitting from there (simulation.ts's own restartRollout()
     // sets that count every rollout — this is just
@@ -414,7 +417,8 @@ export class Agents {
       }),
     });
     const growthEntries = [
-      "clearGrowthField", "scatterGrowthIntent", "proposeResample", "commitResample",
+      "clearGrowthField", "scatterGrowthIntent", "enforceGrowthField",
+      "commitResample", "stopGrowthAtCapacity",
     ] as const;
     // Keep one stable ABI for every growth pass. With `layout: "auto"`, WebGPU
     // infers a different layout per entry point and removes bindings that an
@@ -429,11 +433,6 @@ export class Agents {
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        {
-          binding: 7,
-          visibility: GPUShaderStage.COMPUTE,
-          texture: { sampleType: "unfilterable-float", viewDimension: "2d" },
-        },
         { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ],
@@ -452,7 +451,6 @@ export class Agents {
       [4, { buffer: mpmCore.C }],
       [5, { buffer: mpmCore.velocities }],
       [6, { buffer: mpmCore.F }],
-      [7, mpmCore.morphologyTexture.createView()],
       [8, { buffer: this.growthField }],
       [9, { buffer: this.physicsUniform }],
     ]);
@@ -461,7 +459,9 @@ export class Agents {
       entries: Array.from(resources, ([binding, resource]) => ({ binding, resource })),
     });
     this.growthDispatches = [
-      ceilDiv(7 * NODE_COUNT, 256), null, null, null,
+      ceilDiv(10 * NODE_COUNT, 256),
+      null, ceilDiv(NODE_COUNT, 256), null,
+      ceilDiv(10 * NODE_COUNT, 256),
     ];
   }
 
@@ -665,6 +665,21 @@ export class Agents {
     this.device.queue.writeBuffer(this.physicsUniform, 96, new Uint32Array([endValue]));
   }
 
+  /** Lab-only analytic field override at AgentPhysics byte offset 120. */
+  setMaterialAreaBudget(area: number): void {
+    if (!Number.isFinite(area) || area < 0) throw new Error("Material area budget must be nonnegative");
+    writeFloat32(this.device, this.physicsUniform, 124, new Float32Array([area]));
+  }
+
+  setForcedGrowthFieldOverride(mode: "radial-inward" | null): void {
+    this.forcedGrowthFieldOverride = mode === "radial-inward";
+    this.device.queue.writeBuffer(
+      this.physicsUniform,
+      120,
+      new Uint32Array([this.forcedGrowthFieldOverride ? 1 : 0]),
+    );
+  }
+
   /** Updates this class's own agentStep() dispatch size AND growth's own
    * atomic "next free slot" counter (core/agents.wgsl's own module
    * docstring), which always needs to start from the current
@@ -687,7 +702,7 @@ export class Agents {
    * reflects whatever this macro step's own agentStep() pass just
    * claimed. Does not submit. */
   encodeReadGrownCount(encoder: GPUCommandEncoder): void {
-    encoder.copyBufferToBuffer(this.agentStateBuffer, 0, this.grownCountStaging, 0, 4);
+    encoder.copyBufferToBuffer(this.agentStateBuffer, 0, this.grownCountStaging, 0, 8);
   }
 
   /** Reads back growth's own atomic counter, via encodeReadGrownCount()'s
@@ -703,7 +718,9 @@ export class Agents {
    * is async too (see that module's own module docstring). */
   async readGrownCount(): Promise<number> {
     await this.grownCountStaging.mapAsync(GPUMapMode.READ);
-    const value = new Uint32Array(this.grownCountStaging.getMappedRange())[0];
+    const status = new Uint32Array(this.grownCountStaging.getMappedRange());
+    const value = status[0];
+    this.unresolvedSamples = status[1];
     this.grownCountStaging.unmap();
     return value;
   }
@@ -744,10 +761,13 @@ export class Agents {
     if (commitLifecycle) this.encodeGrowthField(encoder);
   }
 
-  /** Spatially average policy intent, grow continuum volume, then insert at
-   * the lowest-density available target claimed by the whole material. */
+  /** Spatially average policy intent, then conservatively refine any
+   * under-resolved grown or deformed material footprint. */
   private encodeGrowthField(encoder: GPUCommandEncoder): void {
     for (let i = 0; i < this.growthPipelines.length; i++) {
+      // Entry 2 analytically touches every grid node; skip its dispatch for
+      // ordinary training playback rather than paying a dormant full-grid pass.
+      if (i === 2 && !this.forcedGrowthFieldOverride) continue;
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.growthPipelines[i]);
       pass.setBindGroup(0, this.growthBindGroup);

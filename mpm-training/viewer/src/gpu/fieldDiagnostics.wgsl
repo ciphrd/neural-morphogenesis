@@ -73,10 +73,12 @@ struct ParticleRest {
   cycleActive: f32,
   growthAngle: f32,
   growthAnisotropy: f32,
-  divisionBias: f32,
+  divisionBias: f32, // Original world area (legacy ABI name).
   growthFrameAngle: f32,
   appearanceScale: f32,
-  _padding: f32,
+  quadratureWeight: f32,
+  // Transported world-space half edges, row major. Independent of plastic F.
+  domain: vec4<f32>,
 }
 @group(0) @binding(2) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(3) var<storage, read_write> diagnostics: array<atomic<i32>>;
@@ -175,6 +177,8 @@ fn clearDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicStore(&diagnostics[base + CH_MASS], 0);
 }
 
+__DOMAIN_FUNCTIONS__
+
 @compute @workgroup_size(64)
 fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
@@ -197,6 +201,7 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
   // contains stress-free growth and would falsely display grown tissue as
   // strained/pressurized.
   let g = max(matDet(rest.growthF), 1e-6);
+  let q = max(rest.quadratureWeight, 1e-6);
   let Fe = matMul(F, matInverse(rest.growthF));
   let J = matDet(Fe);
   let polar = polarDecompose(Fe);
@@ -212,14 +217,20 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
   let shearMag = sqrt(FminusR.x * FminusR.x + FminusR.y * FminusR.y + FminusR.z * FminusR.z + FminusR.w * FminusR.w);
   let pressure = clamp(-lambda * (J - 1.0), -PRESSURE_CLAMP, PRESSURE_CLAMP);
 
+  for (var k = 0u; k < domainQuadratureCount(rest.domain); k++) {
+    let quadrature = domainQuadrature(rest.domain, k);
+    let samplePos = pos + quadrature.xy;
+    let base = vec2<i32>(floor(samplePos*INV_DX-vec2<f32>(0.5)));
+    let fx = samplePos*INV_DX-vec2<f32>(base);
+    let w = quadraticWeights(fx);
   for (var i: u32 = 0u; i < 3u; i = i + 1u) {
     for (var j: u32 = 0u; j < 3u; j = j + 1u) {
       let ni = wrapIndex(base.x + i32(i));
       let nj = wrapIndex(base.y + i32(j));
 
-      let wgt = w[i].x * w[j].y;
+      let wgt = quadrature.z * w[i].x * w[j].y;
       // Same grown mass weighting as core/p2g.wgsl.
-      let massContribution = wgt * material.particleMass * g;
+      let massContribution = wgt * material.particleMass * q * g;
 
       let nodeIndex = (ni * (GRID_N + 1u) + nj) * CHANNELS;
       atomicAdd(&diagnostics[nodeIndex + CH_J], i32(round(massContribution * J * SCALE)));
@@ -227,5 +238,6 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
       atomicAdd(&diagnostics[nodeIndex + CH_PRESSURE], i32(round(massContribution * pressure * PRESSURE_SCALE)));
       atomicAdd(&diagnostics[nodeIndex + CH_MASS], i32(round(massContribution * SCALE)));
     }
+  }
   }
 }

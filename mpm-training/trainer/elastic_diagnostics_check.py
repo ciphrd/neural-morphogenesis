@@ -87,7 +87,8 @@ def check_analytic_invariants() -> None:
     known_fe = np.array([[1.08, 0.04], [-0.03, 0.94]])
     deformation.append(known_fe @ anisotropic_fg)
     deformation = np.stack(deformation)
-    rest = np.zeros((6, 12))
+    rest = np.zeros((6, 16))
+    rest[:, 11] = 1.0
     rest[:, 0] = 1.0
     rest[:, 3] = 1.0
     rest[:, 4] = 1.0
@@ -141,7 +142,7 @@ def _gpu_constitutive_probe(
         const MU0: f32 = {mu0};
         const LAMBDA0: f32 = {lambda0};
         const HARDENING: f32 = {HARDENING};
-        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, _padding: f32, }}
+        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, quadratureWeight: f32, domain: vec4<f32>, }}
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> particleRest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> output: array<vec4<f32>>;
@@ -224,7 +225,8 @@ def check_gpu_consistency(device: wgpu.GPUDevice) -> None:
         fe = left @ np.diag(stretches[i]) @ right
         deformation[i] = fe * np.sqrt(growth[i])
     deformation32 = deformation.astype(np.float32).reshape(-1, 4)
-    rest32 = np.zeros((count, 12), dtype=np.float32)
+    rest32 = np.zeros((count, 16), dtype=np.float32)
+    rest32[:, 11] = 1.0
     root_growth = np.sqrt(growth).astype(np.float32)
     rest32[:, 0] = root_growth
     rest32[:, 3] = root_growth
@@ -261,12 +263,13 @@ def check_core_readback(device: wgpu.GPUDevice) -> None:
         np.zeros((3, 4), dtype=np.float32),
         np.ones(3, dtype=np.float32),
     )
-    rest = np.zeros((3, 12), dtype=np.float32)
+    rest = np.zeros((3, 16), dtype=np.float32)
     root_growth = np.sqrt(growth)
     rest[:, 0] = root_growth
     rest[:, 3] = root_growth
     rest[:, 4] = 1.0
     rest[:, 5] = [0.0, 1.0, 0.0]
+    rest[:, 11] = 1.0
     device.queue.write_buffer(core.rest, 0, rest)
     summary = measure_core(core, material_e=E, material_nu=NU, material_hardening=HARDENING)
     direct = summarize_elastic_state(
@@ -291,15 +294,15 @@ def check_viewer_diagnostic_shader(device: wgpu.GPUDevice) -> None:
 
 def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
     source = (Path(__file__).parent.parent / "viewer" / "src" / "gpu" / "render.wgsl").read_text()
-    module = device.create_shader_module(code=source)
+    module = device.create_shader_module(code=template_shader(source, {"CHANNELS": 8}))
     internal_pipeline = None
     for vertex, fragment in (
         ("particleVertex", "particleFragment"),
         ("activationParticleVertex", "activationParticleFragment"),
         ("neuralColorParticleVertex", "neuralColorParticleFragment"),
         ("internalStateParticleVertex", "internalStateParticleFragment"),
-        ("triangleVertex", "triangleFragment"),
-        ("growthAxisVertex", "growthAxisFragment"),
+        ("headingLineVertex", "headingLineFragment"),
+        ("growthLineVertex", "headingLineFragment"),
     ):
         pipeline = device.create_render_pipeline(
             layout=wgpu.AutoLayoutMode.auto,
@@ -320,7 +323,7 @@ def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
             {"binding": 0, "resource": {"buffer": device.create_buffer(size=8, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 1, "resource": {"buffer": device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM)}},
             {"binding": 3, "resource": {"buffer": device.create_buffer(size=112, usage=wgpu.BufferUsage.STORAGE)}},
-            {"binding": 4, "resource": {"buffer": device.create_buffer(size=48, usage=wgpu.BufferUsage.STORAGE)}},
+            {"binding": 4, "resource": {"buffer": device.create_buffer(size=64, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 8, "resource": {"buffer": device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM)}},
         ],
     )
@@ -331,7 +334,16 @@ def check_viewer_morphology_visualization_shader(device: wgpu.GPUDevice) -> None
     source = (Path(__file__).parent.parent / "viewer" / "src" / "gpu" / "field.wgsl").read_text()
     code = template_shader(
         source,
-        {"GRID_N": 64, "REPULSION_FIELD_N": 256, "SUBSTRATE_WIDTH": 256, "SUBSTRATE_HEIGHT": 256, "CHANNELS": 8},
+        {
+            "GRID_N": 64,
+            "REPULSION_FIELD_N": 256,
+            "FIELD_MAX_WIDTH": 256,
+            "FIELD_MAX_HEIGHT": 256,
+            "CHANNELS": 8,
+            "FIELD_WIDTHS": "array<u32, 8>(256u, 256u, 256u, 256u, 256u, 256u, 256u, 256u)",
+            "FIELD_HEIGHTS": "array<u32, 8>(256u, 256u, 256u, 256u, 256u, 256u, 256u, 256u)",
+            "FIELD_OFFSETS": "array<u32, 8>(0u, 65536u, 131072u, 196608u, 262144u, 327680u, 393216u, 458752u)",
+        },
     )
     module = device.create_shader_module(code=code)
     pipeline = device.create_render_pipeline(
@@ -351,12 +363,14 @@ def check_viewer_morphology_visualization_shader(device: wgpu.GPUDevice) -> None
     )
     accent = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM)
     display = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM)
+    zoom = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM)
     device.create_bind_group(
         layout=pipeline.get_bind_group_layout(0),
         entries=[
             {"binding": 13, "resource": {"buffer": accent}},
             {"binding": 19, "resource": morphology.create_view()},
             {"binding": 20, "resource": {"buffer": display}},
+            {"binding": 22, "resource": {"buffer": zoom}},
         ],
     )
     print("[PASS] viewer policy-morphology RGB gradient-density pipeline and display-toggle bindings compile")

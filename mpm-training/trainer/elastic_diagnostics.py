@@ -70,6 +70,7 @@ class ElasticParticleState:
     elastic_energy_density: np.ndarray
     elastic_energy: np.ndarray
     growth_area_ratio: np.ndarray
+    quadrature_weight: np.ndarray
     growth_f: np.ndarray
     growth_principal_stretch_max: np.ndarray
     growth_principal_stretch_min: np.ndarray
@@ -100,7 +101,7 @@ def particle_elastic_state(
     Elastic energy density is the fixed-corotated potential whose derivative
     produces core/p2g.wgsl's stress:
     ``mu ||Fe-Re||² + lambda/2 (Je-1)²``. ``elastic_energy`` multiplies it by
-    the particle's grown rest area ``VOL*g``.
+    the sample's represented grown rest area ``VOL*q*g``.
     """
     f = np.asarray(deformation, dtype=np.float64)
     rest = np.asarray(rest_state, dtype=np.float64)
@@ -108,7 +109,7 @@ def particle_elastic_state(
         f = f.reshape(-1, 2, 2)
     if f.ndim != 3 or f.shape[1:] != (2, 2):
         raise ValueError(f"deformation must have shape (n,4) or (n,2,2), got {f.shape}")
-    if rest.ndim != 2 or rest.shape != (f.shape[0], 12):
+    if rest.ndim != 2 or (rest.shape[0] != f.shape[0] or rest.shape[1] not in (12, 16)):
         raise ValueError(f"rest_state must have shape ({f.shape[0]},12), got {rest.shape}")
     if not np.isfinite(f).all() or not np.isfinite(rest).all():
         raise ValueError("deformation and rest_state must be finite")
@@ -116,8 +117,11 @@ def particle_elastic_state(
     fg = rest[:, :4].reshape(-1, 2, 2)
     jp = rest[:, 4]
     growth = np.linalg.det(fg)
+    quadrature_weight = rest[:, 11]
     if np.any(growth <= 0.0):
         raise ValueError("growth area ratios must be strictly positive")
+    if np.any(quadrature_weight <= 0.0):
+        raise ValueError("quadrature weights must be strictly positive")
 
     fe = f @ np.linalg.inv(fg)
     growth_singular = np.linalg.svd(fg, compute_uv=False)
@@ -140,7 +144,7 @@ def particle_elastic_state(
     lam = lambda0 * hardening_scale
     pressure = -lam * (je - 1.0)
     energy_density = mu * corotated**2 + 0.5 * lam * (je - 1.0) ** 2
-    energy = particle_volume * growth * energy_density
+    energy = particle_volume * quadrature_weight * growth * energy_density
 
     return ElasticParticleState(
         elastic_f=fe,
@@ -154,6 +158,7 @@ def particle_elastic_state(
         elastic_energy_density=energy_density,
         elastic_energy=energy,
         growth_area_ratio=growth,
+        quadrature_weight=quadrature_weight,
         growth_f=fg,
         growth_principal_stretch_max=growth_s_max,
         growth_principal_stretch_min=growth_s_min,
@@ -205,7 +210,8 @@ def summarize_elastic_state(
     particle_mass: float = PARTICLE_MASS,
     particle_volume: float = VOL,
 ) -> dict[str, Any]:
-    weights = particle_mass * state.growth_area_ratio
+    represented_area = state.quadrature_weight * state.growth_area_ratio
+    weights = particle_mass * represented_area
     metrics = {
         "elastic_volume_ratio": state.elastic_volume_ratio,
         "principal_stretch_max": state.principal_stretch_max,
@@ -217,6 +223,8 @@ def summarize_elastic_state(
         "absolute_pressure": np.abs(state.pressure),
         "elastic_energy_density": state.elastic_energy_density,
         "growth_area_ratio": state.growth_area_ratio,
+        "quadrature_weight": state.quadrature_weight,
+        "represented_area_ratio": represented_area,
         "growth_principal_stretch_max": state.growth_principal_stretch_max,
         "growth_principal_stretch_min": state.growth_principal_stretch_min,
         "growth_deviatoric_log_strain": state.growth_deviatoric_log_strain,
@@ -261,7 +269,7 @@ def summarize_elastic_state(
     result = {
         "particle_count": int(weights.size),
         "active_cycle_count": int(np.count_nonzero(state.cycle_active > 0.5)),
-        "total_rest_area": float(particle_volume * state.growth_area_ratio.sum()),
+        "total_rest_area": float(particle_volume * represented_area.sum()),
         "total_mass": float(weights.sum()),
         "total_elastic_energy": float(state.elastic_energy.sum()),
         "metrics": {name: distribution_summary(values, weights) for name, values in metrics.items()},

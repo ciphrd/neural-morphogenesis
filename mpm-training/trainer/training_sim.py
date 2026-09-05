@@ -84,7 +84,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from simulation_settings import COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, NEURAL_UPDATES_PER_MACRO
+from simulation_settings import MATERIAL_AREA_BUDGET, COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, NEURAL_UPDATES_PER_MACRO
 
 from agents_gpu import AgentsGPU, _spawn_uniform01
 from density import INITIAL_PACKING_SPACING_SCALE
@@ -143,7 +143,10 @@ def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int
     F = np.tile(np.array([1, 0, 0, 1], dtype=np.float32), (count, 1))
     C = np.zeros((count, 4), dtype=np.float32)
     Jp = np.ones((count,), dtype=np.float32)
-    return positions, velocities, F, C, Jp
+    rotation = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
+    half_edges = rotation @ (packed_spacing * np.array([[0.5, 0.25], [0.0, np.sqrt(3.0) / 4]]))
+    domain = np.tile(half_edges.reshape(1, 4), (count, 1)).astype(np.float32)
+    return positions, velocities, F, C, Jp, domain
 
 
 class TrainingRollout:
@@ -194,6 +197,7 @@ class TrainingRollout:
         )
         agents.set_communication_timestep(communication_dt)
 
+        agents.set_material_area_budget(MATERIAL_AREA_BUDGET)
         core.set_gravity(gravity)
         # Every rollout — same "run-constant in practice today, but a
         # rollout-scoped setter regardless" reasoning set_gravity() above
@@ -204,10 +208,11 @@ class TrainingRollout:
         # compact multi-cell seeding is now governed by split_displacement.
         _ = spawn_half_width
         initial_count = min(agents.max_active_particles, max(1, int(initial_particle_count)))
-        positions, velocities, F, C, Jp = seed_blob(
+        positions, velocities, F, C, Jp, domain = seed_blob(
             initial_count, spawn_center, agents.split_displacement, seed
         )
-        core.load_scene(positions, velocities, F, C, Jp)
+        core.reset_growth_buffers(agents.max_active_particles)
+        core.load_scene(positions, velocities, F, C, Jp, domain)
         # Every slot beyond the genuinely seeded particles is destined to
         # become a real particle via growth, at some unknown point in
         # this rollout — see reset_growth_buffers()'s own docstring for
@@ -216,7 +221,6 @@ class TrainingRollout:
         # exact same fresh defaults. agents.max_active_particles (not a
         # parameter of this constructor — see AgentsGPU's own property
         # docstring for why) is --particles, the growth cap.
-        core.reset_growth_buffers(agents.max_active_particles)
 
         environment.reset()
         agents.set_active_count(initial_count)

@@ -62,7 +62,7 @@ interface ViewerDefaults {
     deform: DeformSettings
   }
   lab: {
-    scenario: "boundary-tangent" | "vertical" | "repeated-top-row"
+    scenario: "boundary-tangent" | "vertical" | "repeated-top-row" | "radial-inward-circle"
   }
 }
 

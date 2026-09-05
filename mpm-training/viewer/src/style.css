@@ -407,7 +407,27 @@ body {
 }
 
 .playback-cap-value {
-  min-width: 52px;
+  grid-row: 3;
+  width: 100%;
+  min-width: 0;
+}
+
+/* The density-scaled cap can contain two six-digit values. Keep that readout
+ * below the control so it never consumes the slider's horizontal space. */
+.playback-cap-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+}
+
+.playback-cap-row > span:first-child {
+  grid-row: 1;
+}
+
+.playback-cap-row .slider {
+  grid-row: 2;
+  width: 100%;
+  min-width: 0;
 }
 
 .channel-window-control {
@@ -1485,4 +1505,16 @@ body {
   letter-spacing: 0.05em;
   color: #9a9a9a;
   margin: 0 0 8px;
+}
+
+.sampling-status {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  padding: 6px 9px;
+  border-radius: 4px;
+  background: rgba(20, 20, 20, 0.85);
+  color: #e4c779;
+  font-size: 12px;
+  pointer-events: none;
 }

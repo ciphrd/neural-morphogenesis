@@ -15,7 +15,7 @@ CORE_DIR = Path(__file__).parent.parent / "core"
 
 
 def template_shader(source: str, template_vars: Mapping[str, object]) -> str:
-    result = source
+    result = source.replace("__DOMAIN_FUNCTIONS__", (CORE_DIR / "materialDomain.wgsl").read_text())
     for key, value in template_vars.items():
         result = result.replace(f"__{key}__", str(value))
     return result

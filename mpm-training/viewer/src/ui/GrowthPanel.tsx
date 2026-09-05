@@ -17,7 +17,7 @@ interface GrowthPanelProps {
 
 export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  "growthDuration" | "growthSpeedMultiplier" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 export interface GrowthSliderSpec {
@@ -77,9 +77,18 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
     format: (v) => `${v.toFixed(2)}×`,
   },
   {
+    key: "growthSpeedMultiplier",
+    label: "Growth speed",
+    hint: "Live multiplier on material growth. 2× halves the time needed to add the same rest area; 0× pauses growth without changing the policy output.",
+    min: 0,
+    max: 8,
+    step: 0.1,
+    format: (v) => `${v.toFixed(1)}×`,
+  },
+  {
     key: "growthDuration",
-    label: "Growth timescale / fade duration",
-    hint: "Mechanical ticks for a unit-magnitude field to double stress-free material area; also controls how quickly a new refinement sample reaches full visual size.",
+    label: "Growth timescale",
+    hint: "Mechanical ticks for a unit-magnitude field to double stress-free material area. Subdivision itself does not grow material.",
     min: 0,
     max: 160,
     step: 1,
@@ -197,6 +206,15 @@ export function GrowthPanel({
       </div>
       {open && (
         <div className="physics-panel-body">
+          <label title="Maximum grown rest area in world coordinates. Zero leaves physical growth unlimited; sample capacity remains a numerical safety limit.">
+            Material area limit (0 = unlimited)
+            <input type="number" min={0} step={0.0001}
+              value={value.materialAreaBudget ?? 0}
+              onChange={(event) => {
+                const area = Number(event.target.value)
+                if (Number.isFinite(area) && area >= 0) onChange({ ...value, materialAreaBudget: area })
+              }} />
+          </label>
           {GROWTH_SLIDER_SPECS.map((spec) => {
             const isTangentThreshold = spec.key === "boundaryTangentMinGradient"
             const displayedValue = isTangentThreshold && !tangentEnabled

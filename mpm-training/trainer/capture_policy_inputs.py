@@ -426,7 +426,7 @@ def main() -> int:
         )
         state = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)[0]
         rest = core.read_rest_state()[0]
-        growth_area = float(rest[0] * rest[3] - rest[1] * rest[2])
+        growth_area = float(rest[11] * (rest[0] * rest[3] - rest[1] * rest[2]))
         return (
             f"hazard={float(state['divisionHazard']):.5f}/"
             f"{float(state['divisionThreshold']):.5f}, "

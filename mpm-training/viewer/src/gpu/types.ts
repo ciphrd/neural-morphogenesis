@@ -107,6 +107,8 @@ export interface RunSettings {
   growthDuration?: number;
   /** Legacy run field, converted to a duration when growthDuration is absent. */
   growthRate?: number;
+  growthModelVersion?: number;
+  materialAreaBudget?: number;
   growthMax: number;
   /** Blend integrated tensor growth from isotropic (0) to directional (1). */
   growthAnisotropy?: number;
@@ -273,11 +275,14 @@ export interface PhysicsSettings {
   friction: number;
   massRampMacroSteps: number;
   growthDuration: number;
+  /** Playback multiplier on the configured material-growth rate. */
+  growthSpeedMultiplier: number;
   neuralUpdatesPerMacro: number;
   communicationSpeed: number;
   internalStateSpeed: number;
   divisionDirectionality: number;
   divisionDriveBoost: number;
+  materialAreaBudget: number;
   growthMax: number;
   // Global cap on the neural per-particle anisotropy output.
   growthAnisotropy: number;
@@ -347,11 +352,13 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     // give.
     massRampMacroSteps: config.massRampMacroSteps ?? 20.0,
     growthDuration: config.growthDuration ?? legacyDuration,
+    growthSpeedMultiplier: 1.0,
     neuralUpdatesPerMacro: Math.max(1, Math.round(config.neuralUpdatesPerMacro ?? 1)),
     communicationSpeed: Math.max(0, config.communicationSpeed ?? 1.0),
     internalStateSpeed: Math.max(0, config.internalStateSpeed ?? 1.0),
     divisionDirectionality: Math.max(0, Math.min(1, config.divisionDirectionality ?? 1.0)),
     divisionDriveBoost: Math.max(0, Math.min(1, config.divisionDriveBoost ?? 0.0)),
+    materialAreaBudget: config.materialAreaBudget ?? 0,
     growthMax: config.growthMax ?? 2.0,
     growthAnisotropy: Math.max(0, Math.min(1, config.growthAnisotropy ?? 1.0)),
     growthCompressionStart: Math.max(0, config.growthCompressionStart ?? 0.10),
@@ -384,6 +391,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
 // One scene's worth of particle state to seed MpmCore with — mirrors
 // trainer/training_sim.py's own seed_blob() output shape.
 export interface SceneData {
+  domain?: Float32Array;
   count: number;
   positions: Float32Array; // (count,2)
   velocities: Float32Array; // (count,2), zero

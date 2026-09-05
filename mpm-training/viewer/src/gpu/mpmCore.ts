@@ -71,8 +71,8 @@ const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
 // growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-// growthFrameAngle, appearanceScale, padding — 48 bytes.
-const REST_FIELDS = 12;
+// growthFrameAngle, appearanceScale, quadratureWeight, domain(4) — 64 bytes.
+export const REST_FIELDS = 16;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own
  * tensor-rest layout, defaulting growthF=I and cycleActive=0.
@@ -87,6 +87,7 @@ function packRest(jp: Float32Array): Float32Array {
     packed[i * REST_FIELDS + 3] = 1;
     packed[i * REST_FIELDS + 4] = jp[i];
     packed[i * REST_FIELDS + 10] = 1;
+    packed[i * REST_FIELDS + 11] = 1;
   }
   return packed;
 }
@@ -215,7 +216,7 @@ export class MpmCore {
     this.gridAccum = device.createBuffer({ size: NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage: GPUBufferUsage.STORAGE });
     this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
     this.growthField = device.createBuffer({
-      size: NODE_COUNT * 7 * f32,
+      size: NODE_COUNT * 10 * f32,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
 
@@ -326,6 +327,7 @@ export class MpmCore {
         { binding: 1, resource: { buffer: this.positions } },
         { binding: 2, resource: { buffer: this.activeCountUniform } },
         { binding: 3, resource: { buffer: this.splatParamsUniform } },
+        { binding: 8, resource: { buffer: this.rest } },
       ],
     });
 
@@ -390,7 +392,16 @@ export class MpmCore {
     // ParticleRest's tensor layout — growthF=I and cycleActive=0 are
     // exactly right for
     // genuinely-seeded particles, which have no ramp to serve.
-    writeFloat32(this.device, this.rest, 0, packRest(scene.Jp));
+    const rest = packRest(scene.Jp);
+    if (scene.domain) {
+      for (let i = 0; i < scene.count; i++) {
+        const h = scene.domain.subarray(i*4, i*4+4);
+        const f = scene.F.subarray(i*4, i*4+4);
+        rest.set(h, i*REST_FIELDS+12);
+        rest[i*REST_FIELDS+8] = 4*(h[0]*h[3]-h[1]*h[2])/(f[0]*f[3]-f[1]*f[2]);
+      }
+    }
+    writeFloat32(this.device, this.rest, 0, rest);
     this.setActiveCount(scene.count);
   }
 
@@ -461,7 +472,7 @@ export class MpmCore {
   }
 
   /** Zero/identity-fills velocities/F/C/ParticleRest for [0, maxActive) — call once
-   * per rollout, after loadScene(). Slots beyond this rollout's own
+   * per rollout, before loadScene(). Slots beyond this rollout's own
    * particle count are destined to become real particles via growth
    * (core/agents.wgsl's own agentStep() — see that file's own module
    * docstring for why every claimable slot must be initialized before
@@ -509,7 +520,7 @@ export class MpmCore {
     writeFloat32(this.device, this.velocities, i * 2 * 4, new Float32Array([0, 0]));
     writeFloat32(this.device, this.F, i * 4 * 4, new Float32Array([1, 0, 0, 1]));
     writeFloat32(this.device, this.C, i * 4 * 4, new Float32Array([0, 0, 0, 0]));
-    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0]));
+    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0]));
     this.setActiveCount(this._activeCount + 1);
     return true;
   }

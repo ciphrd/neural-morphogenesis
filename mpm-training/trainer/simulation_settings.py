@@ -156,8 +156,11 @@ MASS_RAMP_MACRO_STEPS = float(DEFAULT_RUN_SETTINGS["massRampMacroSteps"])
 # increasing substeps for numerical stability no longer accelerates growth
 # relative to communication and control. 0 disables growth.
 GROWTH_DURATION_MACRO_STEPS = float(DEFAULT_RUN_SETTINGS["growthDuration"])
-# Division area ratio. 2 makes one g=2 parent exactly equivalent in mass
-# and rest area to two g=1 daughters.
+# Version 2 uses transported domains and domain-integrated transfers.
+GROWTH_MODEL_VERSION = 2
+# Physical grown rest area in world units; zero disables the physical budget.
+MATERIAL_AREA_BUDGET = float(DEFAULT_RUN_SETTINGS.get("materialAreaBudget", 0.0))
+# Legacy checkpoint slot; subdivision no longer consumes growth.
 GROWTH_MAX = float(DEFAULT_RUN_SETTINGS["growthMax"])
 GROWTH_ANISOTROPY_AUTHORITY = float(DEFAULT_RUN_SETTINGS["growthAnisotropy"])
 # Mechanical contact inhibition. Elastic areal compression is measured as

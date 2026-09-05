@@ -20,7 +20,7 @@ const GRID_N: u32 = __GRID_N__u;
 const INV_DX: f32 = __INV_DX__;
 const DT: f32 = __DT__;
 const CHEMICAL_CHANNELS: u32 = __CHEMICAL_CHANNELS__u;
-const GROWTH_FIELD_CHANNELS: u32 = 7u;
+const GROWTH_FIELD_CHANNELS: u32 = 10u;
 const GROWTH_CH_TENSOR_XX: u32 = 2u;
 const GROWTH_CH_TENSOR_XY: u32 = 3u;
 const GROWTH_CH_TENSOR_YY: u32 = 4u;
@@ -47,10 +47,12 @@ struct ParticleRest {
   cycleActive: f32,
   growthAngle: f32,
   growthAnisotropy: f32,
-  divisionBias: f32,
+  divisionBias: f32, // Original world area (legacy ABI name).
   growthFrameAngle: f32,
   appearanceScale: f32,
-  _padding: f32,
+  quadratureWeight: f32,
+  // Transported world-space half edges, row major. Independent of plastic F.
+  domain: vec4<f32>,
 }
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
@@ -255,6 +257,8 @@ fn quadraticWeights(fx: vec2<f32>) -> array<vec2<f32>, 3> {
   return w;
 }
 
+__DOMAIN_FUNCTIONS__
+
 @compute @workgroup_size(64)
 fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
@@ -266,49 +270,44 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let Jp0 = rest0.jp;
   let Fg0 = rest0.growthF;
 
-  // base = floor(y - 0.5), fx = y - base, landing in [0.5, 1.5) — must
-  // match p2g.wgsl's own note on this exactly (G2P has to gather from
-  // the same 3x3 stencil P2G scattered into this same step).
-  let y = pos * INV_DX;
-  let base = vec2<i32>(floor(y - vec2<f32>(0.5)));
-  let fx = y - vec2<f32>(base);
-  let w = quadraticWeights(fx);
-
-  var v = vec2<f32>(0.0, 0.0);
-  var C = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-  // Symmetric world-space growth-rate tensor (xx, xy, yy), gathered with
-  // exactly the same quadratic basis as velocity.
+  var v = vec2<f32>(0.0);
+  var moment = vec4<f32>(0.0);
+  var L = vec4<f32>(0.0);
   var growthTensor = vec3<f32>(0.0);
-
-  for (var i: u32 = 0u; i < 3u; i = i + 1u) {
-    for (var j: u32 = 0u; j < 3u; j = j + 1u) {
-      let ni = wrapIndex(base.x + i32(i));
-      let nj = wrapIndex(base.y + i32(j));
-
-      // NOT scaled by dx here — unlike p2g's dpos, matches the reference
-      // exactly (the 4*inv_dx below already carries the right units).
-      let dpos = vec2<f32>(f32(i), f32(j)) - fx;
-      let wgt = w[i].x * w[j].y;
-      let nodeIndex = ni * (GRID_N + 1u) + nj;
-      let gv = gridVel[nodeIndex];
-      let wgv = wgt * gv;
-
-      v = v + wgv;
-      // APIC affine velocity field: C += 4*inv_dx * outer(w*grid_v, dpos).
-      C = C + (4.0 * INV_DX) * vec4<f32>(wgv.x * dpos.x, wgv.x * dpos.y, wgv.y * dpos.x, wgv.y * dpos.y);
-
-      let growthBase = nodeIndex * GROWTH_FIELD_CHANNELS;
-      let representedWeight = f32(atomicLoad(&growthField[growthBase + GROWTH_CH_WEIGHT])) / GROWTH_FIELD_SCALE;
-      if (representedWeight > 1e-8) {
-        let nodeTensor = vec3<f32>(
-          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XX])),
-          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XY])),
-          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_YY])),
-        ) / (GROWTH_FIELD_SCALE * representedWeight);
-        growthTensor = growthTensor + wgt * nodeTensor;
+  for (var k = 0u; k < domainQuadratureCount(rest0.domain); k++) {
+    let quadrature = domainQuadrature(rest0.domain, k);
+    let samplePos = pos + quadrature.xy;
+    let base = vec2<i32>(floor(samplePos * INV_DX - vec2<f32>(0.5)));
+    let fx = samplePos * INV_DX - vec2<f32>(base);
+    let w = quadraticWeights(fx);
+    for (var i = 0u; i < 3u; i++) {
+      for (var j = 0u; j < 3u; j++) {
+        let node = base + vec2<i32>(i32(i), i32(j));
+        let dpos = vec2<f32>(node) / INV_DX - pos;
+        let nodeIndex = wrapIndex(node.x) * (GRID_N+1u) + wrapIndex(node.y);
+        let gv = gridVel[nodeIndex];
+        let wgt = quadrature.z * w[i].x * w[j].y;
+        let gradient = quadrature.z * domainBasisGradient(fx, i, j, INV_DX);
+        let wgv = wgt * gv;
+        v += wgv;
+        moment += vec4<f32>(wgv.x*dpos.x, wgv.x*dpos.y, wgv.y*dpos.x, wgv.y*dpos.y);
+        L += vec4<f32>(gv.x*gradient.x, gv.x*gradient.y, gv.y*gradient.x, gv.y*gradient.y);
+        let growthBase = nodeIndex * GROWTH_FIELD_CHANNELS;
+        let weight = f32(atomicLoad(&growthField[growthBase + GROWTH_CH_WEIGHT]));
+        if (weight > 0.0) {
+          growthTensor += wgt * vec3<f32>(
+            f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XX])),
+            f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XY])),
+            f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_YY]))) / weight;
+        }
       }
     }
   }
+  // Invert a dimensionless moment to avoid matInverse's constitutive epsilon
+  // treating a perfectly valid world-space moment (det ~ dx^4) as singular.
+  let momentScale = INV_DX * INV_DX;
+  let C = matMul(moment * momentScale, matInverse(domainMoment(rest0.domain, 1.0/INV_DX) * momentScale));
+  let domainNew = matMul(identityPlusScaled(L, DT), rest0.domain);
 
   // Toroidal: wrap into [0,1) rather than clamp against a wall — fract()
   // is WGSL's own always-non-negative x-floor(x), so this is correct
@@ -321,7 +320,7 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let newPos = fract(pos + DT * v);
   let newVel = v;
 
-  var F = matMul(identityPlusScaled(C, DT), F0);
+  var F = matMul(identityPlusScaled(L, DT), F0);
 
   let FeTrial = matMul(F, matInverse(Fg0));
   let svd = svd2(FeTrial);
@@ -404,17 +403,25 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     // creation). The NN itself still outputs only one two-component vector.
     let anisotropy = clamp(material.growthAnisotropy, 0.0, 1.0);
     let isotropic = 0.5 * fieldRate;
-    let worldRate = vec4<f32>(
+    var worldRate = vec4<f32>(
       mix(isotropic, growthTensor.x, anisotropy),
       growthTensor.y * anisotropy,
       growthTensor.y * anisotropy,
       mix(isotropic, growthTensor.z, anisotropy),
     );
+    // Baseline growth follows the published tensor; sampling never redirects it.
     // Fg lives in the intermediate material configuration. Pull the world
     // tensor back through Fe's elastic rotation before exponentiating it.
     let rotation = polarDecompose(FeTrial).r;
     let materialRate = matMul(matMul(matTranspose(rotation), worldRate), rotation);
-    let increment = symmetricExp(materialRate * (effectiveGrowthRate * DT));
+    var growthDt = effectiveGrowthRate * DT;
+    let budgetRatio = bitcast<f32>(atomicLoad(&growthField[7]));
+    if (budgetRatio > 0.0) {
+      let limit = max(rest0.growthAnisotropy, 1e-6) * budgetRatio;
+      let remainingLogArea = max(log(limit / max(matDet(Fg0), 1e-6)), 0.0);
+      growthDt = min(growthDt, remainingLogArea / max(fieldRate, 1e-8));
+    }
+    let increment = symmetricExp(materialRate * growthDt);
     FgNew = matMul(increment, Fg0);
   }
 
@@ -429,6 +436,6 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     FgNew, JpNew, rest0.cycleActive, rest0.growthAngle,
     rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameAngle,
     appearanceScaleNew,
-    rest0._padding
+    rest0.quadratureWeight, domainNew
   );
 }

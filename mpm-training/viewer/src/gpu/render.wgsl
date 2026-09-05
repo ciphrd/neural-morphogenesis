@@ -44,10 +44,12 @@ struct ParticleRest {
   cycleActive: f32,
   growthAngle: f32,
   growthAnisotropy: f32,
-  divisionBias: f32,
+  divisionBias: f32, // Original world area (legacy ABI name).
   growthFrameAngle: f32,
   appearanceScale: f32,
-  resampleAngle: f32,
+  quadratureWeight: f32,
+  // Transported world-space half edges, row major. Independent of plastic F.
+  domain: vec4<f32>,
 }
 
 struct ParticleMeta {
@@ -87,9 +89,9 @@ fn outsideParticleShape(uv: vec2<f32>) -> bool {
   return viewStyle.y < 0.5 && dot(uv, uv) > 1.0;
 }
 
-// appearanceScale is visible AREA. Radius therefore scales by sqrt(area),
-// making a newborn emerge from a point without making its early disc area
-// grow quadratically faster than the morphoelastic rest area it mirrors.
+// Marker size is a visualization setting, independent of numerical quadrature
+// weight. Refinement changes physical integration density, not the configured
+// point radius shown by the renderer.
 fn appearanceRadiusScale(instanceIndex: u32) -> f32 {
   return sqrt(clamp(particleRest[instanceIndex].appearanceScale, 0.0, 1.0));
 }

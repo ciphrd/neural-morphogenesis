@@ -70,7 +70,7 @@ See `DENSITY_MODEL.md` for the scaling rationale and
 
 ## What drives growth
 
-Growth is deliberately split across three layers:
+Growth is deliberately split across four layers:
 
 1. **Policies propose a local 2-D vector.** Magnitude is requested growth rate;
    direction is the preferred growth orientation.
@@ -80,9 +80,12 @@ Growth is deliberately split across three layers:
    material.
 3. **Continuum volume grows first.** G2P continuously exponentiates the smooth
    tensor into each sample's rest deformation `Fg`.
-4. **Resampling restores precision.** When one sample represents two baseline
-   volumes, one volume is conservatively transferred to a new sample placed
-   toward low morphology density. Nearby insertions atomically share targets.
+4. **Resampling restores precision.** Each sample carries a quadrature weight
+   `q` and a transported material domain `H`. When a domain edge becomes too
+   long, geometric bisection produces two child domains with half the weight.
+   Mechanics, growth-field integration, chemistry and morphology integrate over
+   the domains. APIC uses their full moment matrices. See `GROWTH_MODEL.md` for
+   the numerical quadrature limits and independent physical area budget.
 
 The policy therefore controls where and how strongly tissue wants to grow,
 while the integration layer decides how that request is represented numerically.
@@ -288,14 +291,16 @@ repeat neural_updates_per_macro communication rounds:
 
     if this is the final communication round:
       if persistent environment:
-        growth-deformed gaussian-splat the final signed chemical delta
+        domain-integrate a fixed-world kernel for the final signed chemical delta
       particle.world_growth_vector = rotate_to_world(tanh(local_growth_vector))
 
 volume-weighted B-spline splat vectors and outer-product tensors to MPM nodes
 normalize the field by represented material volume
-when a sample represents two baseline volumes:
-  atomically claim a low-density target
-  conservatively move one represented volume into a new numerical sample
+when a transported domain edge becomes under-resolved:
+  atomically allocate a sample slot
+  bisect the longest material edge and use the two child centers
+  copy material/policy state and halve original area and quadrature weight
+  retain the smaller domains for moment-consistent APIC transfers
 
 if persistent environment:
   diffuse and decay the frozen substrate once
@@ -532,7 +537,12 @@ cap.
 - [`trainer/simulation_settings.py`](trainer/simulation_settings.py) — current
   policy, material, growth, damping, and repulsion defaults.
 - [`trainer/continuous_growth_check.py`](trainer/continuous_growth_check.py) —
-  focused GPU checks for continuous growth and conservative resampling.
+  focused GPU checks for continuous growth, conservative resampling, and
+  continued physics after a partially successful final allocation reaches capacity.
+- [`viewer/capacity-check.html`](viewer/capacity-check.html) — open
+  `/capacity-check.html` on the viewer dev server to run the browser controller,
+  chemistry, and physics through 8,943 samples and verify finite positions during
+  continued playback at capacity. The page reports PASS or the first failure.
 - [`trainer/capture_policy_inputs.py`](trainer/capture_policy_inputs.py) —
   records exact raw policy inputs for stable particle slots during a headless
   rollout and writes an offline HTML dashboard plus its source JSON.

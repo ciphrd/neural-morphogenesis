@@ -326,6 +326,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   },
   ref
 ) {
+  const [samplingMessage, setSamplingMessage] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simulationRef = useRef<GpuSimulation | null>(null);
   const contextRef = useRef<GPUCanvasContext | null>(null);
@@ -1149,15 +1150,25 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
               const positions = await sim.readPositionSamples(auto.maxSamples);
               if (cancelled) return;
               if (positions.length >= 2) {
-                let minX = positions[0];
-                let maxX = positions[0];
-                let minY = positions[1];
-                let maxY = positions[1];
-                for (let i = 2; i < positions.length; i += 2) {
+                let minX = Infinity;
+                let maxX = -Infinity;
+                let minY = Infinity;
+                let maxY = -Infinity;
+                let invalidPositions = 0;
+                for (let i = 0; i + 1 < positions.length; i += 2) {
+                  // An invalid simulation sample must not poison the camera
+                  // transform and hide every otherwise valid particle.
+                  if (!Number.isFinite(positions[i]) || !Number.isFinite(positions[i + 1])) {
+                    invalidPositions += 1;
+                    continue;
+                  }
                   minX = Math.min(minX, positions[i]);
                   maxX = Math.max(maxX, positions[i]);
                   minY = Math.min(minY, positions[i + 1]);
                   maxY = Math.max(maxY, positions[i + 1]);
+                }
+                if (invalidPositions > 0) {
+                  throw new Error(`${invalidPositions} non-finite particle position samples`);
                 }
                 // The existing camera is fixed on world center, so asymmetric
                 // drift must count toward the centered fitting square too.
@@ -1174,8 +1185,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
                   MAX_ZOOM,
                   Math.max(1, fitFraction / (centeredExtent * padding)),
                 );
-                autoZoomTargetRef.current = target;
-                if (autoZoomHardResetRef.current) {
+                if (Number.isFinite(minX)) autoZoomTargetRef.current = target;
+                if (Number.isFinite(minX) && autoZoomHardResetRef.current) {
                   autoZoomHardResetRef.current = false;
                   effectiveZoomRef.current = target;
                   sim.setZoom(target);
@@ -1190,13 +1201,13 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
               }
             }
           }
-          const current = effectiveZoomRef.current;
-          const target = autoZoomTargetRef.current;
+          const current = Number.isFinite(effectiveZoomRef.current) ? effectiveZoomRef.current : 1;
+          const target = Number.isFinite(autoZoomTargetRef.current) ? autoZoomTargetRef.current : current;
           const smoothing = Math.min(1, Math.max(0.001, auto.smoothing));
           const next = Math.abs(target - current) < 1e-4
             ? target
             : current + (target - current) * smoothing;
-          const moved = next !== current;
+          const moved = next !== effectiveZoomRef.current;
           if (moved) {
             effectiveZoomRef.current = next;
             sim.setZoom(next);
@@ -1230,6 +1241,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
           sim.injectDeform(deformHoverRef.current.x, deformHoverRef.current.y, direction, strength, radius, mode);
         }
         sim.render(context);
+        const sampling = sim.samplingStatus;
+        setSamplingMessage(sampling.atCapacity
+          ? `Sampling limit reached; growth paused${sampling.unresolvedSamples ? ` (${sampling.unresolvedSamples} unresolved patches)` : ""}.`
+          : "");
         onStepRef.current?.(sim.currentStep, sim.particleCount);
       }
       if (!cancelled) raf = requestAnimationFrame(frame);
@@ -1252,6 +1267,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
        * this needs to update on every pointermove, which would be a lot
        * of wasted React re-renders for a pure style mutation. */}
       <div ref={deformPreviewRef} className="deform-preview" style={{ display: "none" }} />
+      {status === "ready" && samplingMessage && (
+        <div className="sampling-status" role="status">{samplingMessage}</div>
+      )}
       {status === "loading" && <div className="webgpu-banner hint">Acquiring WebGPU device…</div>}
       {status === "unsupported" && (
         <div className="webgpu-banner">
