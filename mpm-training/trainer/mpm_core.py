@@ -173,8 +173,8 @@ def yield_bounds(elasticity: float) -> tuple[float, float]:
 class MpmCore:
     """Owns every GPU resource for the core MLS-MPM simulation and the
     one step(substeps) entry point — runs `substeps` full advance()
-    iterations (clearDensity -> splatDensity -> densityToTexture ->
-    applyRepulsion -> clearGrid -> p2g -> gridUpdate -> g2p) in a single
+    iterations (optional clearDensity -> splatDensity -> densityToTexture ->
+    applyRepulsion, then clearGrid -> p2g -> gridUpdate -> g2p) in a single
     submitted command buffer, each pass its own begin/end compute pass
     (WebGPU gives no cross-dispatch visibility guarantee *within* one
     pass, only across pass boundaries — same reasoning mpm.ts's own class
@@ -187,6 +187,7 @@ class MpmCore:
     def __init__(self, device: wgpu.GPUDevice) -> None:
         self.device = device
         self._active_count = 0
+        self._repulsion_enabled = False
 
         f32 = 4
         self.positions = device.create_buffer(
@@ -644,6 +645,7 @@ class MpmCore:
     ) -> None:
         """`max_delta` is core/repulsion.wgsl's own RepulsionParams.maxDelta
         — see that field's own comment for what it bounds and why."""
+        self._repulsion_enabled = bool(np.isfinite(strength) and strength != 0.0)
         self.device.queue.write_buffer(
             self.repulsion_params_uniform, 0,
             np.array([strength, max_delta, 0.0, 0.0], dtype=np.float32),
@@ -678,8 +680,8 @@ class MpmCore:
 
     def step(self, substeps: int) -> None:
         """Runs `substeps` full advance() iterations — same pass ordering
-        as mpm.ts's own step(): clearDensity -> splatDensity ->
-        densityToTexture -> applyRepulsion -> clearGrid -> p2g ->
+        as mpm.ts's own step(): optional clearDensity -> splatDensity ->
+        densityToTexture -> applyRepulsion, then clearGrid -> p2g ->
         gridUpdate -> g2p, each its own begin/end compute pass. Repulsion
         runs FIRST (not after g2p) so applyRepulsion's own velocity nudge
         — computed from THIS substep's own freshly-built density field,
@@ -688,7 +690,9 @@ class MpmCore:
         sitting stale in particleVel for one substep. See
         core/repulsion.wgsl's own module docstring for the full
         revision history of this mechanism and why it stays a
-        per-particle pass rather than a per-grid-node one. Internally
+        per-particle pass rather than a per-grid-node one. A zero strength
+        skips all four repulsion passes because their result cannot affect
+        particle state. Internally
         chunked into multiple command encoders/submits, each followed by
         an explicit GPU sync, when `substeps` exceeds
         _MAX_SUBSTEPS_PER_SUBMIT (see that constant's own docstring) —
@@ -706,29 +710,30 @@ class MpmCore:
             remaining -= chunk
             encoder = self.device.create_command_encoder()
             for _ in range(chunk):
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.clear_density_pipeline)
-                p.set_bind_group(0, self.clear_density_bind_group)
-                p.dispatch_workgroups(*self.density_clear_dispatch)
-                p.end()
+                if self._repulsion_enabled:
+                    p = encoder.begin_compute_pass()
+                    p.set_pipeline(self.clear_density_pipeline)
+                    p.set_bind_group(0, self.clear_density_bind_group)
+                    p.dispatch_workgroups(*self.density_clear_dispatch)
+                    p.end()
 
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.splat_density_pipeline)
-                p.set_bind_group(0, self.splat_density_bind_group)
-                p.dispatch_workgroups(particle_dispatch)
-                p.end()
+                    p = encoder.begin_compute_pass()
+                    p.set_pipeline(self.splat_density_pipeline)
+                    p.set_bind_group(0, self.splat_density_bind_group)
+                    p.dispatch_workgroups(particle_dispatch)
+                    p.end()
 
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.density_to_texture_pipeline)
-                p.set_bind_group(0, self.density_to_texture_bind_group)
-                p.dispatch_workgroups(*self.density_texture_dispatch)
-                p.end()
+                    p = encoder.begin_compute_pass()
+                    p.set_pipeline(self.density_to_texture_pipeline)
+                    p.set_bind_group(0, self.density_to_texture_bind_group)
+                    p.dispatch_workgroups(*self.density_texture_dispatch)
+                    p.end()
 
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.apply_repulsion_pipeline)
-                p.set_bind_group(0, self.apply_repulsion_bind_group)
-                p.dispatch_workgroups(particle_dispatch)
-                p.end()
+                    p = encoder.begin_compute_pass()
+                    p.set_pipeline(self.apply_repulsion_pipeline)
+                    p.set_bind_group(0, self.apply_repulsion_bind_group)
+                    p.dispatch_workgroups(particle_dispatch)
+                    p.end()
 
                 p = encoder.begin_compute_pass()
                 p.set_pipeline(self.clear_grid_pipeline)

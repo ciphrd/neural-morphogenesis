@@ -9,7 +9,8 @@
 // comment on why that path needs server.fs.allow).
 //
 // Repulsion (clearDensity/splatDensity/densityToTexture/applyRepulsion,
-// all from ../../../core/repulsion.wgsl) runs FIRST each substep —
+// all from ../../../core/repulsion.wgsl) runs FIRST each substep when
+// repulsion is enabled —
 // applyRepulsion nudges velocity from THIS substep's own freshly-built
 // density field, at each particle's own exact position, so the push
 // reaches the grid through the very same substep's own P2G->gridUpdate
@@ -194,6 +195,7 @@ export class MpmCore {
   private readonly densityTextureDispatch: [number, number];
 
   private _activeCount = 0;
+  private repulsionEnabled = false;
 
   get activeCount(): number {
     return this._activeCount;
@@ -609,6 +611,7 @@ export class MpmCore {
   /** `maxDelta` is core/repulsion.wgsl's own RepulsionParams.maxDelta —
    * see that field's own comment for what it bounds and why. */
   setRepulsionStrength(strength: number, maxDelta: number): void {
+    this.repulsionEnabled = Number.isFinite(strength) && strength !== 0;
     writeFloat32(this.device, this.repulsionParamsUniform, 0, new Float32Array([
       strength, maxDelta, 0, 0,
     ]));
@@ -644,29 +647,32 @@ export class MpmCore {
   encodeSteps(encoder: GPUCommandEncoder, substeps: number): void {
     const particleDispatch = ceilDiv(this._activeCount, WORKGROUP);
     for (let i = 0; i < substeps; i++) {
-      let pass = encoder.beginComputePass();
-      pass.setPipeline(this.clearDensityPipeline);
-      pass.setBindGroup(0, this.clearDensityBindGroup);
-      pass.dispatchWorkgroups(...this.densityClearDispatch);
-      pass.end();
+      let pass: GPUComputePassEncoder;
+      if (this.repulsionEnabled) {
+        pass = encoder.beginComputePass();
+        pass.setPipeline(this.clearDensityPipeline);
+        pass.setBindGroup(0, this.clearDensityBindGroup);
+        pass.dispatchWorkgroups(...this.densityClearDispatch);
+        pass.end();
 
-      pass = encoder.beginComputePass();
-      pass.setPipeline(this.splatDensityPipeline);
-      pass.setBindGroup(0, this.splatDensityBindGroup);
-      pass.dispatchWorkgroups(particleDispatch);
-      pass.end();
+        pass = encoder.beginComputePass();
+        pass.setPipeline(this.splatDensityPipeline);
+        pass.setBindGroup(0, this.splatDensityBindGroup);
+        pass.dispatchWorkgroups(particleDispatch);
+        pass.end();
 
-      pass = encoder.beginComputePass();
-      pass.setPipeline(this.densityToTexturePipeline);
-      pass.setBindGroup(0, this.densityToTextureBindGroup);
-      pass.dispatchWorkgroups(...this.densityTextureDispatch);
-      pass.end();
+        pass = encoder.beginComputePass();
+        pass.setPipeline(this.densityToTexturePipeline);
+        pass.setBindGroup(0, this.densityToTextureBindGroup);
+        pass.dispatchWorkgroups(...this.densityTextureDispatch);
+        pass.end();
 
-      pass = encoder.beginComputePass();
-      pass.setPipeline(this.applyRepulsionPipeline);
-      pass.setBindGroup(0, this.applyRepulsionBindGroup);
-      pass.dispatchWorkgroups(particleDispatch);
-      pass.end();
+        pass = encoder.beginComputePass();
+        pass.setPipeline(this.applyRepulsionPipeline);
+        pass.setBindGroup(0, this.applyRepulsionBindGroup);
+        pass.dispatchWorkgroups(particleDispatch);
+        pass.end();
+      }
 
       pass = encoder.beginComputePass();
       pass.setPipeline(this.clearGridPipeline);

@@ -10,7 +10,6 @@ from agents_gpu import AgentsGPU
 from device import pick_device
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, GRID_N, MpmCore, REST_FIELDS
-from material_domain import Domain, scatter
 
 SPACING = 0.0027
 DX = 1/GRID_N
@@ -74,6 +73,24 @@ def p2g_grid(core):
     return np.frombuffer(core.device.queue.read_buffer(core.grid_accum), np.int32).reshape(-1, 3).astype(float)/4096
 
 
+def point_p2g(position, velocity, affine, mass):
+    """Reference stress-free quadratic MLS-MPM point transfer."""
+    result = np.zeros(((GRID_N + 1) ** 2, 3), dtype=float)
+    base = np.floor(position / DX - 0.5).astype(int)
+    fx = position / DX - base
+    weights = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2,
+               0.5 * (fx - 0.5) ** 2]
+    for i in range(3):
+        for j in range(3):
+            node = base + [i, j]
+            dpos = (np.array([i, j]) - fx) * DX
+            weight = weights[i][0] * weights[j][1]
+            momentum = weight * mass * (velocity + affine @ dpos)
+            index = (node[0] % GRID_N) * (GRID_N + 1) + node[1] % GRID_N
+            result[index] += [momentum[0], momentum[1], weight * mass]
+    return result
+
+
 def check_continuous_growth(device):
     core, agents = make_system(device)
     load_samples(core, agents, [[.5,.5]], [[.5,0]])
@@ -98,7 +115,9 @@ def check_opposed_field(device):
 def check_subdivision(device):
     core,agents=make_system(device)
     h=np.array([[SPACING,0],[0,SPACING]],np.float32)
-    load_samples(core,agents,[[.5,.5]],[[0,0]],domains=h.reshape(1,4))
+    # q*det(G)=4 produces two successive conservative bisections.
+    load_samples(core,agents,[[.5,.5]],[[0,0]],growth_f=[[2,0,0,2]],
+                 domains=h.reshape(1,4))
     original=read_rest(core,1)[0]
     for count in (2,4):
         run_growth_field(device,agents)
@@ -115,34 +134,57 @@ def check_subdivision(device):
     print('[PASS] repeated bisection tiles the parent and preserves second moments')
 
 
-def check_compression_and_passive_stretch(device):
+def check_geometric_refinement_criterion(device):
     core,agents=make_system(device)
+    # Rest growth alone does not create a numerical sample until mechanics has
+    # actually expanded the transported material domain.
     load_samples(core,agents,[[.5,.5]],[[0,0]],growth_f=[[3,0,0,3]],
                  domains=[[SPACING/2,0,0,SPACING/2]])
     run_growth_field(device,agents)
-    assert agents.read_grown_count()==1, 'large rest area in compressed material is not a spatial deficit'
+    assert synchronize_count(core,agents)==1
+    # Doubling one transported half edge doubles world area and crosses the
+    # threshold; the bisection returns each child below it.
     load_samples(core,agents,[[.5,.5]],[[0,0]],domains=[[SPACING,0,0,SPACING/2]])
     run_growth_field(device,agents)
     assert synchronize_count(core,agents)==2
-    np.testing.assert_allclose(read_rest(core,2)[:,11].sum(),1)
-    print('[PASS] passive stretch refines; compressed rest growth alone does not')
+    for _ in range(6):
+        run_growth_field(device,agents)
+        assert synchronize_count(core,agents)==2
+    # Nearly parallel, very long edges model the folded-domain failure that
+    # used to double the population repeatedly in one small world region.
+    folded=np.array([[20*SPACING,19*SPACING],[0,.01*SPACING]],np.float32)
+    load_samples(core,agents,[[.5,.5]],[[0,0]],domains=folded.reshape(1,4))
+    for _ in range(6):
+        run_growth_field(device,agents)
+        assert synchronize_count(core,agents)==1
+    print('[PASS] transported area refines; rest growth and folded edges cannot amplify samples')
 
 
-def check_p2g_conservation(device):
+def check_point_p2g_and_split_conservation(device):
     core,agents=make_system(device)
-    h=np.array([[.002,.0003],[.0002,.0015]])
+    h=np.array([[SPACING,0],[0,SPACING]])
     x=np.array([.5031,.5027])
     c=np.array([[2,-70],[70,-1]],np.float32)
     v=np.array([.2,-.1],np.float32)
-    load_samples(core,agents,[x],[[0,0]],domains=h.reshape(1,4))
+    growth=np.array([[np.sqrt(2),0,0,np.sqrt(2)]],np.float32)
+    load_samples(core,agents,[x],[[0,0]],growth_f=growth,domains=h.reshape(1,4))
     device.queue.write_buffer(core.C,0,c.reshape(1,4))
     device.queue.write_buffer(core.velocities,0,v.reshape(1,2))
     core.set_material(0,.2,0,1,growth_rate=0,particle_mass=100)
     before=p2g_grid(core)
-    cpu=scatter([Domain(x,h,mass=100,velocity=v,affine=c)],DX)
-    expected=np.zeros_like(before)
-    for node,row in cpu.items(): expected[node[0]*(GRID_N+1)+node[1]]=[row[1],row[2],row[0]]
+    represented_mass=200  # particleMass * q * det(G)
+    expected=point_p2g(x,v,c,represented_mass)
     np.testing.assert_allclose(before,expected,atol=.0025,rtol=1e-3)
+    # The transported parallelogram is refinement geometry only. Changing it
+    # must not change an otherwise identical point transfer.
+    load_samples(core,agents,[x],[[0,0]],growth_f=growth,
+                 domains=(h@np.array([[4.,1.],[0.,.25]])).reshape(1,4))
+    device.queue.write_buffer(core.C,0,c.reshape(1,4))
+    device.queue.write_buffer(core.velocities,0,v.reshape(1,2))
+    np.testing.assert_array_equal(p2g_grid(core),before)
+    load_samples(core,agents,[x],[[0,0]],growth_f=growth,domains=h.reshape(1,4))
+    device.queue.write_buffer(core.C,0,c.reshape(1,4))
+    device.queue.write_buffer(core.velocities,0,v.reshape(1,2))
     run_growth_field(device,agents)
     assert synchronize_count(core,agents)==2
     after=p2g_grid(core)
@@ -150,8 +192,7 @@ def check_p2g_conservation(device):
     def angular(g): return np.sum(coords[:,0]*g[:,1]-coords[:,1]*g[:,0])
     np.testing.assert_allclose(after.sum(axis=0),before.sum(axis=0),atol=.005)
     np.testing.assert_allclose(angular(after),angular(before),atol=2e-5)
-    assert np.abs(after[:,2]-before[:,2]).sum()/100 < .01
-    print('[PASS] GPU P2G matches CPU; split conserves mass and angular momentum within fixed-point error')
+    print('[PASS] point P2G ignores domain geometry; split conserves mass, momentum and angular momentum')
 
 
 def check_affine_transport(device):
@@ -192,7 +233,8 @@ def check_courant_guard(device):
 
 def check_capacity(device):
     core,agents=make_system(device,capacity=1)
-    load_samples(core,agents,[[.5,.5]],[[1,0]],domains=[[SPACING,0,0,SPACING]])
+    load_samples(core,agents,[[.5,.5]],[[1,0]],growth_f=[[2,0,0,1]],
+                 domains=[[SPACING,0,0,SPACING]])
     before=read_rest(core,1)
     run_growth_field(device,agents)
     assert agents.read_grown_count()==1 and agents.unresolved_samples==1
@@ -271,7 +313,8 @@ def check_projected_fields_and_state(device):
     from agents_gpu import PARTICLE_META_BUFFER_OFFSET
     from density_gpu_check import _projected_plane
     core,agents,environment=make_system(device,include_environment=True)
-    load_samples(core,agents,[[.5025,.5033]],[[0,0]],domains=[[SPACING,0,0,SPACING/2]])
+    load_samples(core,agents,[[.5025,.5033]],[[0,0]],growth_f=[[2,0,0,1]],
+                 domains=[[SPACING,0,0,SPACING/2]])
     meta=np.zeros(1,dtype=agents._particle_meta_dtype)
     meta["chemicalState"][:]=.5
     meta["privateState"][0]=np.linspace(-.3,.4,8)
@@ -326,18 +369,15 @@ def check_periodic_transfer(device):
     device.queue.write_buffer(core.velocities,0,velocity.reshape(1,2))
     core.set_material(0,.2,0,1,growth_rate=0,particle_mass=100)
     actual=p2g_grid(core)
-    expected=np.zeros_like(actual)
-    for node,row in scatter([Domain(x,h,mass=100,velocity=velocity)],DX).items():
-        index=(node[0]%GRID_N)*(GRID_N+1)+(node[1]%GRID_N)
-        expected[index]+=[row[1],row[2],row[0]]
+    expected=point_p2g(x,velocity,np.zeros((2,2)),100)
     np.testing.assert_allclose(actual,expected,atol=.003,rtol=1e-3)
-    print('[PASS] domain transfers wrap at both toroidal seams without clipping')
+    print('[PASS] point transfers wrap at both toroidal seams without clipping')
 
 
 def main():
     device=pick_device()
     for check in (check_continuous_growth,check_opposed_field,check_subdivision,
-                  check_compression_and_passive_stretch,check_p2g_conservation,
+                  check_geometric_refinement_criterion,check_point_p2g_and_split_conservation,
                   check_affine_transport,check_courant_guard,check_capacity,
                   check_capacity_rollout,check_physical_budget,
                   check_projected_fields_and_state,check_seed_reset,check_periodic_transfer,check_uniform_rollout):

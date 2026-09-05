@@ -1,4 +1,4 @@
-# Material-domain growth (model version 2)
+# Point-transfer material growth (model version 3)
 
 The material grows continuously; numerical samples are added by subdividing
 transported material domains. `GROWTH_REDESIGN.md` records the pre-implementation
@@ -27,19 +27,19 @@ simulation normalization. Density presets scale mass and volume together.
 Seed blobs retain their rotated hexagonal lattice centers. The corresponding
 rotated lattice parallelograms tile without overlap. Rows use square domains.
 Reset buffers **before** loading seed geometry. External legacy scenes with no
-provided domains retain point transfers until the first growth-field pass
+provided domains gain refinement geometry when the first growth-field pass
 initializes a domain from `F` and target spacing; arbitrary input point clouds
 are not thereby guaranteed to tile.
 
 ## Growth law
 
 The policy proposes a world vector `u`; `r=|u|`, `d=u/r`, and `T=r d d^T` (zero
-at zero rate). Domain-integrated quadratic B-spline projection computes the
+at zero rate). Point-based quadratic B-spline projection computes the
 represented-grown-volume-weighted mean tensor at each MPM node. Opposed vectors
 retain their common expansion axis. There is no upper clamp on a lineage's
 `det(G)` in this average.
 
-G2P gathers the tensor over the domain, blends its anisotropy, applies contact
+G2P gathers the tensor at the particle center, blends its anisotropy, applies contact
 inhibition, and rotates it into the elastic frame before advancing
 `G <- exp(dt Lg) G`. Its trace sets logarithmic area production. Hardwired
 positive-tension redirection has been removed: sampling does not change the
@@ -48,24 +48,27 @@ constitutive behavior, independently of domain geometry.
 
 ## Subdivision
 
-Refine when `4 max(|h1|², |h2|²) / targetSpacing² >= 1.75`. `splitDisplacement`
-is the legacy settings name for target spacing; it is no longer an insertion
-separation. Select the longest material edge. Splitting edge 1 gives:
+Refine when `4 |det(H)| / splitDisplacement² >= 1.75`. This measures the
+transported parallelogram's current world area against the target point-sample
+area, analogous to the adaptation paper's volumetric-strain criterion. An
+area-preserving shear or folded long-thin domain does not multiply samples.
+`splitDisplacement` remains the legacy settings name for the target spacing.
+Select the longest transported material edge when partitioning.
+Splitting edge 1 gives:
 
 ```
 x_minus = x - h1/2       x_plus = x + h1/2
 H_minus = H_plus = [h1/2, h2]
 q_minus = q_plus = q/2
 A0_minus = A0_plus = A0/2
-v_minus = v - C h1/2     v_plus = v + C h1/2
+v_minus = v               v_plus = v
 ```
 
 Copy `F`, `G`, `C`, chemistry, appearance and private policy state. Child domains
-exactly partition the parent. The next split remembers which edge was already
-halved; biaxial expansion therefore refines in two dimensions without a spatial
-hash or morphology search. Passive stretching triggers the same process even
-with zero growth command. Compressed grown material need not gain samples until
-its spatial domain expands.
+exactly partition the parent. Since each child's `q` is half the parent's, every
+bisection restores the represented material per sample without a spatial hash
+or morphology search. The transported domain controls daughter placement, but
+does not widen or otherwise modify particle-grid coupling.
 
 One bisection per existing sample is allowed per macro interval. New slots do
 not execute the same commit pass. Atomic allocation enforces the hard capacity;
@@ -73,39 +76,25 @@ there is no region-ownership texture or candidate-placement arbitration.
 
 ## Transfers
 
-All domain integrals initially use a shared 3×3 Gauss-Legendre rule. For a
-quadratic grid basis `Ni`, the integrated normalized weight is `Wi=<Ni>_domain`
-and its gradient is `<grad Ni>_domain`.
-
-P2G deposits mass `m Wi` and affine momentum
-`m Wi [v+C(xi-x)]`. Elastic force uses `-Vg (Pe Fe^T) <grad Ni>`. G2P fits its
-affine state using
+Physics uses the ordinary quadratic point-based MLS-MPM transfer. Each particle
+evaluates one 3×3 grid stencil at its center. Effective mass and stress volume
+remain weighted by `q det(G)`, so subdivision preserves their totals. G2P
+reconstructs the standard APIC affine matrix with `D inverse = 4/dx² I` and
+uses it to transport both constitutive state and refinement geometry:
 
 ```
-D = dx² I/4 + H H^T/3
-v = sum_i Wi vi
-C = (sum_i Wi vi (xi-x)^T) inverse(D)
-L = sum_i vi <grad Ni>^T
-H <- (I + dt L) H
+v = sum_i Ni(xp) vi
+C = 4/dx² sum_i Ni(xp) vi (xi-xp)^T
+F <- (I + dt C) F
+H <- (I + dt C) H
 ```
 
-The kernel moment `dx² I/4` plus domain covariance replaces the old constant
-point inverse moment. The child covariance plus child-center separation equals
-the parent covariance. Consequently subdivision does not add the uncompensated
-APIC angular momentum of a separated point pair.
-
-Gauss quadrature integrates these low-order moments exactly in real arithmetic.
-The grid basis is piecewise polynomial, so subdivision does **not** preserve
-every nodal value exactly across spline knots. Refinement improves that
-integration error. GPU fixed-point atomics add rounding error. Basis gradients
-are integrated directly for force and kinematics; the old MLS surrogate
-`4/dx² * Wi * (xi-x)` is not reused for extended domains.
-
-Chemical deposition integrates a fixed-world kernel over `H`, weighted by
-represented grown area. It no longer enlarges that kernel with `G` as well.
-Morphology/repulsion density and viewer mechanical diagnostics use domain
-quadrature too. Rendered particle markers remain user-sized sample glyphs, not
-literal outlines of material domains.
+The domain `H` is not integrated into P2G, G2P, growth projection, chemical
+deposition, morphology/repulsion density, or viewer diagnostics. Those paths
+use one weighted sample at `xp`. Children copy the parent velocity and affine
+matrix. Symmetric placement and halved weights preserve global mass, linear
+momentum, and APIC angular momentum, although the nodal field can change at the
+instant of refinement. Rendered markers remain user-sized sample glyphs.
 
 ## Physical and numerical limits
 
@@ -143,29 +132,29 @@ Run from `trainer/`:
 .venv/bin/python density_gpu_check.py
 ```
 
-The domain suite covers split moments, CPU/GPU P2G agreement, affine G2P,
-independent geometry transport, passive stretching versus compressed growth,
+The domain suite covers split geometry, point-transfer domain independence,
+CPU/GPU P2G agreement, affine G2P,
+independent geometry transport, growth-driven sampling versus passive deformation,
 capacity, independent physical budgets, chemical/morphology projection,
 material/policy-state inheritance, seed/reset behavior, and a free-growth run.
 The diagnostic suite also compiles the viewer's rendering and field shaders.
 Build playback with `npm run build` in `viewer/`.
 
-On the implementation run (Apple M2 Max), the CPU nodal mass L1 error versus
-24×24 quadrature fell from 0.129% to 0.0416% after bisection in the tested patch.
-The GPU split changed projected chemistry by 0.0477% and morphology by 0.179%
-in its smooth-field test. A 60×32-substep isotropic rollout reached rest area
-11.0205 from 1, with 16 samples and positive finite domains, in approximately
-1.3 seconds including host synchronization. These are specific benchmarks,
-not general error bounds or a comparison against the previous runtime.
+On the implementation run (Apple M2 Max), the GPU split changed projected
+chemistry by 0.00448% and morphology by 0.984% in its smooth-field test. A
+60×32-substep isotropic rollout reached rest area 11.0205 from 1, with 8 samples
+and positive finite domains. Each particle now performs one 3×3 physics stencil
+instead of nine such stencils; wall-clock GPU probes varied substantially with
+concurrent system load and are not recorded as a stable benchmark.
 
 Independent affine domains may still develop gaps/overlaps under nonuniform
-motion. Severe shear, coarse domains, fast motion relative to the macro
-interval, and very small quadrature weights need further convergence studies.
+motion. Severe shear, coarse sampling, fast motion relative to the macro
+interval, and very small represented-material weights need further convergence studies.
 Geometry uses the existing explicit time-step family and requires a suitable
 CFL limit. There is no new fracture model, global remapping or coarsening.
 The density smoke test checks its existing static/zero-command scenarios;
 learned-policy morphology convergence across densities is not established.
 
 This changes physical discretization and sample trajectories. New runs record
-`growthModelVersion=2`; previous weights remain loadable, but old trajectory
+`growthModelVersion=3`; previous weights remain loadable, but old trajectory
 snapshots are historical evidence rather than expected exact replay results.

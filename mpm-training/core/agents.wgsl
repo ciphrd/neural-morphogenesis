@@ -326,9 +326,8 @@ struct AgentState {
   particleMeta: array<ParticleMeta>,
 }
 @group(0) @binding(7) var<storage, read_write> agentState: AgentState;
-// MpmCore's APIC affine velocity field. Division copies C and samples its
-// local velocity field at both daughter offsets, preserving linear and
-// affine momentum rather than silently giving the child C=0 for a step.
+// MpmCore's APIC affine velocity field. Division copies C while both point
+// children inherit the parent's velocity, matching the standard-MPM split.
 @group(0) @binding(8) var<storage, read_write> particleC: array<vec4<f32>>;
 // MpmCore's own velocity buffer. The growth-direction signal only affects
 // this through the optional physics.maxStrafe scale (zero by default).
@@ -391,7 +390,7 @@ struct ParticleRest {
   // Rendering-only appearance fraction. Adaptive refinement copies it to both
   // weighted sites; quadratureWeight below conserves their combined disc area.
   appearanceScale: f32,
-  // Numerical quadrature weight. Refinement divides this between samples;
+  // Numerical represented-material weight. Refinement divides it between samples;
   // material growth never changes it. q * det(growthF) is represented area.
   quadratureWeight: f32,
   // Transported world-space half edges, row major. Independent of plastic F.
@@ -779,16 +778,11 @@ fn depositGaussian(
   }
 }
 
-__DOMAIN_FUNCTIONS__
-
-// Integrate a fixed-world chemical kernel over the transported domain. Growth
-// scales material amount; it no longer enlarges the kernel a second time.
-fn depositDomain(envWrite: array<f32, ENV_WRITE_DIM>, pos: vec2<f32>, rest: ParticleRest) {
+// Deposit one point sample weighted by the material it represents. The
+// transported domain is refinement geometry and does not widen grid coupling.
+fn depositMaterialSample(envWrite: array<f32, ENV_WRITE_DIM>, pos: vec2<f32>, rest: ParticleRest) {
   let representedArea = max(rest.quadratureWeight, 1e-6) * max(matDet(rest.growthF), 1e-6);
-  for (var k = 0u; k < domainQuadratureCount(rest.domain); k++) {
-    let q = domainQuadrature(rest.domain, k);
-    depositGaussian(envWrite, pos+q.xy, vec4<f32>(1.0, 0.0, 0.0, 1.0), representedArea*q.z);
-  }
+  depositGaussian(envWrite, pos, vec4<f32>(1.0, 0.0, 0.0, 1.0), representedArea);
 }
 
 // Rebuild contribution pass, deliberately separate from agentStep so every
@@ -805,7 +799,7 @@ fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
   // chemistry are fully present immediately after division; growthF controls
   // the projection footprint before division so the substrate follows the
   // continuously growing material.
-  depositDomain(levels, positions[pi], particleRest[pi]);
+  depositMaterialSample(levels, positions[pi], particleRest[pi]);
 }
 
 // The bounded subset of the network's raw output: one signed chemical delta
@@ -997,7 +991,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   } else if (stepMode.commitLifecycle != 0u) {
     // Persistent mode deliberates against a frozen field and deposits only the
     // final neural round. Environment depositRate owns macro-time scaling.
-    depositDomain(result.envWrite, pos, particleRest[pi]);
+    depositMaterialSample(result.envWrite, pos, particleRest[pi]);
   }
 
   if (STATEFUL) {

@@ -1,7 +1,10 @@
 # Growth and adaptive material sampling — review and discussion proposal
 
-Review date: 2026-09-05. This describes the current working tree, including its
-uncommitted changes. It proposes a model; it does not change the simulator.
+Review date: 2026-09-05. This records the design alternatives considered during
+the growth rewrite. Model version 3 implements the first transfer level below:
+transported domains guide refinement and child placement, while mechanics and
+spatial fields retain ordinary point transfers. The domain-integrated prototype
+was removed after performance testing and comparison with the adaptation paper.
 
 **Recommendation:** retain continuous tensor growth and give every numerical
 sample an explicit material domain. Add samples by subdividing that domain.
@@ -224,16 +227,18 @@ H_\pm=[\tfrac12h_1\ h_2],\qquad
 A_{0,\pm}=\tfrac12 A_{0,p}.
 \]
 
-Copy `G` and piecewise-constant constitutive/intensive state; set
-`v±=vp±Cph₁/2` and retain `C`. The children exactly partition the parent
-parallelogram. There is no empty-space search and no independent spawn distance.
+Copy `G` and piecewise-constant constitutive/intensive state. The current
+point-transfer experiment sets `v±=vp` and retains `C`, following the adaptation
+paper's copied-velocity rule. The children exactly partition the parent
+parallelogram geometrically. There is no empty-space search or independent spawn distance.
 Splitting the second coordinate is analogous. Splitting both produces four
 children at `x_p ± h₁/2 ± h₂/2`, each with `H/2` and a quarter of the weight.
 
-For a constant parent state, mass, grown rest area, spatial area, centroid, and
-the entire represented material density are unchanged. Children carry the same
-affine velocity field restricted to their domains. Thus continuum linear and
-angular momentum and kinetic energy are unchanged too.
+Mass, grown rest area, spatial area, centroid, linear momentum, and summed APIC
+internal angular momentum are unchanged. Because point transfers place two
+delta samples at new centers, their nodal mass and momentum fields can change at
+the split. The domain-consistent alternative would instead restrict the affine
+field to each child and integrate over the child domains.
 
 The second-moment identity makes the difference precise. A uniform domain has
 covariance `Σp=Hp Hpᵀ/3`. With `δ=h₁/2`,
@@ -242,18 +247,20 @@ covariance `Σp=Hp Hpᵀ/3`. With `δ=h₁/2`,
 \Sigma_{\rm child}+\delta\delta^T=\Sigma_p.
 \]
 
-The new separation is paid for by smaller internal domains. The current point
-split introduces separation without reducing any corresponding internal domain.
+Geometrically, the new separation is paid for by smaller internal domains. The
+current point transfer does not use that covariance and therefore accepts the
+associated instantaneous change in the nodal field.
 
-Refine when a transported domain is too large to resolve, using a world-space
-target length and grid support bound. A simple first rule bounds
-`2 max(||h₁||,||h₂||)`, splitting the longer material edge; assess shear and
-aspect ratio as well. Bounds on area alone miss thin stretched regions.
-Severe shear may eventually require remapping, not endless bisection.
+The implemented model-version-3 trigger follows transported domain area:
+split when `4 |det(H)| / splitDisplacement²` exceeds the per-sample threshold.
+This is analogous to the paper's volumetric-strain criterion while targeting a
+fixed spatial sampling area. A transported longest-edge trigger was tested first,
+but shear could repeatedly partition folded long-thin domains in one small
+region. The longest edge only chooses the bisection axis after the area trigger fires.
 
 An anisotropic split correctly remembers the unsplit width. Isotropic expansion
 can use four children or deterministic successive edge bisections. Passive
-stretch triggers the same geometric rule with zero local growth command.
+stretch transports the refinement domain without changing sample count.
 Neither operation needs growth direction or a morphology gradient.
 
 Initialize a genuine partition, for example a clipped rectangular patch grid
@@ -290,11 +297,13 @@ Two reasonable implementation levels are:
 
 | Level | Benefit | Limitation |
 | --- | --- | --- |
-| Domain-guided placement with current point transfers | Small prototype; removes arbitrary split geometry. | Nodal fields and APIC angular momentum can still jump. Measure this; do not call it fully conservative. |
+| Domain-guided placement with current point transfers | Small prototype; removes arbitrary split geometry. | Nodal fields can jump and the parent affine field is not reproduced across child centers. |
 | Domain-consistent transfers and subdivision | Defines refinement as a change in integration resolution with additive fields. | Larger physics change, potentially wider stencils, new transfer validation. |
 
-I recommend a small CPU reference for the second level before choosing the GPU
-implementation. Global Voronoi or optimal-transport redistribution is another
+Model version 3 chooses the first level so its runtime and behavior can be
+evaluated before adopting CPDI or another finite-domain solver. The existing CPU
+reference remains useful if the second level is revisited. Global Voronoi or
+optimal-transport redistribution is another
 option, but it needs a reconstructed material boundary and conservative remap
 of deformation, chemistry and history. Arbitrarily averaging `G` and `F` can
 change stress and energy. Local subdivision is the clearer first design.

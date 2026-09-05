@@ -257,8 +257,6 @@ fn quadraticWeights(fx: vec2<f32>) -> array<vec2<f32>, 3> {
   return w;
 }
 
-__DOMAIN_FUNCTIONS__
-
 @compute @workgroup_size(64)
 fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
@@ -270,44 +268,38 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let Jp0 = rest0.jp;
   let Fg0 = rest0.growthF;
 
+  let y = pos * INV_DX;
+  let base = vec2<i32>(floor(y - vec2<f32>(0.5)));
+  let fx = y - vec2<f32>(base);
+  let w = quadraticWeights(fx);
+
   var v = vec2<f32>(0.0);
-  var moment = vec4<f32>(0.0);
-  var L = vec4<f32>(0.0);
+  var C = vec4<f32>(0.0);
   var growthTensor = vec3<f32>(0.0);
-  for (var k = 0u; k < domainQuadratureCount(rest0.domain); k++) {
-    let quadrature = domainQuadrature(rest0.domain, k);
-    let samplePos = pos + quadrature.xy;
-    let base = vec2<i32>(floor(samplePos * INV_DX - vec2<f32>(0.5)));
-    let fx = samplePos * INV_DX - vec2<f32>(base);
-    let w = quadraticWeights(fx);
-    for (var i = 0u; i < 3u; i++) {
-      for (var j = 0u; j < 3u; j++) {
-        let node = base + vec2<i32>(i32(i), i32(j));
-        let dpos = vec2<f32>(node) / INV_DX - pos;
-        let nodeIndex = wrapIndex(node.x) * (GRID_N+1u) + wrapIndex(node.y);
-        let gv = gridVel[nodeIndex];
-        let wgt = quadrature.z * w[i].x * w[j].y;
-        let gradient = quadrature.z * domainBasisGradient(fx, i, j, INV_DX);
-        let wgv = wgt * gv;
-        v += wgv;
-        moment += vec4<f32>(wgv.x*dpos.x, wgv.x*dpos.y, wgv.y*dpos.x, wgv.y*dpos.y);
-        L += vec4<f32>(gv.x*gradient.x, gv.x*gradient.y, gv.y*gradient.x, gv.y*gradient.y);
-        let growthBase = nodeIndex * GROWTH_FIELD_CHANNELS;
-        let weight = f32(atomicLoad(&growthField[growthBase + GROWTH_CH_WEIGHT]));
-        if (weight > 0.0) {
-          growthTensor += wgt * vec3<f32>(
-            f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XX])),
-            f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XY])),
-            f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_YY]))) / weight;
-        }
+  for (var i = 0u; i < 3u; i++) {
+    for (var j = 0u; j < 3u; j++) {
+      let ni = wrapIndex(base.x + i32(i));
+      let nj = wrapIndex(base.y + i32(j));
+      let dpos = vec2<f32>(f32(i), f32(j)) - fx;
+      let nodeIndex = ni * (GRID_N+1u) + nj;
+      let gv = gridVel[nodeIndex];
+      let wgt = w[i].x * w[j].y;
+      let wgv = wgt * gv;
+      v += wgv;
+      C += (4.0 * INV_DX) * vec4<f32>(
+        wgv.x*dpos.x, wgv.x*dpos.y, wgv.y*dpos.x, wgv.y*dpos.y,
+      );
+      let growthBase = nodeIndex * GROWTH_FIELD_CHANNELS;
+      let weight = f32(atomicLoad(&growthField[growthBase + GROWTH_CH_WEIGHT]));
+      if (weight > 0.0) {
+        growthTensor += wgt * vec3<f32>(
+          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XX])),
+          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XY])),
+          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_YY]))) / weight;
       }
     }
   }
-  // Invert a dimensionless moment to avoid matInverse's constitutive epsilon
-  // treating a perfectly valid world-space moment (det ~ dx^4) as singular.
-  let momentScale = INV_DX * INV_DX;
-  let C = matMul(moment * momentScale, matInverse(domainMoment(rest0.domain, 1.0/INV_DX) * momentScale));
-  let domainNew = matMul(identityPlusScaled(L, DT), rest0.domain);
+  let domainNew = matMul(identityPlusScaled(C, DT), rest0.domain);
 
   // Toroidal: wrap into [0,1) rather than clamp against a wall — fract()
   // is WGSL's own always-non-negative x-floor(x), so this is correct
@@ -320,7 +312,7 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let newPos = fract(pos + DT * v);
   let newVel = v;
 
-  var F = matMul(identityPlusScaled(L, DT), F0);
+  var F = matMul(identityPlusScaled(C, DT), F0);
 
   let FeTrial = matMul(F, matInverse(Fg0));
   let svd = svd2(FeTrial);

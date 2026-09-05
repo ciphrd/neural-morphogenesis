@@ -100,7 +100,9 @@
 // below is its OWN pipeline with its OWN small bind group, nowhere near
 // that limit.
 //
-// ALWAYS ON, runs every substep. KNOWN LIMITATION: for particles closer
+// When enabled, runs every substep. The host skips these four passes when
+// RepulsionParams.strength is zero because their result cannot affect particle
+// state. KNOWN LIMITATION: for particles closer
 // together than roughly one grid cell (the growth-spawn case), the push
 // is attenuated (not eliminated — see the revision-2-vs-3 comparison
 // above) by gridUpdate.wgsl's own mass-weighted average; a fully
@@ -191,16 +193,12 @@ fn wrapFieldIndex(i: i32) -> i32 {
   return ((i % n) + n) % n;
 }
 
-__DOMAIN_FUNCTIONS__
-
 @compute @workgroup_size(64)
 fn splatDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
   if (pi >= activeCount) { return; }
 
-  for (var k = 0u; k < domainQuadratureCount(particleRest[pi].domain); k++) {
-  let quadrature = domainQuadrature(particleRest[pi].domain, k);
-  let pos = particlePos[pi] + quadrature.xy;
+  let pos = particlePos[pi];
   let texPos = pos * f32(FIELD_N); // continuous texel-space position
   let baseI = i32(floor(texPos.x));
   let baseJ = i32(floor(texPos.y));
@@ -227,17 +225,14 @@ fn splatDensity(@builtin(global_invocation_id) gid: vec3<u32>) {
       let delta = texPos - texelCenter;
       let d2 = dot(delta, delta);
       let idx = u32(wrapFieldIndex(ti)) * FIELD_N + u32(wrapFieldIndex(tj));
-      // Density is material occupancy, not numerical sample count. A
-      // conservative quadrature split must therefore leave this field
-      // unchanged apart from the improved spatial placement of its children.
+      // Density is material occupancy, not numerical sample count. Weight the
+      // point splat by represented area so refinement does not double density.
       let representedArea = max(particleRest[pi].quadratureWeight, 1e-6)
         * max(abs(matDet(particleRest[pi].growthF)), 1e-6);
-      let weight = representedArea * quadrature.z * exp(-d2 / (2.0 * sigma2));
+      let weight = representedArea * exp(-d2 / (2.0 * sigma2));
       atomicAdd(&densityAccum[idx], i32(round(weight * SCALE)));
     }
   }
-}
-
 }
 
 // --- densityAccum (fixed-point) -> densityTexture (r32float) ---

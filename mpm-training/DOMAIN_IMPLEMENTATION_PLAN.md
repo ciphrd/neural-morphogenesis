@@ -2,25 +2,28 @@
 
 The implementation follows `GROWTH_REDESIGN.md` in four ordered stages:
 
-1. Establish a CPU reference for domain quadrature, moment matrices, stress
-   gradients and subdivision; test conservation and quantify quadrature error.
+1. Establish a CPU reference for domain geometry and subdivision; test
+   conservation and compare point versus finite-domain transfers.
 2. Extend the shared rest-state ABI with transported half edges. Seed a tiling,
    advect geometry independently of constitutive clamps, and replace heuristic
-   insertion with longest-edge bisection. Preserve policy/material state.
-3. Use the same domain quadrature in P2G, G2P and growth integration. Replace
-   the point APIC moment with `D = dx² I/4 + H Hᵀ/3`; use integrated basis
-   gradients for stress and kinematic deformation. Verify trainer/viewer parity.
-4. Test subdivision, rigid rotation, affine motion, passive stretching,
+   insertion with conservative bisection driven by transported domain area.
+   Use the longest transported edge only to choose the partition axis. Preserve
+   policy/material state.
+3. Retain ordinary point-based MLS-MPM and point-based field projection. Use the
+   reconstructed APIC velocity gradient to transport the domain, without using
+   the domain to widen grid coupling. Verify trainer/viewer parity.
+4. Test subdivision, rigid rotation, affine motion, deformation-invariant sampling,
    growth, capacity handling and seed/reset behavior; build the viewer and
    document numerical limits and performance.
 
-Three-point Gauss-Legendre quadrature per coordinate is the initial GPU rule.
-It integrates the domain moments exactly, but basis functions are piecewise
-polynomials: nodal fields across spline knots are approximate. Conservation of
-global moments and convergence of nodal fields are separate acceptance criteria.
+Three-point Gauss-Legendre domain quadrature was implemented as an initial
+baseline, then removed after performance testing and comparison with the source
+adaptation paper. Finite-domain CPDI remains a possible separate solver design;
+it is not approximated inside the current MLS-MPM transfer.
 
-All four stages are implemented. Chemistry, morphology and mechanical field
-diagnostics use domain quadrature; rendered sample glyphs remain user-sized.
+All four stages are implemented with point transfers. Chemistry, morphology and
+mechanical field diagnostics use weighted particle centers; rendered sample
+glyphs remain user-sized.
 The physical world-area budget and numerical capacity status have independent
 controls. The retired insertion-ownership grid has been removed.
 

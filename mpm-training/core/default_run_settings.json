@@ -55,7 +55,7 @@
   "growthCompressionStart": 0.1,
   "growthCompressionStop": 0.1,
   "growthCompressionFeedback": 1.0,
-  "growthModelVersion": 2,
+  "growthModelVersion": 3,
   "materialAreaBudget": 0.0,
   "growthMax": 2.0,
   "growthAnisotropy": 1.0,

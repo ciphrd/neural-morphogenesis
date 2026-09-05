@@ -1,7 +1,8 @@
 // Continuous field-driven material growth and geometric domain subdivision.
-// Domains carry transported half edges. Bisection partitions a parent exactly;
-// shared Gauss quadrature approximates its grid integrals. No morphology search
-// or insertion arbitration is needed. See GROWTH_MODEL.md for conservation,
+// Domains carry transported half edges used only for refinement geometry;
+// physics and field coupling remain ordinary point-sample operations. Bisection
+// partitions a parent exactly. No morphology search or insertion arbitration is
+// needed. See GROWTH_MODEL.md for conservation,
 // physical area budgets, and the distinct numerical capacity safety stop.
 
 const CHANNELS: u32 = __CHANNELS__u;
@@ -20,8 +21,10 @@ const CH_WEIGHT: u32 = 5u;
 // Fixed-point growth projection; headroom depends on local represented mass.
 // Channels 6/7 of node zero hold total world rest area / budget ratio.
 const FIELD_SCALE: f32 = 8192.0;
-// Refine when the longest transported full edge exceeds sqrt(1.75) times
-// the target spacing. This criterion is independent of material-growth state.
+// Refine when a transported parallelogram covers 1.75 target point-sample
+// areas. This is the paper's volumetric-strain idea expressed against the
+// fixed target resolution. Area avoids the repeated folded-domain splits caused
+// by the earlier longest-edge criterion; bisection halves it immediately.
 const REFINEMENT_THRESHOLD: f32 = 1.75;
 
 struct ParticleRest {
@@ -107,9 +110,9 @@ struct AgentPhysics {
 fn matDet(m: vec4<f32>) -> f32 { return m.x * m.w - m.y * m.z; }
 
 fn refinementDemand(pi: u32) -> f32 {
-  let h = particleRest[pi].domain;
-  let edge2 = max(h.x*h.x+h.z*h.z, h.y*h.y+h.w*h.w);
-  return 4.0 * edge2 / max(physics.splitDisplacement*physics.splitDisplacement, 1e-12);
+  let worldArea = 4.0 * abs(matDet(particleRest[pi].domain));
+  let targetArea = physics.splitDisplacement * physics.splitDisplacement;
+  return worldArea / max(targetArea, 1e-12);
 }
 
 fn splitFirstAxis(h: vec4<f32>) -> bool {
@@ -135,8 +138,6 @@ fn quadraticWeights(fx: vec2<f32>) -> array<vec2<f32>, 3> {
 fn fieldIndex(node: u32, channel: u32) -> u32 {
   return node * FIELD_CHANNELS + channel;
 }
-
-__DOMAIN_FUNCTIONS__
 
 @compute @workgroup_size(256)
 fn clearGrowthField(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -176,23 +177,19 @@ fn scatterGrowthIntent(@builtin(global_invocation_id) gid: vec3<u32>) {
   let direction = vector / max(rate, 1e-8);
   let tensor = rate * vec3<f32>(direction.x * direction.x, direction.x * direction.y, direction.y * direction.y);
 
-  for (var k = 0u; k < domainQuadratureCount(particleRest[pi].domain); k++) {
-    let quadrature = domainQuadrature(particleRest[pi].domain, k);
-    let samplePos = pos + quadrature.xy;
-    let base = vec2<i32>(floor(samplePos * INV_DX - vec2<f32>(0.5)));
-    let fx = samplePos * INV_DX - vec2<f32>(base);
-    let w = quadraticWeights(fx);
-    for (var i = 0u; i < 3u; i++) {
-      for (var j = 0u; j < 3u; j++) {
-        let node = wrapIndex(base.x+i32(i))*NODE_STRIDE + wrapIndex(base.y+i32(j));
-        let contribution = representedVolume * quadrature.z * w[i].x * w[j].y;
-        atomicAdd(&growthField[fieldIndex(node, CH_VECTOR_X)], i32(round(contribution*vector.x*FIELD_SCALE)));
-        atomicAdd(&growthField[fieldIndex(node, CH_VECTOR_Y)], i32(round(contribution*vector.y*FIELD_SCALE)));
-        atomicAdd(&growthField[fieldIndex(node, CH_TENSOR_XX)], i32(round(contribution*tensor.x*FIELD_SCALE)));
-        atomicAdd(&growthField[fieldIndex(node, CH_TENSOR_XY)], i32(round(contribution*tensor.y*FIELD_SCALE)));
-        atomicAdd(&growthField[fieldIndex(node, CH_TENSOR_YY)], i32(round(contribution*tensor.z*FIELD_SCALE)));
-        atomicAdd(&growthField[fieldIndex(node, CH_WEIGHT)], i32(round(contribution*FIELD_SCALE)));
-      }
+  let base = vec2<i32>(floor(pos * INV_DX - vec2<f32>(0.5)));
+  let fx = pos * INV_DX - vec2<f32>(base);
+  let w = quadraticWeights(fx);
+  for (var i = 0u; i < 3u; i++) {
+    for (var j = 0u; j < 3u; j++) {
+      let node = wrapIndex(base.x+i32(i))*NODE_STRIDE + wrapIndex(base.y+i32(j));
+      let contribution = representedVolume * w[i].x * w[j].y;
+      atomicAdd(&growthField[fieldIndex(node, CH_VECTOR_X)], i32(round(contribution*vector.x*FIELD_SCALE)));
+      atomicAdd(&growthField[fieldIndex(node, CH_VECTOR_Y)], i32(round(contribution*vector.y*FIELD_SCALE)));
+      atomicAdd(&growthField[fieldIndex(node, CH_TENSOR_XX)], i32(round(contribution*tensor.x*FIELD_SCALE)));
+      atomicAdd(&growthField[fieldIndex(node, CH_TENSOR_XY)], i32(round(contribution*tensor.y*FIELD_SCALE)));
+      atomicAdd(&growthField[fieldIndex(node, CH_TENSOR_YY)], i32(round(contribution*tensor.z*FIELD_SCALE)));
+      atomicAdd(&growthField[fieldIndex(node, CH_WEIGHT)], i32(round(contribution*FIELD_SCALE)));
     }
   }
 }
@@ -254,19 +251,16 @@ fn commitResample(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
 
-  // Center the replacement pair around the old quadrature point. Leaving the
+  // Center the replacement pair around the old material point. Leaving the
   // parent fixed and placing every child on the weak-coverage side introduces
   // a first moment at every resample and compounds into radial spokes.
   positions[pi] = fract(positions[pi] - offset);
   positions[newIndex] = spawnPos;
-  velocities[newIndex] = velocities[pi] + vec2<f32>(
-    particleC[pi].x * offset.x + particleC[pi].y * offset.y,
-    particleC[pi].z * offset.x + particleC[pi].w * offset.y,
-  );
-  velocities[pi] = velocities[pi] - vec2<f32>(
-    particleC[pi].x * offset.x + particleC[pi].y * offset.y,
-    particleC[pi].z * offset.x + particleC[pi].w * offset.y,
-  );
+  // Standard point MPM: copy the parent's particle velocity to both children,
+  // as in Ruggirello and Schumacher's adaptation algorithm. Sampling the
+  // affine field at the displaced centers would add orbital angular momentum
+  // on top of each child's retained APIC affine state.
+  velocities[newIndex] = velocities[pi];
   particleC[newIndex] = particleC[pi];
   particleF[newIndex] = particleF[pi];
   particleRest[newIndex] = sourceRest;

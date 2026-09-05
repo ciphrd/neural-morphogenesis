@@ -291,16 +291,16 @@ repeat neural_updates_per_macro communication rounds:
 
     if this is the final communication round:
       if persistent environment:
-        domain-integrate a fixed-world kernel for the final signed chemical delta
+        deposit one represented-area-weighted point kernel for the final signed chemical delta
       particle.world_growth_vector = rotate_to_world(tanh(local_growth_vector))
 
-volume-weighted B-spline splat vectors and outer-product tensors to MPM nodes
+represented-area-weighted point B-spline splat vectors and outer-product tensors to MPM nodes
 normalize the field by represented material volume
 when a transported domain edge becomes under-resolved:
   atomically allocate a sample slot
   bisect the longest material edge and use the two child centers
   copy material/policy state and halve original area and quadrature weight
-  retain the smaller domains for moment-consistent APIC transfers
+  retain the smaller domains for later refinement geometry
 
 if persistent environment:
   diffuse and decay the frozen substrate once
