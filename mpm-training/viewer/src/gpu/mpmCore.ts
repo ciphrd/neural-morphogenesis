@@ -53,6 +53,7 @@ import { templateShader } from "./shaderTemplate";
 import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
 import type { SceneData } from "./types";
 
+export const GROWTH_FIELD_CHANNELS: number = coreConstants.GROWTH_FIELD_CHANNELS;
 export const GRID_N: number = coreConstants.GRID_N;
 export const DX: number = coreConstants.DX;
 // Exported — gpu/fieldDiagnostics.wgsl's own scatterDiagnostics pass
@@ -210,7 +211,7 @@ export class MpmCore {
     this.gridAccum = device.createBuffer({ size: NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage: GPUBufferUsage.STORAGE });
     this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
     this.growthField = device.createBuffer({
-      size: NODE_COUNT * 10 * f32,
+      size: NODE_COUNT * GROWTH_FIELD_CHANNELS * f32,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
 

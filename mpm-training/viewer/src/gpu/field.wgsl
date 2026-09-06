@@ -361,9 +361,9 @@ fn gradientFragment(in: QuadOut) -> @location(0) vec4<f32> {
 }
 
 const GROWTH_NODE_STRIDE: u32 = GRID_N + 1u;
-const GROWTH_FIELD_CHANNELS: u32 = 10u;
+const GROWTH_FIELD_CHANNELS: u32 = __GROWTH_FIELD_CHANNELS__u;
 
-@group(0) @binding(24) var<storage, read> integratedGrowthField: array<i32>;
+@group(0) @binding(24) var<storage, read> integratedGrowthField: array<f32>;
 @group(0) @binding(25) var growthOutputTex: texture_storage_2d<rgba8unorm, write>;
 
 fn cyclicDirectionColor(angle: f32) -> vec3<f32> {
@@ -376,17 +376,19 @@ fn colorizeGrowth(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x > GRID_N || gid.y > GRID_N) { return; }
   let node = gid.x * GROWTH_NODE_STRIDE + gid.y;
   let base = node * GROWTH_FIELD_CHANNELS;
-  let sampleWeight = f32(max(integratedGrowthField[base + 5u], 0));
+  let sampleWeight = max(integratedGrowthField[base + 5u], 0.0);
   let vector = vec2<f32>(
-    f32(integratedGrowthField[base]),
-    f32(integratedGrowthField[base + 1u]),
-  ) / max(sampleWeight, 1.0);
+    integratedGrowthField[base],
+    integratedGrowthField[base + 1u],
+  ) / max(sampleWeight, 1e-30);
   let tensor = vec3<f32>(
-    f32(max(integratedGrowthField[base + 2u], 0)),
-    f32(integratedGrowthField[base + 3u]),
-    f32(max(integratedGrowthField[base + 4u], 0)),
-  ) / max(sampleWeight, 1.0);
-  let averageDrive = clamp(tensor.x + tensor.z, 0.0, 1.0);
+    integratedGrowthField[base + 2u],
+    integratedGrowthField[base + 3u],
+    integratedGrowthField[base + 4u],
+  ) / max(sampleWeight, 1e-30);
+  // Sum of absolute eigenvalues keeps contraction and zero-trace remodeling visible.
+  let averageDrive = clamp(max(abs(tensor.x + tensor.z),
+    length(vec2<f32>(tensor.x - tensor.z, 2.0 * tensor.y))), 0.0, 1.0);
   let signedStrength = clamp(length(vector) / max(averageDrive, 1e-8), 0.0, 1.0);
   let axialStrength = clamp(
     sqrt((tensor.x - tensor.z) * (tensor.x - tensor.z) + 4.0 * tensor.y * tensor.y)
@@ -412,11 +414,11 @@ struct GrowthVectorOut {
 
 fn growthVectorAt(node: u32) -> vec2<f32> {
   let base = node * GROWTH_FIELD_CHANNELS;
-  let weight = f32(max(integratedGrowthField[base + 5u], 0));
+  let weight = max(integratedGrowthField[base + 5u], 0.0);
   return vec2<f32>(
-    f32(integratedGrowthField[base]),
-    f32(integratedGrowthField[base + 1u]),
-  ) / max(weight, 1.0);
+    integratedGrowthField[base],
+    integratedGrowthField[base + 1u],
+  ) / max(weight, 1e-30);
 }
 
 fn arrowSegmentVertex(

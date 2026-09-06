@@ -2,7 +2,7 @@
 import numpy as np
 from pressure_diagnostics import measure
 from elastic_diagnostics import particle_elastic_state
-from mpm_core import MpmCore, DT, DX
+from mpm_core import GROWTH_FIELD_CHANNELS, MpmCore, DT, DX
 from device import pick_device
 
 def check_inventory():
@@ -49,9 +49,9 @@ def check_timestep(device):
         core.load_scene(np.array([[.5, .5]], np.float32), np.array([[1., 0]], np.float32),
                         np.array([[1, 0, 0, 1]], np.float32), np.zeros((1,4), np.float32),
                         np.ones(1, np.float32))
-        field = np.zeros((core.growth_field.size//40, 10), np.int32)
-        field[:, 2] = 8192
-        field[:, 5] = 8192
+        field = np.zeros((core.growth_field.size//(4*GROWTH_FIELD_CHANNELS), GROWTH_FIELD_CHANNELS), np.float32)
+        field[:, 2] = 1.0
+        field[:, 5] = 1.0
         device.queue.write_buffer(core.growth_field, 0, field)
         core.step(32*divisor)
         g = core.read_rest_state()[0, :4].reshape(2, 2)

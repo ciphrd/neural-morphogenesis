@@ -15,7 +15,7 @@ from simulation_settings import (
 )
 
 from environment_gpu import EnvironmentGPU, ceil_div
-from mpm_core import GRID_N, INV_DX, NODE_COUNT, MpmCore, REPULSION_FIELD_N
+from mpm_core import GROWTH_FIELD_CHANNELS, GRID_N, INV_DX, NODE_COUNT, MpmCore, REPULSION_FIELD_N
 from shader_template import load_core_shader
 from policy_parameters import (
     CELL_OWNED_PROJECTION_ARCHITECTURE,
@@ -330,22 +330,24 @@ class AgentsGPU:
         ))
         # Every stage ends a compute pass, providing a device-wide barrier.
         stages = [
-            ("clearGrowthField", (3, 8), ceil_div(10 * NODE_COUNT, 256)),
-            ("scatterGrowthIntent", (0, 1, 2, 8), None),
-            ("enforceGrowthField", (8, 9), ceil_div(NODE_COUNT, 256)),
+            ("clearGrowthField", (3, 8), ceil_div(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)),
             ("clearRefinement", (7,), ceil_div(refine_words, 256)),
             ("indexRefinementEdges", (1, 2, 7), None),
+            ("scatterGrowthIntent", (1, 2, 8), None),
+            ("scatterGrowthBoundary", (1, 2, 7, 8), None),
+            ("enforceGrowthField", (8, 9), ceil_div(NODE_COUNT, 256)),
             ("linkRefinementEdges", (1, 2, 7), None),
             *[("propagateRefinement", (1, 7), None)] * (refine_capacity - 1).bit_length(),
             ("requestRefinement", (1, 2, 3, 7, 9), None),
             ("reserveRefinement", (1, 2, 3, 7, 9), None),
             ("commitResample", (0, 1, 2, 3, 4, 5, 6, 7), None),
-            ("stopGrowthAtCapacity", (3, 7, 8, 9), ceil_div(10 * NODE_COUNT, 256)),
+            ("stopGrowthAtCapacity", (3, 7, 8, 9), ceil_div(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)),
         ]
         pipelines = {entry: device.create_compute_pipeline(
             layout=wgpu.AutoLayoutMode.auto,
             compute={"module": growth_module, "entry_point": entry},
         ) for entry in dict.fromkeys(stage[0] for stage in stages)}
+        self._growth_entries = [entry for entry, _, _ in stages]
         self._growth_pipelines = [pipelines[entry] for entry, _, _ in stages]
         resources = {
             0: {"buffer": core.positions, "offset": 0, "size": core.positions.size},
@@ -578,11 +580,14 @@ class AgentsGPU:
 
     def encode_growth_field(self, encoder: wgpu.GPUCommandEncoder) -> None:
         """Splat growth intent and conservatively refine under-resolved footprints."""
-        for index, (pipeline, bind_group, fixed_dispatch) in enumerate(zip(
-            self._growth_pipelines, self._growth_bind_groups, self._growth_dispatches
-        )):
-            if 6 + self._refinement_rounds <= index < 6 + (self._particle_capacity - 1).bit_length():
-                continue
+        propagation_round = 0
+        for entry, pipeline, bind_group, fixed_dispatch in zip(
+            self._growth_entries, self._growth_pipelines, self._growth_bind_groups, self._growth_dispatches
+        ):
+            if entry == "propagateRefinement":
+                propagation_round += 1
+                if propagation_round > self._refinement_rounds:
+                    continue
             p = encoder.begin_compute_pass()
             p.set_pipeline(pipeline)
             p.set_bind_group(0, bind_group)

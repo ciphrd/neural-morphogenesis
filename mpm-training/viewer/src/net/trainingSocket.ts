@@ -33,6 +33,11 @@ export interface TrainingSocketState {
   configByGeneration: Map<number, SimulationConfig>;
 }
 
+export interface LiveTrainingSocketState extends TrainingSocketState {
+  /** True only while the viewer has an open connection to train_server.py. */
+  serverConnected: boolean;
+}
+
 export const EMPTY_STATE: TrainingSocketState = { history: [], latest: null, configByGeneration: new Map() };
 const MAX_HISTORY = 500;
 
@@ -124,13 +129,14 @@ export function deriveState(acc: Accumulator): TrainingSocketState {
   return { history, latest, configByGeneration };
 }
 
-export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocketState {
+export function useTrainingSocket(wsUrl: string, apiUrl: string): LiveTrainingSocketState {
   // Seed a randomized placeholder immediately from either the last settings
   // supplied by a backend or the shared trainer/viewer defaults.
   const [acc, setAcc] = useState<Accumulator>(() => ({
     settings: loadInitialRunSettings(),
     records: new Map(),
   }));
+  const [serverConnected, setServerConnected] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -179,28 +185,53 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocket
   }, [apiUrl]);
 
   useEffect(() => {
-    const ws = new WebSocket(wsUrl);
-    ws.onmessage = (event: MessageEvent<string>) => {
-      let message: GenerationRecord & { type?: string };
-      try {
-        message = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      if (message.type !== "generation") return;
-      setAcc((prev) => applyGeneration(prev, message));
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const connect = () => {
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => {
+        if (!cancelled) setServerConnected(true);
+      };
+      ws.onmessage = (event: MessageEvent<string>) => {
+        let message: GenerationRecord & { type?: string };
+        try {
+          message = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (message.type !== "generation") return;
+        setAcc((prev) => applyGeneration(prev, message));
+      };
+      ws.onerror = () => {
+        if (!cancelled) setServerConnected(false);
+      };
+      ws.onclose = () => {
+        if (cancelled) return;
+        setServerConnected(false);
+        reconnectTimer = setTimeout(connect, 1000);
+      };
     };
-    ws.onerror = (err) => console.error("[trainingSocket] websocket error:", err);
+    connect();
+
     return () => {
+      cancelled = true;
+      clearTimeout(reconnectTimer);
       // StrictMode double-mount safety: closing a still-CONNECTING socket
       // immediately can throw/warn on some browsers — wait for open first.
-      if (ws.readyState === WebSocket.CONNECTING) {
-        ws.addEventListener("open", () => ws.close());
+      const socket = ws;
+      if (!socket) return;
+      if (socket.readyState === WebSocket.CONNECTING) {
+        socket.addEventListener("open", () => socket.close());
       } else {
-        ws.close();
+        socket.close();
       }
     };
   }, [wsUrl]);
 
-  return useMemo(() => deriveState(acc), [acc]);
+  return useMemo(
+    () => ({ ...deriveState(acc), serverConnected }),
+    [acc, serverConnected]
+  );
 }

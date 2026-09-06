@@ -34,6 +34,7 @@ CORE_DIR = Path(__file__).parent.parent / "core"
 from config import CONFIG
 CONSTANTS = CONFIG["simulation"]
 
+GROWTH_FIELD_CHANNELS: int = CONSTANTS["GROWTH_FIELD_CHANNELS"]
 GRID_N: int = CONSTANTS["GRID_N"]
 DX: float = CONSTANTS["DX"]
 INV_DX: int = CONSTANTS["INV_DX"]
@@ -164,7 +165,7 @@ class MpmCore:
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
         )
         self.growth_field = device.create_buffer(
-            size=NODE_COUNT * 10 * f32,
+            size=NODE_COUNT * GROWTH_FIELD_CHANNELS * f32,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
         )
 

@@ -10,7 +10,7 @@ from agents_gpu import AgentsGPU
 from device import pick_device
 from simulation_settings import SPLAT_RADIUS
 from environment_gpu import EnvironmentGPU
-from mpm_core import DT, GRID_N, MpmCore, REST_FIELDS
+from mpm_core import GROWTH_FIELD_CHANNELS, DT, GRID_N, MpmCore, REST_FIELDS
 from triangle_domain_check import Triangle
 from triangle_vertices import domain_edges, vertices_from_edges, unwrap_vertices
 
@@ -45,6 +45,25 @@ def run_growth_field(device, agents):
     encoder = device.create_command_encoder()
     agents.encode_growth_field(encoder)
     device.queue.submit([encoder.finish()])
+
+def project_growth_field(core, agents, boundary=True):
+    """Run only projection, before refinement changes this test's domains."""
+    encoder = core.device.create_command_encoder()
+    # clear field, clear edge index, index edges, scatter domain, scatter boundary, finalize.
+    for stage, entry in enumerate(agents._growth_entries):
+        if entry == "linkRefinementEdges":
+            break
+        if entry == "scatterGrowthBoundary" and not boundary:
+            continue
+        p = encoder.begin_compute_pass()
+        p.set_pipeline(agents._growth_pipelines[stage])
+        p.set_bind_group(0, agents._growth_bind_groups[stage])
+        dispatch = agents._growth_dispatches[stage]
+        p.dispatch_workgroups(dispatch if dispatch is not None else (core.active_count+63)//64)
+        p.end()
+    core.device.queue.submit([encoder.finish()])
+    return np.frombuffer(core.device.queue.read_buffer(core.growth_field), np.float32).reshape(-1, GROWTH_FIELD_CHANNELS).copy()
+
 
 def read_rest(core, count):
     return np.frombuffer(core.device.queue.read_buffer(core.rest, 0, count*REST_FIELDS*4),
@@ -89,7 +108,7 @@ def point_p2g(position, velocity, affine, mass):
 def check_continuous_growth(device):
     core, agents = make_system(device)
     load_samples(core, agents, [[.5,.5]], [[.5,0]])
-    run_growth_field(device, agents)
+    project_growth_field(core, agents, boundary=False)
     core.set_material(0, .2, 0, 1, growth_rate=12, growth_compression_feedback=0)
     core.step(1)
     np.testing.assert_allclose(np.linalg.det(read_rest(core,1)[0,:4].reshape(2,2)),
@@ -100,9 +119,9 @@ def check_opposed_field(device):
     core, agents = make_system(device)
     load_samples(core,agents,[[.5,.5],[.5,.5]],[[.6,0],[-.6,0]])
     run_growth_field(device,agents)
-    field=np.frombuffer(device.queue.read_buffer(core.growth_field),np.int32).reshape(-1,10)
-    np.testing.assert_allclose(field[:,:2].sum(axis=0),0,atol=1)
-    np.testing.assert_array_equal(field[:,2:5], 0)
+    field=np.frombuffer(device.queue.read_buffer(core.growth_field),np.float32).reshape(-1,GROWTH_FIELD_CHANNELS)
+    np.testing.assert_allclose(field[:,:2].sum(axis=0),0,atol=2e-7)
+    np.testing.assert_allclose(field[:,2:5], 0, atol=2e-7)
     core.set_material(0,.2,0,1,growth_rate=12,growth_compression_feedback=0)
     core.step(16)
     np.testing.assert_allclose(read_rest(core,2)[:,:4], [[1,0,0,1]]*2, atol=1e-6)
@@ -114,8 +133,8 @@ def check_vector_blending(device):
                               ([[.6,0],[-.2,0]], [.2,0,0])):
         core, agents = make_system(device)
         load_samples(core,agents,[[.5,.5],[.5,.5]],vectors)
-        run_growth_field(device,agents)
-        field=np.frombuffer(device.queue.read_buffer(core.growth_field),np.int32).reshape(-1,10)
+        project_growth_field(core,agents,boundary=False)
+        field=np.frombuffer(device.queue.read_buffer(core.growth_field),np.float32).reshape(-1,GROWTH_FIELD_CHANNELS)
         np.testing.assert_allclose(field[:,2:5].sum(axis=0)/field[:,5].sum(), expected, atol=1e-3)
         core.set_material(0,.2,0,1,growth_rate=12,growth_compression_feedback=0)
         core.step(16)

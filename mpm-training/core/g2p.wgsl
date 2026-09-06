@@ -4,12 +4,11 @@ const GRID_N: u32 = __GRID_N__u;
 const INV_DX: f32 = __INV_DX__;
 const DT: f32 = __DT__;
 const CHEMICAL_CHANNELS: u32 = __CHEMICAL_CHANNELS__u;
-const GROWTH_FIELD_CHANNELS: u32 = 10u;
+const GROWTH_FIELD_CHANNELS: u32 = __GROWTH_FIELD_CHANNELS__u;
 const GROWTH_CH_TENSOR_XX: u32 = 2u;
 const GROWTH_CH_TENSOR_XY: u32 = 3u;
 const GROWTH_CH_TENSOR_YY: u32 = 4u;
 const GROWTH_CH_WEIGHT: u32 = 5u;
-const GROWTH_FIELD_SCALE: f32 = 8192.0;
 
 
 @group(0) @binding(0) var<storage, read_write> particlePos: array<vec2<f32>>;
@@ -28,6 +27,7 @@ struct ParticleRest {
   originalArea: f32,
   quadratureWeight: f32,
 }
+__GROWTH_SAMPLING__
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
 
@@ -99,6 +99,22 @@ fn symmetricExp(m: vec4<f32>) -> vec4<f32> {
     radialScale * offDiagonal,
     c - radialScale * diagonal,
   );
+}
+
+// Spectral positive part. Negative eigenvalues are active contraction and
+// must survive compression inhibition and material-area budgets.
+fn positivePart(m: vec4<f32>) -> vec4<f32> {
+  let halfTrace = 0.5 * (m.x + m.w);
+  let diagonal = 0.5 * (m.x - m.w);
+  let radius = length(vec2<f32>(diagonal, m.y));
+  if (radius < 1e-12) {
+    return vec4<f32>(max(halfTrace, 0.0), 0.0, 0.0, max(halfTrace, 0.0));
+  }
+  let high = max(halfTrace + radius, 0.0);
+  let low = max(halfTrace - radius, 0.0);
+  let mean = 0.5 * (high + low);
+  let scale = 0.5 * (high - low) / radius;
+  return vec4<f32>(mean + scale*diagonal, scale*m.y, scale*m.y, mean - scale*diagonal);
 }
 
 struct Polar {
@@ -193,6 +209,27 @@ fn velocityAtVertex(position: vec2<f32>) -> vec2<f32> {
   return velocity;
 }
 
+fn growthTensorAt(position: vec2<f32>) -> vec3<f32> {
+  let y = position * INV_DX;
+  let base = vec2<i32>(floor(y - vec2<f32>(0.5)));
+  let w = quadraticWeights(y - vec2<f32>(base));
+  var tensor = vec3<f32>(0.0);
+  for (var i = 0u; i < 3u; i++) {
+    for (var j = 0u; j < 3u; j++) {
+      let node = wrapIndex(base.x+i32(i)) * (GRID_N+1u) + wrapIndex(base.y+i32(j));
+      let offset = node * GROWTH_FIELD_CHANNELS;
+      let weight = bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_WEIGHT]));
+      if (weight > 0.0) {
+        tensor += w[i].x * w[j].y * vec3<f32>(
+          bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_TENSOR_XX])),
+          bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_TENSOR_XY])),
+          bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_TENSOR_YY]))) / weight;
+      }
+    }
+  }
+  return tensor;
+}
+
 @compute @workgroup_size(64)
 fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
@@ -225,14 +262,6 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       C += (4.0 * INV_DX) * vec4<f32>(
         wgv.x*dpos.x, wgv.x*dpos.y, wgv.y*dpos.x, wgv.y*dpos.y,
       );
-      let growthBase = nodeIndex * GROWTH_FIELD_CHANNELS;
-      let weight = f32(atomicLoad(&growthField[growthBase + GROWTH_CH_WEIGHT]));
-      if (weight > 0.0) {
-        growthTensor += wgt * vec3<f32>(
-          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XX])),
-          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_XY])),
-          f32(atomicLoad(&growthField[growthBase + GROWTH_CH_TENSOR_YY]))) / weight;
-      }
     }
   }
   var domainNew = rest0.verticesAB;
@@ -276,8 +305,13 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var FgNew = Fg0;
 
-  let fieldRate = max(growthTensor.x + growthTensor.z, 0.0);
-  if (fieldRate > 1e-8 && material.growthRate > 0.0) {
+  if (material.growthRate > 0.0) {
+    for (var qi = 0u; qi < GROWTH_QUADRATURE_COUNT; qi++) {
+      growthTensor += GROWTH_QUADRATURE[qi].z * growthTensorAt(growthQuadraturePosition(rest0, qi));
+    }
+  }
+  let fieldRate = growthTensor.x + growthTensor.z;
+  if (any(abs(growthTensor) > vec3<f32>(1e-12)) && material.growthRate > 0.0) {
     let compression = max(0.0, -log(max(newJe, 1e-6)));
     var pressureGate = 0.0;
     if (material.growthCompressionStop > material.growthCompressionStart) {
@@ -291,7 +325,7 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       pressureGate = 1.0;
     }
     let feedback = clamp(material.growthCompressionFeedback, 0.0, 1.0);
-    let effectiveGrowthRate = material.growthRate * mix(1.0, pressureGate, feedback);
+    let expansionGate = mix(1.0, pressureGate, feedback);
 
     let anisotropy = clamp(material.growthAnisotropy, 0.0, 1.0);
     let isotropic = 0.5 * fieldRate;
@@ -302,15 +336,29 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       mix(isotropic, growthTensor.z, anisotropy),
     );
 
-    let rotation = polarDecompose(FeTrial).r;
-    let materialRate = matMul(matMul(matTranspose(rotation), worldRate), rotation);
-    var growthDt = effectiveGrowthRate * DT;
+    let positive = positivePart(worldRate);
+    let negative = worldRate - positive;
+    let growthDt = material.growthRate * DT;
+    var positiveScale = expansionGate;
+    let positiveTrace = max(positive.x + positive.w, 0.0);
     let budgetRatio = bitcast<f32>(atomicLoad(&growthField[7]));
-    if (budgetRatio > 0.0) {
+    if (budgetRatio > 0.0 && positiveTrace > 0.0) {
       let limit = max(rest0.budgetGrowthRatio, 1e-6) * budgetRatio;
       let remainingLogArea = max(log(limit / max(matDet(Fg0), 1e-6)), 0.0);
-      growthDt = min(growthDt, remainingLogArea / max(fieldRate, 1e-8));
+      positiveScale = min(positiveScale, remainingLogArea / (positiveTrace * growthDt));
     }
+    // Stop contraction at the solver's existing determinant floor, rather
+    // than allowing vanishing rest area to make the constitutive inverse fail.
+    let negativeTrace = max(-negative.x - negative.w, 0.0);
+    var negativeScale = 1.0;
+    if (negativeTrace > 0.0) {
+      let availableLogArea = max(log(max(matDet(Fg0), 1e-6) / 1e-6), 0.0)
+        + positiveScale * positiveTrace * growthDt;
+      negativeScale = min(1.0, availableLogArea / (negativeTrace * growthDt));
+    }
+    worldRate = positiveScale * positive + negativeScale * negative;
+    let rotation = polarDecompose(FeTrial).r;
+    let materialRate = matMul(matMul(matTranspose(rotation), worldRate), rotation);
     let increment = symmetricExp(materialRate * growthDt);
     FgNew = matMul(increment, Fg0);
   }

@@ -222,7 +222,6 @@ export function LabView() {
   return (
     <div className="training-layout lab-layout">
       <aside className="controls lab-controls">
-        <h1>Simulation lab</h1>
         <section>
           <h2>Scenario</h2>
           <select
@@ -248,7 +247,7 @@ export function LabView() {
           <div className="stat-row"><span>Spacing</span><span>Target area scale</span></div>
         </section>
         <section>
-          <details className="settings-category">
+          <details className="settings-category foldable-title">
           <summary>Simulation</summary>
           <div className="stat-row">
             <span>Cell memory</span>

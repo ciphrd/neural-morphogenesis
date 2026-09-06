@@ -29,6 +29,7 @@ def main():
     agents.load_weights(weights)
     final_areas = []
     for case in cases:
+        agents.set_forced_growth_field_override(False)
         # Isotropic growth without stress isolates physical material accounting
         # from density-dependent differences in geometric discretization.
         core.set_material(0, .2, 0, 1, growth_duration_macro_steps=8,
@@ -44,6 +45,11 @@ def main():
         sim.macro_step(1, growth_enabled=False)
         baseline = core.read_rest_state()
         np.testing.assert_allclose(baseline[:,:4], rest[:,:4], atol=1e-7)
+        # A constant *vector* now contracts inward-facing boundaries; it no
+        # longer specifies isotropic positive growth. Use a prescribed tensor
+        # to isolate accounting across different coarse seed geometries. Signed
+        # projection/refinement invariance is tested in signed_growth_check.py.
+        agents.set_forced_growth_field_override(True)
         for _ in range(12):
             sim.macro_step(1)
         rest = core.read_rest_state()
@@ -53,10 +59,10 @@ def main():
         assert area > reference.initial_particles*reference.particle_volume*1.1
         assert core.active_count <= case.particle_cap and not agents.capacity_blocked
         final_areas.append(area)
-    # The growth field near a discretized boundary differs slightly between
-    # samplings; compare physical area, never numerical particle counts.
+    # Prescribed unit trace integrates to the same physical rest area at every density.
     areas = np.array(final_areas)
-    np.testing.assert_allclose(areas, areas.mean(), rtol=.05)
+    expected = reference.initial_particles*reference.particle_volume*2**(12/8)
+    np.testing.assert_allclose(areas, expected, rtol=3e-5)
     print(f'[PASS] persistent pipelines switch 0.25/0.5/1/2/4x density: seed material conserved, growth active, final areas={areas}')
 
 if __name__ == '__main__':

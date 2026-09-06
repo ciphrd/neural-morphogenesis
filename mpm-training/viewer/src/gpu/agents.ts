@@ -6,7 +6,7 @@ const coreConstants = coreConstantsConfig.simulation;
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
 import type { Environment } from "./environment";
-import { GRID_N, INV_DX, MAX_PARTICLES, NODE_COUNT, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
+import { GROWTH_FIELD_CHANNELS, GRID_N, INV_DX, MAX_PARTICLES, NODE_COUNT, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { policyHasRecurrence, type ChemicalCommunicationArchitecture, type PolicyArchitecture, type UpdateRuleWeights } from "./types";
 import policyParametersConfig from "../../../core/config.json";
 const policyParameters = policyParametersConfig.policy;
@@ -174,6 +174,7 @@ export class Agents {
   private readonly stepModeUniforms: [GPUBuffer, GPUBuffer];
   private readonly growthField: GPUBuffer;
   private readonly refinement: GPUBuffer;
+  private readonly growthEntries: readonly string[];
   private readonly growthPipelines: readonly GPUComputePipeline[];
   private readonly growthBindGroup: GPUBindGroup;
   private readonly growthDispatches: readonly (number | null)[];
@@ -343,14 +344,16 @@ export class Agents {
       }),
     });
     const stages: [string, number | null][] = [
-      ["clearGrowthField", ceilDiv(10 * NODE_COUNT, 256)],
-      ["scatterGrowthIntent", null], ["enforceGrowthField", ceilDiv(NODE_COUNT, 256)],
+      ["clearGrowthField", ceilDiv(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)],
       ["clearRefinement", ceilDiv(refineWords, 256)],
-      ["indexRefinementEdges", null], ["linkRefinementEdges", null],
+      ["indexRefinementEdges", null],
+      ["scatterGrowthIntent", null], ["scatterGrowthBoundary", null],
+      ["enforceGrowthField", ceilDiv(NODE_COUNT, 256)],
+      ["linkRefinementEdges", null],
       ...Array.from({ length: Math.ceil(Math.log2(MAX_PARTICLES)) },
         (): [string, null] => ["propagateRefinement", null]),
       ["requestRefinement", null], ["reserveRefinement", null],
-      ["commitResample", null], ["stopGrowthAtCapacity", ceilDiv(10 * NODE_COUNT, 256)],
+      ["commitResample", null], ["stopGrowthAtCapacity", ceilDiv(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)],
     ];
     // Keep one stable ABI for every growth pass. With `layout: "auto"`, WebGPU
     // infers a different layout per entry point and removes bindings that an
@@ -379,6 +382,7 @@ export class Agents {
         layout: growthPipelineLayout, compute: { module: growthModule, entryPoint },
       }));
     }
+    this.growthEntries = stages.map(([entry]) => entry);
     this.growthPipelines = stages.map(([entry]) => pipelines.get(entry)!);
     const resources = new Map<number, GPUBindingResource>([
       [0, { buffer: mpmCore.positions }],
@@ -624,10 +628,12 @@ export class Agents {
   /** Spatially average policy intent, then conservatively refine any
    * under-resolved grown or deformed material footprint. */
   private encodeGrowthField(encoder: GPUCommandEncoder): void {
+    let propagationRound = 0;
     for (let i = 0; i < this.growthPipelines.length; i++) {
-      // Entry 2 analytically touches every grid node; skip its dispatch for
-      // ordinary training playback rather than paying a dormant full-grid pass.
-      if (i >= 6 + this.refinementRounds && i < 6 + Math.ceil(Math.log2(MAX_PARTICLES))) continue;
+      // Limit pointer-jumping to the live sample count, independent of the
+      // number of field-projection passes before refinement.
+      if (this.growthEntries[i] === "propagateRefinement" &&
+          ++propagationRound > this.refinementRounds) continue;
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.growthPipelines[i]);
       pass.setBindGroup(0, this.growthBindGroup);

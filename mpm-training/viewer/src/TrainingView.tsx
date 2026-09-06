@@ -2,6 +2,7 @@ import { DEFAULT_RUN_SETTINGS } from "./net/settingsStorage"
 import canonicalConfig from "../../core/config.json"
 import { InitialConditionControls, type InitialConditionSettings } from "./controls/InitialConditionControls"
 import { useEffect, useMemo, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import coreConstantsConfig from "../../core/config.json";
 import { FitnessChart } from "./charts/FitnessChart"
 import { randomPolicySeed, randomWeights } from "./gpu/agents"
@@ -67,6 +68,10 @@ const RECORDING_FORMAT = pickRecordingFormat()
  * field modes are portable without extending core/'s shared physics. */
 export function TrainingView() {
   const liveState = useTrainingSocket(TRAIN_WS_URL, TRAIN_API_URL)
+  const [headerActionsHost, setHeaderActionsHost] = useState<HTMLElement | null>(null)
+  useEffect(() => {
+    setHeaderActionsHost(document.getElementById("training-header-actions"))
+  }, [])
   // null = following the live/current run. Anything else is an archived
   // run's own id (net/runs.ts's RunSummary) — see the RunPicker below.
   const [viewingRunId, setViewingRunId] = useState<string | null>(null)
@@ -648,39 +653,40 @@ export function TrainingView() {
 
   return (
     <div className="training-layout">
+      {headerActionsHost && createPortal(
+        <RunPicker
+          apiUrl={TRAIN_API_URL}
+          activeRunId={viewingRunId}
+          serverConnected={liveState.serverConnected}
+          onSelectRun={setViewingRunId}
+        />,
+        headerActionsHost
+      )}
       <div className="controls">
-        <h1>mpm-training viewer</h1>
-
         <section>
-          <RunPicker
-            apiUrl={TRAIN_API_URL}
-            activeRunId={viewingRunId}
-            onSelectRun={setViewingRunId}
-          />
+          <details className="settings-category foldable-title">
+            <summary>Rollout</summary>
+            <div className="stat-row">
+              <span>Training particle cap</span>
+              <span>{activeConfig ? activeConfig.particles : "—"}</span>
+            </div>
+            <div className="stat-row">
+              <span>Chemical field</span>
+              <span>
+                {activeConfig
+                  ? `${activeConfig.baseResolution}×${activeConfig.baseResolution}`
+                  : "—"}
+              </span>
+            </div>
+            <div className="stat-row">
+              <span>Channels</span>
+              <span>{activeConfig ? activeConfig.channels : "—"}</span>
+            </div>
+          </details>
         </section>
 
         <section>
-          <h2>Rollout</h2>
-          <div className="stat-row">
-            <span>Training particle cap</span>
-            <span>{activeConfig ? activeConfig.particles : "—"}</span>
-          </div>
-          <div className="stat-row">
-            <span>Chemical field</span>
-            <span>
-              {activeConfig
-                ? `${activeConfig.baseResolution}×${activeConfig.baseResolution}`
-                : "—"}
-            </span>
-          </div>
-          <div className="stat-row">
-            <span>Channels</span>
-            <span>{activeConfig ? activeConfig.channels : "—"}</span>
-          </div>
-        </section>
-
-        <section>
-          <details className="settings-category">
+          <details className="settings-category foldable-title">
             <summary>Simulation</summary>
             <div className="stat-row">
               <span>Cell memory</span>

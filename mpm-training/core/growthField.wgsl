@@ -6,7 +6,7 @@ const GRID_N: u32 = __GRID_N__u;
 const INV_DX: f32 = __INV_DX__;
 const NODE_STRIDE: u32 = GRID_N + 1u;
 const NODE_COUNT: u32 = NODE_STRIDE * NODE_STRIDE;
-const FIELD_CHANNELS: u32 = 10u;
+const FIELD_CHANNELS: u32 = __GROWTH_FIELD_CHANNELS__u;
 const CH_VECTOR_X: u32 = 0u;
 const CH_VECTOR_Y: u32 = 1u;
 const CH_TENSOR_XX: u32 = 2u;
@@ -14,7 +14,11 @@ const CH_TENSOR_XY: u32 = 3u;
 const CH_TENSOR_YY: u32 = 4u;
 const CH_WEIGHT: u32 = 5u;
 
-const FIELD_SCALE: f32 = 8192.0;
+// Words 6/7 of node zero are global budget data. Every other live channel
+// holds f32 bits; integer CAS supplies portable floating-point accumulation.
+const CH_NORMAL_X: u32 = 8u;
+const CH_NORMAL_Y: u32 = 9u;
+const CH_BOUNDARY_SUPPORT: u32 = 10u;
 
 const REFINEMENT_THRESHOLD: f32 = __REFINEMENT_THRESHOLD__;
 
@@ -41,6 +45,8 @@ struct ParticleRest {
   originalArea: f32,
   quadratureWeight: f32,
 }
+
+__GROWTH_SAMPLING__
 
 struct ParticleMeta {
   color: vec4<f32>,
@@ -264,6 +270,66 @@ fn fieldIndex(node: u32, channel: u32) -> u32 {
   return node * FIELD_CHANNELS + channel;
 }
 
+fn addFieldFloat(index: u32, value: f32) {
+  if (value == 0.0) { return; }
+  var previous = atomicLoad(&growthField[index]);
+  loop {
+    let next = bitcast<i32>(bitcast<f32>(previous) + value);
+    let result = atomicCompareExchangeWeak(&growthField[index], previous, next);
+    if (result.exchanged) { return; }
+    previous = result.old_value;
+  }
+}
+
+// The edge index must be complete, and domains must not change until this
+// pass ends. Exact matching excludes shared edges, including periodic seams.
+fn isBoundaryEdge(pi: u32, ei: u32) -> bool {
+  let key = edgeKey(pi, ei);
+  var slot = hashKey(key);
+  loop {
+    let entry = atomicLoad(&refinement[slot]);
+    if (entry == 0u) { return true; }
+    let other = (entry - 1u) / 3u;
+    let otherEdge = (entry - 1u) % 3u;
+    if (other != pi && all(edgeKey(other, otherEdge) == key)) { return false; }
+    slot = (slot + 1u) & (REFINE_HASH_SIZE - 1u);
+  }
+  return false;
+}
+
+@compute @workgroup_size(64)
+fn scatterGrowthBoundary(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pi = gid.x;
+  if (pi >= activeCount) { return; }
+  // Three-point Gauss integration on exposed edges. Using geometric length
+  // makes the normal independent of sample weight and boundary subdivision.
+  let points = array<f32, 3>(0.112701665379, 0.5, 0.887298334621);
+  let weights = array<f32, 3>(0.277777777778, 0.444444444444, 0.277777777778);
+  for (var ei = 0u; ei < 3u; ei++) {
+    if (!isBoundaryEdge(pi, ei)) { continue; }
+    let a = vertex(pi, ei);
+    let edge = edgeBetween(a, vertex(pi, (ei + 1u) % 3u));
+    let inside = edgeBetween(a, vertex(pi, (ei + 2u) % 3u));
+    let winding = edge.x * inside.y - edge.y * inside.x;
+    if (abs(winding) < 1e-20) { continue; }
+    let normalMeasure = sign(winding) * vec2<f32>(edge.y, -edge.x);
+    for (var qi = 0u; qi < 3u; qi++) {
+      let pos = fract(a + points[qi] * edge);
+      let base = vec2<i32>(floor(pos * INV_DX - vec2<f32>(0.5)));
+      let w = quadraticWeights(pos * INV_DX - vec2<f32>(base));
+      for (var i = 0u; i < 3u; i++) {
+        for (var j = 0u; j < 3u; j++) {
+          let node = wrapIndex(base.x+i32(i))*NODE_STRIDE + wrapIndex(base.y+i32(j));
+          let contribution = weights[qi] * w[i].x * w[j].y;
+          addFieldFloat(fieldIndex(node, CH_NORMAL_X), contribution * normalMeasure.x);
+          addFieldFloat(fieldIndex(node, CH_NORMAL_Y), contribution * normalMeasure.y);
+          addFieldFloat(fieldIndex(node, CH_BOUNDARY_SUPPORT), contribution * length(edge));
+        }
+      }
+    }
+  }
+}
+
 @compute @workgroup_size(256)
 fn clearGrowthField(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
@@ -281,24 +347,26 @@ fn scatterGrowthIntent(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   particleRest[pi].budgetGrowthRatio = max(matDet(particleRest[pi].growthF), 1e-6);
   let worldRestArea = particleRest[pi].originalArea * particleRest[pi].budgetGrowthRatio;
-  atomicAdd(&growthField[6], i32(round(worldRestArea * 100000000.0)));
-  let pos = positions[pi];
-  let representedVolume = max(particleRest[pi].quadratureWeight, 1e-6)
+  addFieldFloat(6u, worldRestArea);
+  let representedVolume = max(particleRest[pi].quadratureWeight, 0.0)
     * max(matDet(particleRest[pi].growthF), 1e-6);
   var vector = vec2<f32>(particleRest[pi].growthVectorX, particleRest[pi].growthVectorY);
   let magnitude = length(vector);
   if (magnitude > 1.0) { vector = vector / magnitude; }
 
-  let base = vec2<i32>(floor(pos * INV_DX - vec2<f32>(0.5)));
-  let fx = pos * INV_DX - vec2<f32>(base);
-  let w = quadraticWeights(fx);
-  for (var i = 0u; i < 3u; i++) {
-    for (var j = 0u; j < 3u; j++) {
-      let node = wrapIndex(base.x+i32(i))*NODE_STRIDE + wrapIndex(base.y+i32(j));
-      let contribution = representedVolume * w[i].x * w[j].y;
-      atomicAdd(&growthField[fieldIndex(node, CH_VECTOR_X)], i32(round(contribution*vector.x*FIELD_SCALE)));
-      atomicAdd(&growthField[fieldIndex(node, CH_VECTOR_Y)], i32(round(contribution*vector.y*FIELD_SCALE)));
-      atomicAdd(&growthField[fieldIndex(node, CH_WEIGHT)], i32(round(contribution*FIELD_SCALE)));
+  for (var qi = 0u; qi < GROWTH_QUADRATURE_COUNT; qi++) {
+    let pos = growthQuadraturePosition(particleRest[pi], qi);
+    let base = vec2<i32>(floor(pos * INV_DX - vec2<f32>(0.5)));
+    let fx = pos * INV_DX - vec2<f32>(base);
+    let w = quadraticWeights(fx);
+    for (var i = 0u; i < 3u; i++) {
+      for (var j = 0u; j < 3u; j++) {
+        let node = wrapIndex(base.x+i32(i))*NODE_STRIDE + wrapIndex(base.y+i32(j));
+        let contribution = representedVolume * GROWTH_QUADRATURE[qi].z * w[i].x * w[j].y;
+        addFieldFloat(fieldIndex(node, CH_VECTOR_X), contribution * vector.x);
+        addFieldFloat(fieldIndex(node, CH_VECTOR_Y), contribution * vector.y);
+        addFieldFloat(fieldIndex(node, CH_WEIGHT), contribution);
+      }
     }
   }
 }
@@ -309,21 +377,34 @@ fn enforceGrowthField(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (node >= NODE_COUNT) { return; }
   if (physics.forcedGrowthFieldMode != 1u) {
 
-    let weight = f32(atomicLoad(&growthField[fieldIndex(node, CH_WEIGHT)]));
+    let weight = bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_WEIGHT)]));
     var tensor = vec3<f32>(0.0);
     if (weight > 0.0) {
       let vector = vec2<f32>(
-        f32(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_X)])),
-        f32(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_Y)]))) / weight;
+        bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_X)])),
+        bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_Y)]))) / weight;
       let magnitude = length(vector);
       let direction = vector / max(magnitude, 1e-8);
       tensor = min(magnitude, 1.0) * vec3<f32>(
         direction.x * direction.x, direction.x * direction.y, direction.y * direction.y);
+      let normalSum = vec2<f32>(
+        bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_NORMAL_X)])),
+        bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_NORMAL_Y)])));
+      let support = bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_BOUNDARY_SUPPORT)]));
+      // Do not normalize roundoff when opposing boundary faces cancel.
+      if (length(normalSum) > max(1e-20, support * 1e-4)) {
+        let normal = normalize(normalSum);
+        let inward = min(magnitude, 1.0) * max(-dot(direction, normal), 0.0);
+        // Pure inward intent reverses normal expansion into contraction;
+        // tangential and outward commands retain their existing response.
+        tensor -= 2.0 * inward * vec3<f32>(
+          normal.x * normal.x, normal.x * normal.y, normal.y * normal.y);
+      }
     }
 
-    atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XX)], i32(round(weight*tensor.x)));
-    atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XY)], i32(round(weight*tensor.y)));
-    atomicStore(&growthField[fieldIndex(node, CH_TENSOR_YY)], i32(round(weight*tensor.z)));
+    atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XX)], bitcast<i32>(weight*tensor.x));
+    atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XY)], bitcast<i32>(weight*tensor.y));
+    atomicStore(&growthField[fieldIndex(node, CH_TENSOR_YY)], bitcast<i32>(weight*tensor.z));
     return;
   }
   let ix = node / NODE_STRIDE;
@@ -339,12 +420,12 @@ fn enforceGrowthField(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let tensor = vec3<f32>(0.5, 0.0, 0.5);
 
-  atomicStore(&growthField[fieldIndex(node, CH_VECTOR_X)], i32(round(direction.x * FIELD_SCALE)));
-  atomicStore(&growthField[fieldIndex(node, CH_VECTOR_Y)], i32(round(direction.y * FIELD_SCALE)));
-  atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XX)], i32(round(tensor.x * FIELD_SCALE)));
-  atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XY)], i32(round(tensor.y * FIELD_SCALE)));
-  atomicStore(&growthField[fieldIndex(node, CH_TENSOR_YY)], i32(round(tensor.z * FIELD_SCALE)));
-  atomicStore(&growthField[fieldIndex(node, CH_WEIGHT)], i32(FIELD_SCALE));
+  atomicStore(&growthField[fieldIndex(node, CH_VECTOR_X)], bitcast<i32>(direction.x));
+  atomicStore(&growthField[fieldIndex(node, CH_VECTOR_Y)], bitcast<i32>(direction.y));
+  atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XX)], bitcast<i32>(tensor.x));
+  atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XY)], bitcast<i32>(tensor.y));
+  atomicStore(&growthField[fieldIndex(node, CH_TENSOR_YY)], bitcast<i32>(tensor.z));
+  atomicStore(&growthField[fieldIndex(node, CH_WEIGHT)], bitcast<i32>(1.0));
 }
 
 @compute @workgroup_size(64)
@@ -391,7 +472,7 @@ fn stopGrowthAtCapacity(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (i == 0u) { agentState.capacityBlocked = atomicLoad(&refinement[BLOCKED]); }
   if (atomicLoad(&agentState.sampleCount) < physics.maxActiveParticles && atomicLoad(&refinement[BLOCKED]) == 0u) {
     if (i == 7u) {
-      let totalArea = f32(atomicLoad(&growthField[6])) / 100000000.0;
+      let totalArea = bitcast<f32>(atomicLoad(&growthField[6]));
       let ratio = select(0.0, max(1.0, physics.materialAreaBudget / max(totalArea, 1e-12)),
                          physics.materialAreaBudget > 0.0);
       atomicStore(&growthField[7], bitcast<i32>(ratio));

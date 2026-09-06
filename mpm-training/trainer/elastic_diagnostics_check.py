@@ -20,7 +20,7 @@ from elastic_diagnostics import (
     policy_elastic_strain_input,
     summarize_elastic_state,
 )
-from mpm_core import MpmCore, lame_params
+from mpm_core import GROWTH_FIELD_CHANNELS, MpmCore, lame_params
 from shader_template import template_shader
 
 E = 1.0e4
@@ -322,6 +322,7 @@ def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
             {"binding": 0, "resource": {"buffer": device.create_buffer(size=8, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 1, "resource": {"buffer": device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM)}},
             {"binding": 3, "resource": {"buffer": device.create_buffer(size=112, usage=wgpu.BufferUsage.STORAGE)}},
+            {"binding": 4, "resource": {"buffer": device.create_buffer(size=64, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 8, "resource": {"buffer": device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM)}},
         ],
     )
@@ -371,6 +372,42 @@ def check_viewer_morphology_visualization_shader(device: wgpu.GPUDevice) -> None
         ],
     )
     print("[PASS] viewer policy-morphology RGB gradient-density pipeline and display-toggle bindings compile")
+    growth_pipeline = device.create_compute_pipeline(
+        layout=wgpu.AutoLayoutMode.auto,
+        compute={"module": module, "entry_point": "colorizeGrowth"},
+    )
+    growth = np.zeros((65*65, GROWTH_FIELD_CHANNELS), np.float32)
+    # The same contraction at tiny and ordinary weights must be equally
+    # visible. A zero-trace signed tensor must also survive visualization.
+    for node, weight in ((1, 1e-7), (2, 1.0)):
+        growth[node, 0] = -.6 * weight
+        growth[node, 2] = -.6 * weight
+        growth[node, 5] = weight
+    growth[3, [2, 4, 5]] = [.4, -.4, 1.0]
+    growth_buffer = device.create_buffer_with_data(data=growth, usage=wgpu.BufferUsage.STORAGE)
+    growth_texture = device.create_texture(size=(65,65,1), format=wgpu.TextureFormat.rgba8unorm,
+        usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.COPY_SRC)
+    growth_group = device.create_bind_group(layout=growth_pipeline.get_bind_group_layout(0), entries=[
+        {"binding":13, "resource":{"buffer":accent}},
+        {"binding":24, "resource":{"buffer":growth_buffer}},
+        {"binding":25, "resource":growth_texture.create_view()},
+    ])
+    encoder = device.create_command_encoder()
+    compute = encoder.begin_compute_pass()
+    compute.set_pipeline(growth_pipeline)
+    compute.set_bind_group(0,growth_group)
+    compute.dispatch_workgroups(5,5)
+    compute.end()
+    device.queue.submit([encoder.finish()])
+    pixels = np.frombuffer(device.queue.read_texture({'texture':growth_texture},
+        {'bytes_per_row':65*4}, (65,65,1)),np.uint8).reshape(65,65,4)
+    np.testing.assert_allclose(pixels[1,0],pixels[2,0],atol=1)
+    assert np.max(abs(pixels[1,0,:3].astype(int)-pixels[0,0,:3])) > 30
+    assert np.max(abs(pixels[3,0,:3].astype(int)-pixels[0,0,:3])) > 30
+    device.create_render_pipeline(layout=wgpu.AutoLayoutMode.auto,
+        vertex={"module":module,"entry_point":"growthVectorVertex"},
+        fragment={"module":module,"entry_point":"growthVectorFragment", "targets":[{"format":wgpu.TextureFormat.bgra8unorm}]})
+    print('[PASS] signed growth pixels retain tiny-weight contraction and zero-trace remodeling; vector pipeline compiles')
 
 def main() -> None:
     check_policy_elastic_strain_inputs()

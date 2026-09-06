@@ -7,7 +7,7 @@ Python and the browser compile these same WGSL sources. `config.json` supplies d
 | `agents.wgsl` | Chemical/morphology/strain sensing, policy evaluation, private state, growth output and friction |
 | `environment.wgsl` | Triangle-area chemical transfer, persistent environment or cell-owned projection, diffusion, advection and gradients |
 | `morphology.wgsl` | Smoothed material density used for morphology sensing |
-| `growthField.wgsl` | Growth-vector projection, conforming longest-edge refinement, capacity and material-budget handling |
+| `growthField.wgsl` | Floating domain projection, signed boundary growth, conforming refinement and material budgets |
 | `clearGrid.wgsl` | Clear MPM accumulators |
 | `p2g.wgsl` | APIC/MLS-MPM momentum and fixed-corotated stress transfer |
 | `gridUpdate.wgsl` | Grid velocities, gravity and damping |
@@ -36,3 +36,11 @@ Python and the browser compile these same WGSL sources. `config.json` supplies d
 The shared layout must agree in all shader declarations, Python structured arrays/readback code and TypeScript upload code. GPU diagnostics and render checks exercise this boundary.
 
 `density_cases.json` is a set of cross-language test cases, not a default configuration file.
+
+Growth model 15 integrates the field over triangle domains with the shared
+`growthSampling.wgsl` quadrature. Exposed edges define outward normals; inward
+commands contract rest material instead of losing their sign. The growth grid
+uses 12 words per node, storing f32 bits (including signed tensors), not fixed
+point integers. Compression and physical budgets gate expansion only. See
+`../GROWTH_MODEL.md` for the law, mass coupling and resolution limits, and run
+`trainer/.venv/bin/python trainer/signed_growth_check.py` from the project root.

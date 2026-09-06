@@ -1,6 +1,7 @@
 {
   "simulation": {
     "GRID_N": 64,
+    "GROWTH_FIELD_CHANNELS": 12,
     "DX": 0.015625,
     "INV_DX": 64,
     "DT": 1.5625e-5,
@@ -46,7 +47,7 @@
     "growthCompressionStart": 0.1,
     "growthCompressionStop": 0.1,
     "growthCompressionFeedback": 1.0,
-    "growthModelVersion": 14,
+    "growthModelVersion": 15,
     "materialAreaBudget": 0.0,
     "growthAnisotropy": 1.0,
     "mpmEnabled": true,
@@ -104,7 +105,7 @@
     "chemicalValueInputMultiplier": 1.0,
     "chemicalGradientInputScale": 0.045,
     "communicationSpeed": 4.0,
-    "neuralUpdatesPerMacro": 1,
+    "neuralUpdatesPerMacro": 8,
     "initialConditionChannel": 0,
     "version": 1,
     "preset": "developmental-3-3-3",

@@ -30,11 +30,23 @@ body {
   height: 42px;
   flex-shrink: 0;
   display: flex;
-  align-items: end;
-  gap: 2px;
+  align-items: center;
+  justify-content: space-between;
   padding: 0 16px;
   background: #0d0d0d;
   border-bottom: 1px solid #2a2a2a;
+}
+
+.app-nav-tabs {
+  align-self: stretch;
+  display: flex;
+  align-items: end;
+  gap: 2px;
+}
+
+.app-nav-actions {
+  display: flex;
+  align-items: center;
 }
 
 .app-nav button {
@@ -90,10 +102,8 @@ body {
   margin: 0 0 10px;
 }
 
-.controls section,
-.controls-right section {
-  margin-bottom: 24px;
-}
+.controls section { margin-bottom: 14px; }
+.controls-right section { margin-bottom: 24px; }
 
 .policy-weight-control {
   padding: 12px;
@@ -317,6 +327,29 @@ body {
 
 .settings-category[open] > summary {
   border-bottom: 1px solid #202020;
+}
+
+/* Top-level Rollout/Simulation controls read as collapsible section titles,
+   while nested categories such as Post-processing keep the quieter divider
+   treatment above. */
+.foldable-title {
+  margin-top: 0;
+  padding-bottom: 4px;
+  border: 0;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.foldable-title > summary {
+  padding: 0 0 10px;
+  color: #9a9a9a;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.foldable-title[open] > summary {
+  border-bottom: 0;
 }
 
 .slider-row {
@@ -1376,6 +1409,21 @@ body {
 .run-picker-live {
   text-transform: none;
   color: #4ade80;
+}
+
+.run-picker-offline {
+  text-transform: none;
+  color: #9a9a9a;
+}
+
+.app-nav-actions .playback-button {
+  min-width: 112px;
+  padding: 5px 10px;
+}
+
+.app-nav-actions .run-picker-panel {
+  right: 0;
+  left: auto;
 }
 
 .run-picker-meta {
