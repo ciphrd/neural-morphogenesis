@@ -348,25 +348,6 @@ def check_capacity_rollout(device):
     assert capped_steps >= 80, 'must exercise sustained physics after reaching capacity'
     print(f'[PASS] partial final allocation and {capped_steps * 32} post-cap physics steps stay finite; growth stops')
 
-def check_physical_budget(device):
-    for capacity in (8, 32):
-        core,agents=make_system(device,capacity=capacity)
-        load_samples(core,agents,[[.5,.5]],[[1,0]])
-        initial_area=float(read_rest(core,1)[0,14])
-        budget=initial_area*1.3
-        agents.set_material_area_budget(budget)
-        agents.set_forced_growth_field_override(True)
-        core.set_material(0,.2,0,1,growth_rate=500,growth_compression_feedback=0)
-        for _ in range(4):
-            run_growth_field(device,agents)
-            synchronize_count(core,agents)
-            core.step(64)
-        rest=read_rest(core,core.active_count)
-        area=np.sum(rest[:, 14]*np.linalg.det(rest[:,:4].reshape(-1,2,2)))
-        np.testing.assert_allclose(area,budget,rtol=.002)
-        assert core.active_count==1
-    print('[PASS] world-area growth budget stops independently of numerical sample capacity')
-
 def _projected_plane(environment, agents, channel):
     environment.reset()
     encoder = environment.device.create_command_encoder()
@@ -457,7 +438,7 @@ def main():
     for check in (check_continuous_growth,check_opposed_field,check_vector_blending,check_subdivision,
                   check_geometric_refinement_criterion,check_triangle_edges_and_seams,check_point_p2g_and_split_conservation,
                   check_affine_transport,check_courant_guard,check_capacity,
-                  check_capacity_rollout,check_physical_budget,
+                  check_capacity_rollout,
                   check_projected_fields_and_state,check_seed_reset,check_periodic_transfer,check_uniform_rollout):
         check(device)
 

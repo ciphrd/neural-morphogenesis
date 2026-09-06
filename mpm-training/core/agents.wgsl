@@ -60,7 +60,6 @@ struct AgentPhysics {
   forcedGrowthEnd: u32,
   chemicalValueInputMultiplier: f32,
   forcedGrowthFieldMode: u32,
-  materialAreaBudget: f32,
 }
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
@@ -90,7 +89,6 @@ struct ParticleRest {
   jp: f32,
   growthVectorX: f32,
   growthVectorY: f32,
-  budgetGrowthRatio: f32,
   verticesAB: vec4<f32>,
   vertexC: vec2<f32>,
   originalArea: f32,
@@ -446,7 +444,6 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   particleRest[pi].growthVectorX = growthVectorWorld.x;
   particleRest[pi].growthVectorY = growthVectorWorld.y;
-  particleRest[pi].budgetGrowthRatio = 0.0;
 
   agentState.particleMeta[pi].growthMagnitude = length(growthVectorWorld);
   }

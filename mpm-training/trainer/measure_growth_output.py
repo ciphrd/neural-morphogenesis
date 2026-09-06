@@ -124,7 +124,6 @@ def main():
         initial_condition=meta['initial_condition'],
         initial_condition_strength=meta['initial_condition_strength'],
         initial_condition_channel=meta['initial_condition_channel'],
-        material_area_budget=meta['material_area_budget'],
         initial_spacing=density.initial_spacing,
     )
 

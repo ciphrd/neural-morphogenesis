@@ -37,7 +37,7 @@ from policy_parameters import (
 META_NAMES = [
     "valid", "position_x", "position_y", "alignment_angle",
     "growth_vector_x", "growth_vector_y", "growth_area",
-    "budget_growth_ratio", "original_area",
+    "reserved", "original_area",
 ]
 
 def feature_names(channels: int, architecture: str = STATELESS_ARCHITECTURE) -> list[str]:

@@ -1,4 +1,4 @@
-# Domain-integrated signed material growth (model version 15)
+# Domain-integrated signed material growth (model version 17)
 
 The material grows continuously; numerical samples are added by subdividing
 transported material domains. `GROWTH_REDESIGN.md` records the pre-implementation
@@ -16,7 +16,7 @@ and current area is abs(det(E))/2. F is constitutive deformation, with
 Fe=F inverse(G); plasticity/fluidity can modify it without changing vertices.
 
 The shared ParticleRest record has 16 floats (64 bytes): G at 0–3, jp at
-4, world growth vector at 5–6, the budget snapshot at 7, vertices A/B/C at
+4, world growth vector at 5–6, alignment padding at 7, vertices A/B/C at
 8–13, original world area A0 at 14, and numerical weight q at 15. All growth
 changes use this existing layout; no additional neural outputs are required.
 
@@ -58,7 +58,7 @@ interactive additions are not thereby guaranteed to tile.
 ## Growth law
 
 The policy proposes a world vector `u`, capped to unit length. Growth projection
-and gathering integrate over each actual transported triangle using seven-point,
+integrates over each actual transported triangle using seven-point,
 degree-five quadrature (`core/growthSampling.wgsl`). At each quadrature location,
 a quadratic B-spline writes to a 3×3 MPM stencil. Each contribution has weight
 `q det(G) quadratureWeight Ni(x)`. The projected node vector is the signed
@@ -66,13 +66,12 @@ weighted mean, `u_i = sum(weight*u) / sum(weight)`. Zero commands still contribu
 weight. Opposite requests cancel before conversion; identical requests do not
 amplify the rate. Arbitrarily small positive q is retained without a mass floor.
 
-Growth and world-area sums accumulate as f32 via integer atomic compare/exchange,
+Growth sums accumulate as f32 via integer atomic compare/exchange,
 matching the portable strategy used for mechanical transfers. The old 1/8192
 rounding is removed. The 12-word node record contains weighted vector x/y (0–1),
 weighted signed tensor xx/xy/yy (2–4), material weight (5), reserved words (6–7),
 geometric outward-normal measure x/y (8–9), boundary support length (10), and a
-reserved word (11). Words 6 and 7 of node zero hold total grown world rest area
-and the budget ratio. All these quantities are stored as f32 bit patterns;
+reserved word (11). All these quantities are stored as f32 bit patterns;
 consumers must bitcast, not numerically convert the integers.
 
 The complete half-edge hash is built before field projection. Only exposed
@@ -98,13 +97,11 @@ with normal contraction. This is an explicit boundary constitutive rule, not
 a force exerted by empty space. Exterior grid support communicates the command
 back into existing material; it creates no exterior particles or pressure source.
 
-G2P averages the signed tensor over the triangle using the same quadrature,
-blends anisotropy with `trace(T)/2 I`, and separates the result into positive and
-negative spectral parts. Compression feedback and the optional material-area
-budget scale only the positive part. The negative part remains active even in
-compressed material or at an exhausted physical budget. A conservative area
-allowance may defer use of area freed by contraction to later updates. The
-negative part is limited at the existing `det(G)=1e-6` solver floor.
+G2P samples the signed tensor once at the triangle centroid using
+the existing quadratic velocity stencil. It blends anisotropy with `trace(T)/2 I`, and separates the result into positive and
+negative spectral parts. Compression feedback scales only the positive part.
+The negative part remains active in compressed material and is limited at the
+existing `det(G)=1e-6` solver floor.
 
 The final symmetric rate is rotated into the elastic frame and integrated by
 `G <- exp(dt Lg) G`. Negative and zero-trace rates are integrated as well as
@@ -121,8 +118,7 @@ that would require a separately stored active deformation or stress law.
 
 The diagnostic forced field remains a prescribed isotropic positive tensor,
 bypassing the signed boundary conversion. Capacity exhaustion still pauses the
-entire growth/remodeling field as a numerical safety rule; this is distinct from
-the physical area budget, which permits contraction.
+entire growth/remodeling field as a numerical safety rule.
 
 Seven-point quadrature exactly integrates the B-spline polynomial on a triangle
 contained within one polynomial patch (up to floating-point error). Triangles
@@ -130,9 +126,9 @@ crossing spline knots remain an approximation, and under-resolved large domains
 still require refinement. The grid remains 64×64 by default; opposite surfaces
 closer than grid support can blend or cancel. Projection runs once per macro
 interval; the grid field and boundary directions remain fixed during its physics
-substeps while gathers follow the moving domains. This is not an arbitrary
+substeps while gathers follow the moving centroids. This is not an arbitrary
 resolution or timestep convergence claim. Projection uses seven 3×3 stencils
-per triangle; growth gather adds seven stencils when growth is enabled, and
+per triangle; growth gather reads the existing centroid stencil when growth is enabled, and
 exposed-edge integration adds three stencils per boundary edge.
 
 ## Subdivision
@@ -297,7 +293,7 @@ likewise remains based on the centroid gradient, not reconstructed from E.
 The domain `E` is not integrated into P2G, the momentum/constitutive part of
 G2P, chemical deposition, morphology/repulsion density, or mechanical viewer
 field diagnostics. Those paths use one weighted sample at `xp`. Growth projection
-and growth gathering integrate over the stored triangle.
+integrates over the stored triangle; growth gathering uses its centroid.
 Children copy the parent velocity and affine
 matrix. Symmetric placement and halved weights preserve global mass, linear
 momentum, and APIC angular momentum, although the nodal field can change at the
@@ -311,24 +307,9 @@ readback or CPU-generated geometry. “Overlay particle domains” independently
 draws crisp cyan one-device-pixel edges after bloom for every shape selection,
 including Domain.
 
-## Physical and numerical limits
+## Numerical limits
 
-`materialAreaBudget` is an optional maximum **grown rest area in world units**;
-zero disables it. It is available in the viewer Growth panel and shared run
-defaults, and is recorded in training metadata. `set_material_area_budget` and
-`setMaterialAreaBudget` expose the same runtime control.
-
-Each macro interval sums `A0 det(G)` and distributes remaining area in
-proportion to the interval's starting material area. Each sample's exponential
-increment is clipped to that allowance. Subdivision copies the starting growth
-and halves `A0`, preserving the allowance. This conservative allocation can
-underuse the budget for heterogeneous rates during one interval; it reallocates
-next interval. The global area accumulator now uses floating-point summation, removing the
-previous 1e-8 world-area quantum and approximately 21-world-area integer limit.
-Budget accounting still has f32 summation and integration error.
-
-Numerical capacity remains a **safety pause**, independent of the optional
-physical budget. At capacity, or when a complete requested pair cannot fit in
+Numerical capacity is a **safety pause**. At capacity, or when a complete requested pair cannot fit in
 the remaining slots, the growth field is cleared before integration; elastic
 motion continues. A spare slot may therefore remain unused. Failed operations
 preserve their sources and increment
@@ -361,7 +342,7 @@ Run from `trainer/`:
 The domain suite covers split geometry, point-transfer domain independence,
 CPU/GPU P2G agreement, affine G2P,
 independent geometry transport, growth-driven sampling versus passive deformation,
-capacity, independent physical budgets, chemical/morphology projection,
+capacity, chemical/morphology projection,
 material/policy-state inheritance, seed/reset behavior, and a free-growth run.
 The diagnostic suite also compiles the viewer's rendering and field shaders.
 Build playback with `npm run build` in `viewer/`.
@@ -398,7 +379,7 @@ Different coarse seed polygons can produce different signed boundary responses;
 learned-policy morphology convergence across densities is not established.
 
 This changes physical discretization and sample trajectories. New runs record
-`growthModelVersion=15` and `domainGeometry=triangle`; previous policy weights
+`growthModelVersion=17` and `domainGeometry=triangle`; previous policy weights
 remain loadable, but old trajectory
 snapshots are historical evidence rather than expected exact replay results.
 
@@ -410,6 +391,25 @@ probe moved inward by 0.000900, stayed stationary with zero intent, and moved
 outward by 0.001045 with outward intent. These are focused regression fixtures,
 not convergence or training-quality claims. The precision suite checks weights
 from 1e-7 to 1e6, weak commands, periodic seams, independent domain quadrature,
-boundary subdivision, signed/zero-trace exponentials and compression/budget
+boundary subdivision, signed/zero-trace exponentials and compression
 interaction. The viewer test reads rendered pixels to check that negative and
 zero-trace rates remain visible at tiny represented weights.
+
+
+Model 16 restored one growth sample per triangle per physics substep, reusing
+the nine-node velocity stencil. Seven-point domain projection and exposed-edge
+normal projection remain unchanged, as do signed contraction, compression
+feedback. This isolates the cost of gathering: growth node
+visits per particle per substep drop from 63 to 9. Centroid sampling approximates
+the area-average tensor, so nonuniform-field updates need not be invariant under
+subdivision; large triangles crossing strong field variations are the main
+accuracy tradeoff. The model-15 motion measurements above are historical.
+
+
+Seven-point gathering and its comparison toggle have been removed. Growth
+always gathers at the centroid; seven-point field projection remains unchanged.
+
+Model 17 removes the grown-rest-area budget and its global/per-particle
+accounting. Positive growth is now limited only by compression feedback and
+numerical sample capacity; target coverage, spill and overlap remain fitness
+signals rather than hard growth constraints.

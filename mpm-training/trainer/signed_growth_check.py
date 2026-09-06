@@ -142,12 +142,32 @@ def check_boundary_resolution(device):
     print('[PASS] 4x subdivision of the same boundary preserves signed field and integrated material rate')
 
 
-def uniform_tensor(core, tensor, budget=0.):
+def uniform_tensor(core, tensor):
     field = np.zeros(((GRID_N+1)**2, GROWTH_FIELD_CHANNELS),np.float32)
     field[:, 2:5] = tensor
     field[:, 5] = 1
-    field[0, 7] = budget
     core.device.queue.write_buffer(core.growth_field,0,field)
+
+
+def check_centroid_gather(device):
+    core,agents=make_system(device)
+    x=np.repeat(np.arange(GRID_N+1)/GRID_N,GRID_N+1)
+    field=np.zeros(((GRID_N+1)**2,GROWTH_FIELD_CHANNELS),np.float32)
+    field[:,2]=.2+1000*(x-.5)**2
+    field[:,5]=1
+    results=[]
+    for extent in (.002,.04):
+        load_samples(core,agents,[[.5,.5]],[[0,0]],domains=[[extent,0,0,extent]])
+        core.device.queue.write_buffer(core.growth_field,0,field)
+        position=core.read_positions()[0]
+        rate=sum(weight*field[node,2] for node,weight in stencil(position))
+        core.set_material(0,.2,0,1,growth_rate=80,growth_compression_feedback=0)
+        core.step(1)
+        result=read_rest(core,1)[0,:4]
+        np.testing.assert_allclose(result,[np.exp(rate*80*DT),0,0,1],atol=2e-7)
+        results.append(result)
+    np.testing.assert_allclose(results[0],results[1],atol=2e-7)
+    print('[PASS] nonuniform growth uses the centroid stencil independently of triangle extent')
 
 
 def check_signed_integration(device):
@@ -162,12 +182,10 @@ def check_signed_integration(device):
         values,vectors=np.linalg.eigh(rate)
         expected=(vectors*np.exp(values*80*DT*32))@vectors.T
         np.testing.assert_allclose(read_rest(core,1)[0,:4].reshape(2,2),expected,atol=7e-6)
-    # Exhausted budget and compression cannot disable the negative eigenvalue.
+    # Compression cannot disable the negative eigenvalue.
     load_samples(core,agents,[[.5,.5]],[[0,0]])
-    rest=read_rest(core,1);rest[:,7]=1
-    core.device.queue.write_buffer(core.rest,0,rest)
     core.device.queue.write_buffer(core.F,0,np.array([[.8,0,0,.8]],np.float32))
-    uniform_tensor(core,(.6,0,-.6),budget=1.)
+    uniform_tensor(core,(.6,0,-.6))
     core.set_material(0,.2,0,1,growth_rate=80,growth_compression_feedback=1,
                       growth_compression_start=.1,growth_compression_stop=.1)
     core.step(32)
@@ -192,7 +210,7 @@ def check_signed_integration(device):
     core.set_material(0,.2,0,1,growth_rate=80,growth_compression_feedback=0)
     core.step(32)
     np.testing.assert_allclose(np.linalg.det(read_rest(core,1)[0,:4].reshape(2,2)),1e-6,rtol=1e-5)
-    print('[PASS] negative and zero-trace matrix exponentials; contraction survives compression/budget and respects area floor')
+    print('[PASS] negative and zero-trace matrix exponentials; contraction survives compression and respects area floor')
 
 
 def check_boundary_mechanics(device):
@@ -247,7 +265,7 @@ def check_interior_growth_opposition(device):
 
 def main():
     device=pick_device()
-    for check in (check_precision_and_domains,check_boundary_sign,check_boundary_resolution,check_signed_integration,check_boundary_mechanics,check_interior_growth_opposition):
+    for check in (check_precision_and_domains,check_boundary_sign,check_boundary_resolution,check_centroid_gather,check_signed_integration,check_boundary_mechanics,check_interior_growth_opposition):
         check(device)
 
 if __name__=='__main__':main()

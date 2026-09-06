@@ -34,8 +34,7 @@ from evolve import (
     get_weights,
     rollout,
     shape_settings,
-    resolved_material_budget,
-    report_shape_budget,
+    report_shape_capacity,
     run_generation,
     set_weights,
     validate_fitness_configuration,
@@ -64,7 +63,6 @@ from simulation_settings import (
     GROWTH_COMPRESSION_START,
     GROWTH_COMPRESSION_STOP,
     GROWTH_ANISOTROPY_AUTHORITY,
-    MATERIAL_AREA_BUDGET,
     GROWTH_MODEL_VERSION,
     INTERNAL_STATE_SPEED,
     MORPHOLOGY_BLUR_SIGMA,
@@ -137,7 +135,7 @@ def _setup() -> None:
 
     # Fixed for this server's lifetime (no target-switching endpoint).
     target = load_target(args.target)
-    report_shape_budget(args, target)
+    report_shape_capacity(args, target)
     # Fixed for this server's lifetime too — precomputed once rather than
     # recomputing the same thing on every rollout's own fitness-scoring
     # call AND on every _save_generation_images() debug-raster build (see

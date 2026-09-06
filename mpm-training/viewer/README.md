@@ -12,6 +12,6 @@ The server address, playback, rendering and tool defaults come from `core/config
 
 `src/gpu/simulation.ts` coordinates rollouts. `mpmCore.ts`, `agents.ts` and `environment.ts` mirror the Python GPU wrappers. `render.ts` and viewer-local shaders display material triangles, markers, growth vectors/magnitude, neural and chemical state, fields, and elastic diagnostics. `src/net` combines complete run settings with generation records. The training view provides evolutionary-run playback; the lab provides controlled growth scenarios and deformation tools.
 
-Physics controls include material response, damping, friction, chemistry, numerical spacing, morphology and optional repulsion. Growth controls include doubling duration, anisotropy, compression feedback and material budget. Removed motion, lifecycle and chemical-fluidity controls have no UI or GPU state.
+Physics controls include material response, damping, friction, chemistry, numerical spacing, morphology and optional repulsion. Growth controls include doubling duration, anisotropy and compression feedback. Removed motion, lifecycle and chemical-fluidity controls have no UI or GPU state.
 
 A real WebGPU browser is required for playback. The production build checks TypeScript and bundling; native GPU regression checks in `trainer/` also compile and exercise rendering shaders.

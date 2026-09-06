@@ -1,4 +1,4 @@
-"""Headless MLS-MPM/APIC mechanics with explicit advected triangle geometry. ParticleRest uses 16 floats: growthF, Jp, growth vector, budget snapshot, six vertex coordinates, original area, and quadrature weight."""
+"""Headless MLS-MPM/APIC mechanics with explicit advected triangle geometry. ParticleRest uses 16 floats: growthF, Jp, growth vector, alignment padding, six vertex coordinates, original area, and quadrature weight."""
 from __future__ import annotations
 
 import json

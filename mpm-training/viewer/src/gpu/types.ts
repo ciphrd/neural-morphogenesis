@@ -28,8 +28,6 @@ export type ChemicalCommunicationArchitecture = "persistent-environment" | "cell
 export interface RunSettings extends ShapeStopSettings {
   rasterResolution: number;
   estimatedSampleCapacity?: number;
-  materialBudgetMode: "target" | "manual";
-  materialBudgetScale: number;
   // The growth CAP, not the starting count — rollouts start with
   // two half-weight triangles per initialParticleCount seed cell (see
   // restartRollout()) and grow via splitting from there. This is the
@@ -95,7 +93,6 @@ export interface RunSettings extends ShapeStopSettings {
 
   growthModelVersion: number;
   domainGeometry: "triangle-vertices";
-  materialAreaBudget: number;
   /** Blend integrated tensor growth from isotropic (0) to directional (1). */
   growthAnisotropy: number;
   /** Elastic areal-compression interval that smoothly suppresses growth. */
@@ -221,7 +218,6 @@ export interface PhysicsSettings {
   neuralUpdatesPerMacro: number;
   communicationSpeed: number;
   internalStateSpeed: number;
-  materialAreaBudget: number;
   // Global cap on the neural per-particle anisotropy output.
   growthAnisotropy: number;
   growthCompressionStart: number;
@@ -261,7 +257,6 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     neuralUpdatesPerMacro: config.neuralUpdatesPerMacro,
     communicationSpeed: config.communicationSpeed,
     internalStateSpeed: config.internalStateSpeed,
-    materialAreaBudget: config.materialAreaBudget,
     growthAnisotropy: config.growthAnisotropy,
     growthCompressionStart: config.growthCompressionStart,
     growthCompressionStop: config.growthCompressionStop,

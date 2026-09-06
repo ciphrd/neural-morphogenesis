@@ -140,7 +140,6 @@ def _gpu_constitutive_probe(
   jp: f32,
   growthVectorX: f32,
   growthVectorY: f32,
-  budgetGrowthRatio: f32,
   verticesAB: vec4<f32>,
   vertexC: vec2<f32>,
   originalArea: f32,

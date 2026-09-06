@@ -417,15 +417,6 @@ class AgentsGPU:
             ),
         )
 
-    def set_material_area_budget(self, area: float) -> None:
-        """Maximum grown rest area in world units; zero means no physical limit.
-
-        Numerical capacity still pauses growth as an explicit safety boundary.
-        """
-        if not np.isfinite(area) or area < 0:
-            raise ValueError("material area budget must be finite and nonnegative")
-        self.device.queue.write_buffer(self._physics_uniform, 68, np.array([area], np.float32))
-
     def set_growth_enabled(self, enabled: bool) -> None:
         """Enable publication of neural growth vectors (uniform byte 44).
 

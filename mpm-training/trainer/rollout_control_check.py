@@ -15,9 +15,9 @@ def run_case(*, bad_steps=(), blocked=False, horizon=20, cutoff=None, enabled=Tr
     agents=MagicMock();agents.particle_capacity=args.particles
     agents.max_active_particles=args.particles
     agents.capacity_blocked=blocked;agents.unresolved_samples=0
-    flags=[];budgets=[]
+    flags=[]
     class Sim:
-        def __init__(self,*a,**kw): budgets.append(kw['material_area_budget'])
+        def __init__(self,*a,**kw): pass
         def macro_step(self,*a,growth_enabled):
             flags.append(growth_enabled)
             if reach_capacity_at == len(flags): core.active_count=agents.max_active_particles
@@ -28,7 +28,6 @@ def run_case(*, bad_steps=(), blocked=False, horizon=20, cutoff=None, enabled=Tr
     with patch.object(evolve,'TrainingRollout',Sim),patch.object(evolve,'score_domains',score):
         fitness,positions=evolve.rollout(np.zeros(1),target,target_mask(target,64),None,args,0,
             core,agents,MagicMock(),return_positions=True)
-    assert budgets==[target.filled_area()]
     assert positions.shape==(10,2) and np.isfinite(fitness)
     return flags,core.rollout_diagnostics
 
@@ -47,6 +46,6 @@ def main():
     assert not d['stableMatch'] and d['settling'] and len(flags)==7
     flags,d=run_case(cutoff=3,enabled=False)
     assert flags==[True]*3+[False]*17 and not d['stableMatch']
-    print('[PASS] Actual rollout control: target budget, stable match, immediate capacity stop, horizon, explicit growth cutoff')
+    print('[PASS] Actual rollout control: stable match, immediate capacity stop, horizon, explicit growth cutoff')
 
 if __name__=='__main__':main()

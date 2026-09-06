@@ -14,8 +14,6 @@ const CH_TENSOR_XY: u32 = 3u;
 const CH_TENSOR_YY: u32 = 4u;
 const CH_WEIGHT: u32 = 5u;
 
-// Words 6/7 of node zero are global budget data. Every other live channel
-// holds f32 bits; integer CAS supplies portable floating-point accumulation.
 const CH_NORMAL_X: u32 = 8u;
 const CH_NORMAL_Y: u32 = 9u;
 const CH_BOUNDARY_SUPPORT: u32 = 10u;
@@ -39,7 +37,6 @@ struct ParticleRest {
   jp: f32,
   growthVectorX: f32,
   growthVectorY: f32,
-  budgetGrowthRatio: f32,
   verticesAB: vec4<f32>,
   vertexC: vec2<f32>,
   originalArea: f32,
@@ -80,7 +77,6 @@ struct AgentPhysics {
   forcedGrowthEnd: u32,
   chemicalValueInputMultiplier: f32,
   forcedGrowthFieldMode: u32,
-  materialAreaBudget: f32,
 }
 
 @group(0) @binding(0) var<storage, read_write> positions: array<vec2<f32>>;
@@ -345,9 +341,6 @@ fn scatterGrowthIntent(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
   if (pi >= activeCount) { return; }
 
-  particleRest[pi].budgetGrowthRatio = max(matDet(particleRest[pi].growthF), 1e-6);
-  let worldRestArea = particleRest[pi].originalArea * particleRest[pi].budgetGrowthRatio;
-  addFieldFloat(6u, worldRestArea);
   let representedVolume = max(particleRest[pi].quadratureWeight, 0.0)
     * max(matDet(particleRest[pi].growthF), 1e-6);
   var vector = vec2<f32>(particleRest[pi].growthVectorX, particleRest[pi].growthVectorY);
@@ -470,15 +463,7 @@ fn stopGrowthAtCapacity(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= FIELD_CHANNELS * NODE_COUNT) { return; }
   if (i == 0u) { agentState.capacityBlocked = atomicLoad(&refinement[BLOCKED]); }
-  if (atomicLoad(&agentState.sampleCount) < physics.maxActiveParticles && atomicLoad(&refinement[BLOCKED]) == 0u) {
-    if (i == 7u) {
-      let totalArea = bitcast<f32>(atomicLoad(&growthField[6]));
-      let ratio = select(0.0, max(1.0, physics.materialAreaBudget / max(totalArea, 1e-12)),
-                         physics.materialAreaBudget > 0.0);
-      atomicStore(&growthField[7], bitcast<i32>(ratio));
-    }
-    return;
-  }
+  if (atomicLoad(&agentState.sampleCount) < physics.maxActiveParticles && atomicLoad(&refinement[BLOCKED]) == 0u) { return; }
 
   atomicStore(&growthField[i], 0);
 }

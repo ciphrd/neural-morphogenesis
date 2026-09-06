@@ -35,7 +35,6 @@ from simulation_settings import (
     FIELD_N,
     GROWTH_DURATION_MACRO_STEPS,
     GROWTH_MODEL_VERSION,
-    MATERIAL_AREA_BUDGET,
     GROWTH_COMPRESSION_FEEDBACK,
     GROWTH_COMPRESSION_START,
     GROWTH_COMPRESSION_STOP,
@@ -150,23 +149,17 @@ def mutate(
     noise = rng.normal(size=weights.shape).astype(np.float32)
     return (weights.astype(np.float32, copy=False) + noise * np.float32(sigma) * scales).astype(np.float32)
 
-def resolved_material_budget(args, target):
-    if args.material_budget_mode == "target":
-        return target.filled_area() * args.material_budget_scale
-    return args.material_area_budget
-
 def estimated_sample_capacity(args, target):
     # Two samples per spacing-squared is an allocation estimate, not a
     # physical material limit. Anisotropy and conforming refinement need slack.
     spacing = resolve_run_density(args, 1.0).spacing
     return max(2 * args.initial_particles, int(np.ceil(2 * target.filled_area() / spacing**2)))
 
-def report_shape_budget(args, target):
+def report_shape_capacity(args, target):
     if target.filled_area() <= 0:
         raise SystemExit("training target must contain at least one filled texel")
     estimate = estimated_sample_capacity(args, target)
-    print(f"Material budget: {resolved_material_budget(args, target):.6g} world area; "
-          f"sample capacity: {args.particles}; estimated target sampling capacity: ~{estimate} at 1x density")
+    print(f"Sample capacity: {args.particles}; estimated target sampling capacity: ~{estimate} at 1x density")
     if args.particles < estimate:
         print(f"The current sampling cap may pause growth before the target is filled. "
               f"Consider --particles {estimate}; adding --particle-densities 0.5 reduces its sampling cost.")
@@ -175,9 +168,6 @@ def shape_settings(args, target):
     """Wire settings also embed target geometry for autonomous offline playback."""
     return {
         "estimatedSampleCapacity": estimated_sample_capacity(args, target),
-        "materialBudgetMode": args.material_budget_mode,
-        "materialBudgetScale": args.material_budget_scale,
-        "materialAreaBudget": resolved_material_budget(args, target),
         "stableStop": args.stable_stop,
         "shapeCheckInterval": args.shape_check_interval,
         "shapeConfirmations": args.shape_confirmations,
@@ -252,7 +242,6 @@ def rollout(
         initial_condition=getattr(args, "initial_condition", "none"),
         initial_condition_strength=getattr(args, "initial_condition_strength", 0.3),
         initial_condition_channel=getattr(args, "initial_condition_channel", 0),
-        material_area_budget=resolved_material_budget(args, target),
         initial_spacing=density.initial_spacing,
     )
 
@@ -297,7 +286,6 @@ def rollout(
         "atCapacity": core.active_count >= agents.max_active_particles,
         "stopReason": "capacity" if stopped_at_capacity else ("stable-match" if stopping.complete else "horizon"),
         "unresolvedSamples": int(agents.unresolved_samples),
-        "materialAreaBudget": resolved_material_budget(args, target),
         "missing": last_evaluation.match.missing,
         "spill": last_evaluation.match.spill,
         "overlap": last_evaluation.match.overlap,
@@ -489,12 +477,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional last macro step in which agents may start new cell cycles; omitted means no time cutoff",
     )
-    parser.add_argument("--material-budget-mode", choices=("target", "manual"),
-                        default=DEFAULT_RUN_SETTINGS["materialBudgetMode"])
-    parser.add_argument("--material-budget-scale", type=float, default=DEFAULT_RUN_SETTINGS["materialBudgetScale"],
-                        help="multiply the target's physical filled area for the growth budget")
-    parser.add_argument("--material-area-budget", type=float, default=MATERIAL_AREA_BUDGET,
-                        help="world rest-area limit in manual mode; zero means unlimited")
     parser.add_argument("--stable-stop", action=argparse.BooleanOptionalAction, default=DEFAULT_RUN_SETTINGS["stableStop"],
                         help="stop after repeated good shape matches and growth-free settling")
     parser.add_argument("--shape-check-interval", type=int, default=DEFAULT_RUN_SETTINGS["shapeCheckInterval"])
@@ -610,10 +592,6 @@ def validate_fitness_configuration(args: argparse.Namespace) -> None:
     for name in ("shape_missing_tolerance", "shape_spill_tolerance", "shape_overlap_tolerance"):
         if not 0 <= getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be in [0,1)")
-    if not np.isfinite(args.material_budget_scale) or args.material_budget_scale <= 0:
-        raise SystemExit("--material-budget-scale must be finite and positive")
-    if not np.isfinite(args.material_area_budget) or args.material_area_budget < 0:
-        raise SystemExit("--material-area-budget must be finite and nonnegative")
     if args.raster_resolution < 8:
         raise SystemExit("--raster-resolution must be at least 8")
     for name in (
@@ -659,7 +637,6 @@ def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed
         'substeps_per_macro': args.substeps_per_macro,
         'growth_model_version': GROWTH_MODEL_VERSION,
         'domain_geometry': 'triangle-vertices',
-        'material_area_budget': resolved_material_budget(args, target),
         'shape_settings': shape_settings(args, target),
         'growth_duration_macro_steps': GROWTH_DURATION_MACRO_STEPS,
         'growth_compression_start': GROWTH_COMPRESSION_START,
@@ -732,7 +709,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     target = load_target(args.target)
-    report_shape_budget(args, target)
+    report_shape_capacity(args, target)
     # Physical target footprint, precomputed once for every worker.
     target_raster = target_mask(target, args.raster_resolution)
     target_distance_field = build_target_distance_field(target_raster)

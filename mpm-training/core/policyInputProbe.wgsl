@@ -23,7 +23,6 @@ struct ParticleRest {
   jp: f32,
   growthVectorX: f32,
   growthVectorY: f32,
-  budgetGrowthRatio: f32,
   verticesAB: vec4<f32>,
   vertexC: vec2<f32>,
   originalArea: f32,
@@ -172,7 +171,7 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
   output[baseOut+4u]=rest.growthVectorX;
   output[baseOut+5u]=rest.growthVectorY;
   output[baseOut+6u]=growthArea;
-  output[baseOut+7u]=rest.budgetGrowthRatio;
+  output[baseOut+7u]=0.0;
   output[baseOut+8u]=rest.originalArea;
 
   let forward = agentState.alignment;

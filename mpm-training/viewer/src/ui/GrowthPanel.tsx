@@ -135,15 +135,6 @@ export function GrowthPanel({
       </div>
       {open && (
         <div className="physics-panel-body">
-          <label title="Maximum grown rest area in world coordinates. Zero leaves physical growth unlimited; sample capacity remains a numerical safety limit.">
-            Material area limit (0 = unlimited)
-            <input type="number" min={0} step={0.0001}
-              value={value.materialAreaBudget ?? 0}
-              onChange={(event) => {
-                const area = Number(event.target.value)
-                if (Number.isFinite(area) && area >= 0) onChange({ ...value, materialAreaBudget: area })
-              }} />
-          </label>
           {GROWTH_SLIDER_SPECS.map((spec) => (
             <label key={spec.key} className="slider-row" title={spec.hint}>
               <span>{spec.label}</span>

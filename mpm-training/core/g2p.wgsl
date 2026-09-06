@@ -21,13 +21,11 @@ struct ParticleRest {
   jp: f32,
   growthVectorX: f32,
   growthVectorY: f32,
-  budgetGrowthRatio: f32,
   verticesAB: vec4<f32>,
   vertexC: vec2<f32>,
   originalArea: f32,
   quadratureWeight: f32,
 }
-__GROWTH_SAMPLING__
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
 
@@ -102,7 +100,7 @@ fn symmetricExp(m: vec4<f32>) -> vec4<f32> {
 }
 
 // Spectral positive part. Negative eigenvalues are active contraction and
-// must survive compression inhibition and material-area budgets.
+// must survive compression inhibition.
 fn positivePart(m: vec4<f32>) -> vec4<f32> {
   let halfTrace = 0.5 * (m.x + m.w);
   let diagonal = 0.5 * (m.x - m.w);
@@ -209,27 +207,6 @@ fn velocityAtVertex(position: vec2<f32>) -> vec2<f32> {
   return velocity;
 }
 
-fn growthTensorAt(position: vec2<f32>) -> vec3<f32> {
-  let y = position * INV_DX;
-  let base = vec2<i32>(floor(y - vec2<f32>(0.5)));
-  let w = quadraticWeights(y - vec2<f32>(base));
-  var tensor = vec3<f32>(0.0);
-  for (var i = 0u; i < 3u; i++) {
-    for (var j = 0u; j < 3u; j++) {
-      let node = wrapIndex(base.x+i32(i)) * (GRID_N+1u) + wrapIndex(base.y+i32(j));
-      let offset = node * GROWTH_FIELD_CHANNELS;
-      let weight = bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_WEIGHT]));
-      if (weight > 0.0) {
-        tensor += w[i].x * w[j].y * vec3<f32>(
-          bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_TENSOR_XX])),
-          bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_TENSOR_XY])),
-          bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_TENSOR_YY]))) / weight;
-      }
-    }
-  }
-  return tensor;
-}
-
 @compute @workgroup_size(64)
 fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
@@ -262,6 +239,18 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       C += (4.0 * INV_DX) * vec4<f32>(
         wgv.x*dpos.x, wgv.x*dpos.y, wgv.y*dpos.x, wgv.y*dpos.y,
       );
+      // One growth sample at the triangle centroid, sharing the velocity
+      // stencil. Signed boundary tensors still integrate every physics step.
+      if (material.growthRate > 0.0) {
+        let offset = nodeIndex * GROWTH_FIELD_CHANNELS;
+        let weight = bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_WEIGHT]));
+        if (weight > 0.0) {
+          growthTensor += wgt * vec3<f32>(
+            bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_TENSOR_XX])),
+            bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_TENSOR_XY])),
+            bitcast<f32>(atomicLoad(&growthField[offset + GROWTH_CH_TENSOR_YY]))) / weight;
+        }
+      }
     }
   }
   var domainNew = rest0.verticesAB;
@@ -305,11 +294,6 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var FgNew = Fg0;
 
-  if (material.growthRate > 0.0) {
-    for (var qi = 0u; qi < GROWTH_QUADRATURE_COUNT; qi++) {
-      growthTensor += GROWTH_QUADRATURE[qi].z * growthTensorAt(growthQuadraturePosition(rest0, qi));
-    }
-  }
   let fieldRate = growthTensor.x + growthTensor.z;
   if (any(abs(growthTensor) > vec3<f32>(1e-12)) && material.growthRate > 0.0) {
     let compression = max(0.0, -log(max(newJe, 1e-6)));
@@ -341,12 +325,6 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     let growthDt = material.growthRate * DT;
     var positiveScale = expansionGate;
     let positiveTrace = max(positive.x + positive.w, 0.0);
-    let budgetRatio = bitcast<f32>(atomicLoad(&growthField[7]));
-    if (budgetRatio > 0.0 && positiveTrace > 0.0) {
-      let limit = max(rest0.budgetGrowthRatio, 1e-6) * budgetRatio;
-      let remainingLogArea = max(log(limit / max(matDet(Fg0), 1e-6)), 0.0);
-      positiveScale = min(positiveScale, remainingLogArea / (positiveTrace * growthDt));
-    }
     // Stop contraction at the solver's existing determinant floor, rather
     // than allowing vanishing rest area to make the constitutive inverse fail.
     let negativeTrace = max(-negative.x - negative.w, 0.0);
@@ -370,7 +348,7 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   particleRest[pi] = ParticleRest(
     FgNew, JpNew, rest0.growthVectorX, rest0.growthVectorY,
-    rest0.budgetGrowthRatio, domainNew, vertexCNew,
+    domainNew, vertexCNew,
     rest0.originalArea, rest0.quadratureWeight
   );
 }

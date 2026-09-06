@@ -452,7 +452,6 @@ export class GpuSimulation {
     this.agents.setChemicalGradientInputScale(physics.chemicalGradientInputScale);
 
 
-    this.agents.setMaterialAreaBudget(physics.materialAreaBudget);
     this.agents.setPhysics({
       maxEnvWrite: physics.maxEnvWrite,
       sampleSpacing: physics.sampleSpacing,

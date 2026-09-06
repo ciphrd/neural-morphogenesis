@@ -54,7 +54,6 @@ Sources: [p2g.wgsl](core/p2g.wgsl), [g2p.wgsl](core/g2p.wgsl), [gridUpdate.wgsl]
 | Compression inhibition | Active | `growthCompressionFeedback=1`, start/stop both `0.1`: a hard cutoff based on elastic areal compression. Distinct thresholds select smooth inhibition; feedback zero bypasses it. |
 | Conforming longest-edge refinement | Active, conditional | Geometry-based demand, edge hashing/linking, propagation, paired slot reservation, midpoint splits, and state copying. Hardcoded demand threshold `1.75`; minimum daughter grown weight `0.3125`. |
 | Sampling limits | Active | Runtime sample cap plus allocated buffer capacity. Default cap 400, density-resolved. **Capacity exhaustion or blocked reservation clears the growth field and stops physical growth too.** |
-| Physical material-area budget | Active in normal training | `materialBudgetMode="target"`, scale 1 resolves the budget from target filled area. The raw JSON `materialAreaBudget=0` does not mean the default trainer is unbudgeted. Manual mode with zero disables this budget. |
 | External stable-shape stop | Active | Every 10 steps, require 3 successful checks, then 20 settling steps with growth off. Failed settling resumes growth. Missing/spill/overlap tolerances are each 0.02. Capacity-blocked or unresolved sampling cannot count as success. |
 | Explicit growth horizon | Optional | `growthSteps=null`; a specified cutoff stops the growth command while mechanics and chemistry continue. |
 | Deterministic forced growth | Lab/test only | Forced sample ranges, fixed directions and a radial-inward field override. The radial case deliberately injects an isotropic expansion tensor. |
@@ -139,7 +138,7 @@ These should be distinguished from useful ablations set to zero. Some are still 
 | `mechanicalGrowthGate()` in agents shader | Uncalled helper; actual contact inhibition remains active in G2P. |
 | `spatialUniform01()` and its random-field machinery | Uncalled growth helper; do not confuse this with still-active seed RNG or mutation RNG. |
 
-Renaming rather than deletion is needed for several **live** state slots: `cycleActive` and `growthAngle` now carry growth-vector X/Y; `divisionBias` stores original world area; `growthAnisotropy` in the rest record is reused as a per-macro growth snapshot for budget allocation. `mitosisPropensity` displays vector magnitude. These names no longer describe their jobs.
+Renaming rather than deletion is needed for several **live** state slots: `cycleActive` and `growthAngle` now carry growth-vector X/Y; `divisionBias` stores original world area; `mitosisPropensity` displays vector magnitude. These names no longer describe their jobs.
 
 ## Where configuration actually lives
 
@@ -153,7 +152,7 @@ Renaming rather than deletion is needed for several **live** state slots: `cycle
 | `core/policy_parameters.json` | Head initialization and mutation priors. |
 | `core/initial_conditions.json` | Preset names and defaults; Python CLI also hardcodes strength/channel defaults. |
 | `trainer/simulation_settings.py` | Typed aliases plus derived constants and a hardcoded growth model version. Many comments describe prior implementations. |
-| `trainer/evolve.py` | CLI override/default resolution, density/budget derivation, validation, capture schedule, checkpoints. |
+| `trainer/evolve.py` | CLI override/default resolution, density derivation, validation, capture schedule, checkpoints. |
 | `trainer/train_server.py` | Builds run/broadcast records, repeating the settings surface. |
 | Python and TypeScript GPU wrappers | Uniform packing, construction fallbacks, derived material settings and dispatch rules, maintained in two languages. |
 | `viewer/src/gpu/types.ts`, `viewer/src/net/runs.ts` | Run/replay schema and historical fallback resolution. |
@@ -176,4 +175,4 @@ No removal plan is assumed yet. The main decisions are whether to retain both ch
 
 There is also a separate scientific question: which active policy observations and outputs improve growth/shape fitness? Reachability alone cannot answer that. Mechanosensing, morphology inputs, channel scales, private memory and visual-only RGB heads are candidates for explicit usefulness decisions or ablations, not automatically dead code.
 
-The clear structural cleanup candidates are the unused control surface, misleading live-state names, stale documentation, redundant config resolution, and separation of production code from reference experiments. The density prepass, raster helpers, seed RNG, actual compression gate and live budget state are examples where indiscriminate removal by old feature name would break active functionality.
+The clear structural cleanup candidates are the unused control surface, misleading live-state names, stale documentation, redundant config resolution, and separation of production code from reference experiments. The density prepass, raster helpers, seed RNG and actual compression gate are examples where indiscriminate removal by old feature name would break active functionality.

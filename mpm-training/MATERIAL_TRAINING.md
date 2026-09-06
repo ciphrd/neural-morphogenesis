@@ -5,19 +5,7 @@ subdivision changes sampling without changing the amount of material. The old
 Gaussian point scorer remains available for historical diagnostic tools. Scores
 from the two fitness versions are not directly comparable.
 
-## Material budget and sample capacity
-
-By default, training computes the target's filled world area from unique export
-texels, including their square footprints and excluding holes. That area becomes
-the grown rest-area budget (`sum A0 det(G)`). It does not depend on sample count,
-raster resolution, or density multiplier. Compression and deformation can make
-current geometric area differ from rest area; the budget is a useful starting
-point, not a guarantee of shape convergence.
-
-- `--material-budget-mode target` is the default.
-- `--material-budget-scale 1.1` allows 10% more rest area than the target.
-- `--material-budget-mode manual --material-area-budget 0.05` sets a world-area limit.
-- Manual mode with budget zero disables the physical area limit.
+## Sample capacity
 
 `--particles` remains a reference-density **allocation limit**. It cannot define
 what counts as filled. At capacity, the simulator still pauses growth for
@@ -35,8 +23,8 @@ samples at spacing 0.0027. The previous cap of 400 is much smaller. For example:
 trainer/.venv/bin/python trainer/evolve.py --target circle --particles 20000 --particle-densities 0.5
 ```
 
-This allocates 10,000 samples at the coarser density while preserving the same
-physical material budget. Increase capacity if refinement still becomes blocked.
+This allocates 10,000 samples at the coarser density. Increase capacity if
+refinement still becomes blocked.
 
 ## Material coverage fitness
 

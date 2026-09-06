@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from simulation_settings import DEFAULT_RUN_SETTINGS, MATERIAL_AREA_BUDGET, COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, INITIAL_SPACING, NEURAL_UPDATES_PER_MACRO
+from simulation_settings import DEFAULT_RUN_SETTINGS, COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, INITIAL_SPACING, NEURAL_UPDATES_PER_MACRO
 
 from agents_gpu import AgentsGPU, _spawn_uniform01
 from density import INITIAL_PACKING_SPACING_SCALE
@@ -54,7 +54,6 @@ class TrainingRollout:
         neural_updates_per_macro: int = NEURAL_UPDATES_PER_MACRO,
         communication_speed: float = COMMUNICATION_SPEED,
         initial_particle_count: int = INITIAL_PARTICLE_COUNT,
-        material_area_budget: float = MATERIAL_AREA_BUDGET,
         initial_condition: str = DEFAULT_RUN_SETTINGS["initialCondition"],
         initial_condition_strength: float = DEFAULT_RUN_SETTINGS["initialConditionStrength"],
         initial_condition_channel: int = DEFAULT_RUN_SETTINGS["initialConditionChannel"],
@@ -76,7 +75,6 @@ class TrainingRollout:
         )
         agents.set_communication_timestep(communication_dt)
 
-        agents.set_material_area_budget(material_area_budget)
         core.set_gravity(gravity)
         agents.set_spawn_center(*spawn_center)
         if agents.max_active_particles < 2:

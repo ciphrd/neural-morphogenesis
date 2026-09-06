@@ -532,12 +532,6 @@ export class Agents {
     this.device.queue.writeBuffer(this.physicsUniform, 56, new Uint32Array([endValue]));
   }
 
-  /** Lab-only analytic field override at AgentPhysics byte offset 120. */
-  setMaterialAreaBudget(area: number): void {
-    if (!Number.isFinite(area) || area < 0) throw new Error("Material area budget must be nonnegative");
-    writeFloat32(this.device, this.physicsUniform, 68, new Float32Array([area]));
-  }
-
   setForcedGrowthFieldOverride(mode: "radial-inward" | null): void {
     this.forcedGrowthFieldOverride = mode === "radial-inward";
     this.device.queue.writeBuffer(
