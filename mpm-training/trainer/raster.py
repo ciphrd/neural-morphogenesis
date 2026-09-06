@@ -1,37 +1,8 @@
-"""Gaussian-splat rasterization + a smooth raster distance — ported from
-envnca/raster.py. This is this project's own evolution-training fitness
-function (evolve.py's own rollout()/_score_fitness call
-training_raster_distance() below directly), in place of
-distance.py/alignment.py's Chamfer distance — that strategy was tried
-too, and for a while was the live fitness function, before this module
-was brought back (see evolve.py's own module docstring). train_server.py's
-own _save_generation_images() also calls training_raster_distance()
-directly, on each generation's winning positions, to render the
-`..._agents.png` debug raster the dashboard shows next to
-`..._target.png` — a second, display-only use of the same function
-fitness scoring already calls, not a separate code path.
-Hard Hamming/IoU scoring gives evolutionary search almost nothing to climb: a
-near miss and a far miss both fail until a point enters the exact target cell.
-Candidate particles are therefore Gaussian-splatted into weighted density and
-smoothly saturated into bounded occupancy. A fine-to-coarse pyramid preserves
-the broad attraction basin while retaining high-resolution silhouette detail.
-Separate coverage, spill, boundary, and crowding terms prevent background
-dilution and stop density collapse from hiding behind occupancy saturation.
+"""Legacy Gaussian point-cloud scoring and reusable raster-loss primitives.
 
-Unlike envnca (whose own domain IS its simulation grid, in grid-pixel
-units), this project's particle positions and target points already
-live in MpmCore's fixed [0,1]^2 domain (see targets.py) — `extent` below
-is always evolve.py's own RASTER_EXTENT = (0, 1, 0, 1), not a
-resolution-dependent value, but every function here stays generic over
-`extent` regardless, unchanged from envnca's own version.
-
-Performance note: this runs in evolve.py's hot training path (every
-candidate x every rotation-search angle x every generation x every
-near-the-end capture snapshot — see evolve.py's own CAPTURE_OFFSETS), so
-rasterize_points()/rasterize_points_sum() below are fully vectorized (no
-Python-level loop over points) via broadcasting + np.maximum.at's
-scatter-max — a naive per-point Python loop was measured to be the
-dominant cost otherwise, in envnca's own version of this file.
+New training runs use domain_fitness.py's material-domain coverage. The point
+rasterizer remains available to distance_playground.py and historical checks;
+its occupancy calibration intentionally retains the original point semantics.
 """
 
 from __future__ import annotations

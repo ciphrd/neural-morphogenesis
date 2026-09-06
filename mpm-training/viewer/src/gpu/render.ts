@@ -436,7 +436,7 @@ export class Renderer {
       ],
     });
 
-    // Live channel-7-gradient heading overlay. It reads the alignment cache
+    // Live channel-index-3-gradient heading overlay. It reads the alignment cache
     // written by agentStep; render.wgsl normalizes that clipped gradient for
     // a stable visual length without changing the simulation's confidence.
     // Binding numbers 0/2 reuse the positions and color declarations in
@@ -627,7 +627,7 @@ export class Renderer {
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
     this.substrateChannelStartUniform = device.createBuffer({
-      // x = RGB-window start, y = isolate orientation channel 7. vec4 keeps
+      // x = RGB-window start, y = isolate orientation channel index 3. vec4 keeps
       // the uniform layout portable while leaving two lanes for future modes.
       size: 16,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,

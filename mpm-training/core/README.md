@@ -26,7 +26,8 @@ own module docstring.
 - `agents.wgsl` — the evolved policy's forward pass
   (specialized as stateless `Dense(128)` or eight-state `Dense(64)`, followed
   by concatenated logical heads), with its local frame rebuilt each step from
-  the L2-clipped gradient of chemical channel 3 (gradient-based steering).
+  the L2-clipped gradient of chemical channel index 3 (the fourth channel;
+  gradient-based steering).
   Not part of the physics passes above — a training-loop concern, not
   MLS-MPM itself — but shares this directory so both consumers load the
   exact same shader.

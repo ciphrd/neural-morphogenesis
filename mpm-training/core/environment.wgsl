@@ -22,7 +22,7 @@
 //
 // Layout: flat array<f32>, (C,H,W) row-major — gridIndex(c,y,x) =
 // c*HEIGHT*WIDTH + y*WIDTH + x. Sensing (agents.wgsl) does its own
-// bilinear gather straight out of gridCurrent/gradient at continuous
+// quadratic B-spline gather straight out of gridCurrent/gradient at continuous
 // particle positions — this file only maintains the transient grid itself
 // (clear splats, materialize, compute the whole grid's gradient once per brain
 // invocation), same "one gradient pass shared by
@@ -46,8 +46,8 @@ const FIELD_MAX_HEIGHT: u32 = __FIELD_MAX_HEIGHT__u;
 const GRID_N: u32 = __GRID_N__u;
 // A matching packed density plane per channel supports normalized convolution
 // even when adjacent channels use different grids.
-const DEPOSIT_SCALE_INDEX: u32 = FIELD_TOTAL * 2u;
-const SCRATCH_TOTAL: u32 = DEPOSIT_SCALE_INDEX + 1u;
+// Final unused slot retained for host buffer-layout compatibility.
+const SCRATCH_TOTAL: u32 = FIELD_TOTAL * 2u + 1u;
 const CLEAR_WORKGROUP_SIZE: u32 = 256u;
 
 fn gridIndex(c: u32, y: u32, x: u32) -> u32 {
@@ -106,17 +106,18 @@ fn clearScratch(
 }
 
 fn resolvedDeposit(i: u32) -> f32 {
-  let depositScale = f32(max(atomicLoad(&depositScratch[DEPOSIT_SCALE_INDEX]), 1));
-  let numerator = f32(atomicLoad(&depositScratch[i])) / depositScale;
-  if (physics.normalizeDeposits < 0.5) { return numerator; }
-  let density = f32(atomicLoad(&depositScratch[FIELD_TOTAL + i]))
-    / depositScale;
-  // Below one configured layer of represented material, preserve the raw
-  // Gaussian source. Above it, divide by density so overcrowding cannot
-  // amplify the local source. This is N/max(D,D_capacity), not a soft
-  // N/(D+D_reference) attenuation.
-  let capacity = max(physics.depositDensityReference, 1e-6);
-  return numerator / max(density, capacity);
+  let numerator = bitcast<f32>(atomicLoad(&depositScratch[i]));
+  let area = bitcast<f32>(atomicLoad(&depositScratch[FIELD_TOTAL + i]));
+  if (area <= 0.0) { return 0.0; }
+  let c = channelForIndex(i);
+  let inverseTexelArea = f32(FIELD_WIDTHS[c]) * f32(FIELD_HEIGHTS[c]);
+  // Optional secretion mode: signed chemical quantity per world area.
+  if (physics.normalizeDeposits < 0.5) { return numerator * inverseTexelArea; }
+  // Average expression is independent of crowding. Coverage fades the source
+  // at empty edges, using physical area rather than an arbitrary particle count.
+  let expression = numerator / area;
+  let coverage = min(area * inverseTexelArea, 1.0);
+  return expression * coverage;
 }
 
 fn channelRetention(c: u32) -> f32 {

@@ -301,7 +301,7 @@ class AgentsGPU:
         # — same underlying need, smaller ceiling since this class has no
         # such interactive tool of its own).
         #
-        # rng/cooldown/current channel-7 alignment plus aligned neural RGBA —
+        # rng/cooldown/current channel-index-3 alignment plus aligned neural RGBA —
         # packed into one aligned per-particle buffer (112 bytes at C=8)
         # (core/agents.wgsl's own ParticleMeta struct), not four separate
         # buffers: this shader hit a REAL, confirmed CreateComputePipeline

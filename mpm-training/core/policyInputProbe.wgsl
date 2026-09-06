@@ -32,11 +32,6 @@ struct ParticleMeta {
   mitosisPropensity: f32,
   privateState: array<f32, 8>, chemicalState: array<f32, CHANNELS>,
 }
-struct Corners {
-  x0: u32, x1: u32, y0: u32, y1: u32,
-  wx0: f32, wx1: f32, wy0: f32, wy1: f32,
-}
-
 @group(0) @binding(0) var<storage, read> positions: array<vec2<f32>>;
 @group(0) @binding(1) var<uniform> activeCount: u32;
 @group(0) @binding(2) var<storage, read> gridCurrent: array<f32>;
@@ -51,36 +46,55 @@ struct Corners {
 fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
   return FIELD_OFFSETS[c] + y * FIELD_WIDTHS[c] + x;
 }
-fn wrapCoord(v: f32, size: f32) -> f32 {
-  let m = v % size;
-  return select(m, m + size, m < 0.0);
+// Quadratic B-spline basis shared by chemical scatter and perception.
+// Positions here use integer-centered texel coordinates (world * size - 0.5).
+struct Corners {
+  xs: array<u32, 3>,
+  ys: array<u32, 3>,
+  weights: array<vec2<f32>, 3>,
 }
+
+fn wrapDepositIndex(i: i32, size: u32) -> u32 {
+  let n = i32(size);
+  return u32(((i % n) + n) % n);
+}
+
 fn corners(c: u32, posIn: vec2<f32>) -> Corners {
-  let width = FIELD_WIDTHS[c]; let height = FIELD_HEIGHTS[c];
-  let p = vec2<f32>(wrapCoord(posIn.x, f32(width)), wrapCoord(posIn.y, f32(height)));
-  let x0f = floor(p.x);
-  let y0f = floor(p.y);
+  let base = vec2<i32>(floor(posIn - vec2<f32>(0.5)));
+  let f = posIn - vec2<f32>(base);
   var out: Corners;
-  out.wx1 = p.x - x0f; out.wx0 = 1.0 - out.wx1;
-  out.wy1 = p.y - y0f; out.wy0 = 1.0 - out.wy1;
-  out.x0 = u32(x0f) % width; out.x1 = (out.x0 + 1u) % width;
-  out.y0 = u32(y0f) % height; out.y1 = (out.y0 + 1u) % height;
+  out.weights[0] = 0.5 * (vec2<f32>(1.5) - f) * (vec2<f32>(1.5) - f);
+  out.weights[1] = vec2<f32>(0.75) - (f - vec2<f32>(1.0)) * (f - vec2<f32>(1.0));
+  out.weights[2] = 0.5 * (f - vec2<f32>(0.5)) * (f - vec2<f32>(0.5));
+  for (var j = 0u; j < 3u; j = j + 1u) {
+    out.xs[j] = wrapDepositIndex(base.x + i32(j), FIELD_WIDTHS[c]);
+    out.ys[j] = wrapDepositIndex(base.y + i32(j), FIELD_HEIGHTS[c]);
+  }
   return out;
 }
+
 fn sampleValue(c: u32, k: Corners) -> f32 {
-  let v00 = gridCurrent[fieldIndex(c, k.y0, k.x0)];
-  let v10 = gridCurrent[fieldIndex(c, k.y0, k.x1)];
-  let v01 = gridCurrent[fieldIndex(c, k.y1, k.x0)];
-  let v11 = gridCurrent[fieldIndex(c, k.y1, k.x1)];
-  return v00*k.wx0*k.wy0 + v10*k.wx1*k.wy0 + v01*k.wx0*k.wy1 + v11*k.wx1*k.wy1;
+  var value = 0.0;
+  for (var x = 0u; x < 3u; x = x + 1u) {
+    for (var y = 0u; y < 3u; y = y + 1u) {
+      value = value + gridCurrent[fieldIndex(c, k.ys[y], k.xs[x])]
+        * k.weights[x].x * k.weights[y].y;
+    }
+  }
+  return value;
 }
-fn sampleGrad(offset: u32, c: u32, k: Corners) -> f32 {
-  let v00 = gradient[offset + fieldIndex(c, k.y0, k.x0)];
-  let v10 = gradient[offset + fieldIndex(c, k.y0, k.x1)];
-  let v01 = gradient[offset + fieldIndex(c, k.y1, k.x0)];
-  let v11 = gradient[offset + fieldIndex(c, k.y1, k.x1)];
-  return v00*k.wx0*k.wy0 + v10*k.wx1*k.wy0 + v01*k.wx0*k.wy1 + v11*k.wx1*k.wy1;
+
+fn sampleGrad(planeOffset: u32, c: u32, k: Corners) -> f32 {
+  var value = 0.0;
+  for (var x = 0u; x < 3u; x = x + 1u) {
+    for (var y = 0u; y < 3u; y = y + 1u) {
+      value = value + gradient[planeOffset + fieldIndex(c, k.ys[y], k.xs[x])]
+        * k.weights[x].x * k.weights[y].y;
+    }
+  }
+  return value;
 }
+
 fn morphologyLoad(p: vec2<i32>) -> f32 {
   let n = i32(MORPHOLOGY_FIELD_N);
   let q = ((p % vec2<i32>(n)) + vec2<i32>(n)) % vec2<i32>(n);

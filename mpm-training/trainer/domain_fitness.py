@@ -48,10 +48,28 @@ def centered_triangles(vertices, center):
     return triangles-centroid+center, total
 
 
+def _raster_batches(triangles, resolution):
+    scaled = np.asarray(triangles, float).reshape(-1, 3, 2)*resolution
+    if not len(scaled):
+        return
+    low = np.maximum(0, np.floor(scaled.min(axis=1)))
+    high = np.minimum(resolution, np.ceil(scaled.max(axis=1)))
+    counts = np.maximum(0, high-low).prod(axis=1)
+    start = 0
+    cells = 0
+    for i, count in enumerate(counts):
+        if i > start and (cells+count > 32768 or i-start >= 256):
+            yield scaled[start:i]
+            start, cells = i, 0
+        cells += count
+    if start < len(scaled):
+        yield scaled[start:]
+
+
 def rasterize_triangles(triangles, resolution):
     """Add exact triangle/pixel intersection areas using batched convex clipping."""
     out = np.zeros((resolution, resolution), dtype=float)
-    for chunk in np.array_split(np.asarray(triangles, float)*resolution, max(1, (len(triangles)+255)//256)):
+    for chunk in _raster_batches(triangles, resolution):
         low = np.maximum(0, np.floor(chunk.min(axis=1)).astype(int))
         high = np.minimum(resolution, np.ceil(chunk.max(axis=1)).astype(int))
         sizes = np.maximum(0, high-low)
@@ -165,7 +183,7 @@ def evaluate_domains(vertices, target, mask, *, coverage_weight=1., spill_weight
             best = DomainEvaluation(score, occupancy, RasterFitnessBreakdown(score, coverage, spill, boundary, crowding, angle), match)
     for i in range(num_angles):
         evaluate(2*np.pi*i/num_angles)
-    # Refine both the training objective and the physical stopping objective.
+    # Refine the physical match pose; this search is identical in browser playback.
     step = 2*np.pi/num_angles
     for _ in range(refinement_steps):
         step /= 3

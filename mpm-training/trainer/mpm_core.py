@@ -180,9 +180,19 @@ class MpmCore:
 
     Particle buffers are sized to MAX_PARTICLES (fixed capacity); load_scene()
     writes into the head of each buffer and updates the small activeCount
-    uniform p2g/g2p gate their per-particle work on."""
+    uniform p2g/g2p gate their per-particle work on.
 
-    def __init__(self, device: wgpu.GPUDevice) -> None:
+    ``physics_dt`` is an optional compile-time override for diagnostic timestep
+    studies. Defaults remain unchanged. Callers must keep controller/refinement
+    cadence fixed in physical time and pass their actual substep count when
+    deriving a growth rate. Per-substep fluidity and capped repulsion need
+    separate treatment; pressure diagnostics disable both.
+    """
+
+    def __init__(self, device: wgpu.GPUDevice, *, physics_dt: float = DT) -> None:
+        if not np.isfinite(physics_dt) or physics_dt <= 0:
+            raise ValueError("physics_dt must be finite and positive")
+        self.dt = float(physics_dt)
         self.device = device
         self._active_count = 0
         self._repulsion_enabled = False
@@ -257,7 +267,7 @@ class MpmCore:
         self.damping_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_damping(DAMPING_LOSS_FRACTION, SUBSTEPS_PER_DAMPING_FRAME)
 
-        template_vars = {"GRID_N": GRID_N, "DX": DX, "INV_DX": INV_DX, "DT": DT, "CHEMICAL_CHANNELS": CHEM_CHANNELS}
+        template_vars = {"GRID_N": GRID_N, "DX": DX, "INV_DX": INV_DX, "DT": self.dt, "CHEMICAL_CHANNELS": CHEM_CHANNELS}
 
         clear_grid_module = device.create_shader_module(code=load_core_shader("clearGrid.wgsl", {"GRID_N": GRID_N}))
         self.clear_grid_pipeline = device.create_compute_pipeline(
@@ -284,7 +294,7 @@ class MpmCore:
             ],
         )
 
-        grid_update_module = device.create_shader_module(code=load_core_shader("gridUpdate.wgsl", {"GRID_N": GRID_N, "DT": DT}))
+        grid_update_module = device.create_shader_module(code=load_core_shader("gridUpdate.wgsl", {"GRID_N": GRID_N, "DT": self.dt}))
         self.grid_update_pipeline = device.create_compute_pipeline(
             layout=wgpu.AutoLayoutMode.auto, compute={"module": grid_update_module, "entry_point": "gridUpdate"}
         )
@@ -301,7 +311,7 @@ class MpmCore:
         g2p_module = device.create_shader_module(
             code=load_core_shader(
                 "g2p.wgsl",
-                {"GRID_N": GRID_N, "INV_DX": INV_DX, "DT": DT, "CHEMICAL_CHANNELS": CHEM_CHANNELS},
+                {"GRID_N": GRID_N, "INV_DX": INV_DX, "DT": self.dt, "CHEMICAL_CHANNELS": CHEM_CHANNELS},
             )
         )
         self.g2p_pipeline = device.create_compute_pipeline(layout=wgpu.AutoLayoutMode.auto, compute={"module": g2p_module, "entry_point": "g2p"})
@@ -352,7 +362,7 @@ class MpmCore:
         self.set_repulsion_strength(REPULSION_STRENGTH, REPULSION_MAX_DELTA)
 
         repulsion_module = device.create_shader_module(
-            code=load_core_shader("repulsion.wgsl", {"FIELD_N": REPULSION_FIELD_N, "DT": DT})
+            code=load_core_shader("repulsion.wgsl", {"FIELD_N": REPULSION_FIELD_N, "DT": self.dt})
         )
 
         self.clear_density_pipeline = device.create_compute_pipeline(
@@ -565,7 +575,9 @@ class MpmCore:
         self.device.queue.write_buffer(self.gravity_uniform, 0, np.array([gravity], dtype=np.float32))
 
     def set_damping(self, loss_fraction: float, substeps: int) -> None:
-        self.device.queue.write_buffer(self.damping_uniform, 0, np.array([per_substep_damping(loss_fraction, substeps)], dtype=np.float32))
+        # The requested loss refers to substeps at the reference DT; retain
+        # the same decay per physical second during timestep comparisons.
+        self.device.queue.write_buffer(self.damping_uniform, 0, np.array([per_substep_damping(loss_fraction, substeps) ** (self.dt / DT)], dtype=np.float32))
 
     def set_material(
         self,
@@ -597,7 +609,7 @@ class MpmCore:
         effective_growth_rate = (
             growth_rate
             if growth_rate is not None
-            else growth_rate_for_duration(growth_duration_macro_steps, substeps_per_macro)
+            else growth_rate_for_duration(growth_duration_macro_steps, substeps_per_macro) * DT / self.dt
         )
         if particle_mass <= 0.0 or particle_volume <= 0.0:
             raise ValueError("particle mass and volume must be positive")

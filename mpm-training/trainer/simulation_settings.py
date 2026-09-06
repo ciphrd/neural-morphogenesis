@@ -109,10 +109,9 @@ ELASTIC_STRAIN_INPUTS_ENABLED = bool(DEFAULT_RUN_SETTINGS["elasticStrainInputsEn
 
 # Deposit
 DEPOSIT_RATE = float(DEFAULT_RUN_SETTINGS["depositRate"])
-# Optional capacity-normalized deposit mode. Below the configured represented-
-# material capacity, raw Gaussian deposition is preserved; above it, matching
-# local density divides away any amplification from overcrowding. The legacy
-# wire name "reference" is retained for checkpoint compatibility.
+# Area-averaged expression with explicit world-area coverage; disabling this
+# selects secretion proportional to material density. The reference setting
+# is retained for checkpoint compatibility and no longer affects transfer.
 NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY = bool(DEFAULT_RUN_SETTINGS["normalizeDepositsByLocalDensity"])
 DEPOSIT_DENSITY_REFERENCE = float(DEFAULT_RUN_SETTINGS["depositDensityReference"])
 # Retained in the AgentPhysics/settings ABI for checkpoint compatibility.

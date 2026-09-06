@@ -13,7 +13,7 @@ The hidden activation is bounded, monotonic tanh. This replaces the earlier
 experimental sine activation to make evolved responses smoother under input
 changes and mutation.
 
-The LOCAL frame is constructed directly from chemical channel 7's gradient
+The LOCAL frame is constructed directly from chemical channel index 3's gradient
 by core/agents.wgsl. It is not stored or controlled by the cell. The shader
 uses that frame to rotate sensed gradients in and growth-direction outputs
 back out to world space —

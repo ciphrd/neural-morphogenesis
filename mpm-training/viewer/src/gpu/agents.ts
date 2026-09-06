@@ -22,7 +22,7 @@
 // acceleration, damped by `friction`) — see agents.wgsl's own module
 // docstring for the full history (this has flipped between velocity and
 // a direct position nudge twice now). agentStateBuffer packs FOUR
-// per-particle state (rng, cooldown, channel-7-gradient alignment, neural RGB) into
+// per-particle state (rng, cooldown, channel-index-3-gradient alignment, neural RGB) into
 // ONE buffer, not four, to keep this shader's own storage buffer count
 // AT (not under — there's no headroom left) the 10-per-stage hardware
 // ceiling Chrome's own Dawn backend reports on real browser adapters —
@@ -129,6 +129,19 @@ function policyRandom(seed?: number): () => number {
     x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
     return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** Samples a fresh viewer-side policy seed. Passing the previous seed makes
+ * the caller's "random" action guarantee a different value even in the
+ * extremely unlikely event that the random source repeats itself. */
+export function randomPolicySeed(previous?: number): number {
+  const values = new Uint32Array(1);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(values);
+  } else {
+    values[0] = Math.floor(Math.random() * 0x100000000) >>> 0;
+  }
+  return values[0] === previous ? (values[0] + 1) >>> 0 : values[0];
 }
 
 function randomSymmetric(bound: number, random: () => number): number {
@@ -743,7 +756,7 @@ export class Agents {
   }
 
   /** Clears all rollout-scoped agent state. Alignment is deliberately zero
-   * here and is reconstructed from channel 7's gradient by agentStep. */
+   * here and is reconstructed from channel index 3's gradient by agentStep. */
   resetState(seed: number): void {
     this.unresolvedSamples = 0;
     this.capacityBlocked = false;

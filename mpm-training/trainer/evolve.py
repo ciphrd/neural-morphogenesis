@@ -15,14 +15,11 @@ own module docstring and core/agents.wgsl's own growth design);
 --particles is the CAP that growth can reach, not a fixed per-rollout
 count.
 
-Fitness is raster.py's bounded, multiscale occupancy comparison. Weighted
-Gaussian particle density is saturated into [0,1] occupancy, then scored for
-missing coverage, outside spill, fine silhouette disagreement, and excessive
-crowding after centroid matching and a coarse-to-fine rotation search. Several
-snapshots near the rollout's end are blended as mean plus worst-case pressure;
-see _score_fitness() and CAPTURE_OFFSETS. The earlier aligned symmetric Chamfer
-metric remains available in alignment.py for one-off point-cloud diagnostics,
-but it no longer selects candidates.
+Fitness integrates transported triangle coverage using domain_fitness.py.
+Missing material, outside spill, silhouette disagreement and overlap are scored
+without particle-count normalization. Late scores use a mean/worst blend;
+optional early completion requires repeated matches followed by growth-free
+settling. Point-cloud scorers remain available for legacy diagnostics.
 
 Rollouts run across a persistent pool of worker PROCESSES (see
 parallel_workers.py's own module docstring), each with its own wgpu
@@ -582,27 +579,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--raster-resolution",
         type=int,
         default=DEFAULT_RUN_SETTINGS["rasterResolution"],
-        help="side length of the square lattice target/particle point clouds are splatted onto for fitness — see raster.py",
+        help="side length of the cell-average material coverage raster",
     )
     parser.add_argument(
         "--raster-sigma",
         type=float,
         default=DEFAULT_RUN_SETTINGS["rasterSigma"],
-        help="Gaussian splat width, in raster pixels (not domain units) — see raster.rasterize_points",
+        help="legacy point-diagnostic Gaussian width; unused by domain fitness",
     )
     parser.add_argument(
         "--outside-weight",
         type=float,
         default=DEFAULT_RUN_SETTINGS["outsideWeight"],
         help=(
-            "weight of the distance-transform penalty for particles landing outside the target's footprint "
+            "weight of the material-coverage distance penalty outside the target footprint "
             "inside the spill term (0 keeps occupancy spill but disables distance growth)"
         ),
     )
     parser.add_argument(
         "--fitness-target-occupancy", type=float,
         default=DEFAULT_RUN_SETTINGS["fitnessTargetOccupancy"],
-        help="desired bounded occupancy in a uniformly filled target interior",
+        help="legacy point-scoring calibration; unused by domain fitness",
     )
     parser.add_argument(
         "--fitness-coverage-weight", type=float,
@@ -622,7 +619,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fitness-crowding-weight", type=float,
         default=DEFAULT_RUN_SETTINGS["fitnessCrowdingWeight"],
-        help="weight of excessive raw particle-density spikes",
+        help="weight of overlapping material area",
     )
     parser.add_argument(
         "--fitness-temporal-worst-weight", type=float,
@@ -722,11 +719,7 @@ def main() -> None:
 
     target = load_target(args.target)
     report_shape_budget(args, target)
-    # Fixed for the whole run — precomputed once rather than on every
-    # rollout's training_raster_distance() call (population x generations
-    # x rotation-search angles x snapshots otherwise recomputing the
-    # exact same thing). See raster.build_target_raster()'s own
-    # docstring.
+    # Physical target footprint, precomputed once for every worker.
     target_raster = target_mask(target, args.raster_resolution)
     target_distance_field = build_target_distance_field(target_raster)
 

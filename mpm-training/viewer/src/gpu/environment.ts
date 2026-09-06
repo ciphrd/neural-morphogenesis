@@ -98,7 +98,7 @@ export class Environment {
     this.advectionDt = Math.max(0, config.advectionDt ?? 0);
 
     const total = this.layout.total;
-    // Numerator + matched density + one shared adaptive fixed-point scale.
+    // Float numerator + matched world area + one unused compatibility slot.
     const scratchTotal = total * 2 + 1;
     const f32 = 4;
 

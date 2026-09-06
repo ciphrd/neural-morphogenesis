@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import coreConstants from "../../core/constants.json"
 import { FitnessChart } from "./charts/FitnessChart"
-import { randomWeights } from "./gpu/agents"
+import { randomPolicySeed, randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
 import { MAX_PARTICLES } from "./gpu/mpmCore"
 import { mutatePolicyWeights } from "./gpu/policyMutation"
@@ -53,14 +53,6 @@ const TRAIN_WS_URL = "ws://localhost:8003/ws"
 // pickRecordingFormat()'s own docstring), so it's computed once here
 // rather than round-tripped through GridCanvasHandle every render.
 const RECORDING_FORMAT = pickRecordingFormat()
-
-function explorationBrainSeed(seed: number, variant: number): number {
-  if (variant === 0) return seed >>> 0
-  let x = ((seed >>> 0) ^ Math.imul(variant, 0x9e3779b9)) >>> 0
-  x = Math.imul(x ^ (x >>> 16), 0x7feb352d) >>> 0
-  x = Math.imul(x ^ (x >>> 15), 0x846ca68b) >>> 0
-  return (x ^ (x >>> 16)) >>> 0
-}
 
 /** Passive training viewer — a live WebGPU replay of whichever
  * generation's weights are selected, plus a fitness-history timeline.
@@ -325,11 +317,11 @@ export function TrainingView() {
     setSubstrateChannelStart((start) => Math.min(start, maxStart))
   }, [activeConfig?.channels])
   // Shape-changing exploration never reinterprets checkpoint weights. It
-  // creates a deterministic fresh policy from this rollout's own seed.
+  // creates a fresh random policy and retains its seed across re-renders.
   const [policyExploration, setPolicyExploration] = useState<{
     cellMemory: CellMemory
     hiddenWidth: number
-    variant: number
+    seed: number
   } | null>(null)
   useEffect(() => {
     setPolicyExploration(null)
@@ -349,7 +341,7 @@ export function TrainingView() {
         playbackConfig.channels,
         policyExploration.hiddenWidth,
         policyArchitecture,
-        explorationBrainSeed(playbackConfig.seed, policyExploration.variant)
+        policyExploration.seed
       ),
     }
   }, [playbackConfig, policyExploration])
@@ -358,7 +350,7 @@ export function TrainingView() {
     selectedGeneration ?? "latest",
     policyExploration?.cellMemory ?? "trained",
     policyExploration?.hiddenWidth ?? "trained",
-    policyExploration?.variant ?? "trained",
+    policyExploration?.seed ?? "trained",
   ].join(":")
   const [mutation, setMutation] = useState<{
     selectionKey: string
@@ -485,7 +477,7 @@ export function TrainingView() {
   // changes rather than once on mount. Points already arrive in
   // MpmCore's own [0,1]^2 domain (targets.py's own TargetShape) — no
   // grid_size/rescaling step needed, unlike envnca's pixel-space targets.
-  const [shapeStatus, setShapeStatus] = useState<{ complete: boolean; settling: boolean; capacityBlocked: boolean; unresolvedSamples: number; match: { missing: number; spill: number; overlap: number } | null } | null>(null)
+  const [shapeStatus, setShapeStatus] = useState<{ complete: boolean; settling: boolean; atCapacity: boolean; capacityBlocked: boolean; unresolvedSamples: number; match: { missing: number; spill: number; overlap: number } | null } | null>(null)
   const [targetPoints, setTargetPoints] = useState<Float32Array | null>(null)
   useEffect(() => {
     if (!activeConfig) return
@@ -708,7 +700,7 @@ export function TrainingView() {
                   setPolicyExploration({
                     cellMemory: event.target.value as CellMemory,
                     hiddenWidth: displayedHiddenWidth,
-                    variant: 0,
+                    seed: randomPolicySeed(policyExploration?.seed),
                   })
                 }
               >
@@ -727,7 +719,7 @@ export function TrainingView() {
                   setPolicyExploration({
                     cellMemory: displayedCellMemory,
                     hiddenWidth: Number(event.target.value),
-                    variant: 0,
+                    seed: randomPolicySeed(policyExploration?.seed),
                   })
                 }
               >
@@ -748,7 +740,7 @@ export function TrainingView() {
                 aria-label="Restore trained brain"
               >
                 {policyExploration
-                  ? `Seeded random #${policyExploration.variant + 1} ↺`
+                  ? `Random seed ${policyExploration.seed} ↺`
                   : "Trained"}
               </button>
             </div>
@@ -1212,7 +1204,7 @@ export function TrainingView() {
               <option value="morphology">Policy morphology</option>
               <option value="growth">Integrated growth</option>
               <option value="substrate">Substrate</option>
-              <option value="orientation">Orientation substrate (ch7)</option>
+              <option value="orientation">Orientation substrate (ch3)</option>
               <option value="gradient">Boundary gradient</option>
             </select>
           </label>
@@ -1401,7 +1393,10 @@ export function TrainingView() {
             tool={tool}
             deformSettings={deformSettings}
             onStep={(step, particles, shape) => {
-              setShapeStatus(shape)
+              setShapeStatus(previous => previous?.complete === shape.complete &&
+                previous.settling === shape.settling && previous.atCapacity === shape.atCapacity &&
+                previous.capacityBlocked === shape.capacityBlocked && previous.unresolvedSamples === shape.unresolvedSamples &&
+                previous.match === shape.match ? previous : shape)
               setReplayStep(step)
               setCellCount(particles)
             }}
@@ -1424,12 +1419,14 @@ export function TrainingView() {
                 : "— cells"}
             </span>
             <span>
-              {shapeStatus?.complete ? "Stable match" : shapeStatus?.capacityBlocked
+              {shapeStatus?.complete ? "Stable match" : (shapeStatus?.capacityBlocked || shapeStatus?.atCapacity)
                 ? "Sampling capacity reached" : shapeStatus?.settling ? "Settling · growth paused"
                 : shapeStatus?.unresolvedSamples ? "Refining material samples" : ""}
             </span>
             {shapeStatus?.match && <span>
-              {`Missing ${(100*shapeStatus.match.missing).toFixed(1)}% · Outside ${(100*shapeStatus.match.spill).toFixed(1)}% · Overlap ${(100*shapeStatus.match.overlap).toFixed(1)}%`}
+              {Object.values(shapeStatus.match).every(Number.isFinite)
+                ? `Missing ${(100*shapeStatus.match.missing).toFixed(1)}% · Outside ${(100*shapeStatus.match.spill).toFixed(1)}% · Overlap ${(100*shapeStatus.match.overlap).toFixed(1)}%`
+                : "Invalid material geometry"}
             </span>}
           </div>
         </div>
@@ -1609,17 +1606,12 @@ export function TrainingView() {
                 setPolicyExploration((current) => ({
                   cellMemory: displayedCellMemory,
                   hiddenWidth: displayedHiddenWidth,
-                  variant:
-                    current &&
-                    current.cellMemory === displayedCellMemory &&
-                    current.hiddenWidth === displayedHiddenWidth
-                      ? current.variant + 1
-                      : 0,
+                  seed: randomPolicySeed(current?.seed),
                 }))
               }}
               disabled={!activeConfig}
-              title="Advance to the next deterministic random brain derived from the active rollout seed"
-              aria-label="Load seeded random brain"
+              title="Load a new randomly seeded brain"
+              aria-label="Load random brain"
             >
               🎲
             </button>

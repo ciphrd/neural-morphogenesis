@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { randomWeights } from "./gpu/agents"
+import { randomPolicySeed, randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
 import { MAX_ZOOM, type FieldMode, type ParticleColorMode, type ParticleShape } from "./gpu/render"
 import type { CellMemory, ChemicalCommunicationArchitecture, PhysicsSettings } from "./gpu/types"
@@ -24,14 +24,6 @@ import { VIEWER_DEFAULTS } from "./viewerConfig"
 const TRAIN_API_URL = "http://localhost:8003"
 const TRAIN_WS_URL = "ws://localhost:8003/ws"
 const RECORDING_FORMAT = pickRecordingFormat()
-
-function explorationBrainSeed(seed: number, variant: number): number {
-  if (variant === 0) return seed >>> 0
-  let x = ((seed >>> 0) ^ Math.imul(variant, 0x9e3779b9)) >>> 0
-  x = Math.imul(x ^ (x >>> 16), 0x7feb352d) >>> 0
-  x = Math.imul(x ^ (x >>> 15), 0x846ca68b) >>> 0
-  return (x ^ (x >>> 16)) >>> 0
-}
 
 const BOUNDARY_TANGENT_SCENARIO: SimulationScenario = {
   initialLayout: { kind: "rows", rows: 2, columns: 9 },
@@ -119,7 +111,7 @@ export function LabView() {
   const [policyExploration, setPolicyExploration] = useState<{
     cellMemory: CellMemory
     hiddenWidth: number
-    variant: number
+    seed: number
   } | null>(null)
   const [physicsOverride, setPhysicsOverride] = useState<PhysicsSettings | null>(null)
   useEffect(() => {
@@ -165,7 +157,7 @@ export function LabView() {
         playbackConfig.channels,
         policyExploration.hiddenWidth,
         policyArchitecture,
-        explorationBrainSeed(playbackConfig.seed, policyExploration.variant),
+        policyExploration.seed,
       ),
     }
   }, [playbackConfig, policyExploration])
@@ -276,7 +268,7 @@ export function LabView() {
               onChange={(event) => setPolicyExploration({
                 cellMemory: event.target.value as CellMemory,
                 hiddenWidth: displayedHiddenWidth,
-                variant: 0,
+                seed: randomPolicySeed(policyExploration?.seed),
               })}
             >
               <option value="none">None</option>
@@ -293,7 +285,7 @@ export function LabView() {
               onChange={(event) => setPolicyExploration({
                 cellMemory: displayedCellMemory,
                 hiddenWidth: Number(event.target.value),
-                variant: 0,
+                seed: randomPolicySeed(policyExploration?.seed),
               })}
             >
               {[16, 32, 64, 128, 256].map((width) => (
@@ -310,7 +302,7 @@ export function LabView() {
               title="Restore the current generation's trained brain"
             >
               {policyExploration
-                ? `Seeded random #${policyExploration.variant + 1} ↺`
+                ? `Random seed ${policyExploration.seed} ↺`
                 : "Trained"}
             </button>
           </div>
@@ -462,7 +454,7 @@ export function LabView() {
           <label className="slider-row">
             <span>Background</span>
             <select className="select" value={fieldMode} onChange={(event) => setFieldMode(event.target.value as FieldMode)}>
-              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="growth">Integrated growth</option><option value="substrate">Substrate</option><option value="orientation">Orientation substrate (ch7)</option><option value="gradient">Boundary gradient</option>
+              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="growth">Integrated growth</option><option value="substrate">Substrate</option><option value="orientation">Orientation substrate (ch3)</option><option value="gradient">Boundary gradient</option>
             </select>
           </label>
           {fieldMode === "growth" && <p className="hint">Brightness shows regional drive or accumulated admission credit. Direction cycles right=red, up=yellow, left=cyan, down=violet; green is broad or ambiguous.</p>}
@@ -578,7 +570,7 @@ export function LabView() {
           <div className="toolbar-actions">
             <label className="toolbar-checkbox" title="Lab scenarios run past the configured event"><input type="checkbox" checked={false} readOnly />Loop</label>
             <button className="icon-button" disabled title="Parameter sweeps are unavailable in lab scenarios" aria-label="Collect parameter samples">◫</button>
-            <button className="icon-button" onClick={() => canvasRef.current?.randomizeWeights()} disabled={!config} title="Load random brain" aria-label="Load random brain">🎲</button>
+            <button className="icon-button" onClick={() => setPolicyExploration((current) => ({ cellMemory: displayedCellMemory, hiddenWidth: displayedHiddenWidth, seed: randomPolicySeed(current?.seed) }))} disabled={!config} title="Load a new randomly seeded brain" aria-label="Load random brain">🎲</button>
             <button className="icon-button" onClick={() => setPaused((value) => !value)} title={paused ? "Play" : "Pause"} aria-label={paused ? "Play" : "Pause"}>{paused ? "▶" : "⏸"}</button>
             <button className="icon-button" onClick={() => canvasRef.current?.restart()} title="Restart scenario" aria-label="Restart">↺</button>
             <button className={`icon-button${recording ? " is-recording" : ""}`} onClick={toggleRecording} disabled={!RECORDING_FORMAT} title={recording ? "Stop recording" : "Record"} aria-label={recording ? "Stop recording" : "Record"}>{recording ? "●" : "⏺"}</button>

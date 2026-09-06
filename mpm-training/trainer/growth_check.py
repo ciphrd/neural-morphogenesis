@@ -336,7 +336,7 @@ def check_compressed_growth_pauses_and_resumes(device: wgpu.GPUDevice) -> None:
 
 
 def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
-    """Cell deltas persist locally; rebuilt Gaussian fields do not persist."""
+    """Cell deltas persist locally; rebuilt chemical fields do not persist."""
     channels = 8
     width = height = 32
     core = MpmCore(device)
@@ -348,7 +348,7 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
         2, 0.01, 1.0, 1.0, 0.01, 1.0, 0.5, 0.5,
     )
     # Exactly the center of texel (x=8,y=24). Keep the diagnostic kernel
-    # sub-texel so fixed-point quantization cannot flatten neighboring peaks.
+    # centered so the quadratic stencil has a unique maximum.
     position = np.array([[(8.5 / width), (24.5 / height)]], dtype=np.float32)
     core.load_scene(
         position,
@@ -366,8 +366,8 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     for channel in range(4):
         weights[layout["fc2b_offset"] + channel] = 20.0
     env_write_dim = channels
-    weights[layout["fc2b_offset"] + env_write_dim + 5] = 20.0
-    weights[layout["fc2b_offset"] + env_write_dim + 6] = -20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 2] = 20.0
+    weights[layout["fc2b_offset"] + env_write_dim + 3] = -20.0
     # Blue stays at logit 0 -> sigmoid 0.5.
     agents.load_weights(weights)
 
@@ -412,7 +412,7 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     compute.end()
     device.queue.submit([encoder.finish()])
 
-    scratch = np.frombuffer(device.queue.read_buffer(readback), np.int32).reshape(channels, height, width)
+    scratch = np.frombuffer(device.queue.read_buffer(readback), np.float32).reshape(channels, height, width)
     target = (8, 24)
     for channel in range(4):
         max_y, max_x = np.unravel_index(np.argmax(scratch[channel]), scratch[channel].shape)
@@ -420,13 +420,11 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
         assert scratch[channel, max_y, max_x] > 0
     assert not np.any(scratch[4:]), "one output channel leaked into another"
 
-    # Newborn appearance is rendering-only: a physically present daughter must
-    # publish its full baseline chemistry immediately after division.
-    device.queue.write_buffer(
-        core.rest,
-        0,
-        _rest_state(np.ones(1), np.ones(1), np.ones(1), appearance_scale=np.array([0.25])),
-    )
+    # Newborn appearance is rendering-only. Preserve the material rest area
+    # initialized by the lifecycle pass while changing only visual fade.
+    faded_rest = core.read_rest_state().copy()
+    faded_rest[:, 10] = 0.25
+    device.queue.write_buffer(core.rest, 0, faded_rest)
     encoder = device.create_command_encoder()
     environment.encode_clear(encoder)
     agents.encode_splat_chemical_state(encoder)
@@ -437,23 +435,16 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     compute.end()
     device.queue.submit([encoder.finish()])
     faded_scratch = np.frombuffer(
-        device.queue.read_buffer(readback), np.int32
+        device.queue.read_buffer(readback), np.float32
     ).reshape(channels, height, width)
     np.testing.assert_array_equal(faded_scratch, scratch)
 
-    # The substrate footprint follows stress-free material growth. Isotropic
-    # area doubling must retain the peak while increasing the projected area,
-    # even when the renderer is still fading the particle in.
+    # Growth doubles represented area and source strength, with the same
+    # quadratic transfer stencil; rendering fade does not affect chemistry.
     root2 = np.float32(np.sqrt(2.0))
-    device.queue.write_buffer(
-        core.rest,
-        0,
-        _rest_state(
-            np.ones(1), np.array([2.0]), np.ones(1),
-            growth_f=np.array([[root2, 0.0, 0.0, root2]], dtype=np.float32),
-            appearance_scale=np.array([0.25]),
-        ),
-    )
+    grown_rest = faded_rest.copy()
+    grown_rest[:, :4] = [root2, 0.0, 0.0, root2]
+    device.queue.write_buffer(core.rest, 0, grown_rest)
     encoder = device.create_command_encoder()
     environment.encode_clear(encoder)
     agents.encode_splat_chemical_state(encoder)
@@ -464,7 +455,7 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     compute.end()
     device.queue.submit([encoder.finish()])
     grown_scratch = np.frombuffer(
-        device.queue.read_buffer(readback), np.int32
+        device.queue.read_buffer(readback), np.float32
     ).reshape(channels, height, width)
     assert grown_scratch[0, target[1], target[0]] >= scratch[0, target[1], target[0]]
     assert grown_scratch[0].sum() > scratch[0].sum() * 1.5
@@ -492,7 +483,7 @@ def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
     compute.dispatch_workgroups((count + 63) // 64)
     compute.end()
     device.queue.submit([encoder.finish()])
-    cleared = np.frombuffer(device.queue.read_buffer(readback), np.int32)
+    cleared = np.frombuffer(device.queue.read_buffer(readback), np.float32)
     assert not np.any(cleared), "transient field retained a prior round's splat"
     print("[PASS] cell chemistry persists locally; substrate follows material growth, ignores visual fade, and discards old writes")
 
@@ -683,7 +674,7 @@ def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
     normalized = policy_elastic_strain_input(
         (fe @ fg)[None], fg[None], np.array([heading]), scale=scale
     )[0]
-    # An isolated particle has no channel-7-gradient frame. Volumetric strain is
+    # An isolated particle has no channel-index-3-gradient frame. Volumetric strain is
     # orientation-free; axial and shear perception are therefore suppressed.
     normalized[1:] = 0.0
     expected_color = 1.0 / (1.0 + np.exp(-np.tanh(normalized)))
@@ -806,7 +797,7 @@ def check_directional_material_fan(device: wgpu.GPUDevice) -> None:
 
 
 
-def check_channel_seven_gradient_defines_alignment(device: wgpu.GPUDevice) -> None:
+def check_channel_three_gradient_defines_alignment(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     environment = EnvironmentGPU(
         device, 8, 32, 32, 1.0, 1.0,
@@ -826,15 +817,15 @@ def check_channel_seven_gradient_defines_alignment(device: wgpu.GPUDevice) -> No
         np.ones(2, dtype=np.float32),
     )
     environment.reset()
-    # Channel 7 has a ridge centered at x=0.5, so its gradient points right
+    # Channel index 3 has a ridge centered at x=0.5, so its gradient points right
     # for the left particle and left for the right particle. All other
     # chemical channels remain flat; morphology is deliberately symmetric.
     field = np.zeros(environment.total_values, dtype=np.float32)
-    width = environment.channel_widths[7]
-    height = environment.channel_heights[7]
+    width = environment.channel_widths[3]
+    height = environment.channel_heights[3]
     x = (np.arange(width, dtype=np.float32) + 0.5) / width
     ridge = np.exp(-0.5 * ((x - 0.5) / 0.08) ** 2).astype(np.float32)
-    offset = environment.channel_offsets[7]
+    offset = environment.channel_offsets[3]
     field[offset:offset + width * height] = np.tile(ridge, height)
     device.queue.write_buffer(environment.buffers[0], 0, field)
     agents.set_active_count(2)
@@ -856,7 +847,7 @@ def check_channel_seven_gradient_defines_alignment(device: wgpu.GPUDevice) -> No
     assert alignment[0, 0] > 0.0 and alignment[1, 0] < 0.0, alignment
     assert np.all(np.abs(alignment[:, 1]) < np.abs(alignment[:, 0]) * 0.05), alignment
     assert np.all(np.linalg.norm(alignment, axis=1) <= 1.0 + 1e-6), alignment
-    print("[PASS] agent alignment is the L2-clipped chemical-channel-7 gradient")
+    print("[PASS] agent alignment is the L2-clipped chemical-channel-index-3 gradient")
 
 
 def _directional_growth_case(
@@ -902,14 +893,14 @@ def _directional_growth_case(
     core.set_active_count(1)
     environment.reset()
     if defined_alignment:
-        # A +X channel-7 gradient defines the local frame, allowing the test
+        # A +X channel-index-3 gradient defines the local frame, allowing the test
         # to distinguish local-forward from local-backward growth outputs.
         field = np.zeros(environment.total_values, dtype=np.float32)
-        width = environment.channel_widths[7]
-        height = environment.channel_heights[7]
+        width = environment.channel_widths[3]
+        height = environment.channel_heights[3]
         x = (np.arange(width, dtype=np.float32) + 0.5) / width
         wave = (10.0 * np.sin(2.0 * np.pi * (x - 0.5))).astype(np.float32)
-        offset = environment.channel_offsets[7]
+        offset = environment.channel_offsets[3]
         field[offset:offset + width * height] = np.tile(wave, height)
         device.queue.write_buffer(environment.buffers[0], 0, field)
     agents.set_active_count(1)
@@ -968,7 +959,7 @@ def check_morphology_gradient_does_not_override_growth_direction(device: wgpu.GP
         0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
         6, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
     )
-    # The morphology gradient is deliberately distinct from the channel-7
+    # The morphology gradient is deliberately distinct from the channel-index-3
     # frame; ordinary policy growth must remain the division axis.
     agents.set_boundary_tangent_min_gradient(1e-6)
     # Particle 0 is just to the right of a small cluster. Its morphology
@@ -1002,14 +993,14 @@ def check_morphology_gradient_does_not_override_growth_direction(device: wgpu.GP
     device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(count), growth, cycle))
     core.set_active_count(count)
     environment.reset()
-    # Give channel 7 a vertical gradient that is deliberately distinct from
+    # Give channel index 3 a vertical gradient that is deliberately distinct from
     # the cluster's mostly horizontal morphology gradient.
     field = np.zeros(environment.total_values, dtype=np.float32)
-    width = environment.channel_widths[7]
-    height = environment.channel_heights[7]
+    width = environment.channel_widths[3]
+    height = environment.channel_heights[3]
     y = (np.arange(height, dtype=np.float32) + 0.5) / height
     ridge = np.exp(-0.5 * ((y - 0.60) / 0.12) ** 2).astype(np.float32)
-    offset = environment.channel_offsets[7]
+    offset = environment.channel_offsets[3]
     field[offset:offset + width * height] = np.repeat(ridge, width)
     device.queue.write_buffer(environment.buffers[0], 0, field)
     agents.set_active_count(count)
@@ -1252,14 +1243,14 @@ def check_persistent_growth_targets_drive_state_not_motion(device: wgpu.GPUDevic
         np.ones(1, dtype=np.float32),
     )
     environment.reset()
-    # Supply a +Y channel-7 gradient while the NN requests a distinct local
+    # Supply a +Y channel-index-3 gradient while the NN requests a distinct local
     # diagonal. The stored frame and local angle must remain separate.
     field = np.zeros(environment.total_values, dtype=np.float32)
-    width = environment.channel_widths[7]
-    height = environment.channel_heights[7]
+    width = environment.channel_widths[3]
+    height = environment.channel_heights[3]
     y = (np.arange(height, dtype=np.float32) + 0.5) / height
     wave = (10.0 * np.sin(2.0 * np.pi * (y - 0.5))).astype(np.float32)
-    offset = environment.channel_offsets[7]
+    offset = environment.channel_offsets[3]
     field[offset:offset + width * height] = np.repeat(wave, width)
     device.queue.write_buffer(environment.buffers[0], 0, field)
     agents.set_active_count(1)

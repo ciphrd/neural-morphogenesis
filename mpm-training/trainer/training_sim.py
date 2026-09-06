@@ -44,12 +44,12 @@ step — a fixed, small cost per rollout rather than one paid
 
 Local-frame sensing/action rotation now lives entirely inside
 AgentsGPU/core/agents.wgsl. The frame is reconstructed from the L2-clipped
-gradient of chemical channel 7 on every evaluation; there is no persistent heading
+gradient of chemical channel index 3 on every evaluation; there is no persistent heading
 or angular-velocity state.
 
 The two former strafe channels directly set the local-space tensor-growth direction
 on every neural evaluation, without temporal smoothing. The agent shader rotates
-that direction through the current channel-7-gradient frame and
+that direction through the current channel-index-3-gradient frame and
 relaxes persistent anisotropy toward its sigmoid target; a
 separate sigmoid controls signed division placement. MAX_STRAFE independently
 controls whether the reconstructed world direction also acts as physical

@@ -20,7 +20,7 @@
 // buffers).
 //
 // - Gradient-based steering, following Mordvintsev et al.'s steerable NCA:
-//   the local frame is the L2-clipped gradient of chemical channel 7.
+//   the local frame is the L2-clipped gradient of chemical channel index 3.
 //   There is no persistent cell heading, turn state, or neural heading
 //   output. In a locally uniform field the frame is zero, so directional
 //   perception loses authority. Growth direction and anisotropy still follow
@@ -87,7 +87,7 @@
 // continuum growth still proceeds; only numerical resolution stops increasing.
 //
 // agentState.particleMeta (binding 7, byte offset 256) packs retained ABI
-// bookkeeping, the channel-7-gradient alignment cache, and neural state into
+// bookkeeping, the channel-index-3-gradient alignment cache, and neural state into
 // one struct/buffer. `rng` now acts as a refinement lineage generation;
 // cooldown/hazard/threshold fields remain layout-compatible but are not part
 // of the continuous growth decision.
@@ -129,10 +129,10 @@ const ELASTIC_STRAIN_INPUTS_ENABLED: bool = __ELASTIC_STRAIN_INPUTS_ENABLED__;
 const PRIVATE_STATE_DIM: u32 = 8u;
 
 const CHANNELS: u32 = __CHANNELS__u;
-// Production policies use chemical channel index 7 as their orientation
+// Production policies use chemical channel index 3 as their orientation
 // field. Reduced-channel shader checks fall back to their last channel so the
-// shared shader remains valid when CHANNELS < 8.
-const HEADING_CHANNEL: u32 = min(7u, CHANNELS - 1u);
+// shared shader remains valid when CHANNELS < 4.
+const HEADING_CHANNEL: u32 = min(3u, CHANNELS - 1u);
 const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
 // Per chemical channel: value, heading-forward gradient, lateral gradient;
 // followed by morphology occupancy/forward/lateral gradient and three
@@ -166,15 +166,7 @@ const FIELD_TOTAL: u32 = __FIELD_TOTAL__u;
 const FIELD_MAX_WIDTH: u32 = __FIELD_MAX_WIDTH__u;
 const FIELD_MAX_HEIGHT: u32 = __FIELD_MAX_HEIGHT__u;
 
-// Scratch stores one extra atomic after numerator+density. Every publisher
-// writes the same dynamically derived fixed-point scale there before adding
-// contributions. The scale uses the live capacity/projection bounds, giving
-// sub-micro precision for ordinary runs while retaining explicit overflow
-// headroom for much larger particle counts.
-const DEPOSIT_SCALE_INDEX: u32 = FIELD_TOTAL * 2u;
-const MAX_DEPOSIT_SCALE: f32 = 1048576.0;
-const DEPOSIT_ACCUMULATOR_BUDGET: f32 = 1000000000.0;
-const MAX_PROJECTION_GROWTH: f32 = 4.0;
+// Numerator and represented-world-area planes store atomic f32 bits.
 const SPATIAL_RANDOM_CELLS: u32 = __SPATIAL_RANDOM_CELLS__u;
 
 @group(0) @binding(0) var<storage, read> weights: array<f32>;
@@ -221,10 +213,7 @@ struct AgentPhysics {
   // independent knob, not a duplicate of that one). trainer/
   // simulation_settings.py's own FRICTION is the starting value.
   friction: f32,
-  // Gaussian splat sigma in normalized world-domain units. Each channel
-  // converts it to its native grid only to choose a bounded support; weights
-  // themselves are evaluated in world space, so changing field resolution no
-  // longer changes the physical deposit footprint.
+  // Legacy ABI slot; chemical transfer now uses a fixed quadratic stencil.
   depositSigma: f32,
   // Host-controlled gate for admitting new material-emission events.
   growthEnabled: f32,
@@ -241,9 +230,7 @@ struct AgentPhysics {
   elasticStrainScale: f32,
   // Density-resolved normalization for the field-pixel Sobel gradient.
   chemicalGradientInputScale: f32,
-  // Represented material area carried by one chemical projection.  q times
-  // as many particles each publish at 1/q so the fixed-resolution chemical
-  // field observes the same continuum concentration across sampling density.
+  // Legacy ABI slot; original world area already accounts for sampling density.
   chemicalProjectionWeight: f32,
   // Seed for a fixed world-space lifecycle random field. Nearby numerical
   // samples share thresholds regardless of particle slot or density.
@@ -279,7 +266,7 @@ struct AgentPhysics {
 @group(0) @binding(6) var<uniform> physics: AgentPhysics;
 
 // Persistent per-particle state, owned by this shader (not MpmCore, not
-// Environment). The alignment vector is only a cache of the current channel-7
+// Environment). The alignment vector is only a cache of the current channel-index-3
 // chemical gradient for rendering; it is overwritten on every agent
 // evaluation.
 // binding, same as rng/cooldown once did before THEY got packed
@@ -558,231 +545,89 @@ fn spatialUniform01(pos: vec2<f32>, generation: u32, domain: u32) -> f32 {
   return f32(hashU32(combined) >> 8u) * (1.0 / 16777216.0);
 }
 
+// Quadratic B-spline basis shared by chemical scatter and perception.
+// Positions here use integer-centered texel coordinates (world * size - 0.5).
 struct Corners {
-  x0: u32,
-  x1: u32,
-  y0: u32,
-  y1: u32,
-  wx0: f32,
-  wx1: f32,
-  wy0: f32,
-  wy1: f32,
+  xs: array<u32, 3>,
+  ys: array<u32, 3>,
+  weights: array<vec2<f32>, 3>,
 }
 
-// WGSL's own `%` keeps the input's sign (like C fmod, not Python's %) —
-// this folds a same-sign-as-divisor result back into [0,size) whichever
-// side of 0 `v` started on. It is a no-op for values already in range.
-fn wrapCoord(v: f32, size: f32) -> f32 {
-  let m = v % size;
-  return select(m, m + size, m < 0.0);
+fn wrapDepositIndex(i: i32, size: u32) -> u32 {
+  let n = i32(size);
+  return u32(((i % n) + n) % n);
 }
 
-// Bilinear gather/scatter corners at a continuous field-pixel position,
-// wrapped (toroidal) into [0,size) — matches trainer/environment.py's
-// own _corners() exactly (see environment.wgsl's own module docstring).
 fn corners(c: u32, posIn: vec2<f32>) -> Corners {
-  let width = FIELD_WIDTHS[c];
-  let height = FIELD_HEIGHTS[c];
-  let pos = vec2<f32>(wrapCoord(posIn.x, f32(width)), wrapCoord(posIn.y, f32(height)));
-  let x0f = floor(pos.x);
-  let y0f = floor(pos.y);
+  let base = vec2<i32>(floor(posIn - vec2<f32>(0.5)));
+  let f = posIn - vec2<f32>(base);
   var out: Corners;
-  out.wx1 = pos.x - x0f;
-  out.wx0 = 1.0 - out.wx1;
-  out.wy1 = pos.y - y0f;
-  out.wy0 = 1.0 - out.wy1;
-  out.x0 = u32(x0f) % width;
-  out.x1 = (u32(x0f) + 1u) % width;
-  out.y0 = u32(y0f) % height;
-  out.y1 = (u32(y0f) + 1u) % height;
+  out.weights[0] = 0.5 * (vec2<f32>(1.5) - f) * (vec2<f32>(1.5) - f);
+  out.weights[1] = vec2<f32>(0.75) - (f - vec2<f32>(1.0)) * (f - vec2<f32>(1.0));
+  out.weights[2] = 0.5 * (f - vec2<f32>(0.5)) * (f - vec2<f32>(0.5));
+  for (var j = 0u; j < 3u; j = j + 1u) {
+    out.xs[j] = wrapDepositIndex(base.x + i32(j), FIELD_WIDTHS[c]);
+    out.ys[j] = wrapDepositIndex(base.y + i32(j), FIELD_HEIGHTS[c]);
+  }
   return out;
 }
 
 fn sampleValue(c: u32, k: Corners) -> f32 {
-  let v00 = gridCurrent[fieldIndex(c, k.y0, k.x0)];
-  let v10 = gridCurrent[fieldIndex(c, k.y0, k.x1)];
-  let v01 = gridCurrent[fieldIndex(c, k.y1, k.x0)];
-  let v11 = gridCurrent[fieldIndex(c, k.y1, k.x1)];
-  return v00 * (k.wx0 * k.wy0) + v10 * (k.wx1 * k.wy0) + v01 * (k.wx0 * k.wy1) + v11 * (k.wx1 * k.wy1);
+  var value = 0.0;
+  for (var x = 0u; x < 3u; x = x + 1u) {
+    for (var y = 0u; y < 3u; y = y + 1u) {
+      value = value + gridCurrent[fieldIndex(c, k.ys[y], k.xs[x])]
+        * k.weights[x].x * k.weights[y].y;
+    }
+  }
+  return value;
 }
 
 fn sampleGrad(planeOffset: u32, c: u32, k: Corners) -> f32 {
-  let v00 = gradient[planeOffset + fieldIndex(c, k.y0, k.x0)];
-  let v10 = gradient[planeOffset + fieldIndex(c, k.y0, k.x1)];
-  let v01 = gradient[planeOffset + fieldIndex(c, k.y1, k.x0)];
-  let v11 = gradient[planeOffset + fieldIndex(c, k.y1, k.x1)];
-  return v00 * (k.wx0 * k.wy0) + v10 * (k.wx1 * k.wy0) + v01 * (k.wx0 * k.wy1) + v11 * (k.wx1 * k.wy1);
-}
-
-// Hard cap on the deposit splat's own texel footprint, regardless of how
-// large physics.depositSigma is dragged via its own PhysicsPanel slider
-// — same bounded-cost reasoning core/repulsion.wgsl's own
-// MAX_KERNEL_RADIUS_TEXELS gives (see that const's own comment): this is
-// what keeps depositGaussian()'s own per-call cost genuinely bounded
-// rather than growing without limit alongside a live-tunable radius.
-// Smaller than repulsion's own cap (5) to keep each particle's chemical
-// write bounded.
-const MAX_DEPOSIT_KERNEL_RADIUS: i32 = 6;
-
-// Euclidean modulo, i32 in/out — same wraparound idea
-// core/repulsion.wgsl's own wrapFieldIndex() already uses for its own
-// (separate) splat/field, applied per-axis here since this file's own
-// field can have independent FIELD_WIDTH/FIELD_HEIGHT.
-fn wrapDepositIndex(i: i32, size: u32) -> i32 {
-  let n = i32(size);
-  return ((i % n) + n) % n;
-}
-
-fn currentDepositScale() -> f32 {
-  let worstCaseMagnitude = max(
-    f32(physics.maxActiveParticles)
-      * max(physics.chemicalProjectionWeight, 1e-6)
-      * MAX_PROJECTION_GROWTH
-      * max(abs(physics.maxEnvWrite), 1.0),
-    1.0,
-  );
-  return max(
-    1.0,
-    min(MAX_DEPOSIT_SCALE, floor(DEPOSIT_ACCUMULATOR_BUDGET / worstCaseMagnitude)),
-  );
-}
-
-fn publishDepositScale() -> f32 {
-  let scale = currentDepositScale();
-  // Every invocation writes the same integer. Compute-pass ordering makes it
-  // visible to environment.wgsl before materialization/merge.
-  atomicStore(&depositScratch[DEPOSIT_SCALE_INDEX], i32(scale));
-  return scale;
-}
-
-fn addChemicalDeposit(c: u32, y: u32, x: u32, value: f32, projectionWeight: f32) {
-  let depositScale = f32(max(atomicLoad(&depositScratch[DEPOSIT_SCALE_INDEX]), 1));
-  let scaled = value * projectionWeight * depositScale;
-  atomicAdd(&depositScratch[fieldIndex(c, y, x)], i32(round(scaled)));
-  atomicAdd(
-    &depositScratch[FIELD_TOTAL + fieldIndex(c, y, x)],
-    i32(round(projectionWeight * depositScale)),
-  );
-}
-
-// Four-point quadrature over the texel centered at the unwrapped native-grid
-// coordinate (ti,tj). Evaluating the deformed Gaussian in world coordinates
-// makes its physical width independent of FIELD_WIDTHS/FIELD_HEIGHTS. This is
-// an inexpensive approximation to the texel integral and handles rotated,
-// anisotropic growthF, for which separable Gaussian-CDF differences do not.
-fn integratedGaussianTexelWeight(
-  centerFieldPos: vec2<f32>,
-  fieldDimensions: vec2<f32>,
-  ti: i32,
-  tj: i32,
-  inverseGrowth: vec4<f32>,
-  sigmaWorld2: f32,
-) -> f32 {
-  var weight = 0.0;
-  for (var sy: u32 = 0u; sy < 2u; sy = sy + 1u) {
-    for (var sx: u32 = 0u; sx < 2u; sx = sx + 1u) {
-      let sampleOffset = vec2<f32>(f32(sx) * 0.5 - 0.25, f32(sy) * 0.5 - 0.25);
-      let sampleFieldPos = vec2<f32>(f32(ti), f32(tj)) + sampleOffset;
-      let worldDelta = (centerFieldPos - sampleFieldPos) / fieldDimensions;
-      let referenceWorldDelta = vec2<f32>(
-        inverseGrowth.x * worldDelta.x + inverseGrowth.y * worldDelta.y,
-        inverseGrowth.z * worldDelta.x + inverseGrowth.w * worldDelta.y,
-      );
-      weight = weight + exp(-dot(referenceWorldDelta, referenceWorldDelta) / (2.0 * sigmaWorld2));
+  var value = 0.0;
+  for (var x = 0u; x < 3u; x = x + 1u) {
+    for (var y = 0u; y < 3u; y = y + 1u) {
+      value = value + gradient[planeOffset + fieldIndex(c, k.ys[y], k.xs[x])]
+        * k.weights[x].x * k.weights[y].y;
     }
   }
-  return weight * 0.25;
+  return value;
 }
 
-// Scatter-adds one particle's per-channel chemical expression using a
-// normalized-world-space kernel. Sub-texel Gaussians use the grid's bilinear
-// basis directly; resolved Gaussians use texel-integrated quadrature and a
-// second normalization pass. Both paths conserve projection mass, remain
-// smooth under sub-texel particle motion, and scale total projection by
-// det(growthF), so conservative division preserves represented material area.
-fn depositGaussian(
-  envWrite: array<f32, ENV_WRITE_DIM>,
-  centerWorldPos: vec2<f32>,
-  growthF: vec4<f32>,
-  quadratureWeight: f32,
-) {
-  _ = publishDepositScale();
-  let growthDet = max(abs(matDet(growthF)), 1e-6);
-  let inverseGrowth = matInverse(growthF);
-  // Largest singular value of growthF. It bounds the deformed Gaussian in
-  // every direction, while the inverse transform below supplies the exact
-  // anisotropic weight within that conservative square footprint.
-  let frobenius2 = dot(growthF, growthF);
-  let largestStretch = sqrt(max(
-    0.5 * (frobenius2 + sqrt(max(frobenius2 * frobenius2
-      - 4.0 * growthDet * growthDet, 0.0))),
-    1e-6,
-  ));
-  for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-    let width = FIELD_WIDTHS[c];
-    let height = FIELD_HEIGHTS[c];
-    let fieldDimensions = vec2<f32>(f32(width), f32(height));
-    // Storage texel i is centered at world coordinate (i + 0.5) / size.
-    // Shift world coordinates into the integer-centered lattice used by
-    // corners() and integratedGaussianTexelWeight().
-    let centerFieldPos = fract(centerWorldPos) * fieldDimensions - vec2<f32>(0.5);
-    let baseI = i32(floor(centerFieldPos.x));
-    let baseJ = i32(floor(centerFieldPos.y));
-    let sigmaWorld = max(
-      physics.depositSigma * FIELD_DEPOSIT_SIGMA_MULTIPLIERS[c], 1e-8
-    );
-    let sigmaNative = sigmaWorld * max(fieldDimensions.x, fieldDimensions.y);
-    let projectionScale = max(quadratureWeight, 1e-6) * growthDet
-      * physics.chemicalProjectionWeight;
-
-    // A Gaussian narrower than half a native texel is not meaningfully
-    // resolved. Cloud-in-cell is its mass-conserving, motion-continuous limit
-    // on the same bilinear grid used by sampleValue()/sampleGrad().
-    if (sigmaNative < 0.5) {
-      let k = corners(c, centerFieldPos);
-      addChemicalDeposit(c, k.y0, k.x0, envWrite[c], projectionScale * k.wx0 * k.wy0);
-      addChemicalDeposit(c, k.y0, k.x1, envWrite[c], projectionScale * k.wx1 * k.wy0);
-      addChemicalDeposit(c, k.y1, k.x0, envWrite[c], projectionScale * k.wx0 * k.wy1);
-      addChemicalDeposit(c, k.y1, k.x1, envWrite[c], projectionScale * k.wx1 * k.wy1);
-      continue;
-    }
-
-    let sigmaWorld2 = sigmaWorld * sigmaWorld;
-    let kernelRadius = min(
-      i32(ceil(3.0 * sigmaNative * largestStretch + 0.5)),
-      MAX_DEPOSIT_KERNEL_RADIUS,
-    );
-
-    var totalWeight = 0.0;
-    for (var di: i32 = -kernelRadius; di <= kernelRadius; di = di + 1) {
-      for (var dj: i32 = -kernelRadius; dj <= kernelRadius; dj = dj + 1) {
-        totalWeight = totalWeight + integratedGaussianTexelWeight(
-          centerFieldPos, fieldDimensions, baseI + di, baseJ + dj,
-          inverseGrowth, sigmaWorld2,
-        );
-      }
-    }
-    let inverseTotalWeight = 1.0 / max(totalWeight, 1e-20);
-    for (var di: i32 = -kernelRadius; di <= kernelRadius; di = di + 1) {
-      for (var dj: i32 = -kernelRadius; dj <= kernelRadius; dj = dj + 1) {
-        let ti = baseI + di;
-        let tj = baseJ + dj;
-        let weight = integratedGaussianTexelWeight(
-          centerFieldPos, fieldDimensions, ti, tj, inverseGrowth, sigmaWorld2,
-        ) * inverseTotalWeight;
-        let wx = u32(wrapDepositIndex(ti, width));
-        let wy = u32(wrapDepositIndex(tj, height));
-        addChemicalDeposit(c, wy, wx, envWrite[c], projectionScale * weight);
-      }
-    }
+// Same portable floating-point atomic addition as MPM P2G. Tiny refined
+// samples retain relative precision rather than rounding to a fixed quantum.
+fn addDepositFloat(index: u32, value: f32) {
+  if (value == 0.0) { return; }
+  var previous = atomicLoad(&depositScratch[index]);
+  loop {
+    let next = bitcast<i32>(bitcast<f32>(previous) + value);
+    let result = atomicCompareExchangeWeak(&depositScratch[index], previous, next);
+    if (result.exchanged) { return; }
+    previous = result.old_value;
   }
 }
 
-// Deposit one point sample weighted by the material it represents. The
-// transported domain is refinement geometry and does not widen grid coupling.
 fn depositMaterialSample(envWrite: array<f32, ENV_WRITE_DIM>, pos: vec2<f32>, rest: ParticleRest) {
-  let representedArea = max(rest.quadratureWeight, 1e-6) * max(matDet(rest.growthF), 1e-6);
-  depositGaussian(envWrite, pos, vec4<f32>(1.0, 0.0, 0.0, 1.0), representedArea);
+  // Production triangles carry original world area, already split on refinement
+  // and scaled by seeding density. Do not multiply by quadratureWeight or the
+  // legacy chemicalProjectionWeight again. Point-only legacy scenes use spacing.
+  let originalArea = select(
+    physics.splitDisplacement * physics.splitDisplacement * max(rest.quadratureWeight, 0.0),
+    rest.divisionBias, rest.divisionBias > 0.0,
+  );
+  let area = originalArea * max(matDet(rest.growthF), 0.0);
+  for (var c = 0u; c < CHANNELS; c = c + 1u) {
+    let k = corners(c, fract(pos)
+      * vec2<f32>(f32(FIELD_WIDTHS[c]), f32(FIELD_HEIGHTS[c])) - vec2<f32>(0.5));
+    for (var x = 0u; x < 3u; x = x + 1u) {
+      for (var y = 0u; y < 3u; y = y + 1u) {
+        let index = fieldIndex(c, k.ys[y], k.xs[x]);
+        let weightedArea = area * k.weights[x].x * k.weights[y].y;
+        addDepositFloat(index, envWrite[c] * weightedArea);
+        addDepositFloat(FIELD_TOTAL + index, weightedArea);
+      }
+    }
+  }
 }
 
 // Rebuild contribution pass, deliberately separate from agentStep so every
@@ -796,9 +641,8 @@ fn splatChemicalState(@builtin(global_invocation_id) gid: vec3<u32>) {
     levels[c] = agentState.particleMeta[pi].chemicalState[c];
   }
   // appearanceScale is deliberately rendering-only. Physical mass and
-  // chemistry are fully present immediately after division; growthF controls
-  // the projection footprint before division so the substrate follows the
-  // continuously growing material.
+  // chemistry are fully present immediately after division; growthF scales
+  // represented area; the transfer footprint stays fixed on each native grid.
   depositMaterialSample(levels, positions[pi], particleRest[pi]);
 }
 
@@ -863,7 +707,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Sample the orientation field before assembling heading-relative policy
   // inputs. Sobel gradients are expressed per native texel, so convert channel
-  // 7 to the same reference-grid convention used by the chemical perception
+  // index 3 to the same reference-grid convention used by the chemical perception
   // loop below before applying the paper's L2 clipping. Strong gradients have
   // unit direction; weak/undefined gradients proportionally suppress every
   // directional lane. The angle is only a cache for growth physics/rendering.

@@ -3,9 +3,7 @@
   "particles": 400,
   "initialParticleCount": 5,
   "densityModelVersion": 3,
-  "trainingDensityMultipliers": [
-    1.0
-  ],
+  "trainingDensityMultipliers": [1.0],
   "densityAggregation": "worst",
   "particleCapacity": 400,
   "particleMass": 10.0,
@@ -25,17 +23,15 @@
   "morphologyBlurSigma": 0.01,
   "morphologyDensityReference": 1.0,
   "boundaryTangentMinGradient": 1.0,
-  "neuralUpdatesPerMacro": 4,
-  "communicationSpeed": 1.0,
-  "internalStateSpeed": 1.0,
+  "neuralUpdatesPerMacro": 1,
+  "communicationSpeed": 4.0,
+  "internalStateSpeed": 4.0,
   "divisionDirectionality": 1.0,
   "divisionDriveBoost": 0.0,
   "elasticStrainScale": 0.15,
   "elasticStrainInputsEnabled": true,
   "hiddenDim": 128,
-  "hiddenLayers": [
-    128
-  ],
+  "hiddenLayers": [128],
   "cellMemory": "recurrent",
   "policyArchitecture": "stateful-128",
   "chemicalCommunicationArchitecture": "persistent-environment",

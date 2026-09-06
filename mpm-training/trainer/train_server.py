@@ -271,7 +271,7 @@ def _archive_previous_run() -> None:
 def _save_generation_images(
     generation: int, winner_weights: np.ndarray, winner_seed: int, winner_density: float,
     core: MpmCore, agents: AgentsGPU, environment: EnvironmentGPU
-) -> dict[str, float] | None:
+) -> dict[str, object] | None:
     """Three PNGs per generation — see debug_images.py's own module
     docstring for what each one is and why: `..._grown.png` (raw,
     un-aligned positions), `..._target.png` (the target's own raster,

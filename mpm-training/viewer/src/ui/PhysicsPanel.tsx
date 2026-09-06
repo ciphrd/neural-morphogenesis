@@ -128,14 +128,6 @@ export function physicsSliderSpecsFor(
       format: (v) => v.toFixed(2),
     },
     {
-      key: "depositDensityReference",
-      label: "Deposit density capacity",
-      min: 0,
-      max: Math.max(4, trained.depositDensityReference * 4),
-      step: 0.01,
-      format: (v) => v.toFixed(2),
-    },
-    {
       key: "maxAccel",
       label: "Max accel",
       ...scaledRange(trained.maxAccel, 3),
@@ -158,12 +150,6 @@ export function physicsSliderSpecsFor(
       label: "Chemical delta amplitude",
       ...scaledRange(trained.maxEnvWrite, 3),
       format: (v) => v.toFixed(3),
-    },
-    {
-      key: "depositSigma",
-      label: "Deposit sigma (world)",
-      ...scaledRange(trained.depositSigma, 8, 0.01),
-      format: (v) => v.toFixed(5),
     },
     {
       key: "splitDisplacement",
@@ -229,9 +215,7 @@ export function physicsSliderSpecsFor(
  * strafe's own maxAccel/maxStrafe/friction (strafe
  * drives MpmCore's own velocity directly — an acceleration, damped by
  * friction — see agents.wgsl's own module docstring for the full
- * history), and depositSigma (the normalized-world cell-state Gaussian sigma — see
- * agents.wgsl's own depositGaussian() for the exact kernel this drives,
- * replacing that shader's old flat 4-corner bilinear scatter),
+ * history),
  * growth's own splitDisplacement (growth-aligned daughter separation) and
  * divisionCooldown (macro steps a particle refuses
  * to split again for, right after splitting, whether as parent or child
@@ -303,7 +287,7 @@ export function PhysicsPanel({
           </label>
           <label
             className="checkbox-row"
-            title="Preserve raw deposits below the configured material capacity, then divide by matching local density so overcrowding cannot amplify the chemical source."
+            title="Average chemical expression by represented material area, with partial coverage at empty edges. Disable for secretion proportional to material density."
           >
             <input
               type="checkbox"
@@ -315,7 +299,7 @@ export function PhysicsPanel({
                 })
               }
             />
-            Limit deposits by local density
+            Average chemical expression
           </label>
           {specs.map((spec) => (
             <label key={spec.key} className="slider-row">

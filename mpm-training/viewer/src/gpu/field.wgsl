@@ -413,7 +413,7 @@ fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   var color = vec3<f32>(substrateDisplayValue(r), substrateDisplayValue(g), substrateDisplayValue(b));
   if (substrateDisplay.y != 0u) {
     // Must match core/agents.wgsl's HEADING_CHANNEL fallback exactly.
-    let orientationChannel = min(7u, SUBSTRATE_CHANNELS - 1u);
+    let orientationChannel = min(3u, SUBSTRATE_CHANNELS - 1u);
     color = vec3<f32>(substrateDisplayValue(substrateValue(orientationChannel, x, y)));
   }
 

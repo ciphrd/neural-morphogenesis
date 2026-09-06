@@ -227,7 +227,7 @@ fn activationParticleFragment(in: ActivationDotOut) -> @location(0) vec4<f32> {
 //
 // Heading is NOT derived from velocity here (an earlier revision did
 // atan2(vel.y,vel.x) — see agents.wgsl's own module docstring for why
-// that coupling was removed project-wide): it is the channel-7-gradient
+// that coupling was removed project-wide): it is the channel-index-3-gradient
 // alignment cache agents.wgsl refreshes every controller evaluation.
 //
 // ParticleMeta is a small, deliberate DUPLICATE of core/agents.wgsl's
@@ -521,7 +521,7 @@ fn boundaryValueParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32
 
 // Optional one-pixel heading indicator, independently composited over either
 // particle shape and every color mode. ParticleMeta.alignment stores the
-// L2-clipped chemical-channel-7 gradient, so its magnitude is confidence, not
+// L2-clipped chemical-channel-index-3 gradient, so its magnitude is confidence, not
 // a useful display length. Normalize it here to keep every defined heading
 // visible; a flat field still produces a zero-length line.
 @group(0) @binding(5) var<uniform> directionalLineStyle: vec4<f32>;

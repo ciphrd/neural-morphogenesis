@@ -91,8 +91,8 @@ The policy therefore controls where and how strongly tissue wants to grow,
 while the integration layer decides how that request is represented numerically.
 Heading is
 not policy state: the local frame always follows the gradient of chemical
-channel 3. The morphology-gradient input lanes remain separate observations in
-that channel-3-relative frame.
+channel index 3 (the fourth channel). The morphology-gradient input lanes remain
+separate observations in that channel-index-3-relative frame.
 
 The current eight-channel policy has 30 inputs: 24 chemical value/gradient
 components, morphology occupancy and its two heading-frame gradient
@@ -150,9 +150,9 @@ checkpoints retain their recorded width and replay unchanged.
 
 The viewer exposes `Cell memory` and the current single hidden-layer width as
 exploration controls. A shape change never reinterprets checkpoint weights:
-it creates a fresh deterministic brain from the active rollout seed, rebuilds
-the GPU policy, and labels the source `Seeded random`. Reset restores the
-selected generation's trained brain.
+it creates a freshly randomized brain, rebuilds the GPU policy, and displays
+the sampled seed. The random button samples a new seed on every click. Reset
+restores the selected generation's trained brain.
 
 Run a controlled paired experiment with identical evolution arguments and
 seed using:
@@ -213,22 +213,38 @@ layout from `core/chemical_channels.json`:
 Channels are packed into common field, gradient, and deposit buffers, so this
 does not add agent-shader storage bindings. Each recorded channel profile owns
 its resolution scale, cell-delta timescale, field-delta timescale, decay exponent,
-diffusion multiplier, and deposit-sigma multiplier. Both temporal scales divide
+diffusion multiplier (legacy profiles also retain a deposit-sigma multiplier). Both temporal scales divide
 the corresponding signed delta rate, letting slow channels accumulate gradually
 instead of turning their output into a concentration target. The shader derives indexing and transport from generated arrays;
 adding a scale or moving a channel between scales is therefore a configuration
 change rather than another GPU architecture.
 
-When local-density limiting is enabled, every texel accumulates a matched
-chemical numerator `N` and represented-material density `D` from exactly the
-same kernel weights. Its effective source is `N / max(D, D_capacity)`: raw
-Gaussian deposition is preserved below capacity, while additional overlapping
-material cannot amplify the source above the density-weighted mean. Persistent
-decay and forcing are integrated with the exact constant-source leaky-system
-factor `(1-r)/(-log(r))`, where `r` is that channel's retention for the tick.
-The integer atomic scale is derived from the live particle-capacity and
-projection bounds each round, retaining deterministic accumulation while
-avoiding the former fixed 1/4096 quantization.
+Chemical transfer uses the MPM-style quadratic B-spline basis: a centered 3×3
+stencil on each channel's native grid, with matching value/gradient gathers.
+Each texel accumulates `N = sum(weight * worldRestArea * expression)` and
+`A = sum(weight * worldRestArea)` using floating-point atomic additions.
+World rest area is the particle's original triangle area times `det(growthF)`;
+refinement splits that area, so no additional particle-density weight is needed.
+
+With **Average chemical expression** enabled (the default), the source is
+`(N / A) * min(A / texelWorldArea, 1)`, or zero when `A` is zero. The first
+factor averages expression; the second estimates material coverage and fades
+partially occupied edge texels. Compression cannot amplify uniform expression
+in fully covered material. With this option disabled, secretion is
+`N / texelWorldArea`, proportional to material density. Coverage is a raster
+estimate; coarse grids and undersampled material still change boundary detail.
+
+Diffusion and decay set chemical spread and persistence. Persistent decay and
+forcing retain the exact constant-source factor `(1-r)/(-log(r))`, where `r`
+is the channel's retention for the tick. Only the final neural round deposits.
+`depositSigma`, per-channel `depositSigmaMultiplier`, `depositDensityReference`,
+and `chemicalProjectionWeight` are retained in legacy metadata/uniform layouts
+but no longer control chemical transfer. Existing policies load, but their
+chemical inputs and trajectories change with this transfer model.
+
+Run `trainer/.venv/bin/python trainer/chemical_transfer_check.py` for GPU
+checks of resolution, refinement, compression, coverage, signed cancellation,
+growth, periodic boundaries, and small-area accumulation.
 
 The live `decay` setting remains the local-channel retention. A channel with
 exponent `a` retains `decay^a` per unit communication time, so coarse global
@@ -258,12 +274,12 @@ repeat neural_updates_per_macro communication rounds:
   if cell-owned projection:
     clear the transient substrate
     for each active particle:
-      growth-deformed gaussian-splat particle.chemical_state into every substrate channel
+      quadratic-splat particle.chemical_state, weighted by world rest area, into every channel
   compute substrate gradients
 
   for each active particle:
     inputs = []
-    alignment = channel_3_gradient / max(length(channel_3_gradient), 1)
+    alignment = channel_index_3_gradient / max(length(channel_index_3_gradient), 1)
 
     for each substrate channel:
         inputs += value at particle
@@ -416,7 +432,7 @@ perpendicular = area_factor ^ ((1 - strength) / 2)
 
 At `strength = 0`, this is isotropic. At `strength = 1`, the entire area
 increment is placed along the selected axis. The local axis is first rotated by
-the channel-3-gradient heading, then transformed through the elastic rotation
+the channel-index-3-gradient heading, then transformed through the elastic rotation
 before applying the material update.
 
 The existing global anisotropy multiplier remains a playback compatibility
@@ -434,7 +450,7 @@ shape before a new particle is inserted.
 ## Legacy directional fan emission (inactive)
 
 The current neural direction is a signed vector transformed from agent-local
-space through the channel-3-gradient frame. Unlike the old axial model, `v`
+space through the channel-index-3-gradient frame. Unlike the old axial model, `v`
 and `-v` grow into opposite regions. If that local frame is undefined, a
 rollout-seeded spatial direction supplies an unbiased fallback.
 

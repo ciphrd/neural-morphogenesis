@@ -94,7 +94,7 @@ class EnvironmentGPU:
         )
 
         total = self.total_values
-        # Numerator + matched density + one shared adaptive fixed-point scale.
+        # Float numerator + matched world area + one unused compatibility slot.
         scratch_total = total * 2 + 1
         f32 = 4
 
@@ -219,7 +219,7 @@ class EnvironmentGPU:
         return neural_dt
 
     def set_deposit_normalization(self, enabled: bool, density_reference: float) -> None:
-        """Configure matching-kernel capacity normalization."""
+        """Select area-averaged expression or density-proportional secretion."""
         self.normalize_deposits_by_local_density = bool(enabled)
         self.deposit_density_reference = max(0.0, float(density_reference))
 

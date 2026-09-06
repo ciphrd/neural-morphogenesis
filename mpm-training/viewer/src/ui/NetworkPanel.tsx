@@ -521,7 +521,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           </div>
           <p className="hint">
             {elasticInputsEnabled
-              ? "Normalized channel-7-gradient-frame Hencky strain as received by the policy."
+              ? "Normalized channel-index-3-gradient-frame Hencky strain as received by the policy."
               : "Temporarily unwired: all three policy lanes are forced to zero."}
           </p>
         </div>

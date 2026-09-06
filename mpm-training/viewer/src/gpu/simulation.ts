@@ -436,7 +436,7 @@ export class GpuSimulation {
     this.agents.setMaxActiveParticles(this.particleCap);
     this.agents.setActiveCount(scene.count);
     // Clear rollout-scoped policy state. The first agent evaluation derives
-    // alignment from chemical channel 7's freshly sensed gradient.
+    // alignment from chemical channel index 3's freshly sensed gradient.
     this.agents.resetState(this.config.seed);
     this._currentStep = 0;
     this.shapeStop = new StableMatchStop(this.scenario ? {} : this.config);

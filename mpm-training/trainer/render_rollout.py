@@ -1,20 +1,7 @@
-"""One-off visual sanity check for evolve.py's checkpoints — not part of
-the eventual trainer/server (see ../viewer/README.md's own staging).
-Loads checkpoints/best.npy + best_meta.json, replays that rollout, and
-rasterizes the *aligned* final particle positions (via alignment.py's
-own Chamfer-based best_alignment — the SAME rotation-search algorithm
-evolve.py's own _score_fitness() currently scores/selects checkpoints
-with, see that module's own module docstring for the current Chamfer/
-raster back-and-forth; if fitness is ever switched back to raster.py's
-own rotation search instead, this file's own alignment would once again
-be a reasonable-but-not-necessarily-exact stand-in, not the literal pose
-that scored the checkpoint) overlaid on the target point cloud — showing
-the raw, un-transformed positions instead would make a perfectly-scoring
-but rotated/translated result look wrong by eye, since fitness is
-pose-invariant but a flat image isn't. Mirrors render_check.py's own
-role for feasibility_check.py.
+"""Render checkpoint rollouts, honoring saved material budgets and stable stopping.
 
-Usage:
+The pictures use legacy point-cloud alignment for a diagnostic overlay; live
+training fitness and stopping use transported material domains. Usage:
     python render_rollout.py [out_dir]
 """
 from __future__ import annotations
