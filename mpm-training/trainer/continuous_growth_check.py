@@ -112,8 +112,27 @@ def check_opposed_field(device):
     run_growth_field(device,agents)
     field=np.frombuffer(device.queue.read_buffer(core.growth_field),np.int32).reshape(-1,10)
     np.testing.assert_allclose(field[:,:2].sum(axis=0),0,atol=1)
-    np.testing.assert_allclose(field[:,2:5].sum(axis=0)/field[:,5].sum(),[.6,0,0],atol=1e-3)
-    print('[PASS] opposing proposals preserve normalized axial growth')
+    np.testing.assert_array_equal(field[:,2:5], 0)
+    core.set_material(0,.2,0,1,growth_rate=12,growth_compression_feedback=0)
+    core.step(16)
+    np.testing.assert_allclose(read_rest(core,2)[:,:4], [[1,0,0,1]]*2, atol=1e-6)
+    print('[PASS] opposing proposals cancel field and physical growth')
+
+
+def check_vector_blending(device):
+    for vectors, expected in (([[.6,0],[.6,0]], [.6,0,0]),
+                              ([[.6,0],[0,.6]], [np.sqrt(.18)/2]*3),
+                              ([[.6,0],[-.2,0]], [.2,0,0])):
+        core, agents = make_system(device)
+        load_samples(core,agents,[[.5,.5],[.5,.5]],vectors)
+        run_growth_field(device,agents)
+        field=np.frombuffer(device.queue.read_buffer(core.growth_field),np.int32).reshape(-1,10)
+        np.testing.assert_allclose(field[:,2:5].sum(axis=0)/field[:,5].sum(), expected, atol=1e-3)
+        core.set_material(0,.2,0,1,growth_rate=12,growth_compression_feedback=0)
+        core.step(16)
+        determinants=np.linalg.det(read_rest(core,2)[:,:4].reshape(-1,2,2))
+        np.testing.assert_allclose(determinants, np.exp((expected[0]+expected[2])*12*DT*16),rtol=3e-5)
+    print('[PASS] aligned, perpendicular, and unequal opposed vectors blend before tensor conversion')
 
 
 def check_subdivision(device):
@@ -439,7 +458,7 @@ def check_periodic_transfer(device):
 
 def main():
     device=pick_device()
-    for check in (check_continuous_growth,check_opposed_field,check_subdivision,
+    for check in (check_continuous_growth,check_opposed_field,check_vector_blending,check_subdivision,
                   check_geometric_refinement_criterion,check_triangle_edges_and_seams,check_point_p2g_and_split_conservation,
                   check_affine_transport,check_courant_guard,check_capacity,
                   check_capacity_rollout,check_physical_budget,

@@ -339,9 +339,6 @@ fn scatterGrowthIntent(@builtin(global_invocation_id) gid: vec3<u32>) {
   var vector = vec2<f32>(particleRest[pi].cycleActive, particleRest[pi].growthAngle);
   let magnitude = length(vector);
   if (magnitude > 1.0) { vector = vector / magnitude; }
-  let rate = min(magnitude, 1.0);
-  let direction = vector / max(rate, 1e-8);
-  let tensor = rate * vec3<f32>(direction.x * direction.x, direction.x * direction.y, direction.y * direction.y);
 
   let base = vec2<i32>(floor(pos * INV_DX - vec2<f32>(0.5)));
   let fx = pos * INV_DX - vec2<f32>(base);
@@ -352,9 +349,6 @@ fn scatterGrowthIntent(@builtin(global_invocation_id) gid: vec3<u32>) {
       let contribution = representedVolume * w[i].x * w[j].y;
       atomicAdd(&growthField[fieldIndex(node, CH_VECTOR_X)], i32(round(contribution*vector.x*FIELD_SCALE)));
       atomicAdd(&growthField[fieldIndex(node, CH_VECTOR_Y)], i32(round(contribution*vector.y*FIELD_SCALE)));
-      atomicAdd(&growthField[fieldIndex(node, CH_TENSOR_XX)], i32(round(contribution*tensor.x*FIELD_SCALE)));
-      atomicAdd(&growthField[fieldIndex(node, CH_TENSOR_XY)], i32(round(contribution*tensor.y*FIELD_SCALE)));
-      atomicAdd(&growthField[fieldIndex(node, CH_TENSOR_YY)], i32(round(contribution*tensor.z*FIELD_SCALE)));
       atomicAdd(&growthField[fieldIndex(node, CH_WEIGHT)], i32(round(contribution*FIELD_SCALE)));
     }
   }
@@ -363,7 +357,27 @@ fn scatterGrowthIntent(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(256)
 fn enforceGrowthField(@builtin(global_invocation_id) gid: vec3<u32>) {
   let node = gid.x;
-  if (node >= NODE_COUNT || physics.forcedGrowthFieldMode != 1u) { return; }
+  if (node >= NODE_COUNT) { return; }
+  if (physics.forcedGrowthFieldMode != 1u) {
+    // Average signed proposals before constructing an expansion tensor.
+    // Opposing intents cancel; adding identical samples cannot amplify growth.
+    let weight = f32(atomicLoad(&growthField[fieldIndex(node, CH_WEIGHT)]));
+    var tensor = vec3<f32>(0.0);
+    if (weight > 0.0) {
+      let vector = vec2<f32>(
+        f32(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_X)])),
+        f32(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_Y)]))) / weight;
+      let magnitude = length(vector);
+      let direction = vector / max(magnitude, 1e-8);
+      tensor = min(magnitude, 1.0) * vec3<f32>(
+        direction.x * direction.x, direction.x * direction.y, direction.y * direction.y);
+    }
+    // Retain the weighted tensor ABI consumed by G2P and field diagnostics.
+    atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XX)], i32(round(weight*tensor.x)));
+    atomicStore(&growthField[fieldIndex(node, CH_TENSOR_XY)], i32(round(weight*tensor.y)));
+    atomicStore(&growthField[fieldIndex(node, CH_TENSOR_YY)], i32(round(weight*tensor.z)));
+    return;
+  }
   let ix = node / NODE_STRIDE;
   let iy = node % NODE_STRIDE;
   let nodePos = vec2<f32>(f32(ix), f32(iy)) / f32(GRID_N);

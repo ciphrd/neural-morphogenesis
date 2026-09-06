@@ -804,7 +804,6 @@ export class Agents {
     for (let i = 0; i < this.growthPipelines.length; i++) {
       // Entry 2 analytically touches every grid node; skip its dispatch for
       // ordinary training playback rather than paying a dormant full-grid pass.
-      if (i === 2 && !this.forcedGrowthFieldOverride) continue;
       if (i >= 6 + this.refinementRounds && i < 6 + Math.ceil(Math.log2(MAX_PARTICLES))) continue;
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.growthPipelines[i]);

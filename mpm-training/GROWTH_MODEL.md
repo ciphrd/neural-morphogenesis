@@ -55,11 +55,13 @@ interactive additions are not thereby guaranteed to tile.
 
 ## Growth law
 
-The policy proposes a world vector `u`; `r=|u|`, `d=u/r`, and `T=r d d^T` (zero
-at zero rate). Point-based quadratic B-spline projection computes the
-represented-grown-volume-weighted mean tensor at each MPM node. Opposed vectors
-retain their common expansion axis. There is no upper clamp on a lineage's
-`det(G)` in this average.
+The policy proposes a world vector `u`, capped to unit length. Point-based
+quadratic B-spline projection computes the represented-grown-volume-weighted
+mean signed vector at each MPM node. Only then is it converted to
+`T=r d d^T`, where `r=min(|mean(u)|,1)` and `d` is its unit direction (zero
+tensor at zero rate). Equal opposite requests cancel; perpendicular requests
+produce weaker diagonal growth. Additional identical samples do not amplify
+the rate. There is no upper clamp on a lineage's `det(G)` in this average.
 
 G2P gathers the tensor at the particle center, blends its anisotropy, applies contact
 inhibition, and rotates it into the elastic frame before advancing

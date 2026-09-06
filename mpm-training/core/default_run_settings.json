@@ -65,7 +65,7 @@
   "materialE": 10000.0,
   "materialNu": 0.2,
   "materialHardening": 3.0,
-  "materialElasticity": 0.5,
+  "materialElasticity": 1.0,
   "materialFluidity": 0.0,
   "splatRadius": 0.004,
   "repulsionStrength": 0.0,

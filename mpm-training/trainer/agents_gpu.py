@@ -841,8 +841,6 @@ class AgentsGPU:
         for index, (pipeline, bind_group, fixed_dispatch) in enumerate(zip(
             self._growth_pipelines, self._growth_bind_groups, self._growth_dispatches
         )):
-            if index == 2 and not self._forced_growth_field_override:
-                continue
             if 6 + self._refinement_rounds <= index < 6 + (self._particle_capacity - 1).bit_length():
                 continue
             p = encoder.begin_compute_pass()
