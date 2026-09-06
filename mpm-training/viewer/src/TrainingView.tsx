@@ -1,15 +1,22 @@
-import { DEFAULT_RUN_SETTINGS } from "./net/settingsStorage"
-import canonicalConfig from "../../core/config.json"
-import { InitialConditionControls, type InitialConditionSettings } from "./controls/InitialConditionControls"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
-import coreConstantsConfig from "../../core/config.json";
+import canonicalConfig from "../../core/config.json"
+import coreConstantsConfig from "../../core/config.json"
 import { FitnessChart } from "./charts/FitnessChart"
+import {
+  InitialConditionControls,
+  type InitialConditionSettings,
+} from "./controls/InitialConditionControls"
 import { randomPolicySeed, randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
 import { MAX_PARTICLES } from "./gpu/mpmCore"
 import { mutatePolicyWeights } from "./gpu/policyMutation"
-import { MAX_ZOOM, type FieldMode, type ParticleColorMode, type ParticleShape } from "./gpu/render"
+import {
+  type FieldMode,
+  MAX_ZOOM,
+  type ParticleColorMode,
+  type ParticleShape,
+} from "./gpu/render"
 import type {
   CellMemory,
   ChemicalCommunicationArchitecture,
@@ -25,6 +32,7 @@ import {
 } from "./gpu/types"
 import { generationImageUrl } from "./net/images"
 import { fetchRunState } from "./net/runs"
+import { DEFAULT_RUN_SETTINGS } from "./net/settingsStorage"
 import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
 import { pickRecordingFormat } from "./render/canvasRecorder"
@@ -68,7 +76,8 @@ const RECORDING_FORMAT = pickRecordingFormat()
  * field modes are portable without extending core/'s shared physics. */
 export function TrainingView() {
   const liveState = useTrainingSocket(TRAIN_WS_URL, TRAIN_API_URL)
-  const [headerActionsHost, setHeaderActionsHost] = useState<HTMLElement | null>(null)
+  const [headerActionsHost, setHeaderActionsHost] =
+    useState<HTMLElement | null>(null)
   useEffect(() => {
     setHeaderActionsHost(document.getElementById("training-header-actions"))
   }, [])
@@ -183,7 +192,9 @@ export function TrainingView() {
   const [directionalLineVisible, setDirectionalLineVisible] = useState(
     VIEWER_DEFAULTS.rendering.directionalLineVisible
   )
-  const [domainVisible, setDomainVisible] = useState(VIEWER_DEFAULTS.rendering.domainVisible)
+  const [domainVisible, setDomainVisible] = useState(
+    VIEWER_DEFAULTS.rendering.domainVisible
+  )
   const [growthLineVisible, setGrowthLineVisible] = useState(
     VIEWER_DEFAULTS.rendering.growthLineVisible
   )
@@ -260,7 +271,8 @@ export function TrainingView() {
     hiddenWidth: number
     seed: number
   } | null>(null)
-  const [initialConditionOverride, setInitialConditionOverride] = useState<InitialConditionSettings | null>(null)
+  const [initialConditionOverride, setInitialConditionOverride] =
+    useState<InitialConditionSettings | null>(null)
   const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
     useState<ChemicalCommunicationArchitecture | null>(null)
   const [particleDensityOverride, setParticleDensityOverride] = useState<
@@ -287,7 +299,10 @@ export function TrainingView() {
   // changed only mass/spacing, so a 4x selection could never look 4x denser.
   const densityScaledParticleCap = Math.min(
     MAX_PARTICLES,
-    Math.max(2, Math.floor(frontendParticleCap * effectiveParticleDensity + 0.5))
+    Math.max(
+      2,
+      Math.floor(frontendParticleCap * effectiveParticleDensity + 0.5)
+    )
   )
   const densityScaledInitialParticleCount = Math.min(
     densityScaledParticleCap,
@@ -297,12 +312,23 @@ export function TrainingView() {
     )
   )
   const defaultSubstrateResolution =
-    VIEWER_DEFAULTS.playback.substrateResolution ?? activeConfig?.baseResolution ?? canonicalConfig.chemistry.baseResolution
+    VIEWER_DEFAULTS.playback.substrateResolution ??
+    activeConfig?.baseResolution ??
+    canonicalConfig.chemistry.baseResolution
   const effectiveSubstrateResolution =
     substrateResolutionOverride ?? defaultSubstrateResolution
-  const initialMemory = policyExploration?.cellMemory ?? (activeConfig ? cellMemoryFromConfig(activeConfig) : "none")
-  const selectedInitialCondition = initialConditionOverride?.initialCondition ?? activeConfig?.initialCondition ?? DEFAULT_RUN_SETTINGS.initialCondition
-  const effectiveInitialCondition = selectedInitialCondition === "internal-state" && initialMemory !== "recurrent" ? "none" : selectedInitialCondition
+  const initialMemory =
+    policyExploration?.cellMemory ??
+    (activeConfig ? cellMemoryFromConfig(activeConfig) : "none")
+  const selectedInitialCondition =
+    initialConditionOverride?.initialCondition ??
+    activeConfig?.initialCondition ??
+    DEFAULT_RUN_SETTINGS.initialCondition
+  const effectiveInitialCondition =
+    selectedInitialCondition === "internal-state" &&
+    initialMemory !== "recurrent"
+      ? "none"
+      : selectedInitialCondition
   const playbackConfig = useMemo(() => {
     if (!activeConfig) return null
     const densityResolved = configAtDensity(
@@ -374,7 +400,9 @@ export function TrainingView() {
     if (!previewConfig || !mutatedWeights) return previewConfig
     return { ...previewConfig, weights: mutatedWeights }
   }, [previewConfig, mutatedWeights])
-  const [policyWeightGain, setPolicyWeightGain] = useState(VIEWER_DEFAULTS.policyExploration.weightGain)
+  const [policyWeightGain, setPolicyWeightGain] = useState(
+    VIEWER_DEFAULTS.policyExploration.weightGain
+  )
   const weightedPreviewConfig = useMemo(() => {
     if (!activeBrainConfig || policyWeightGain === 1) return activeBrainConfig
     return {
@@ -390,7 +418,9 @@ export function TrainingView() {
       },
     }
   }, [activeBrainConfig, policyWeightGain])
-  const [mutationStrength, setMutationStrength] = useState(VIEWER_DEFAULTS.policyExploration.mutationStrength)
+  const [mutationStrength, setMutationStrength] = useState(
+    VIEWER_DEFAULTS.policyExploration.mutationStrength
+  )
   const mutateActiveBrain = () => {
     if (!activeBrainConfig || mutationStrength <= 0) return
     setMutation({
@@ -478,17 +508,26 @@ export function TrainingView() {
   // live run's own id — viewingRunId is null for that case.
   const activeRunId = viewingRunId ?? "current"
 
-  const [shapeStatus, setShapeStatus] = useState<{ complete: boolean; settling: boolean; atCapacity: boolean; capacityBlocked: boolean; unresolvedSamples: number; match: { missing: number; spill: number; overlap: number } | null } | null>(null)
+  const [shapeStatus, setShapeStatus] = useState<{
+    complete: boolean
+    settling: boolean
+    atCapacity: boolean
+    capacityBlocked: boolean
+    unresolvedSamples: number
+    match: { missing: number; spill: number; overlap: number } | null
+  } | null>(null)
   // Derive a bounded overlay from the checkpoint-embedded mask. This keeps
   // archived runs immutable and avoids uploading every source PNG pixel.
   const targetPoints = useMemo(() => {
     const shape = activeConfig?.shapeTarget
     if (!shape) return null
     if (shape.mask && shape.resolution) {
-      const points: number[] = [], n = shape.resolution
-      for (let i = 0; i < shape.mask.length; i++) if (shape.mask[i] >= 0.5) {
-        points.push((i % n + 0.5) / n, (Math.floor(i / n) + 0.5) / n)
-      }
+      const points: number[] = [],
+        n = shape.resolution
+      for (let i = 0; i < shape.mask.length; i++)
+        if (shape.mask[i] >= 0.5) {
+          points.push(((i % n) + 0.5) / n, (Math.floor(i / n) + 0.5) / n)
+        }
       return Float32Array.from(points)
     }
     return shape.points ? Float32Array.from(shape.points.flat()) : null
@@ -653,15 +692,16 @@ export function TrainingView() {
 
   return (
     <div className="training-layout">
-      {headerActionsHost && createPortal(
-        <RunPicker
-          apiUrl={TRAIN_API_URL}
-          activeRunId={viewingRunId}
-          serverConnected={liveState.serverConnected}
-          onSelectRun={setViewingRunId}
-        />,
-        headerActionsHost
-      )}
+      {headerActionsHost &&
+        createPortal(
+          <RunPicker
+            apiUrl={TRAIN_API_URL}
+            activeRunId={viewingRunId}
+            serverConnected={liveState.serverConnected}
+            onSelectRun={setViewingRunId}
+          />,
+          headerActionsHost
+        )}
       <div className="controls">
         <section>
           <details className="settings-category foldable-title">
@@ -743,7 +783,11 @@ export function TrainingView() {
                   : "Trained"}
               </button>
             </div>
-            <InitialConditionControls config={playbackConfig} recurrent={initialMemory === "recurrent"} onChange={setInitialConditionOverride} />
+            <InitialConditionControls
+              config={playbackConfig}
+              recurrent={initialMemory === "recurrent"}
+              onChange={setInitialConditionOverride}
+            />
             <div className="stat-row">
               <span>Chemical architecture</span>
               <select
@@ -788,7 +832,9 @@ export function TrainingView() {
                   setPhysicsOverride(null)
                 }}
               >
-                {Array.from(new Set([0.25, 0.5, 1, 2, 4, effectiveParticleDensity]))
+                {Array.from(
+                  new Set([0.25, 0.5, 1, 2, 4, effectiveParticleDensity])
+                )
                   .sort((a, b) => a - b)
                   .map((density) => (
                     <option key={density} value={density}>
@@ -856,7 +902,9 @@ export function TrainingView() {
               </span>
             </label>
             <label className="slider-row">
-              <span title="Each seed cell starts as two half-weight triangle samples">Initial seed cells (at 1×)</span>
+              <span title="Each seed cell starts as two half-weight triangle samples">
+                Initial seed cells (at 1×)
+              </span>
               <input
                 className="number-input"
                 type="number"
@@ -891,7 +939,15 @@ export function TrainingView() {
                 }}
               />
               <span className="slider-value">
-                → {(2 * Math.min(densityScaledInitialParticleCount, Math.floor(densityScaledParticleCap / 2))).toLocaleString()} samples
+                →{" "}
+                {(
+                  2 *
+                  Math.min(
+                    densityScaledInitialParticleCount,
+                    Math.floor(densityScaledParticleCap / 2)
+                  )
+                ).toLocaleString()}{" "}
+                samples
               </span>
             </label>
           </details>
@@ -986,8 +1042,15 @@ export function TrainingView() {
             />
             Heading direction (red)
           </label>
-          <label className="checkbox-row" title="Overlay actual transported triangle boundaries on Dot or Triangle markers">
-            <input type="checkbox" checked={domainVisible} onChange={(event) => setDomainVisible(event.target.checked)} />
+          <label
+            className="checkbox-row"
+            title="Overlay actual transported triangle boundaries on Dot or Triangle markers"
+          >
+            <input
+              type="checkbox"
+              checked={domainVisible}
+              onChange={(event) => setDomainVisible(event.target.checked)}
+            />
             Overlay particle domains
           </label>
           <label className="checkbox-row">
@@ -1016,7 +1079,9 @@ export function TrainingView() {
           {(particleColorMode === "neural-memory" ||
             particleColorMode === "chemical-memory") && (
             <>
-              <div className={`channel-window-control${neuralMemoryControlsInactive ? " is-inactive" : ""}`}>
+              <div
+                className={`channel-window-control${neuralMemoryControlsInactive ? " is-inactive" : ""}`}
+              >
                 <div className="channel-window-label">
                   <span>Channels</span>
                   <span>
@@ -1035,7 +1100,9 @@ export function TrainingView() {
                 />
               </div>
               {particleColorMode === "neural-memory" && (
-                <label className={`slider-row${neuralMemoryControlsInactive ? " is-inactive" : ""}`}>
+                <label
+                  className={`slider-row${neuralMemoryControlsInactive ? " is-inactive" : ""}`}
+                >
                   <span>Opponent subtraction</span>
                   <Slider
                     min={0}
@@ -1237,28 +1304,76 @@ export function TrainingView() {
               <>
                 <label className="slider-row">
                   <span>Bloom intensity</span>
-                  <Slider min={0} max={3} step={0.05} value={bloom.intensity} onChange={(intensity) => setBloom((value) => ({ ...value, intensity }))} />
-                  <span className="slider-value">{bloom.intensity.toFixed(2)}</span>
+                  <Slider
+                    min={0}
+                    max={3}
+                    step={0.05}
+                    value={bloom.intensity}
+                    onChange={(intensity) =>
+                      setBloom((value) => ({ ...value, intensity }))
+                    }
+                  />
+                  <span className="slider-value">
+                    {bloom.intensity.toFixed(2)}
+                  </span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom threshold</span>
-                  <Slider min={0} max={1} step={0.01} value={bloom.threshold} onChange={(threshold) => setBloom((value) => ({ ...value, threshold }))} />
-                  <span className="slider-value">{bloom.threshold.toFixed(2)}</span>
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={bloom.threshold}
+                    onChange={(threshold) =>
+                      setBloom((value) => ({ ...value, threshold }))
+                    }
+                  />
+                  <span className="slider-value">
+                    {bloom.threshold.toFixed(2)}
+                  </span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom radius</span>
-                  <Slider min={0.25} max={8} step={0.25} value={bloom.radiusPx} onChange={(radiusPx) => setBloom((value) => ({ ...value, radiusPx }))} />
-                  <span className="slider-value">{bloom.radiusPx.toFixed(2)}px</span>
+                  <Slider
+                    min={0.25}
+                    max={8}
+                    step={0.25}
+                    value={bloom.radiusPx}
+                    onChange={(radiusPx) =>
+                      setBloom((value) => ({ ...value, radiusPx }))
+                    }
+                  />
+                  <span className="slider-value">
+                    {bloom.radiusPx.toFixed(2)}px
+                  </span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom levels</span>
-                  <Slider min={2} max={10} step={1} value={bloom.levels} onChange={(levels) => setBloom((value) => ({ ...value, levels }))} />
+                  <Slider
+                    min={2}
+                    max={10}
+                    step={1}
+                    value={bloom.levels}
+                    onChange={(levels) =>
+                      setBloom((value) => ({ ...value, levels }))
+                    }
+                  />
                   <span className="slider-value">{bloom.levels}</span>
                 </label>
                 <label className="slider-row">
                   <span>Bloom scatter</span>
-                  <Slider min={0} max={1} step={0.01} value={bloom.scatter} onChange={(scatter) => setBloom((value) => ({ ...value, scatter }))} />
-                  <span className="slider-value">{bloom.scatter.toFixed(2)}</span>
+                  <Slider
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={bloom.scatter}
+                    onChange={(scatter) =>
+                      setBloom((value) => ({ ...value, scatter }))
+                    }
+                  />
+                  <span className="slider-value">
+                    {bloom.scatter.toFixed(2)}
+                  </span>
                 </label>
               </>
             )}
@@ -1322,10 +1437,16 @@ export function TrainingView() {
             tool={tool}
             deformSettings={deformSettings}
             onStep={(step, particles, shape) => {
-              setShapeStatus(previous => previous?.complete === shape.complete &&
-                previous.settling === shape.settling && previous.atCapacity === shape.atCapacity &&
-                previous.capacityBlocked === shape.capacityBlocked && previous.unresolvedSamples === shape.unresolvedSamples &&
-                previous.match === shape.match ? previous : shape)
+              setShapeStatus((previous) =>
+                previous?.complete === shape.complete &&
+                previous.settling === shape.settling &&
+                previous.atCapacity === shape.atCapacity &&
+                previous.capacityBlocked === shape.capacityBlocked &&
+                previous.unresolvedSamples === shape.unresolvedSamples &&
+                previous.match === shape.match
+                  ? previous
+                  : shape
+              )
               setReplayStep(step)
               setCellCount(particles)
             }}
@@ -1338,9 +1459,11 @@ export function TrainingView() {
                 ? `${replayStep} / ${activeConfig.macroSteps} steps`
                 : "— steps"}
             </span>
-            {activeConfig?.estimatedSampleCapacity && <span title="Allocation estimate at reference density; stretching can require more samples">
-              {`Target sampling estimate: ~${Math.ceil(activeConfig.estimatedSampleCapacity * effectiveParticleDensity).toLocaleString()}`}
-            </span>}
+            {activeConfig?.estimatedSampleCapacity && (
+              <span title="Allocation estimate at reference density; stretching can require more samples">
+                {`Target sampling estimate: ~${Math.ceil(activeConfig.estimatedSampleCapacity * effectiveParticleDensity).toLocaleString()}`}
+              </span>
+            )}
             {/* Live count, not the cap — grows as growth splits. */}
             <span>
               {activeConfig
@@ -1348,15 +1471,23 @@ export function TrainingView() {
                 : "— cells"}
             </span>
             <span>
-              {shapeStatus?.complete ? "Stable match" : (shapeStatus?.capacityBlocked || shapeStatus?.atCapacity)
-                ? "Sampling capacity reached" : shapeStatus?.settling ? "Settling · growth paused"
-                : shapeStatus?.unresolvedSamples ? "Refining material samples" : ""}
+              {shapeStatus?.complete
+                ? "Stable match"
+                : shapeStatus?.capacityBlocked || shapeStatus?.atCapacity
+                  ? "Sampling capacity reached"
+                  : shapeStatus?.settling
+                    ? "Settling · growth paused"
+                    : shapeStatus?.unresolvedSamples
+                      ? "Refining material samples"
+                      : ""}
             </span>
-            {shapeStatus?.match && <span>
-              {Object.values(shapeStatus.match).every(Number.isFinite)
-                ? `Missing ${(100*shapeStatus.match.missing).toFixed(1)}% · Outside ${(100*shapeStatus.match.spill).toFixed(1)}% · Overlap ${(100*shapeStatus.match.overlap).toFixed(1)}%`
-                : "Invalid material geometry"}
-            </span>}
+            {shapeStatus?.match && (
+              <span>
+                {Object.values(shapeStatus.match).every(Number.isFinite)
+                  ? `Missing ${(100 * shapeStatus.match.missing).toFixed(1)}% · Outside ${(100 * shapeStatus.match.spill).toFixed(1)}% · Overlap ${(100 * shapeStatus.match.overlap).toFixed(1)}%`
+                  : "Invalid material geometry"}
+              </span>
+            )}
           </div>
         </div>
         <div className="toolbar">
@@ -1478,7 +1609,7 @@ export function TrainingView() {
               <span>σ</span>
               <Slider
                 min={0}
-                max={0.000025}
+                max={0.025}
                 step={0.0000005}
                 value={mutationStrength}
                 onChange={setMutationStrength}
