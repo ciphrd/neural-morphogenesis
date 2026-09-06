@@ -1,7 +1,4 @@
-// Diagnostic-only sampler for both raw sensors and the exact normalized vector
-// consumed by agents.wgsl. It is dispatched for a small stable list of
-// particle-slot indices and used by trainer/capture_policy_inputs.py; it never
-// participates in training.
+
 
 const CHANNELS: u32 = __CHANNELS__u;
 const FIELD_WIDTHS: array<u32, CHANNELS> = __FIELD_WIDTHS__;
@@ -15,22 +12,29 @@ const TRACKED: u32 = __TRACKED__u;
 const ELASTIC_SCALE: f32 = __ELASTIC_SCALE__;
 const ELASTIC_ENABLED: bool = __ELASTIC_ENABLED__;
 const IN_DIM: u32 = __IN_DIM__u;
-const META_DIM: u32 = 12u;
+const META_DIM: u32 = 9u;
 const OUT_STRIDE: u32 = META_DIM + 2u * IN_DIM;
 const CHEMICAL_VALUE_INPUT_MULTIPLIER: f32 = __CHEMICAL_VALUE_INPUT_MULTIPLIER__;
 const CHEMICAL_GRADIENT_INPUT_SCALE: f32 = __CHEMICAL_GRADIENT_INPUT_SCALE__;
 const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__;
 
 struct ParticleRest {
-  growthF: vec4<f32>, jp: f32, cycleActive: f32,
-  growthAngle: f32, growthAnisotropy: f32,
-  divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, quadratureWeight: f32, domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>,
+  growthF: vec4<f32>,
+  jp: f32,
+  growthVectorX: f32,
+  growthVectorY: f32,
+  budgetGrowthRatio: f32,
+  verticesAB: vec4<f32>,
+  vertexC: vec2<f32>,
+  originalArea: f32,
+  quadratureWeight: f32,
 }
 struct ParticleMeta {
-  rng: u32, cooldown: f32, alignment: vec2<f32>,
-  color: vec4<f32>, divisionHazard: f32, divisionThreshold: f32,
-  mitosisPropensity: f32,
-  privateState: array<f32, 8>, chemicalState: array<f32, CHANNELS>,
+  color: vec4<f32>,
+  alignment: vec2<f32>,
+  growthMagnitude: f32,
+  privateState: array<f32, 8>,
+  chemicalState: array<f32, __CHANNELS__>,
 }
 @group(0) @binding(0) var<storage, read> positions: array<vec2<f32>>;
 @group(0) @binding(1) var<uniform> activeCount: u32;
@@ -46,8 +50,7 @@ struct ParticleMeta {
 fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
   return FIELD_OFFSETS[c] + y * FIELD_WIDTHS[c] + x;
 }
-// Quadratic B-spline basis shared by chemical scatter and perception.
-// Positions here use integer-centered texel coordinates (world * size - 0.5).
+
 struct Corners {
   xs: array<u32, 3>,
   ys: array<u32, 3>,
@@ -165,12 +168,12 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
   output[baseOut+0u]=1.0; output[baseOut+1u]=pos.x; output[baseOut+2u]=pos.y;
   let alignmentStrength = length(agentState.alignment);
   let heading = select(0.0, atan2(agentState.alignment.y, agentState.alignment.x), alignmentStrength > 1e-10);
-  output[baseOut+3u]=heading; output[baseOut+4u]=agentState.cooldown;
-  output[baseOut+5u]=agentState.divisionHazard; output[baseOut+6u]=agentState.divisionThreshold;
-  output[baseOut+7u]=rest.cycleActive; output[baseOut+8u]=growthArea;
-  output[baseOut+9u]=rest.growthAngle;
-  output[baseOut+10u]=rest.growthAnisotropy;
-  output[baseOut+11u]=rest.divisionBias;
+  output[baseOut+3u]=heading;
+  output[baseOut+4u]=rest.growthVectorX;
+  output[baseOut+5u]=rest.growthVectorY;
+  output[baseOut+6u]=growthArea;
+  output[baseOut+7u]=rest.budgetGrowthRatio;
+  output[baseOut+8u]=rest.originalArea;
 
   let forward = agentState.alignment;
   let lateral = vec2<f32>(-forward.y, forward.x);

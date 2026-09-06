@@ -11,7 +11,6 @@ from density import INITIAL_PACKING_SPACING_SCALE
 from training_sim import seed_blob
 from triangle_vertices import unwrap_vertices
 
-
 def check_seed_partition():
     from collections import Counter
     for count in (1, 2, 5, 7, 13, 37, 100, 256, 1000):
@@ -49,7 +48,6 @@ def check_seed_partition():
             if count >= 37:
                 assert 1-np.cos(np.pi/len(boundary)) < .02
     print('[PASS] circular boundary, conforming mesh, positive areas, uniform material density and seam wrapping')
-
 
 def check_viewer_parity():
     root = Path(__file__).resolve().parents[1]
@@ -93,7 +91,6 @@ console.log(JSON.stringify({blobs:input.map(c=>plain(seedBlob(c))),
     np.testing.assert_allclose(centers,[[.49,.495],[.5,.495],[.51,.495],
                                       [.49,.505],[.5,.505],[.51,.505]],atol=6e-8)
     print('[PASS] TypeScript/Python triangle seed parity and row count/area/ordering')
-
 
 if __name__ == "__main__":
     check_seed_partition()

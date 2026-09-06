@@ -21,7 +21,6 @@ import numpy as np
 
 from policy_parameters import CELL_MEMORY_OPTIONS
 
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -85,7 +84,6 @@ th,td{{padding:.55rem .8rem;border:1px solid #444;text-align:right}}th:first-chi
 <pre>{html.escape(' '.join(forwarded))}</pre>"""
     (args.output / "report.html").write_text(report)
     print(f"[compare] report: {args.output / 'report.html'}")
-
 
 if __name__ == "__main__":
     main()

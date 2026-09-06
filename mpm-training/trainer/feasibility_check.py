@@ -37,15 +37,12 @@ CROSS_CHECK_REFERENCE_PATH = Path(__file__).parent / "cross_check_reference.json
 
 RESULTS: list[tuple[str, str]] = []  # (name, verdict) — printed as a summary at the end
 
-
 def record(name: str, ok: bool | None, detail: str) -> None:
     verdict = "SKIP" if ok is None else ("PASS" if ok else "FAIL")
     RESULTS.append((name, verdict))
     print(f"[{verdict}] {name}: {detail}")
 
-
 # --- Check 1: atomics smoke test ---------------------------------------
-
 
 def check_atomics(device: wgpu.GPUDevice) -> bool:
     n = 10_000
@@ -82,9 +79,7 @@ def check_atomics(device: wgpu.GPUDevice) -> bool:
     record("atomics", ok, f"expected {n}, got {result}")
     return ok
 
-
 # --- Scene seeding (mirrors mls-mpm/src/worlds/util.ts's allocateScene/setRestState) ---
-
 
 def seed_blob(count: int, center: tuple[float, float], half_width: float, rng: np.random.Generator) -> tuple[np.ndarray, ...]:
     positions = center + rng.uniform(-half_width, half_width, size=(count, 2))
@@ -94,9 +89,7 @@ def seed_blob(count: int, center: tuple[float, float], half_width: float, rng: n
     Jp = np.ones((count,), dtype=np.float32)
     return positions.astype(np.float32), velocities, F, C, Jp
 
-
 # --- Check 2: no-op-gravity sanity --------------------------------------
-
 
 def check_no_gravity_drift(device: wgpu.GPUDevice) -> bool:
     core = MpmCore(device)
@@ -122,9 +115,7 @@ def check_no_gravity_drift(device: wgpu.GPUDevice) -> bool:
     )
     return ok
 
-
 # --- Check 3: settling under gravity ------------------------------------
-
 
 def check_settle(device: wgpu.GPUDevice) -> bool:
     # KNOWN, EXPECTED TO NOW FAIL: this check's whole premise (a blob
@@ -204,9 +195,7 @@ def check_settle(device: wgpu.GPUDevice) -> bool:
     )
     return ok
 
-
 # --- Check 4: cross-check against the browser sandbox (manual) ---------
-
 
 def check_cross_reference(device: wgpu.GPUDevice) -> bool | None:
     if not CROSS_CHECK_REFERENCE_PATH.exists():
@@ -266,7 +255,6 @@ def check_cross_reference(device: wgpu.GPUDevice) -> bool | None:
     )
     return ok
 
-
 def main() -> int:
     device = pick_device()
 
@@ -289,12 +277,10 @@ def main() -> int:
     print_summary()
     return 0 if all(v != "FAIL" for _, v in RESULTS) else 1
 
-
 def print_summary() -> None:
     print("\n=== Summary ===")
     for name, verdict in RESULTS:
         print(f"  {verdict:5s}  {name}")
-
 
 if __name__ == "__main__":
     sys.exit(main())

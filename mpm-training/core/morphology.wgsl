@@ -1,9 +1,7 @@
-// Simulation-owned morphology pre-pass. Renderer blur settings cannot alter
-// this field or the policy inputs derived from it. A separable Gaussian keeps
-// the once-per-controller-tick cost linear in radius rather than radius².
+
 
 const FIELD_N: u32 = __FIELD_N__u;
-const MAX_RADIUS: i32 = 8;
+const MAX_RADIUS: i32 = __MORPHOLOGY_MAX_RADIUS__;
 
 struct MorphologyParams {
   sigmaDomain: f32,

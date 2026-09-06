@@ -27,9 +27,7 @@ from policy_parameters import policy_heads, policy_hidden_dim, random_flat_polic
 from simulation_settings import *  # This experiment intentionally snapshots every shared default.
 from training_sim import TrainingRollout
 
-
 CHECKPOINTS = (0, 1, 10, 50, 100, 250, 500, 750, 1000)
-
 
 @dataclass(frozen=True)
 class ExperimentConfig:
@@ -39,7 +37,6 @@ class ExperimentConfig:
     epsilon: float
     output_dir: str
 
-
 def _density():
     return resolve_density(
         DensityReference(
@@ -48,14 +45,12 @@ def _density():
             chemical_field_n=FIELD_N,
             particle_mass=PARTICLE_MASS,
             particle_volume=VOL,
-            deposit_sigma=DEPOSIT_SIGMA,
             chemical_gradient_input_scale=CHEMICAL_GRADIENT_INPUT_SCALE,
             repulsion_strength=REPULSION_STRENGTH,
             repulsion_max_delta=REPULSION_MAX_DELTA,
         ),
         1.0,
     )
-
 
 def _build_sim(weights: np.ndarray, rollout_seed: int):
     density = _density()
@@ -71,7 +66,6 @@ def _build_sim(weights: np.ndarray, rollout_seed: int):
         substeps_per_macro=DEFAULT_SUBSTEPS_PER_MACRO,
         particle_mass=density.particle_mass,
         particle_volume=density.particle_volume,
-        growth_max=GROWTH_MAX,
         growth_anisotropy=GROWTH_ANISOTROPY_AUTHORITY,
         growth_compression_start=GROWTH_COMPRESSION_START,
         growth_compression_stop=GROWTH_COMPRESSION_STOP,
@@ -81,61 +75,16 @@ def _build_sim(weights: np.ndarray, rollout_seed: int):
     core.set_splat_radius(density.splat_radius)
     core.set_repulsion_strength(density.repulsion_strength, density.repulsion_max_delta)
 
-    environment = EnvironmentGPU(
-        device,
-        CHEM_CHANNELS,
-        FIELD_N,
-        FIELD_N,
-        DECAY,
-        DEPOSIT_RATE,
-        CHEMICAL_COMMUNICATION_ARCHITECTURE,
-        NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-        DEPOSIT_DENSITY_REFERENCE,
-        grid_velocity=core.grid_vel,
-        channel_profiles=CHEMICAL_CHANNEL_PROFILES,
-    )
-    agents = AgentsGPU(
-        device,
-        core,
-        environment,
-        CHEM_CHANNELS,
-        policy_hidden_dim(POLICY_ARCHITECTURE),
-        MAX_ACCEL,
-        MAX_STRAFE,
-        MAX_ENV_WRITE,
-        MAX_ANGULAR_ACCEL,
-        ANGULAR_DAMPING,
-        MAX_ANGULAR_VELOCITY,
-        CHIRALITY,
-        DEPOSIT_DISTANCE,
-        density.particle_cap,
-        density.spacing,
-        DIVISION_COOLDOWN,
-        FRICTION,
-        density.deposit_sigma,
-        1.0,
-        DEFAULT_RUN_SETTINGS["spawnX"],
-        DEFAULT_RUN_SETTINGS["spawnY"],
-        ELASTIC_STRAIN_SCALE,
-        ELASTIC_STRAIN_INPUTS_ENABLED,
-        policy_architecture=POLICY_ARCHITECTURE,
-        internal_state_speed=INTERNAL_STATE_SPEED,
-        division_directionality=DIVISION_DIRECTIONALITY,
-        division_drive_boost=DIVISION_DRIVE_BOOST,
-        chemical_communication_architecture=CHEMICAL_COMMUNICATION_ARCHITECTURE,
-        growth_compression_start=GROWTH_COMPRESSION_START,
-        growth_compression_stop=GROWTH_COMPRESSION_STOP,
-        growth_compression_feedback=GROWTH_COMPRESSION_FEEDBACK,
-    )
+    environment = EnvironmentGPU(device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE, CHEMICAL_COMMUNICATION_ARCHITECTURE, NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY, grid_velocity=core.grid_vel, channel_profiles=CHEMICAL_CHANNEL_PROFILES)
+    agents = AgentsGPU(device, core, environment, CHEM_CHANNELS, policy_hidden_dim(POLICY_ARCHITECTURE), MAX_ENV_WRITE, density.particle_cap, density.spacing, FRICTION, 1.0, DEFAULT_RUN_SETTINGS['spawnX'], DEFAULT_RUN_SETTINGS['spawnY'], ELASTIC_STRAIN_SCALE, ELASTIC_STRAIN_INPUTS_ENABLED, policy_architecture=POLICY_ARCHITECTURE, internal_state_speed=INTERNAL_STATE_SPEED, chemical_communication_architecture=CHEMICAL_COMMUNICATION_ARCHITECTURE,   )
     agents.load_weights(weights)
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
-    agents.set_chemical_projection_weight(density.chemical_projection_weight)
+
     sim = TrainingRollout(
         core,
         agents,
         environment,
         spawn_center=(DEFAULT_RUN_SETTINGS["spawnX"], DEFAULT_RUN_SETTINGS["spawnY"]),
-        spawn_half_width=DEFAULT_RUN_SETTINGS["spawnHalfWidth"],
         gravity=DEFAULT_RUN_SETTINGS["gravity"],
         seed=rollout_seed,
         mpm_enabled=MPM_ENABLED,
@@ -144,7 +93,6 @@ def _build_sim(weights: np.ndarray, rollout_seed: int):
         initial_particle_count=density.initial_particles,
     )
     return core, sim
-
 
 def _capture(core: MpmCore, agents: AgentsGPU) -> dict[str, np.ndarray]:
     count = core.active_count
@@ -162,13 +110,10 @@ def _capture(core: MpmCore, agents: AgentsGPU) -> dict[str, np.ndarray]:
         "rest_state": core.read_rest_state(),
         "agent_alignment": meta["alignment"].copy(),
         "agent_color": meta["color"].copy(),
-        "agent_division_hazard": meta["divisionHazard"].copy(),
-        "agent_division_threshold": meta["divisionThreshold"].copy(),
-        "agent_mitosis_propensity": meta["mitosisPropensity"].copy(),
+        "agent_growth_magnitude": meta["growthMagnitude"].copy(),
         "agent_private_state": meta["privateState"].copy(),
         "agent_chemical_state": meta["chemicalState"].copy(),
     }
-
 
 def _run_variant(payload: tuple[str, np.ndarray, ExperimentConfig]) -> str:
     name, weights, config = payload
@@ -190,7 +135,6 @@ def _run_variant(payload: tuple[str, np.ndarray, ExperimentConfig]) -> str:
     }
     np.savez_compressed(path, **flat)
     return str(path)
-
 
 def _cloud_metrics(a: np.ndarray, b: np.ndarray) -> dict[str, float | int | None]:
     out: dict[str, float | int | None] = {
@@ -220,7 +164,6 @@ def _cloud_metrics(a: np.ndarray, b: np.ndarray) -> dict[str, float | int | None
     out["perturbed_rms_radius"] = float(np.sqrt(np.mean(np.sum((b64 - cb) ** 2, axis=1))))
     return out
 
-
 def _draw_clouds(a: np.ndarray, b: np.ndarray, path: Path, title: str) -> None:
     size, margin = 720, 42
     image = Image.new("RGB", (size, size + 48), (12, 16, 24))
@@ -235,14 +178,12 @@ def _draw_clouds(a: np.ndarray, b: np.ndarray, path: Path, title: str) -> None:
     draw.text((margin, size + 10), "blue = baseline    orange = +epsilon", fill=(200, 205, 216))
     image.save(path)
 
-
 def _fmt(value: object) -> str:
     if value is None:
         return "n/a"
     if isinstance(value, int):
         return str(value)
     return f"{float(value):.8g}"
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -412,7 +353,7 @@ Blue is the baseline output; orange is the one-weight-perturbed output.
 |---:|---:|---:|---:|---:|---:|---:|---:|
 {rows}
 
-Chamfer is the symmetric nearest-neighbor distance between raw output point clouds. Paired values compare particles by stable slot index for the shared prefix. "Saved values" covers positions, velocities, deformation, affine state, tensor-growth/rest state, channel-index-3-gradient alignment, color, division hazard/threshold/propensity, recurrent private state, and per-agent chemical state. Coordinates use the simulation's unit-square domain.
+Chamfer is the symmetric nearest-neighbor distance between raw output point clouds. Paired values compare particles by stable slot index for the shared prefix. "Saved values" covers positions, velocities, deformation, affine state, tensor-growth/rest state, channel-index-3-gradient alignment, color, growth magnitude, recurrent private state, and per-agent chemical state. Coordinates use the simulation's unit-square domain.
 
 ## Output files
 
@@ -423,14 +364,12 @@ Chamfer is the symmetric nearest-neighbor distance between raw output point clou
 
 ## Interpretation
 
-This random brain never initiated growth: both runs stayed at five particles. The changed weight feeds the division-drive output, and the perturbation produced small float32 differences in `agent_mitosis_propensity` and accumulated `agent_division_hazard` (maximum saved delta `{_fmt(final['max_abs_state_delta'])}` at frame {args.frames:,}). Those differences never crossed a stochastic division threshold. Because the current shared defaults also set translational acceleration controls to zero, there was no alternate motion pathway through which this particular weight could affect position. The observed effect for this controlled pair is therefore **measurable inside the division controller, but zero in the spatial/physical output**.
 
 This is a deterministic paired sensitivity test for one randomly initialized policy, not a population-level estimate. A single zero-effect run does not show that every weight is insensitive. Estimating typical sensitivity would require repeating the pair across weights, policy seeds, and rollout seeds.
 """
     (args.output_dir / "REPORT.md").write_text(report)
     print(f"wrote {args.output_dir / 'REPORT.md'}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

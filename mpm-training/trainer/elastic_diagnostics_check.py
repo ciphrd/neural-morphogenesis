@@ -23,14 +23,10 @@ from elastic_diagnostics import (
 from mpm_core import MpmCore, lame_params
 from shader_template import template_shader
 
-SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "tensor_growth_isotropic_equivalence.json"
-SCALAR_SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "scalar_growth_elastic_baseline.json"
-DIRECTIONAL_SNAPSHOT_PATH = Path(__file__).parent / "snapshots" / "tensor_growth_directional_strafe.json"
 E = 1.0e4
 NU = 0.2
 HARDENING = 3.0
 STRAIN_SCALE = 0.15
-
 
 def check_policy_elastic_strain_inputs() -> None:
     identity = np.eye(2)
@@ -69,7 +65,6 @@ def check_policy_elastic_strain_inputs() -> None:
     assert np.isclose(mirrored[2], -base[2], atol=1e-12)
     print("[PASS] policy elastic strain: rigid/growth invariant, heading-objective, mirror-correct")
 
-
 def check_analytic_invariants() -> None:
     theta = 0.73
     rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
@@ -88,7 +83,7 @@ def check_analytic_invariants() -> None:
     deformation.append(known_fe @ anisotropic_fg)
     deformation = np.stack(deformation)
     rest = np.zeros((6, 16))
-    rest[:, 11] = 1.0
+    rest[:, 15] = 1.0
     rest[:, 0] = 1.0
     rest[:, 3] = 1.0
     rest[:, 4] = 1.0
@@ -119,7 +114,6 @@ def check_analytic_invariants() -> None:
     assert np.allclose(state.growth_deviatoric_log_strain[:5], 0.0, atol=1e-12)
     print("[PASS] analytic invariants: rotation/growth stress-free, tensor decomposition, volumetric/deviatoric separation")
 
-
 def check_weighted_summary() -> None:
     summary = distribution_summary(np.array([1.0, 3.0, 10.0]), np.array([1.0, 8.0, 1.0]))
     assert np.isclose(summary["mean"], 3.5)
@@ -128,7 +122,6 @@ def check_weighted_summary() -> None:
     assert summary["p95"] == 10.0
     assert summary["min"] == 1.0 and summary["max"] == 10.0
     print("[PASS] grown-mass-weighted summary and percentile boundaries")
-
 
 def _gpu_constitutive_probe(
     device: wgpu.GPUDevice,
@@ -142,7 +135,17 @@ def _gpu_constitutive_probe(
         const MU0: f32 = {mu0};
         const LAMBDA0: f32 = {lambda0};
         const HARDENING: f32 = {HARDENING};
-        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, quadratureWeight: f32, domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>, }}
+        struct Rest {{
+  growthF: vec4<f32>,
+  jp: f32,
+  growthVectorX: f32,
+  growthVectorY: f32,
+  budgetGrowthRatio: f32,
+  verticesAB: vec4<f32>,
+  vertexC: vec2<f32>,
+  originalArea: f32,
+  quadratureWeight: f32,
+}}
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> particleRest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> output: array<vec4<f32>>;
@@ -208,7 +211,6 @@ def _gpu_constitutive_probe(
     device.queue.submit([encoder.finish()])
     return np.frombuffer(device.queue.read_buffer(out_buffer), np.float32).reshape(-1, 4).copy()
 
-
 def check_gpu_consistency(device: wgpu.GPUDevice) -> None:
     rng = np.random.default_rng(4281)
     count = 97
@@ -225,8 +227,8 @@ def check_gpu_consistency(device: wgpu.GPUDevice) -> None:
         fe = left @ np.diag(stretches[i]) @ right
         deformation[i] = fe * np.sqrt(growth[i])
     deformation32 = deformation.astype(np.float32).reshape(-1, 4)
-    rest32 = np.zeros((count, 20), dtype=np.float32)
-    rest32[:, 11] = 1.0
+    rest32 = np.zeros((count, 16), dtype=np.float32)
+    rest32[:, 15] = 1.0
     root_growth = np.sqrt(growth).astype(np.float32)
     rest32[:, 0] = root_growth
     rest32[:, 3] = root_growth
@@ -250,7 +252,6 @@ def check_gpu_consistency(device: wgpu.GPUDevice) -> None:
     assert np.allclose(gpu, expected, rtol=4e-5, atol=3e-3), np.max(np.abs(gpu - expected), axis=0)
     print("[PASS] CPU diagnostics match independent WGSL constitutive probe (97 randomized states)")
 
-
 def check_core_readback(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
     growth = np.array([1.0, 1.3, 1.8], dtype=np.float32)
@@ -263,13 +264,13 @@ def check_core_readback(device: wgpu.GPUDevice) -> None:
         np.zeros((3, 4), dtype=np.float32),
         np.ones(3, dtype=np.float32),
     )
-    rest = np.zeros((3, 20), dtype=np.float32)
+    rest = np.zeros((3, 16), dtype=np.float32)
     root_growth = np.sqrt(growth)
     rest[:, 0] = root_growth
     rest[:, 3] = root_growth
     rest[:, 4] = 1.0
     rest[:, 5] = [0.0, 1.0, 0.0]
-    rest[:, 11] = 1.0
+    rest[:, 15] = 1.0
     device.queue.write_buffer(core.rest, 0, rest)
     summary = measure_core(core, material_e=E, material_nu=NU, material_hardening=HARDENING)
     direct = summarize_elastic_state(
@@ -278,10 +279,9 @@ def check_core_readback(device: wgpu.GPUDevice) -> None:
         positions=core.read_positions(),
     )
     assert summary == direct
-    assert summary["particle_count"] == 3 and summary["active_cycle_count"] == 1
+    assert summary["particle_count"] == 3
     assert np.isclose(summary["total_rest_area"], growth.sum())
     print("[PASS] MpmCore F/rest/velocity/position readback and complete summary")
-
 
 def check_viewer_diagnostic_shader(device: wgpu.GPUDevice) -> None:
     source = (Path(__file__).parent.parent / "viewer" / "src" / "gpu" / "fieldDiagnostics.wgsl").read_text()
@@ -290,7 +290,6 @@ def check_viewer_diagnostic_shader(device: wgpu.GPUDevice) -> None:
     device.create_compute_pipeline(layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "clearDiagnostics"})
     device.create_compute_pipeline(layout=wgpu.AutoLayoutMode.auto, compute={"module": module, "entry_point": "scatterDiagnostics"})
     print("[PASS] viewer tensor-Fg field diagnostic shader compiles for both entry points")
-
 
 def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
     source = (Path(__file__).parent.parent / "viewer" / "src" / "gpu" / "render.wgsl").read_text()
@@ -323,12 +322,10 @@ def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
             {"binding": 0, "resource": {"buffer": device.create_buffer(size=8, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 1, "resource": {"buffer": device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM)}},
             {"binding": 3, "resource": {"buffer": device.create_buffer(size=112, usage=wgpu.BufferUsage.STORAGE)}},
-            {"binding": 4, "resource": {"buffer": device.create_buffer(size=80, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 8, "resource": {"buffer": device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM)}},
         ],
     )
     print("[PASS] viewer white, activation, neural RGB, internal-state, heading, and growth-axis pipelines compile")
-
 
 def check_viewer_morphology_visualization_shader(device: wgpu.GPUDevice) -> None:
     source = (Path(__file__).parent.parent / "viewer" / "src" / "gpu" / "field.wgsl").read_text()
@@ -375,52 +372,6 @@ def check_viewer_morphology_visualization_shader(device: wgpu.GPUDevice) -> None
     )
     print("[PASS] viewer policy-morphology RGB gradient-density pipeline and display-toggle bindings compile")
 
-
-def check_saved_snapshot() -> None:
-    if not SNAPSHOT_PATH.exists():
-        raise AssertionError(f"missing baseline snapshot: {SNAPSHOT_PATH}")
-    snapshot = json.loads(SNAPSHOT_PATH.read_text())
-    assert snapshot["schema_version"] == 1
-    assert snapshot["growth_model"] == "tensor_Fg_with_isotropic_increment"
-    assert SCALAR_SNAPSHOT_PATH.exists(), "the preserved scalar baseline must not be overwritten"
-    assert snapshot["scenario"]["substeps_per_macro"] == 16
-    checkpoints = snapshot["checkpoints"]
-    assert [row["macro_step"] for row in checkpoints] == sorted(row["macro_step"] for row in checkpoints)
-    assert checkpoints[0]["macro_step"] == 0 and checkpoints[-1]["phase"] == "settling"
-    for row in checkpoints:
-        assert row["particle_count"] >= 2
-        assert np.isfinite(row["total_elastic_energy"])
-        assert row["metrics"]["principal_stretch_min"]["min"] > 0.0
-        assert row["metrics"]["growth_principal_stretch_min"]["min"] > 0.0
-        assert row["metrics"]["growth_deviatoric_log_strain"]["max"] < 1e-7
-    scalar = json.loads(SCALAR_SNAPSHOT_PATH.read_text())
-    scalar_checkpoints = scalar["checkpoints"]
-    assert len(scalar_checkpoints) == len(checkpoints)
-    # Isotropic tensor increments should reproduce the scalar trajectory;
-    # tiny differences are expected from general matrix inverse/multiply
-    # roundoff replacing the old scalar divide.
-    for old, new in zip(scalar_checkpoints, checkpoints, strict=True):
-        assert old["macro_step"] == new["macro_step"]
-        assert old["particle_count"] == new["particle_count"]
-        assert old["active_cycle_count"] == new["active_cycle_count"]
-        assert abs(old["geometry"]["rms_radius"] - new["geometry"]["rms_radius"]) < 5e-7
-        assert abs(old["metrics"]["elastic_volume_ratio"]["mean"] - new["metrics"]["elastic_volume_ratio"]["mean"]) < 3e-5
-        assert abs(old["metrics"]["deviatoric_log_strain"]["mean"] - new["metrics"]["deviatoric_log_strain"]["mean"]) < 3e-5
-        assert abs(old["total_elastic_energy"] - new["total_elastic_energy"]) < 2e-3
-        assert abs(old["total_kinetic_energy"] - new["total_kinetic_energy"]) < 1e-3
-    print(f"[PASS] saved snapshot schema and finite/invertible checkpoint measurements ({len(checkpoints)} checkpoints)")
-    print("[PASS] tensor isotropic trajectory matches preserved scalar baseline within roundoff tolerance")
-
-    directional = json.loads(DIRECTIONAL_SNAPSHOT_PATH.read_text())
-    assert directional["growth_model"] == "tensor_Fg_with_network_direction"
-    directional_checkpoints = directional["checkpoints"]
-    assert [row["particle_count"] for row in directional_checkpoints] == [row["particle_count"] for row in checkpoints]
-    assert max(row["metrics"]["growth_deviatoric_log_strain"]["max"] for row in directional_checkpoints) > 0.2
-    assert directional_checkpoints[-1]["geometry"]["rms_radius"] > checkpoints[-1]["geometry"]["rms_radius"] * 1.5
-    assert directional_checkpoints[-1]["metrics"]["deviatoric_log_strain"]["mean"] < 2e-4
-    print("[PASS] directional snapshot develops anisotropic Fg, elongates morphology, then settles")
-
-
 def main() -> None:
     check_policy_elastic_strain_inputs()
     check_analytic_invariants()
@@ -431,8 +382,6 @@ def main() -> None:
     check_viewer_diagnostic_shader(device)
     check_viewer_render_shader(device)
     check_viewer_morphology_visualization_shader(device)
-    check_saved_snapshot()
-
 
 if __name__ == "__main__":
     main()

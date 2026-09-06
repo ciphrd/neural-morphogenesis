@@ -1,6 +1,8 @@
+import { DEFAULT_RUN_SETTINGS } from "./net/settingsStorage"
+import canonicalConfig from "../../core/config.json"
 import { InitialConditionControls, type InitialConditionSettings } from "./controls/InitialConditionControls"
 import { useEffect, useMemo, useRef, useState } from "react"
-import coreConstants from "../../core/constants.json"
+import coreConstantsConfig from "../../core/config.json";
 import { FitnessChart } from "./charts/FitnessChart"
 import { randomPolicySeed, randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
@@ -47,8 +49,8 @@ import { SampleSweepModal, sweepValues } from "./ui/SampleSweepModal"
 import { Slider } from "./ui/Slider"
 import { VIEWER_DEFAULTS } from "./viewerConfig"
 
-const TRAIN_API_URL = "http://localhost:8003"
-const TRAIN_WS_URL = "ws://localhost:8003/ws"
+const TRAIN_API_URL = `http://${canonicalConfig.server.host}:${canonicalConfig.server.port}`
+const TRAIN_WS_URL = `ws://${canonicalConfig.server.host}:${canonicalConfig.server.port}/ws`
 
 // A pure browser feature-check (no canvas/mount needed — see
 // pickRecordingFormat()'s own docstring), so it's computed once here
@@ -176,7 +178,7 @@ export function TrainingView() {
   const [directionalLineVisible, setDirectionalLineVisible] = useState(
     VIEWER_DEFAULTS.rendering.directionalLineVisible
   )
-  const [domainVisible, setDomainVisible] = useState(false)
+  const [domainVisible, setDomainVisible] = useState(VIEWER_DEFAULTS.rendering.domainVisible)
   const [growthLineVisible, setGrowthLineVisible] = useState(
     VIEWER_DEFAULTS.rendering.growthLineVisible
   )
@@ -216,8 +218,8 @@ export function TrainingView() {
   const [targetVisible, setTargetVisible] = useState(
     VIEWER_DEFAULTS.rendering.targetVisible
   )
-  const [mitosisSignalBoost, setMitosisSignalBoost] = useState(
-    VIEWER_DEFAULTS.rendering.mitosisSignalBoost
+  const [growthMagnitudeBoost, setGrowthMagnitudeBoost] = useState(
+    VIEWER_DEFAULTS.rendering.growthMagnitudeBoost
   )
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(
     VIEWER_DEFAULTS.rendering.internalStateChannelStart
@@ -256,9 +258,6 @@ export function TrainingView() {
   const [initialConditionOverride, setInitialConditionOverride] = useState<InitialConditionSettings | null>(null)
   const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
     useState<ChemicalCommunicationArchitecture | null>(null)
-  const [chiralityOverride, setChiralityOverride] = useState<boolean | null>(
-    null
-  )
   const [particleDensityOverride, setParticleDensityOverride] = useState<
     number | null
   >(null)
@@ -267,7 +266,6 @@ export function TrainingView() {
   useEffect(() => {
     setInitialConditionOverride(null)
     setChemicalArchitectureOverride(null)
-    setChiralityOverride(null)
     setParticleDensityOverride(null)
     setSubstrateResolutionOverride(null)
   }, [viewingRunId, activeConfig?.generation])
@@ -294,13 +292,11 @@ export function TrainingView() {
     )
   )
   const defaultSubstrateResolution =
-    VIEWER_DEFAULTS.playback.substrateResolution ?? activeConfig?.fieldN ?? 256
+    VIEWER_DEFAULTS.playback.substrateResolution ?? activeConfig?.fieldN ?? canonicalConfig.run.fieldN
   const effectiveSubstrateResolution =
     substrateResolutionOverride ?? defaultSubstrateResolution
-  const effectiveChirality =
-    chiralityOverride ?? activeConfig?.chirality ?? true
   const initialMemory = policyExploration?.cellMemory ?? (activeConfig ? cellMemoryFromConfig(activeConfig) : "none")
-  const selectedInitialCondition = initialConditionOverride?.initialCondition ?? activeConfig?.initialCondition ?? "none"
+  const selectedInitialCondition = initialConditionOverride?.initialCondition ?? activeConfig?.initialCondition ?? DEFAULT_RUN_SETTINGS.initialCondition
   const effectiveInitialCondition = selectedInitialCondition === "internal-state" && initialMemory !== "recurrent" ? "none" : selectedInitialCondition
   const playbackConfig = useMemo(() => {
     if (!activeConfig) return null
@@ -313,7 +309,6 @@ export function TrainingView() {
         chemicalCommunicationArchitecture:
           chemicalArchitectureOverride ??
           chemicalCommunicationArchitectureFromConfig(activeConfig),
-        chirality: effectiveChirality,
       },
       effectiveParticleDensity
     )
@@ -323,7 +318,6 @@ export function TrainingView() {
     chemicalArchitectureOverride,
     initialConditionOverride,
     effectiveInitialCondition,
-    effectiveChirality,
     effectiveParticleDensity,
     effectiveSubstrateResolution,
   ])
@@ -375,7 +369,7 @@ export function TrainingView() {
     if (!previewConfig || !mutatedWeights) return previewConfig
     return { ...previewConfig, weights: mutatedWeights }
   }, [previewConfig, mutatedWeights])
-  const [policyWeightGain, setPolicyWeightGain] = useState(1)
+  const [policyWeightGain, setPolicyWeightGain] = useState(VIEWER_DEFAULTS.policyExploration.weightGain)
   const weightedPreviewConfig = useMemo(() => {
     if (!activeBrainConfig || policyWeightGain === 1) return activeBrainConfig
     return {
@@ -391,7 +385,7 @@ export function TrainingView() {
       },
     }
   }, [activeBrainConfig, policyWeightGain])
-  const [mutationStrength, setMutationStrength] = useState(0.000005)
+  const [mutationStrength, setMutationStrength] = useState(VIEWER_DEFAULTS.policyExploration.mutationStrength)
   const mutateActiveBrain = () => {
     if (!activeBrainConfig || mutationStrength <= 0) return
     setMutation({
@@ -399,7 +393,7 @@ export function TrainingView() {
       weights: mutatePolicyWeights(
         activeBrainConfig.weights,
         activeBrainConfig.channels,
-        activeBrainConfig.policyArchitecture ?? "stateless-128",
+        activeBrainConfig.policyArchitecture,
         mutationStrength
       ),
     })
@@ -427,7 +421,7 @@ export function TrainingView() {
     const runKey = [
       viewingRunId ?? "current",
       activeConfig.particles,
-      activeConfig.initialParticleCount ?? coreConstants.INITIAL_PARTICLE_COUNT,
+      activeConfig.initialParticleCount,
     ].join(":")
     if (particleCapRunRef.current === runKey) return
     particleCapRunRef.current = runKey
@@ -444,7 +438,7 @@ export function TrainingView() {
         Math.floor(
           VIEWER_DEFAULTS.playback.initialParticleCount ??
             activeConfig.initialParticleCount ??
-            coreConstants.INITIAL_PARTICLE_COUNT
+            coreConstantsConfig.run.initialParticleCount
         )
       )
     )
@@ -563,9 +557,7 @@ export function TrainingView() {
         "particleMass",
         "particleVolume",
         "chemicalGradientInputScale",
-        "chemicalProjectionWeight",
-        "depositSigma",
-        "splitDisplacement",
+        "sampleSpacing",
         "splatRadius",
         "repulsionStrength",
         "repulsionMaxDelta",
@@ -842,22 +834,6 @@ export function TrainingView() {
                   ))}
               </select>
             </div>
-            <label
-              className="checkbox-row"
-              title="Changing chirality rebuilds and restarts playback"
-            >
-              <input
-                type="checkbox"
-                checked={effectiveChirality}
-                disabled={!activeConfig}
-                onChange={(event) => {
-                  const trained = activeConfig?.chirality ?? true
-                  const selected = event.target.checked
-                  setChiralityOverride(selected === trained ? null : selected)
-                }}
-              />
-              Chirality
-            </label>
             <label className="slider-row playback-cap-row">
               <span>Playback sample cap (at 1×)</span>
               <Slider
@@ -1078,8 +1054,8 @@ export function TrainingView() {
               }
             >
               <option value="white">White</option>
-              <option value="neural-color">Neural RGB</option>
-              <option value="mitosis-drive">Growth magnitude</option>
+              <option value="neural-color">NN output</option>
+              <option value="growth-magnitude">Growth magnitude</option>
               <option value="neural-memory">Neural memory</option>
               <option value="chemical-memory">Chemical memory</option>
               <option value="boundary-value">Boundary value</option>
@@ -1117,18 +1093,18 @@ export function TrainingView() {
             />
             Growth direction (green)
           </label>
-          {particleColorMode === "mitosis-drive" && (
+          {particleColorMode === "growth-magnitude" && (
             <label className="slider-row">
               <span>Magnitude boost</span>
               <Slider
                 min={1}
                 max={10}
                 step={0.1}
-                value={mitosisSignalBoost}
-                onChange={setMitosisSignalBoost}
+                value={growthMagnitudeBoost}
+                onChange={setGrowthMagnitudeBoost}
               />
               <span className="slider-value">
-                {mitosisSignalBoost.toFixed(1)}×
+                {growthMagnitudeBoost.toFixed(1)}×
               </span>
             </label>
           )}
@@ -1395,7 +1371,7 @@ export function TrainingView() {
             onEffectiveZoomChange={setEffectiveZoom}
             bloom={bloom}
             particleRadiusPx={particleRadiusPx}
-            mitosisSignalBoost={mitosisSignalBoost}
+            growthMagnitudeBoost={growthMagnitudeBoost}
             boundaryGradientScale={boundaryGradientScale}
             internalStateChannelStart={internalStateChannelStart}
             chemicalMemoryOpponentSubtraction={

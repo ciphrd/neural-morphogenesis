@@ -4,7 +4,6 @@ Both constructions emit twice the material-unit count. Mirrored in rng.ts.
 """
 import numpy as np
 
-
 def triangulate_seed_cells(positions, half_edges):
     positions = np.asarray(positions, dtype=np.float64).reshape(-1, 2)
     h = np.asarray(half_edges, dtype=np.float64).reshape(-1, 2, 2)
@@ -37,15 +36,7 @@ def triangulate_seed_cells(positions, half_edges):
     return (centers.astype(np.float32), vertices.reshape(-1,6),
             np.full(2*len(positions), .5, dtype=np.float32))
 
-
 def triangulate_seed_disk(count, center, spacing, theta):
-    """A conforming concentric-ring disk with exactly 2*count triangles.
-
-    Ring populations grow with circumference. The Euler disk identity
-    T = 2*interior_vertices + boundary_vertices - 2 fixes the final ring.
-    Preserve the legacy packed-cell area, with area-proportional weights.
-    A one-cell budget can only represent a quadrilateral (two triangles).
-    """
     if count < 1 or int(count) != count or not np.isfinite(spacing) or spacing <= 0:
         raise ValueError('Disk seeds require a positive integer count and spacing')
     total = 2*count

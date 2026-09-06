@@ -8,10 +8,8 @@ from initial_conditions import InitialCondition, PRESETS, validate_initial_condi
 from training_sim import seed_blob, TrainingRollout
 from density import INITIAL_PACKING_SPACING_SCALE
 
-
 def radius(count=37):
     return np.sqrt(count*(.01*INITIAL_PACKING_SPACING_SCALE)**2*np.sqrt(3)/(2*np.pi))
-
 
 def check_cpu():
     root = Path(__file__).resolve().parents[1]
@@ -55,7 +53,6 @@ console.log(JSON.stringify([scene.positions,scene.F,scene.domain,state.chemistry
         else: raise AssertionError(args)
     print('[PASS] All presets: material area, positive deformation, seam wrapping, zero-strength baseline, validation, Python/browser parity')
 
-
 def check_gpu():
     from device import pick_device
     from mpm_core import MpmCore
@@ -64,11 +61,8 @@ def check_gpu():
     device = pick_device()
     core = MpmCore(device)
     for architecture in ('cell-owned-projection','persistent-environment'):
-        env = EnvironmentGPU(device,9,64,64,1.,1., chemical_communication_architecture=architecture)
-        agents = AgentsGPU(device, core, env, 9, 128,
-                           0., 0., 1., 1.4, .8, .1, False, 0.,
-                           128, .01, 1., 1., .01, 1., .5, .5,
-                           policy_architecture='stateful-128', chemical_communication_architecture=architecture)
+        env = EnvironmentGPU(device, 9, 64, 64, 1.0, 1.0, chemical_communication_architecture=architecture)
+        agents = AgentsGPU(device, core, env, 9, 128, 1.0, 128, 0.01, 1.0, 1.0, 0.5, 0.5, policy_architecture='stateful-128', chemical_communication_architecture=architecture)
         for preset in PRESETS:
             rollout = TrainingRollout(core,agents,env,(.5,.5),.01,0.,17,
                                       initial_particle_count=37, initial_condition=preset,
@@ -93,7 +87,6 @@ def check_gpu():
             assert not reset['chemicalState'].any() and not reset['privateState'].any()
             assert not np.frombuffer(device.queue.read_buffer(env.buffers[0]),np.float32).any()
     print('[PASS] GPU: both chemistry architectures, initial state upload, first tick, reset clears all cues')
-
 
 if __name__ == '__main__':
     check_cpu()

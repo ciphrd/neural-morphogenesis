@@ -1,3 +1,4 @@
+import { VIEWER_DEFAULTS } from "../viewerConfig";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { DeformDirection, DeformMode } from "../gpu/deform";
 import type { BloomSettings } from "../gpu/bloom";
@@ -51,12 +52,6 @@ interface GridCanvasProps {
   targetPoints: Float32Array | null;
   /** Rendering-only visibility of the training-target overlay. */
   targetVisible?: boolean;
-  // Live gravity/decay/maxAccel/maxStrafe/maxEnvWrite for the Physics
-  // panel's sliders — the caller (TrainingView) always resolves this to
-  // a concrete value once a config is loaded (either the config's own
-  // trained values, or the user's in-progress override); null only means
-  // nothing has loaded yet. Applied via a plain uniform-buffer write
-  // (GpuSimulation.setPhysics()), never a rebuild.
   physics: PhysicsSettings | null;
   /** Playback-only growth/interaction cap; does not alter training. */
   particleCap?: number;
@@ -78,7 +73,7 @@ interface GridCanvasProps {
   domainVisible?: boolean;
   particleRadiusPx?: number;
   /** Visualization-only multiplier for growth-vector magnitude. */
-  mitosisSignalBoost?: number;
+  growthMagnitudeBoost?: number;
   /** Boundary diagnostic half-activation gradient g0. */
   boundaryGradientScale?: number;
   /** First of three contiguous private-state channels mapped to cell RGB. */
@@ -292,39 +287,39 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     config,
     scenario = null,
     targetPoints,
-    targetVisible = true,
+    targetVisible = VIEWER_DEFAULTS.rendering.targetVisible,
     physics,
     particleCap,
     initialParticleCount,
-    fieldMode = "none",
-    substrateChannelStart = 0,
-    substrateZeroIsBlack = false,
-    boundaryGradientZeroIsBlack = false,
-    particleShape = "dot",
-    particleColorMode = "white",
-    particleAlpha = 1,
-    directionalLineVisible = false,
-    growthLineVisible = false,
-    domainVisible = false,
+    fieldMode = VIEWER_DEFAULTS.rendering.fieldMode,
+    substrateChannelStart = VIEWER_DEFAULTS.rendering.substrateChannelStart,
+    substrateZeroIsBlack = VIEWER_DEFAULTS.rendering.substrateZeroIsBlack,
+    boundaryGradientZeroIsBlack = VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack,
+    particleShape = VIEWER_DEFAULTS.rendering.particleShape,
+    particleColorMode = VIEWER_DEFAULTS.rendering.particleColorMode,
+    particleAlpha = VIEWER_DEFAULTS.rendering.particleAlpha,
+    directionalLineVisible = VIEWER_DEFAULTS.rendering.directionalLineVisible,
+    growthLineVisible = VIEWER_DEFAULTS.rendering.growthLineVisible,
+    domainVisible = VIEWER_DEFAULTS.rendering.domainVisible,
     particleRadiusPx,
-    mitosisSignalBoost = 1,
-    boundaryGradientScale = 0.01,
-    internalStateChannelStart = 0,
-    chemicalMemoryOpponentSubtraction = 0,
-    accent = 0,
-    morphologyGradientVisible = true,
-    morphologyDensityVisible = true,
-    blur = 0,
-    gradientExponent = 1,
+    growthMagnitudeBoost = VIEWER_DEFAULTS.rendering.growthMagnitudeBoost,
+    boundaryGradientScale = VIEWER_DEFAULTS.rendering.boundaryGradientScale,
+    internalStateChannelStart = VIEWER_DEFAULTS.rendering.internalStateChannelStart,
+    chemicalMemoryOpponentSubtraction = VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction,
+    accent = VIEWER_DEFAULTS.rendering.accent,
+    morphologyGradientVisible = VIEWER_DEFAULTS.rendering.morphologyGradientVisible,
+    morphologyDensityVisible = VIEWER_DEFAULTS.rendering.morphologyDensityVisible,
+    blur = VIEWER_DEFAULTS.rendering.blur,
+    gradientExponent = VIEWER_DEFAULTS.rendering.gradientExponent,
     bloom,
-    zoom = 1,
+    zoom = VIEWER_DEFAULTS.rendering.zoom,
     autoZoom,
     onEffectiveZoomChange,
-    tool = "none",
+    tool = VIEWER_DEFAULTS.tools.selected,
     deformSettings,
     onStep,
-    loopAtTrainedSteps = true,
-    paused = false,
+    loopAtTrainedSteps = VIEWER_DEFAULTS.playback.loopAtTrainedSteps,
+    paused = VIEWER_DEFAULTS.playback.paused,
   },
   ref
 ) {
@@ -349,7 +344,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const growthLineVisibleRef = useRef(growthLineVisible);
   const domainVisibleRef = useRef(domainVisible);
   const particleRadiusPxRef = useRef(particleRadiusPx);
-  const mitosisSignalBoostRef = useRef(mitosisSignalBoost);
+  const growthMagnitudeBoostRef = useRef(growthMagnitudeBoost);
   const boundaryGradientScaleRef = useRef(boundaryGradientScale);
   const internalStateChannelStartRef = useRef(internalStateChannelStart);
   const chemicalMemoryOpponentSubtractionRef = useRef(chemicalMemoryOpponentSubtraction);
@@ -497,7 +492,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   growthLineVisibleRef.current = growthLineVisible;
   domainVisibleRef.current = domainVisible;
   particleRadiusPxRef.current = particleRadiusPx;
-  mitosisSignalBoostRef.current = mitosisSignalBoost;
+  growthMagnitudeBoostRef.current = growthMagnitudeBoost;
   boundaryGradientScaleRef.current = boundaryGradientScale;
   internalStateChannelStartRef.current = internalStateChannelStart;
   chemicalMemoryOpponentSubtractionRef.current = chemicalMemoryOpponentSubtraction;
@@ -683,7 +678,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setDirectionalLineVisible(directionalLineVisibleRef.current);
       simulation.setGrowthLineVisible(growthLineVisibleRef.current);
       simulation.setDomainVisible(domainVisibleRef.current);
-      simulation.setMitosisSignalBoost(mitosisSignalBoostRef.current);
+      simulation.setGrowthMagnitudeBoost(growthMagnitudeBoostRef.current);
       simulation.setBoundaryGradientScale(boundaryGradientScaleRef.current);
       simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
       simulation.setChemicalMemoryOpponentSubtraction(chemicalMemoryOpponentSubtractionRef.current);
@@ -1023,8 +1018,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [domainVisible]);
 
   useEffect(() => {
-    simulationRef.current?.setMitosisSignalBoost(mitosisSignalBoost);
-  }, [mitosisSignalBoost]);
+    simulationRef.current?.setGrowthMagnitudeBoost(growthMagnitudeBoost);
+  }, [growthMagnitudeBoost]);
 
   useEffect(() => {
     simulationRef.current?.setBoundaryGradientScale(boundaryGradientScale);
@@ -1121,7 +1116,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     // this creates: if this component unmounts WHILE a frame() call is
     // suspended awaiting step(), sim.destroy() (a DIFFERENT effect's own
     // cleanup, not this one — see this component's own device-acquisition
-    // effect) can destroy the very buffers readGrownCount()'s own
+    // effect) can destroy the very buffers readSampleCount()'s own
     // mapAsync() is waiting on, which WebGPU rejects rather than silently
     // ignores; `cancelled` (this effect's own flag) tells the two apart
     // from a real bug, which still surfaces via console.error rather than

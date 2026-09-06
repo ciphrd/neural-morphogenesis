@@ -1,67 +1,3 @@
-"""Population-based (mu, lambda) evolutionary training for UpdateRule,
-with elitism — the mpm-training analogue of envnca/evolve.py and
-trainer/backend/evolve.py, adapted to real MLS-MPM particle physics via
-training_sim.TrainingRollout instead of either project's own simpler
-rollout substrate.
-
-No gradient descent anywhere (MpmCore's physics isn't wired for
-autograd) — a plain (mu, lambda) ES, same as this repo's other
-evolve.py's minus envnca's own optional memetic refinement (not ported
-here). population size here means the *evolutionary* population
-(candidate weight-sets), same meaning it has in every other evolve.py in
-this repo — not the particle count: every rollout starts with
---initial-particles agents and grows via splitting (see training_sim.py's
-own module docstring and core/agents.wgsl's own growth design);
---particles is the CAP that growth can reach, not a fixed per-rollout
-count.
-
-Fitness integrates transported triangle coverage using domain_fitness.py.
-Missing material, outside spill, silhouette disagreement and overlap are scored
-without particle-count normalization. Late scores use a mean/worst blend;
-optional early completion requires repeated matches followed by growth-free
-settling. Point-cloud scorers remain available for legacy diagnostics.
-
-Rollouts run across a persistent pool of worker PROCESSES (see
-parallel_workers.py's own module docstring), each with its own wgpu
-device and a single MpmCore/AgentsGPU/EnvironmentGPU triple, one
-candidate rollout per task, `--workers` of them running truly
-concurrently. This replaced an earlier single-process sequential loop
-after profiling (cProfile against a real generation) showed that loop
-was CPU-bound on a single core — wgpu-py's own per-compute-pass FFI call
-overhead plus its GPU-sync poll loop, together over 75% of wall time —
-while a 400-particle rollout barely touches the GPU's actual throughput
-and every OTHER CPU core sat idle. Multiple OS processes, each doing the
-exact same cheap per-candidate work concurrently on separate cores,
-sharing the same GPU (which has plenty of spare capacity for this), maps
-directly onto that profile in a way an in-process design can't: a single
-Python process is fundamentally bounded by one core's worth of FFI/poll
-overhead no matter how the GPU work within it is organized.
-
-A batched, single-process alternative was tried and measured FIRST
-(every candidate getting its own MpmCore/AgentsGPU/EnvironmentGPU, all
-advanced together within one process so per-macro-step GPU syncs are
-paid once for the whole population instead of once per candidate), on
-the theory that sync *count* was the dominant cost. It wasn't: at
-population=8, 16, and 32 (particles=150, macro_steps=16) it measured no
-reliable speedup — 0.8x-1.2x, noisy, one config outright slower — and
-crashed the device once (a real, confirmed instance of the wgpu-native
-command-buffer-count bug mpm_core.MpmCore's own docstring already
-describes, from an under-counted pass budget spanning several MpmCore
-instances). The profiling that followed explained why: the dominant
-costs (FFI call overhead, GPU-sync poll wait) are both proportional to
-total work done, not to how many syncs that work is grouped into —
-batching within one process changes the grouping, not the total, so it
-couldn't have helped. Multiprocessing instead adds a second (and third,
-...) core actually doing that work concurrently — the only lever that
-was ever going to move the needle for a single-core-CPU-bound loop.
-
-Fitness scoring is pure NumPy/SciPy and separate from the wgpu simulation. Its
-local Gaussian scatter is vectorized, and worker processes evaluate candidates
-concurrently; raster.py documents the hot path and its complexity.
-
-Usage:
-    python evolve.py --target puddle --generations 50 --population 16
-"""
 from __future__ import annotations
 
 import argparse
@@ -92,8 +28,6 @@ from simulation_settings import (
     DECAY,
     DEPOSIT_RATE,
     NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-    DEPOSIT_DENSITY_REFERENCE,
-    DEPOSIT_SIGMA,
     DEFAULT_RUN_SETTINGS,
     DEFAULT_SUBSTEPS_PER_MACRO,
     ELASTIC_STRAIN_SCALE,
@@ -108,8 +42,6 @@ from simulation_settings import (
     GROWTH_ANISOTROPY_AUTHORITY,
     INITIAL_PARTICLE_COUNT,
     INTERNAL_STATE_SPEED,
-    DIVISION_DRIVE_BOOST,
-    DIVISION_DIRECTIONALITY,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
@@ -140,7 +72,6 @@ from update_rule import UpdateRule
 
 CHECKPOINTS_DIR = Path(__file__).parent / "checkpoints"
 
-
 def density_reference(args: argparse.Namespace) -> DensityReference:
     """The run's q=1 settings; public particle counts remain reference counts."""
     return DensityReference(
@@ -149,12 +80,10 @@ def density_reference(args: argparse.Namespace) -> DensityReference:
         chemical_field_n=FIELD_N,
         particle_mass=PARTICLE_MASS,
         particle_volume=VOL,
-        deposit_sigma=DEPOSIT_SIGMA,
         chemical_gradient_input_scale=CHEMICAL_GRADIENT_INPUT_SCALE,
         repulsion_strength=REPULSION_STRENGTH,
         repulsion_max_delta=REPULSION_MAX_DELTA,
     )
-
 
 def resolve_run_density(args: argparse.Namespace, multiplier: float) -> ResolvedDensity:
     return resolve_density(
@@ -188,7 +117,6 @@ RASTER_EXTENT = (0.0, 1.0, 0.0, 1.0)
 # already provides.
 CAPTURE_OFFSETS = (0.10, 0.075, 0.05, 0.025, 0.0)
 
-
 def get_weights(model: UpdateRule) -> np.ndarray:
     """Also the exact flat layout agents_gpu.AgentsGPU.load_weights()
     expects — see that method's own docstring for why (nn.Linear's own
@@ -196,14 +124,12 @@ def get_weights(model: UpdateRule) -> np.ndarray:
     matching core/agents.wgsl's FC1W_OFFSET/etc. indexing)."""
     return model.flat_parameters().detach().cpu().numpy()
 
-
 def set_weights(model: UpdateRule, flat: np.ndarray) -> None:
     """CPU-only — `model` (a scratch UpdateRule) is never used for a live
     forward pass anymore (see training_sim.py's own module docstring),
     only for export_weights()'s JSON shape at checkpoint time, so there's
     no reason to pay a device transfer here."""
     model.load_flat_parameters(torch.from_numpy(flat).float())
-
 
 def mutate(
     weights: np.ndarray,
@@ -224,19 +150,16 @@ def mutate(
     noise = rng.normal(size=weights.shape).astype(np.float32)
     return (weights.astype(np.float32, copy=False) + noise * np.float32(sigma) * scales).astype(np.float32)
 
-
 def resolved_material_budget(args, target):
     if args.material_budget_mode == "target":
         return target.filled_area() * args.material_budget_scale
     return args.material_area_budget
-
 
 def estimated_sample_capacity(args, target):
     # Two samples per spacing-squared is an allocation estimate, not a
     # physical material limit. Anisotropy and conforming refinement need slack.
     spacing = resolve_run_density(args, 1.0).spacing
     return max(2 * args.initial_particles, int(np.ceil(2 * target.filled_area() / spacing**2)))
-
 
 def report_shape_budget(args, target):
     if target.filled_area() <= 0:
@@ -247,7 +170,6 @@ def report_shape_budget(args, target):
     if args.particles < estimate:
         print(f"The current sampling cap may pause growth before the target is filled. "
               f"Consider --particles {estimate}; adding --particle-densities 0.5 reduces its sampling cost.")
-
 
 def shape_settings(args, target):
     """Wire settings also embed target geometry for autonomous offline playback."""
@@ -266,11 +188,9 @@ def shape_settings(args, target):
         "shapeTarget": {"points": target.points.tolist(), "texelSize": target.texel_size()},
     }
 
-
 def _aggregate_scores(scores, args):
     return ((1-args.fitness_temporal_worst_weight)*float(np.mean(scores))
             + args.fitness_temporal_worst_weight*max(scores))
-
 
 def rollout(
     weights: np.ndarray,
@@ -311,9 +231,9 @@ def rollout(
     core.set_damping(DAMPING_LOSS_FRACTION, args.substeps_per_macro)
     core.set_splat_radius(density.splat_radius)
     core.set_repulsion_strength(density.repulsion_strength, density.repulsion_max_delta)
-    agents.set_density_geometry(density.spacing, density.deposit_sigma)
+    agents.set_density_geometry(density.spacing)
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
-    agents.set_chemical_projection_weight(density.chemical_projection_weight)
+
     agents.set_max_active_particles(density.particle_cap)
 
     sim = TrainingRollout(
@@ -321,7 +241,6 @@ def rollout(
         agents,
         environment,
         spawn_center=(args.spawn_x, args.spawn_y),
-        spawn_half_width=args.spawn_half_width,
         gravity=args.gravity,
         seed=seed,
         mpm_enabled=MPM_ENABLED,
@@ -340,7 +259,7 @@ def rollout(
         sim.macro_step(args.substeps_per_macro, growth_enabled=stopping.growth_enabled and
                        (args.growth_steps is None or step <= args.growth_steps))
         if step in checkpoint_steps or stopping.due(step):
-            vertices = core.read_rest_state()[:, 12:18]
+            vertices = core.read_rest_state()[:, 8:14]
             last_evaluation = score_domains(vertices, target, target_raster, args)
             if step in checkpoint_steps:
                 scores.append(last_evaluation.total)
@@ -363,7 +282,6 @@ def rollout(
         "overlap": last_evaluation.match.overlap,
     }
     return (fitness, sim.positions()) if return_positions else fitness
-
 
 def run_generation(
     population: list[np.ndarray],
@@ -455,10 +373,9 @@ def run_generation(
         evaluation_seeds, winner_density_fitnesses,
     )
 
-
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    # Defaults live in core/constants.json; both architecture axes are public
+    # Defaults live in core/config.json; both architecture axes are public
     # run selections. The hidden alias remains exclusively for the paired
     # comparison utility's existing subprocess interface.
     parser.set_defaults(policy_architecture=None, cell_memory=None)
@@ -468,22 +385,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="private neural memory: none uses a reactive policy; recurrent adds gated per-cell state",
     )
     parser.add_argument(
-        "--policy-architecture",
-        dest="policy_architecture",
-        choices=POLICY_ARCHITECTURES,
-        help=argparse.SUPPRESS,
-    )
-    parser.add_argument(
         "--_comparison-policy-architecture",
         dest="policy_architecture",
         choices=POLICY_ARCHITECTURES,
         help=argparse.SUPPRESS,
     )
     from initial_conditions import PRESETS
-    parser.add_argument("--initial-condition", choices=PRESETS, default="none",
+    parser.add_argument("--initial-condition", choices=PRESETS, default=DEFAULT_RUN_SETTINGS["initialCondition"],
                         help="One-time asymmetry applied at every rollout reset")
-    parser.add_argument("--initial-condition-strength", type=float, default=0.3)
-    parser.add_argument("--initial-condition-channel", type=int, default=0)
+    parser.add_argument("--initial-condition-strength", type=float, default=DEFAULT_RUN_SETTINGS["initialConditionStrength"])
+    parser.add_argument("--initial-condition-channel", type=int, default=DEFAULT_RUN_SETTINGS["initialConditionChannel"])
     parser.add_argument(
         "--chemical-communication-architecture",
         choices=CHEMICAL_COMMUNICATION_ARCHITECTURES,
@@ -536,7 +447,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--allow-unsafe-density",
         action="store_true",
-        help="allow multipliers outside core/density.json's calibrated range",
+        help="allow multipliers outside core/config.json's calibrated range",
     )
     parser.add_argument(
         "--initial-particles",
@@ -581,19 +492,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # middle of the space, not offset toward any one wall.
     parser.add_argument("--spawn-x", type=float, default=DEFAULT_RUN_SETTINGS["spawnX"])
     parser.add_argument("--spawn-y", type=float, default=DEFAULT_RUN_SETTINGS["spawnY"])
-    parser.add_argument("--spawn-half-width", type=float, default=DEFAULT_RUN_SETTINGS["spawnHalfWidth"])
     parser.add_argument("--mutation-sigma", type=float, default=DEFAULT_RUN_SETTINGS["mutationSigma"])
     parser.add_argument(
         "--raster-resolution",
         type=int,
         default=DEFAULT_RUN_SETTINGS["rasterResolution"],
         help="side length of the cell-average material coverage raster",
-    )
-    parser.add_argument(
-        "--raster-sigma",
-        type=float,
-        default=DEFAULT_RUN_SETTINGS["rasterSigma"],
-        help="legacy point-diagnostic Gaussian width; unused by domain fitness",
     )
     parser.add_argument(
         "--outside-weight",
@@ -603,11 +507,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "weight of the material-coverage distance penalty outside the target footprint "
             "inside the spill term (0 keeps occupancy spill but disables distance growth)"
         ),
-    )
-    parser.add_argument(
-        "--fitness-target-occupancy", type=float,
-        default=DEFAULT_RUN_SETTINGS["fitnessTargetOccupancy"],
-        help="legacy point-scoring calibration; unused by domain fitness",
     )
     parser.add_argument(
         "--fitness-coverage-weight", type=float,
@@ -648,19 +547,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     return parser
 
-
 def finalize_policy_configuration(args: argparse.Namespace) -> None:
-    """Resolve the public memory switch while retaining legacy CLI support."""
+    """Resolve memory and explicit comparison architecture selection."""
     if args.policy_architecture is not None:
-        legacy_memory = cell_memory_for_architecture(args.policy_architecture)
-        if args.cell_memory is not None and args.cell_memory != legacy_memory:
-            raise SystemExit("--cell-memory conflicts with the legacy --policy-architecture value")
-        args.cell_memory = legacy_memory
+        selected_memory = cell_memory_for_architecture(args.policy_architecture)
+        if args.cell_memory is not None and args.cell_memory != selected_memory:
+            raise SystemExit("--cell-memory conflicts with the comparison architecture value")
+        args.cell_memory = selected_memory
     else:
         args.cell_memory = args.cell_memory or cell_memory_for_architecture(POLICY_ARCHITECTURE)
         args.policy_architecture = architecture_for_cell_memory(args.cell_memory)
     args.hidden_layers = [policy_hidden_dim(args.policy_architecture)]
-
 
 def finalize_density_configuration(args: argparse.Namespace) -> None:
     try:
@@ -674,7 +571,6 @@ def finalize_density_configuration(args: argparse.Namespace) -> None:
         raise SystemExit(
             f"maximum resolved particle cap {args.particle_capacity} exceeds GPU capacity {MAX_PARTICLES}"
         )
-
 
 def validate_fitness_configuration(args: argparse.Namespace) -> None:
     from initial_conditions import validate_initial_condition
@@ -698,10 +594,6 @@ def validate_fitness_configuration(args: argparse.Namespace) -> None:
         raise SystemExit("--material-area-budget must be finite and nonnegative")
     if args.raster_resolution < 8:
         raise SystemExit("--raster-resolution must be at least 8")
-    if not np.isfinite(args.raster_sigma) or args.raster_sigma <= 0.0:
-        raise SystemExit("--raster-sigma must be finite and positive")
-    if not 0.0 < args.fitness_target_occupancy < 1.0:
-        raise SystemExit("--fitness-target-occupancy must be strictly between 0 and 1")
     for name in (
         "outside_weight",
         "fitness_coverage_weight",
@@ -715,6 +607,87 @@ def validate_fitness_configuration(args: argparse.Namespace) -> None:
     if not 0.0 <= args.fitness_temporal_worst_weight <= 1.0:
         raise SystemExit("--fitness-temporal-worst-weight must be between 0 and 1")
 
+def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds):
+    """Complete checkpoint settings shared by CLI training and the server."""
+    return {
+        'generation': generation,
+        'fitness': best_fitness,
+        'fitness_model_version': FITNESS_MODEL_VERSION,
+        'target': args.target,
+        'particles': args.particles,
+        'initial_particle_count': args.initial_particles,
+        'initial_condition': args.initial_condition,
+        'initial_condition_strength': args.initial_condition_strength,
+        'initial_condition_channel': args.initial_condition_channel,
+        'density_model_version': DENSITY_MODEL_VERSION,
+        'particle_density_multipliers': args.particle_densities,
+        'density_aggregation': args.density_aggregation,
+        'particle_capacity': args.particle_capacity,
+        'particle_mass': PARTICLE_MASS,
+        'particle_volume': VOL,
+        'chemical_value_input_multiplier': CHEMICAL_VALUE_INPUT_MULTIPLIER,
+        'chemical_gradient_input_scale': CHEMICAL_GRADIENT_INPUT_SCALE,
+        'winner_seed': best_winner_seed,
+        'winner_density_multiplier': best_winner_density,
+        'density_fitnesses': best_density_fitnesses,
+        'macro_steps': args.macro_steps,
+        'growth_steps': args.growth_steps,
+        'substeps_per_macro': args.substeps_per_macro,
+        'growth_model_version': GROWTH_MODEL_VERSION,
+        'domain_geometry': 'triangle-vertices',
+        'material_area_budget': resolved_material_budget(args, target),
+        'shape_settings': shape_settings(args, target),
+        'growth_duration_macro_steps': GROWTH_DURATION_MACRO_STEPS,
+        'growth_compression_start': GROWTH_COMPRESSION_START,
+        'growth_compression_stop': GROWTH_COMPRESSION_STOP,
+        'growth_compression_feedback': GROWTH_COMPRESSION_FEEDBACK,
+        'growth_anisotropy_authority': GROWTH_ANISOTROPY_AUTHORITY,
+        'morphology_blur_sigma': MORPHOLOGY_BLUR_SIGMA,
+        'morphology_density_reference': MORPHOLOGY_DENSITY_REFERENCE,
+        'neural_updates_per_macro': NEURAL_UPDATES_PER_MACRO,
+        'communication_speed': COMMUNICATION_SPEED,
+        'internal_state_speed': INTERNAL_STATE_SPEED,
+        'elastic_strain_scale': ELASTIC_STRAIN_SCALE,
+        'elastic_strain_inputs_enabled': ELASTIC_STRAIN_INPUTS_ENABLED,
+        'gravity': args.gravity,
+        'spawn_x': args.spawn_x,
+        'spawn_y': args.spawn_y,
+        'channels': CHEM_CHANNELS,
+        'field_n': FIELD_N,
+        'chemical_channel_profiles': profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
+        'population': args.population,
+        'seeds_per_candidate': args.seeds_per_candidate,
+        'evaluation_seeds': best_evaluation_seeds,
+        'elites': args.elites,
+        'mutation_sigma': args.mutation_sigma,
+        'policy_architecture': args.policy_architecture,
+        'cell_memory': args.cell_memory,
+        'hidden_layers': args.hidden_layers,
+        'chemical_communication_architecture': args.chemical_communication_architecture,
+        'decay': DECAY,
+        'friction': DEFAULT_RUN_SETTINGS["friction"],
+        'max_env_write': DEFAULT_RUN_SETTINGS["maxEnvWrite"],
+        'deposit_rate': DEPOSIT_RATE,
+        'normalize_deposits_by_local_density': NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
+        'hidden_dim': policy_hidden_dim(args.policy_architecture),
+        'mutation_scales': mutation_scales(args.policy_architecture),
+        'raster_resolution': args.raster_resolution,
+        'outside_weight': args.outside_weight,
+        'fitness_coverage_weight': args.fitness_coverage_weight,
+        'fitness_spill_weight': args.fitness_spill_weight,
+        'fitness_boundary_weight': args.fitness_boundary_weight,
+        'fitness_crowding_weight': args.fitness_crowding_weight,
+        'fitness_temporal_worst_weight': args.fitness_temporal_worst_weight,
+        'seed': args.seed,
+        'damping_loss_fraction': DAMPING_LOSS_FRACTION,
+        'material_e': MATERIAL_E,
+        'material_nu': MATERIAL_NU,
+        'material_hardening': MATERIAL_HARDENING,
+        'material_elasticity': MATERIAL_ELASTICITY,
+        'splat_radius': SPLAT_RADIUS,
+        'repulsion_strength': REPULSION_STRENGTH,
+        'repulsion_max_delta': REPULSION_MAX_DELTA,
+    }
 
 def main() -> None:
     args = build_arg_parser().parse_args()
@@ -790,108 +763,13 @@ def main() -> None:
             (checkpoint_dir / "best_weights.json").write_text(json.dumps(update_rule.export_weights()))
             (checkpoint_dir / "best_meta.json").write_text(
                 json.dumps(
-                    {
-                        "generation": generation,
-                        "fitness": best_fitness,
-                        "fitness_model_version": FITNESS_MODEL_VERSION,
-                        "target": args.target,
-                        "particles": args.particles,
-                        "initial_particle_count": args.initial_particles,
-                        "initial_condition": args.initial_condition,
-                        "initial_condition_strength": args.initial_condition_strength,
-                        "initial_condition_channel": args.initial_condition_channel,
-                        "density_model_version": DENSITY_MODEL_VERSION,
-                        "particle_density_multipliers": args.particle_densities,
-                        "density_aggregation": args.density_aggregation,
-                        "particle_capacity": args.particle_capacity,
-                        "particle_mass": PARTICLE_MASS,
-                        "particle_volume": VOL,
-                        "deposit_sigma": DEPOSIT_SIGMA,
-                        "chemical_projection_weight": 1.0,
-                        "chemical_value_input_multiplier": CHEMICAL_VALUE_INPUT_MULTIPLIER,
-                        "chemical_gradient_input_scale": CHEMICAL_GRADIENT_INPUT_SCALE,
-                        "winner_seed": best_winner_seed,
-                        "winner_density_multiplier": best_winner_density,
-                        "density_fitnesses": best_density_fitnesses,
-                        "macro_steps": args.macro_steps,
-                        "growth_steps": args.growth_steps,
-                        "substeps_per_macro": args.substeps_per_macro,
-                        "growth_model_version": GROWTH_MODEL_VERSION,
-                        "domain_geometry": "triangle",
-                        "material_area_budget": resolved_material_budget(args, target),
-                        "shape_settings": shape_settings(args, target),
-                        "growth_duration_macro_steps": GROWTH_DURATION_MACRO_STEPS,
-                        "growth_compression_start": GROWTH_COMPRESSION_START,
-                        "growth_compression_stop": GROWTH_COMPRESSION_STOP,
-                        "growth_compression_feedback": GROWTH_COMPRESSION_FEEDBACK,
-                        "growth_anisotropy_authority": GROWTH_ANISOTROPY_AUTHORITY,
-                        "morphology_blur_sigma": MORPHOLOGY_BLUR_SIGMA,
-                        "morphology_density_reference": MORPHOLOGY_DENSITY_REFERENCE,
-                        "neural_updates_per_macro": NEURAL_UPDATES_PER_MACRO,
-                        "communication_speed": COMMUNICATION_SPEED,
-                        "internal_state_speed": INTERNAL_STATE_SPEED,
-                        "division_directionality": DIVISION_DIRECTIONALITY,
-                        "division_drive_boost": DIVISION_DRIVE_BOOST,
-                        "elastic_strain_scale": ELASTIC_STRAIN_SCALE,
-                        "elastic_strain_inputs_enabled": ELASTIC_STRAIN_INPUTS_ENABLED,
-                        "gravity": args.gravity,
-                        "spawn_x": args.spawn_x,
-                        "spawn_y": args.spawn_y,
-                        "spawn_half_width": args.spawn_half_width,
-                        "channels": CHEM_CHANNELS,
-                        "field_n": FIELD_N,
-                        "chemical_channel_profiles": profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
-                        "population": args.population,
-                        "seeds_per_candidate": args.seeds_per_candidate,
-                        # These belong to best_weights, which may come from an
-                        # earlier generation than the checkpoint write.
-                        "evaluation_seeds": best_evaluation_seeds,
-                        "elites": args.elites,
-                        "mutation_sigma": args.mutation_sigma,
-                        "policy_architecture": args.policy_architecture,
-                        "cell_memory": args.cell_memory,
-                        "hidden_layers": args.hidden_layers,
-                        "chemical_communication_architecture": args.chemical_communication_architecture,
-                        "decay": DECAY,
-                        "deposit_rate": DEPOSIT_RATE,
-                        "normalize_deposits_by_local_density": NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-                        "deposit_density_reference": DEPOSIT_DENSITY_REFERENCE,
-                        "hidden_dim": policy_hidden_dim(args.policy_architecture),
-                        "mutation_scales": mutation_scales(args.policy_architecture),
-                        "raster_resolution": args.raster_resolution,
-                        "raster_sigma": args.raster_sigma,
-                        "outside_weight": args.outside_weight,
-                        "fitness_target_occupancy": args.fitness_target_occupancy,
-                        "fitness_coverage_weight": args.fitness_coverage_weight,
-                        "fitness_spill_weight": args.fitness_spill_weight,
-                        "fitness_boundary_weight": args.fitness_boundary_weight,
-                        "fitness_crowding_weight": args.fitness_crowding_weight,
-                        "fitness_temporal_worst_weight": args.fitness_temporal_worst_weight,
-                        "seed": args.seed,
-                        # Not CLI args (nothing above this line is) — the
-                        # simulation_settings.py values this run actually
-                        # simulated under. Recorded here too so this
-                        # checkpoint's own metadata is a complete,
-                        # standalone description of the run, without
-                        # requiring a cross-reference to whatever
-                        # simulation_settings.py happened to say at some
-                        # other point in time.
-                        "damping_loss_fraction": DAMPING_LOSS_FRACTION,
-                        "material_e": MATERIAL_E,
-                        "material_nu": MATERIAL_NU,
-                        "material_hardening": MATERIAL_HARDENING,
-                        "material_elasticity": MATERIAL_ELASTICITY,
-                        "splat_radius": SPLAT_RADIUS,
-                        "repulsion_strength": REPULSION_STRENGTH,
-                        "repulsion_max_delta": REPULSION_MAX_DELTA,
-                    },
+                    checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds),
                     indent=2,
                 )
             )
 
     pool.shutdown()
     print(f"done. best fitness: {best_fitness:.4f}. weights saved to {checkpoint_dir / 'best.npy'}")
-
 
 if __name__ == "__main__":
     main()

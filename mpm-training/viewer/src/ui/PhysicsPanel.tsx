@@ -104,12 +104,6 @@ export function physicsSliderSpecsFor(
       format: (v) => v.toFixed(2),
     },
     {
-      key: "materialFluidity",
-      label: "Fluidity (shear relaxation)",
-      ...FRACTION_RANGE,
-      format: (v) => v.toFixed(3),
-    },
-    {
       key: "decay",
       label: "Substrate decay",
       ...FRACTION_RANGE,
@@ -128,18 +122,6 @@ export function physicsSliderSpecsFor(
       format: (v) => v.toFixed(2),
     },
     {
-      key: "maxAccel",
-      label: "Max accel",
-      ...scaledRange(trained.maxAccel, 3),
-      format: (v) => v.toFixed(3),
-    },
-    {
-      key: "maxStrafe",
-      label: "Physical strafe scale",
-      ...scaledRange(trained.maxStrafe, 3),
-      format: (v) => v.toFixed(3),
-    },
-    {
       key: "friction",
       label: "Friction",
       ...FRACTION_RANGE,
@@ -152,16 +134,10 @@ export function physicsSliderSpecsFor(
       format: (v) => v.toFixed(3),
     },
     {
-      key: "splitDisplacement",
+      key: "sampleSpacing",
       label: "Growth sample spacing",
-      ...scaledRange(trained.splitDisplacement, 3),
+      ...scaledRange(trained.sampleSpacing, 3),
       format: (v) => v.toFixed(4),
-    },
-    {
-      key: "divisionCooldown",
-      label: "Growth cooldown",
-      ...scaledRange(trained.divisionCooldown, 3),
-      format: (v) => v.toFixed(1),
     },
     {
       key: "splatRadius",
@@ -208,32 +184,6 @@ export function physicsSliderSpecsFor(
   ]
 }
 
-/** Collapsible "Physics" section (default closed) exposing every
- * live-adjustable simulation setting as a slider — gravity, damping, MPM
- * material (E/nu/hardening/elasticity), persistent substrate decay and deposit rate,
- * chemical delta amplitude,
- * strafe's own maxAccel/maxStrafe/friction (strafe
- * drives MpmCore's own velocity directly — an acceleration, damped by
- * friction — see agents.wgsl's own module docstring for the full
- * history),
- * growth's own splitDisplacement (growth-aligned daughter separation) and
- * divisionCooldown (macro steps a particle refuses
- * to split again for, right after splitting, whether as parent or child
- * — see agents.wgsl's own module docstring for the full growth design;
- * the growth cap itself is `particles` — see types.ts's own
- * SimulationConfig.particles docstring for why that's a CAP now, not a
- * starting count, and not a slider here since it's rebuild-triggering,
- * same as channels/fieldN/hiddenDim), density's splatRadius,
- * morphologyBlurSigma, and morphologyDensityReference, repulsion strength,
- * and mpmEnabled (a checkbox, not a slider — off skips MpmCore's own
- * physics substeps entirely each macro step, a debug/testing aid to
- * isolate sensing/communication/growth/chirality from elastic material
- * response/gravity/repulsion — see types.ts's own
- * RunSettings.mpmEnabled docstring for the full reasoning).
- * See gpu/simulation.ts's applyPhysics() for why moving any of these
- * never disturbs the rollout currently in flight (a plain uniform-buffer
- * write, not a pipeline rebuild) — this is playback-only, doesn't affect
- * training itself. */
 export function PhysicsPanel({
   trained,
   value,

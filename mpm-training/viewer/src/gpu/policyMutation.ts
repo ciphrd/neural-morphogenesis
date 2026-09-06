@@ -1,4 +1,5 @@
-import policyParameters from "../../../core/policy_parameters.json"
+import policyParametersConfig from "../../../core/config.json";
+const policyParameters = policyParametersConfig.policy;
 import {
   policyHasRecurrence,
   type PolicyArchitecture,
@@ -33,7 +34,7 @@ function repeatedScale(name: HeadName, count: number): number[] {
 
 /** Browser-side equivalent of trainer/evolve.py's mutate(): independent
  * Gaussian noise for every weight and bias, with the same per-head scale
- * buckets from core/policy_parameters.json. */
+ * buckets from core/config.json. */
 export function mutatePolicyWeights(
   weights: UpdateRuleWeights,
   channels: number,
@@ -53,7 +54,8 @@ export function mutatePolicyWeights(
           ...repeatedScale("stateDelta", 8),
           ...repeatedScale("stateGate", 8),
         ]
-      : repeatedScale("color", 3)),
+      : []),
+    ...repeatedScale("color", 3),
   ]
   if (
     headScales.length !== weights.fc2w.length ||

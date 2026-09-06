@@ -1,17 +1,3 @@
-// Pure-JS reimplementation of core/agents.wgsl's own evalPolicy() —
-// mirrors that function's exact math (Dense(hiddenDim) -> tanh ->
-// Dense(outDim), tanh-squashed output with per-channel scaling) so
-// ui/NetworkPanel.tsx can visualize the CURRENT generation's policy as
-// a response surface (see that component's own module docstring) using
-// activeConfig.weights directly (already plain JS number[][]/number[] —
-// see gpu/types.ts's own UpdateRuleWeights — no GPU round-trip needed).
-// This does NOT replace the real GPU forward pass agentStep() runs
-// during an actual rollout, and deliberately excludes CHIRALITY's own
-// mirror-averaging (see agents.wgsl's own module docstring for what
-// that does). This inspector deliberately shows the raw weight matrix's
-// response to the manually supplied vector; live simulation additionally
-// enforces chirality by evaluating the mirrored lateral gradient and
-// combining the two responses.
 
 import { policyHasRecurrence, type PolicyArchitecture, type UpdateRuleWeights } from "./types";
 
@@ -35,7 +21,7 @@ export function policyWeightsShapeError(
 ): string | null {
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  const outDim = channels + (stateful ? 18 : 5);
+  const outDim = channels + (stateful ? 21 : 5);
   const fc1w = weights?.fc1w;
   const fc1b = weights?.fc1b;
   const fc2w = weights?.fc2w;
@@ -58,7 +44,7 @@ export function policyWeightsShapeError(
   return (
     `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
     `(chemical deltas plus a 2-D growth vector and state/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
-    "The current policy has no learned heading head; restart the training backend and retrain older checkpoints."
+    "The current policy requires three dedicated RGB outputs; restart the training backend and retrain incompatible checkpoints."
   );
 }
 
@@ -74,22 +60,12 @@ function safeSigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
 }
 
-/** One Dense(hiddenDim) -> tanh -> Dense(policy output width) forward pass,
- * squashed exactly like agents.wgsl's own evalPolicy() — see that
- * function's own comment for the exact math this mirrors, and this
- * file's own module docstring for why CHIRALITY's mirror-averaging is
- * NOT applied here. `input` must be exactly channels*3+6 long
- * ([chemical value/forward/lateral, morphology occupancy/forward/lateral,
- * elastic volume/axial/shear strain] — see
- * agents.wgsl's own IN_DIM). */
 export function evalPolicy(
   input: Float32Array,
   weights: UpdateRuleWeights,
   channels: number,
   hiddenDim: number,
   maxEnvWrite: number,
-  _maxAngularAccel: number,
-  _maxStrafe: number,
   architecture: PolicyArchitecture = "stateless-128",
 ): PolicyOutput {
   const shapeError = policyWeightsShapeError(weights, channels, hiddenDim, architecture);
@@ -103,7 +79,7 @@ export function evalPolicy(
   }
 
   const stateful = policyHasRecurrence(architecture);
-  const outDim = channels + (stateful ? 18 : 5);
+  const outDim = channels + (stateful ? 21 : 5);
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -127,15 +103,12 @@ export function evalPolicy(
       stateDelta[i] = safeTanh(outVec[envWriteDim + 2 + i]);
       stateGate[i] = safeSigmoid(outVec[envWriteDim + 10 + i]);
     }
-    // The inspector evaluates a zero private state. Live RGB is derived after
-    // applying the residual update to each particle's actual persistent state.
-    color = [0.5, 0.5, 0.5];
-  } else {
-    color = [
-      safeSigmoid(outVec[envWriteDim + 2]),
-      safeSigmoid(outVec[envWriteDim + 3]),
-      safeSigmoid(outVec[envWriteDim + 4]),
-    ];
   }
+  const colorOffset = envWriteDim + (stateful ? 18 : 2);
+  color = [
+    safeSigmoid(outVec[colorOffset]),
+    safeSigmoid(outVec[colorOffset + 1]),
+    safeSigmoid(outVec[colorOffset + 2]),
+  ];
   return { envWrite, growthVector, color, stateDelta, stateGate };
 }

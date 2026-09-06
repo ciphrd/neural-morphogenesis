@@ -1,4 +1,4 @@
-import defaults from '../../../core/initial_conditions.json'
+import defaultsConfig from '../../../core/config.json';
 import { initialConditionPresets, type InitialConditionPreset } from '../gpu/initialConditions'
 import type { RunSettings } from '../gpu/types'
 
@@ -8,9 +8,9 @@ export function InitialConditionControls({ config, recurrent, onChange }: {
   onChange: (settings: InitialConditionSettings) => void;
 }) {
   const preset = config?.initialCondition ?? 'none'
-  const strength = config?.initialConditionStrength ?? defaults.defaultStrength
-  const channel = config?.initialConditionChannel ?? defaults.defaultChannel
-  const change = (patch: InitialConditionSettings) => onChange({ initialCondition: preset,
+  const strength = config?.initialConditionStrength ?? defaultsConfig.run.initialConditionStrength
+  const channel = config?.initialConditionChannel ?? defaultsConfig.run.initialConditionChannel
+  const change = (patch: Partial<InitialConditionSettings>) => onChange({ initialCondition: preset,
     initialConditionStrength: strength, initialConditionChannel: channel, ...patch })
   const chemical = preset.startsWith('chemical-') || preset === 'handed-chemistry'
   return <>

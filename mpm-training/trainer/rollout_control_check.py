@@ -5,7 +5,6 @@ import evolve
 from domain_fitness import DomainEvaluation, MatchMetrics, target_mask
 from targets import load_target
 
-
 def run_case(*, bad_steps=(), blocked=False, horizon=20, cutoff=None, enabled=True):
     args=evolve.build_arg_parser().parse_args(['--macro-steps',str(horizon),
         '--shape-check-interval','2','--shape-confirmations','2','--shape-settle-steps','5'])
@@ -29,7 +28,6 @@ def run_case(*, bad_steps=(), blocked=False, horizon=20, cutoff=None, enabled=Tr
     assert positions.shape==(10,2) and np.isfinite(fitness)
     return flags,core.rollout_diagnostics
 
-
 def main():
     flags,d=run_case()
     assert d['stableMatch'] and d['steps']==9
@@ -44,6 +42,5 @@ def main():
     flags,d=run_case(cutoff=3,enabled=False)
     assert flags==[True]*3+[False]*17 and not d['stableMatch']
     print('[PASS] Actual rollout control: target budget, successful/failed settling, capacity, horizon, explicit growth cutoff')
-
 
 if __name__=='__main__':main()

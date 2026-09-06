@@ -1,26 +1,7 @@
-"""FastAPI server that runs evolve.py's training loop in the background
-and hands each generation's stats + winning weights to any connected
-browser over a websocket — same overall shape as envnca/train_server.py
-and trainer/backend/train_server.py, ported to this project's own
-evolve.py/training_sim.py.
-
-Unlike envnca's frontend (which replays the winning rollout itself,
-entirely client-side, on WebGPU), mpm-training's own viewer is still
-unbuilt (../viewer/README.md's own staging is explicitly blocked on,
-among other things, this exact server's message schema) — so for now
-this server *also* renders each generation's winning rollout server-side
-(debug_images.py) and serves those PNGs directly: the "collect renders
-of the best of each generation so the frontend can parse these" fallback
-envnca/train_server.py already uses for its own debug snapshots, just
-promoted here from a debug aid to the primary way progress is shown. The
-`weights` broadcast on every message is still included (see
-latest_generation_message below) so a future client-side replay isn't
-blocked on anything this server would need to change.
-
-Usage:
-    python train_server.py --target circle --population 16 --generations 100 --port 8003
-"""
+"""FastAPI training server: stream generation results and serve run settings, archives, and diagnostic images."""
 from __future__ import annotations
+from config import CONFIG
+from evolve import checkpoint_metadata
 
 import asyncio
 import json
@@ -65,24 +46,16 @@ from policy_parameters import mutation_scales, policy_hidden_dim
 from raster import build_target_distance_field
 from domain_fitness import FITNESS_MODEL_VERSION, target_mask, score_domains
 from simulation_settings import (
-    ANGULAR_DAMPING,
     BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEM_CHANNELS,
     CHEMICAL_CHANNEL_PROFILES,
     CHEMICAL_GRADIENT_INPUT_SCALE,
     CHEMICAL_VALUE_INPUT_MULTIPLIER,
-    CHIRALITY,
     COMMUNICATION_SPEED,
     DAMPING_LOSS_FRACTION,
     DECAY,
-    DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
     NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-    DEPOSIT_DENSITY_REFERENCE,
-    DEPOSIT_SIGMA,
-    DIVISION_COOLDOWN,
-    DIVISION_DRIVE_BOOST,
-    DIVISION_DIRECTIONALITY,
     ELASTIC_STRAIN_SCALE,
     ELASTIC_STRAIN_INPUTS_ENABLED,
     FIELD_N,
@@ -92,35 +65,28 @@ from simulation_settings import (
     GROWTH_COMPRESSION_START,
     GROWTH_COMPRESSION_STOP,
     GROWTH_ANISOTROPY_AUTHORITY,
-    GROWTH_MAX,
     MATERIAL_AREA_BUDGET,
     GROWTH_MODEL_VERSION,
     INTERNAL_STATE_SPEED,
-    MASS_RAMP_MACRO_STEPS,
     MORPHOLOGY_BLUR_SIGMA,
     MORPHOLOGY_DENSITY_REFERENCE,
     NEURAL_UPDATES_PER_MACRO,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
-    MATERIAL_FLUIDITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
-    MAX_ACCEL,
-    MAX_ANGULAR_ACCEL,
-    MAX_ANGULAR_VELOCITY,
     MAX_ENV_WRITE,
-    MAX_STRAFE,
     MPM_ENABLED,
     REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
-    SPLIT_DISPLACEMENT,
+    SAMPLE_SPACING,
 )
 from targets import TARGETS_DIR, load_target
 from update_rule import UpdateRule
 
 parser = build_arg_parser()
-parser.add_argument("--port", type=int, default=8003)
+parser.add_argument("--port", type=int, default=CONFIG["server"]["port"])
 
 # `args`/`wgpu_device`/`target`/`target_raster`/`target_distance_field`
 # are set by _setup() below, called only under `if __name__ ==
@@ -152,7 +118,6 @@ target = None
 target_raster = None
 target_distance_field = None
 
-
 def _setup() -> None:
     global args, wgpu_device, target, target_raster, target_distance_field
     args = parser.parse_args()
@@ -183,7 +148,6 @@ def _setup() -> None:
     # second.
     target_raster = target_mask(target, args.raster_resolution)
     target_distance_field = build_target_distance_field(target_raster)
-
 
 # Every generation's own message (stats + weights) is appended here as it
 # happens, so a browser tab that connects mid-run — or reconnects after a
@@ -227,7 +191,6 @@ RUNS_DIR = CHECKPOINTS_DIR / "runs"
 IMAGES_DIR = CHECKPOINTS_DIR / "generation_images"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-
 def _archive_previous_run() -> None:
     """Moves the previous run's history.jsonl/best_meta.json/weight
     checkpoints (plus IMAGES_DIR, if it has anything in it) into a
@@ -267,7 +230,6 @@ def _archive_previous_run() -> None:
 
     print(f"[train_server] archived previous run to {archive_dir}")
 
-
 def _save_generation_images(
     generation: int, winner_weights: np.ndarray, winner_seed: int, winner_density: float,
     core: MpmCore, agents: AgentsGPU, environment: EnvironmentGPU
@@ -299,7 +261,7 @@ def _save_generation_images(
         return_positions=True,
         density_multiplier=winner_density,
     )
-    evaluation = score_domains(core.read_rest_state()[:, 12:18], target, target_raster, args)
+    evaluation = score_domains(core.read_rest_state()[:, 8:14], target, target_raster, args)
     agent_raster, breakdown = evaluation.raster, evaluation.breakdown
 
     prefix = f"gen_{generation:05d}"
@@ -319,12 +281,10 @@ def _save_generation_images(
         "rollout": core.rollout_diagnostics,
     }
 
-
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     asyncio.create_task(training_loop())
     yield
-
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
@@ -342,7 +302,6 @@ latest_generation_message: Optional[dict] = None
 # until it has). GET /settings below serves this directly.
 settings: Optional[dict] = None
 
-
 async def broadcast(message: dict) -> None:
     dead = set()
     for ws in connections:
@@ -351,7 +310,6 @@ async def broadcast(message: dict) -> None:
         except Exception:
             dead.add(ws)
     connections.difference_update(dead)
-
 
 async def training_loop() -> None:
     """Thin wrapper so a crash anywhere in the run is loud and visible
@@ -363,7 +321,6 @@ async def training_loop() -> None:
     except Exception:
         print("[train_server] training_loop crashed — training has stopped:")
         traceback.print_exc()
-
 
 async def _training_loop_body() -> None:
     global latest_generation_message, settings
@@ -383,39 +340,8 @@ async def _training_loop_body() -> None:
     # (below) — never a live forward pass, see training_sim.py's own
     # module docstring.
     core = MpmCore(wgpu_device)
-    environment = EnvironmentGPU(
-        wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE,
-        args.chemical_communication_architecture,
-        NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-        DEPOSIT_DENSITY_REFERENCE,
-        grid_velocity=core.grid_vel,
-        channel_profiles=CHEMICAL_CHANNEL_PROFILES,
-    )
-    agents = AgentsGPU(
-        wgpu_device,
-        core,
-        environment,
-        CHEM_CHANNELS,
-        policy_hidden,
-        MAX_ACCEL,
-        MAX_STRAFE,
-        MAX_ENV_WRITE,
-        MAX_ANGULAR_ACCEL,
-        ANGULAR_DAMPING,
-        MAX_ANGULAR_VELOCITY,
-        CHIRALITY,
-        DEPOSIT_DISTANCE,
-        args.particle_capacity,
-        SPLIT_DISPLACEMENT,
-        DIVISION_COOLDOWN,
-        FRICTION,
-        DEPOSIT_SIGMA,
-        1.0,
-        args.spawn_x,
-        args.spawn_y,
-        policy_architecture=args.policy_architecture,
-        chemical_communication_architecture=args.chemical_communication_architecture,
-    )
+    environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE, args.chemical_communication_architecture, NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY, grid_velocity=core.grid_vel, channel_profiles=CHEMICAL_CHANNEL_PROFILES)
+    agents = AgentsGPU(wgpu_device, core, environment, CHEM_CHANNELS, policy_hidden, MAX_ENV_WRITE, args.particle_capacity, SAMPLE_SPACING, FRICTION, 1.0, args.spawn_x, args.spawn_y, policy_architecture=args.policy_architecture, chemical_communication_architecture=args.chemical_communication_architecture)
     num_workers = args.workers if args.workers is not None else min(os.cpu_count() or 4, args.population)
     # log_device=False — _setup() already logged the "[device] adapter:
     # ..." confirmation once, above, for this process's own wgpu_device;
@@ -454,14 +380,12 @@ async def _training_loop_body() -> None:
         "particleVolume": VOL,
         "chemicalValueInputMultiplier": CHEMICAL_VALUE_INPUT_MULTIPLIER,
         "chemicalGradientInputScale": CHEMICAL_GRADIENT_INPUT_SCALE,
-        "chemicalProjectionWeight": 1.0,
         "macroSteps": args.macro_steps,
         "growthSteps": args.growth_steps,
         "substepsPerMacro": args.substeps_per_macro,
         "gravity": args.gravity,
         "spawnX": args.spawn_x,
         "spawnY": args.spawn_y,
-        "spawnHalfWidth": args.spawn_half_width,
         "channels": CHEM_CHANNELS,
         "fieldN": FIELD_N,
         "chemicalChannelProfiles": profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
@@ -471,8 +395,6 @@ async def _training_loop_body() -> None:
         "neuralUpdatesPerMacro": NEURAL_UPDATES_PER_MACRO,
         "communicationSpeed": COMMUNICATION_SPEED,
         "internalStateSpeed": INTERNAL_STATE_SPEED,
-        "divisionDirectionality": DIVISION_DIRECTIONALITY,
-        "divisionDriveBoost": DIVISION_DRIVE_BOOST,
         "elasticStrainScale": ELASTIC_STRAIN_SCALE,
         "elasticStrainInputsEnabled": ELASTIC_STRAIN_INPUTS_ENABLED,
         "hiddenDim": policy_hidden,
@@ -483,27 +405,16 @@ async def _training_loop_body() -> None:
         "decay": DECAY,
         "depositRate": DEPOSIT_RATE,
         "normalizeDepositsByLocalDensity": NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-        "depositDensityReference": DEPOSIT_DENSITY_REFERENCE,
-        "maxAccel": MAX_ACCEL,
-        "maxStrafe": MAX_STRAFE,
         "maxEnvWrite": MAX_ENV_WRITE,
-        "maxAngularAccel": MAX_ANGULAR_ACCEL,
-        "angularDamping": ANGULAR_DAMPING,
-        "maxAngularVelocity": MAX_ANGULAR_VELOCITY,
-        "depositDistance": DEPOSIT_DISTANCE,
-        "depositSigma": DEPOSIT_SIGMA,
-        "splitDisplacement": SPLIT_DISPLACEMENT,
-        "divisionCooldown": DIVISION_COOLDOWN,
+        "sampleSpacing": SAMPLE_SPACING,
         "friction": FRICTION,
-        "massRampMacroSteps": MASS_RAMP_MACRO_STEPS,
         "growthDuration": GROWTH_DURATION_MACRO_STEPS,
         "growthCompressionStart": GROWTH_COMPRESSION_START,
         "growthCompressionStop": GROWTH_COMPRESSION_STOP,
         "growthCompressionFeedback": GROWTH_COMPRESSION_FEEDBACK,
         "growthModelVersion": GROWTH_MODEL_VERSION,
-        "domainGeometry": "triangle",
+        "domainGeometry": "triangle-vertices",
         **shape_settings(args, target),
-        "growthMax": GROWTH_MAX,
         "growthAnisotropy": GROWTH_ANISOTROPY_AUTHORITY,
         # simulation_settings.py's own MPM_ENABLED (that constant's own
         # comment has the full "why" — a real testing/debug mode that
@@ -513,13 +424,11 @@ async def _training_loop_body() -> None:
         # viewer/src/gpu/types.ts's own RunSettings.mpmEnabled), still
         # live-flippable there afterward regardless of this constant.
         "mpmEnabled": MPM_ENABLED,
-        "chirality": CHIRALITY,
         "damping": DAMPING_LOSS_FRACTION,
         "materialE": MATERIAL_E,
         "materialNu": MATERIAL_NU,
         "materialHardening": MATERIAL_HARDENING,
         "materialElasticity": MATERIAL_ELASTICITY,
-        "materialFluidity": MATERIAL_FLUIDITY,
         "splatRadius": SPLAT_RADIUS,
         "repulsionStrength": REPULSION_STRENGTH,
         "repulsionMaxDelta": REPULSION_MAX_DELTA,
@@ -528,9 +437,7 @@ async def _training_loop_body() -> None:
         "elites": args.elites,
         "mutationSigma": args.mutation_sigma,
         "rasterResolution": args.raster_resolution,
-        "rasterSigma": args.raster_sigma,
         "outsideWeight": args.outside_weight,
-        "fitnessTargetOccupancy": args.fitness_target_occupancy,
         "fitnessCoverageWeight": args.fitness_coverage_weight,
         "fitnessSpillWeight": args.fitness_spill_weight,
         "fitnessBoundaryWeight": args.fitness_boundary_weight,
@@ -645,112 +552,13 @@ async def _training_loop_body() -> None:
             (CHECKPOINTS_DIR / "best_weights.json").write_text(json.dumps(update_rule.export_weights()))
             (CHECKPOINTS_DIR / "best_meta.json").write_text(
                 json.dumps(
-                    {
-                        "generation": generation,
-                        "fitness": best_fitness,
-                        "fitness_model_version": FITNESS_MODEL_VERSION,
-                        "material_area_budget": resolved_material_budget(args, target),
-                        "shape_settings": shape_settings(args, target),
-                        "raster_resolution": args.raster_resolution,
-                        "target": args.target,
-                        "particles": args.particles,
-                        "initial_particle_count": args.initial_particles,
-                        "initial_condition": args.initial_condition,
-                        "initial_condition_strength": args.initial_condition_strength,
-                        "initial_condition_channel": args.initial_condition_channel,
-                        "density_model_version": DENSITY_MODEL_VERSION,
-                        "particle_density_multipliers": args.particle_densities,
-                        "density_aggregation": args.density_aggregation,
-                        "particle_capacity": args.particle_capacity,
-                        "particle_mass": PARTICLE_MASS,
-                        "particle_volume": VOL,
-                        "chemical_projection_weight": 1.0,
-                        "chemical_gradient_input_scale": CHEMICAL_GRADIENT_INPUT_SCALE,
-                        "winner_density_multiplier": best_winner_density,
-                        "density_fitnesses": best_density_fitnesses,
-                        "macro_steps": args.macro_steps,
-                        "growth_steps": args.growth_steps,
-                        "substeps_per_macro": args.substeps_per_macro,
-                        "gravity": args.gravity,
-                        "spawn_x": args.spawn_x,
-                        "spawn_y": args.spawn_y,
-                        "spawn_half_width": args.spawn_half_width,
-                        "channels": CHEM_CHANNELS,
-                        "field_n": FIELD_N,
-                        "chemical_channel_profiles": profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
-                        "population": args.population,
-                        "seeds_per_candidate": args.seeds_per_candidate,
-                        # These identify the evaluation that selected
-                        # best_weights; the current generation may be newer.
-                        "evaluation_seeds": best_evaluation_seeds,
-                        "elites": args.elites,
-                        "mutation_sigma": args.mutation_sigma,
-                        "fitness_target_occupancy": args.fitness_target_occupancy,
-                        "fitness_coverage_weight": args.fitness_coverage_weight,
-                        "fitness_spill_weight": args.fitness_spill_weight,
-                        "fitness_boundary_weight": args.fitness_boundary_weight,
-                        "fitness_crowding_weight": args.fitness_crowding_weight,
-                        "fitness_temporal_worst_weight": args.fitness_temporal_worst_weight,
-                        "policy_architecture": args.policy_architecture,
-                        "cell_memory": args.cell_memory,
-                        "hidden_layers": args.hidden_layers,
-                        "chemical_communication_architecture": args.chemical_communication_architecture,
-                        "hidden_dim": policy_hidden,
-                        "mutation_scales": mutation_scales(args.policy_architecture),
-                        "seed": args.seed,
-                        "winner_seed": best_winner_seed,
-                        # simulation_settings.py's own values this run
-                        # actually simulated under — see evolve.py's own
-                        # checkpoint metadata for why these ride along
-                        # even though every message already carries them.
-                        "decay": DECAY,
-                        "deposit_rate": DEPOSIT_RATE,
-                        "normalize_deposits_by_local_density": NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-                        "deposit_density_reference": DEPOSIT_DENSITY_REFERENCE,
-                        "max_accel": MAX_ACCEL,
-                        "max_strafe": MAX_STRAFE,
-                        "max_env_write": MAX_ENV_WRITE,
-                        "max_angular_accel": MAX_ANGULAR_ACCEL,
-                        "angular_damping": ANGULAR_DAMPING,
-                        "max_angular_velocity": MAX_ANGULAR_VELOCITY,
-                        "deposit_distance": DEPOSIT_DISTANCE,
-                        "deposit_sigma": DEPOSIT_SIGMA,
-                        "split_displacement": SPLIT_DISPLACEMENT,
-                        "division_cooldown": DIVISION_COOLDOWN,
-                        "friction": FRICTION,
-                        "mass_ramp_macro_steps": MASS_RAMP_MACRO_STEPS,
-                        "growth_duration_macro_steps": GROWTH_DURATION_MACRO_STEPS,
-                        "growth_compression_start": GROWTH_COMPRESSION_START,
-                        "growth_compression_stop": GROWTH_COMPRESSION_STOP,
-                        "growth_compression_feedback": GROWTH_COMPRESSION_FEEDBACK,
-                        "morphology_blur_sigma": MORPHOLOGY_BLUR_SIGMA,
-                        "morphology_density_reference": MORPHOLOGY_DENSITY_REFERENCE,
-                        "neural_updates_per_macro": NEURAL_UPDATES_PER_MACRO,
-                        "communication_speed": COMMUNICATION_SPEED,
-                        "internal_state_speed": INTERNAL_STATE_SPEED,
-                        "division_directionality": DIVISION_DIRECTIONALITY,
-                        "division_drive_boost": DIVISION_DRIVE_BOOST,
-                        "elastic_strain_scale": ELASTIC_STRAIN_SCALE,
-                        "elastic_strain_inputs_enabled": ELASTIC_STRAIN_INPUTS_ENABLED,
-                        "growth_max": GROWTH_MAX,
-                        "growth_anisotropy_authority": GROWTH_ANISOTROPY_AUTHORITY,
-                        "chirality": CHIRALITY,
-                        "damping": DAMPING_LOSS_FRACTION,
-                        "material_e": MATERIAL_E,
-                        "material_nu": MATERIAL_NU,
-                        "material_hardening": MATERIAL_HARDENING,
-                        "material_elasticity": MATERIAL_ELASTICITY,
-                        "splat_radius": SPLAT_RADIUS,
-                        "repulsion_strength": REPULSION_STRENGTH,
-                        "repulsion_max_delta": REPULSION_MAX_DELTA,
-                    },
+                    checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds),
                     indent=2,
                 )
             )
 
     pool.shutdown()
     print(f"done. best fitness: {best_fitness:.4f}. weights saved to {CHECKPOINTS_DIR / 'best.npy'}")
-
 
 @app.get("/history")
 def history() -> dict:
@@ -764,7 +572,6 @@ def history() -> dict:
     lines = [line for line in HISTORY_PATH.read_text().splitlines() if line]
     return {"generations": [json.loads(line) for line in lines[-MAX_HISTORY:]]}
 
-
 @app.get("/settings")
 def get_settings() -> dict:
     """This run's own fixed settings — see the `settings` global's own
@@ -777,18 +584,9 @@ def get_settings() -> dict:
         raise HTTPException(503, "training hasn't started yet")
     return settings
 
-
 @app.get("/runs/{run_id}/settings")
 def run_settings(run_id: str) -> dict:
-    """Same shape as /settings, for one specific run — "current" is just
-    /settings itself; anything else reads that archived run's own copy
-    of settings.json (moved, not copied, by _archive_previous_run(),
-    same as history.jsonl). 404 (not the transient 503 /settings itself
-    can return) for an archived run with no settings.json at all — a run
-    archived before this endpoint existed, not a startup race, so
-    retrying wouldn't help; the frontend falls back to whatever that
-    generation's own history record still carries inline for such a
-    run — see net/trainingSocket.ts's own applyGeneration()."""
+    """Read the complete current-schema settings for a saved run."""
     if run_id == "current":
         return get_settings()
     run_dir = _run_dir_for_id(run_id)
@@ -796,15 +594,16 @@ def run_settings(run_id: str) -> dict:
         raise HTTPException(404, f"unknown run '{run_id}'")
     settings_path = run_dir / "settings.json"
     if not settings_path.is_file():
-        raise HTTPException(404, f"run '{run_id}' has no settings.json (archived before this existed)")
-    return json.loads(settings_path.read_text())
-
+        raise HTTPException(404, f"run '{run_id}' has no settings.json")
+    settings = json.loads(settings_path.read_text())
+    if settings["growthModelVersion"] != GROWTH_MODEL_VERSION:
+        raise HTTPException(422, "Run schema does not match the current simulation")
+    return settings
 
 @app.get("/target/points")
 def target_points() -> dict:
     """This server only ever has the one target it was launched with."""
     return {"points": target.points.tolist()}
-
 
 @app.get("/targets/{name}/points")
 def named_target_points(name: str) -> dict:
@@ -818,7 +617,6 @@ def named_target_points(name: str) -> dict:
         raise HTTPException(404, f"unknown target '{name}'")
     loaded = load_target(name)
     return {"points": loaded.points.tolist()}
-
 
 def _find_latest_preview_prefix(images_dir: Path) -> Optional[str]:
     """Zero-padded generation prefix (e.g. "gen_00042") of the highest-
@@ -850,7 +648,6 @@ def _find_latest_preview_prefix(images_dir: Path) -> Optional[str]:
             return candidates[-1].name.rsplit("_", 1)[0]
     return None
 
-
 def _run_dir_for_id(run_id: str) -> Optional[Path]:
     """Resolves an archived run id (an archive directory's own name — see
     _archive_previous_run()) to its path, rejecting anything that isn't
@@ -863,7 +660,6 @@ def _run_dir_for_id(run_id: str) -> Optional[Path]:
     if candidate.is_dir() and candidate.parent == RUNS_DIR:
         return candidate
     return None
-
 
 @app.get("/runs")
 def list_runs() -> dict:
@@ -922,7 +718,6 @@ def list_runs() -> dict:
 
     return {"runs": runs}
 
-
 @app.get("/runs/{run_id}/history")
 def run_history(run_id: str) -> dict:
     """Same shape as /history, for one specific run — "current" is just
@@ -940,7 +735,6 @@ def run_history(run_id: str) -> dict:
     lines = [line for line in history_path.read_text().splitlines() if line]
     return {"generations": [json.loads(line) for line in lines[-MAX_HISTORY:]]}
 
-
 def _images_dir_for_run(run_id: str) -> Path:
     """Shared by run_preview() and run_image() below — "current" is the
     live, in-progress run's own IMAGES_DIR; anything else must resolve to
@@ -952,7 +746,6 @@ def _images_dir_for_run(run_id: str) -> Path:
     if run_dir is None:
         raise HTTPException(404, f"unknown run '{run_id}'")
     return run_dir / "generation_images"
-
 
 @app.get("/runs/{run_id}/preview.png")
 def run_preview(run_id: str) -> FileResponse:
@@ -967,7 +760,6 @@ def run_preview(run_id: str) -> FileResponse:
     if not path.is_file():
         path = images_dir / f"{prefix}_grown.png"
     return FileResponse(path)
-
 
 @app.get("/runs/{run_id}/target-preview.png")
 def run_target_preview(run_id: str) -> FileResponse:
@@ -986,7 +778,6 @@ def run_target_preview(run_id: str) -> FileResponse:
         raise HTTPException(404, "no target preview image available yet")
     return FileResponse(path)
 
-
 @app.get("/runs/{run_id}/images/{filename}")
 def run_image(run_id: str, filename: str) -> FileResponse:
     """A specific gen_{N:05d}_{grown,aligned}.png from a specific run —
@@ -999,7 +790,6 @@ def run_image(run_id: str, filename: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(404)
     return FileResponse(path)
-
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket) -> None:
@@ -1018,9 +808,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     finally:
         connections.discard(websocket)
 
-
 if __name__ == "__main__":
     import uvicorn
 
     _setup()
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    uvicorn.run(app, host=CONFIG["server"]["bindHost"], port=args.port)

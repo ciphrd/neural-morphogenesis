@@ -4,14 +4,11 @@ Run: trainer/.venv/bin/python trainer/growth_resampling_math_check.py
 """
 import numpy as np
 
-
 def cross(a, b):
     return a[0] * b[1] - a[1] * b[0]
 
-
 def affine_spin(c, covariance):
     return (c @ covariance)[1, 0] - (c @ covariance)[0, 1]
-
 
 def totals(m, x, v, c, covariance):
     return np.array([
@@ -21,7 +18,6 @@ def totals(m, x, v, c, covariance):
         m * (cross(x, v) + affine_spin(c, covariance)),
         0.5 * m * (v @ v + np.trace(c @ covariance @ c.T)),
     ])
-
 
 def check_domain_bisection():
     rng = np.random.default_rng(42)
@@ -48,7 +44,6 @@ def check_domain_bisection():
             np.testing.assert_allclose(after, before, rtol=1e-12, atol=1e-12)
     print('[PASS] domain bisection preserves area, covariance, mass, centroid, '
           'linear/angular momentum and affine kinetic energy')
-
 
 def check_point_apic_counterexample():
     dx, mass, omega = 1 / 256, 1.0, 3.0
@@ -89,7 +84,6 @@ def check_point_apic_counterexample():
     assert expected_spin > 0
     print(f'[PASS] point APIC split counterexample: angular momentum jump '
           f'{expected_spin:.9g}, affine energy jump {expected_energy:.9g}')
-
 
 if __name__ == '__main__':
     check_domain_bisection()

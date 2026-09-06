@@ -9,7 +9,6 @@ from mpm_core import DT
 from triangle_domain_check import Triangle
 from triangle_vertices import domain_edges, vertices_from_edges, unwrap_vertices
 
-
 def sample_grid(grid, position):
     y = (np.asarray(position) % 1)/DX
     base = np.floor(y-.5).astype(int)
@@ -17,7 +16,6 @@ def sample_grid(grid, position):
     weights = [.5*(1.5-fx)**2, .75-(fx-1)**2, .5*(fx-.5)**2]
     return sum(weights[i][0]*weights[j][1]*grid[(base[0]+i)%GRID_N,(base[1]+j)%GRID_N]
                for i in range(3) for j in range(3))
-
 
 def run_g2p(core):
     encoder = core.device.create_command_encoder()
@@ -28,7 +26,6 @@ def run_g2p(core):
     compute.end()
     core.device.queue.submit([encoder.finish()])
 
-
 def load_triangles(core, vertices):
     triangles = [Triangle.from_vertices(v) for v in vertices]
     n = len(triangles)
@@ -38,14 +35,11 @@ def load_triangles(core, vertices):
                     np.asarray(vertices,np.float32).reshape(n,6)%1,
                     domain_geometry='triangle-vertices')
 
-
 def actual_triangles(core):
-    return [Triangle.from_vertices(v) for v in unwrap_vertices(read_rest(core,core.active_count)[:,12:18])]
-
+    return [Triangle.from_vertices(v) for v in unwrap_vertices(read_rest(core,core.active_count)[:,8:14])]
 
 def periodic_error(a,b):
     return (np.asarray(a)-np.asarray(b)+.5)%1-.5
-
 
 def check_nonlinear_shared_vertices(device):
     core,_ = make_system(device)
@@ -72,7 +66,7 @@ def check_nonlinear_shared_vertices(device):
             velocities = np.frombuffer(device.queue.read_buffer(core.velocities,0,16),np.float32).reshape(2,2)
             np.testing.assert_allclose(velocities,center_velocities,rtol=2e-6,atol=3e-7)
             shared = periodic_error(after[0].vertices()[[1,2]],after[1].vertices()[[0,2]])
-            raw = read_rest(core,2)[:,12:18].reshape(2,3,2)
+            raw = read_rest(core,2)[:,8:14].reshape(2,3,2)
             np.testing.assert_array_equal(raw[0,[1,2]].view(np.uint32),raw[1,[0,2]].view(np.uint32))
             max_shared_error = max(max_shared_error,float(np.max(np.abs(shared))))
             if step==0:
@@ -83,16 +77,15 @@ def check_nonlinear_shared_vertices(device):
     print(f'[PASS] nonlinear per-vertex CPU/GPU agreement and shared corners over 128 steps, '
           f'including seams: max separation {max_shared_error:.3g}; centroid-path difference {centroid_correction:.3g}')
 
-
 def check_translation_and_rest(device):
     core,_ = make_system(device)
     load_triangles(core,[[[.999,.998],[1.001,.998],[.999,1.001]]])
     before = actual_triangles(core)[0]
-    domain = read_rest(core,1)[0,12:18].copy()
+    domain = read_rest(core,1)[0,8:14].copy()
     grid = np.zeros(((GRID_N+1)**2,2),np.float32)
     device.queue.write_buffer(core.grid_vel,0,grid)
     run_g2p(core)
-    np.testing.assert_array_equal(read_rest(core,1)[0,12:18],domain)
+    np.testing.assert_array_equal(read_rest(core,1)[0,8:14],domain)
     np.testing.assert_allclose(periodic_error(core.read_positions()[0],before.x),0,atol=6e-8)
     velocity = np.array([12.,15.],np.float32)
     grid[:] = velocity
@@ -102,7 +95,6 @@ def check_translation_and_rest(device):
     np.testing.assert_allclose(periodic_error(after.vertices(),before.vertices()+16*DT*velocity),0,atol=1e-6)
     np.testing.assert_allclose(after.edges,before.edges,atol=1e-6)
     print('[PASS] zero flow retains geometry exactly; uniform translation preserves shape across both seams')
-
 
 def check_relocation_momentum_accounting(device):
     # Keeping the point velocity preserves the gathered linear momentum, but
@@ -129,7 +121,6 @@ def check_relocation_momentum_accounting(device):
     print(f'[PASS] point linear-momentum gather retained; geometric relocation angular change '
           f'per unit mass={angular_change_per_mass:.3g} (not guaranteed zero)')
 
-
 def check_split_and_seed_identity(device):
     from continuous_growth_check import run_growth_field, synchronize_count
     from training_sim import seed_blob
@@ -137,11 +128,11 @@ def check_split_and_seed_identity(device):
     # Both incident triangles bisect the same longest edge, in opposite orders.
     a,b,c,d=np.array([[.4,.4],[.41,.4],[.4,.41],[.41,.41]],np.float32)
     load_triangles(core,[[a,b,c],[b,d,c]])
-    original=read_rest(core,2)[:,12:18].reshape(-1,2).copy()
+    original=read_rest(core,2)[:,8:14].reshape(-1,2).copy()
     agents.set_active_count(2)
     run_growth_field(device,agents)
     assert synchronize_count(core,agents)==4
-    vertices=read_rest(core,4)[:,12:18].reshape(-1,2)
+    vertices=read_rest(core,4)[:,8:14].reshape(-1,2)
     old_bits={tuple(v.view(np.uint32)) for v in original}
     new=[tuple(v.view(np.uint32)) for v in vertices if tuple(v.view(np.uint32)) not in old_bits]
     assert len(new)==4 and len(set(new))==1, 'Independently bisected shared edge must use one exact midpoint'
@@ -150,7 +141,7 @@ def check_split_and_seed_identity(device):
     # Startup cells also share exact coordinates before any advection.
     scene=seed_blob(7,(.9999,.0001),.01,17)
     core.load_scene(*scene)
-    vertices=read_rest(core,14)[:,12:18].reshape(-1,2)
+    vertices=read_rest(core,14)[:,8:14].reshape(-1,2)
     groups={}
     for i,v in enumerate(vertices): groups.setdefault(tuple(v.view(np.uint32)),[]).append(i)
     duplicates=[indices for indices in groups.values() if len(indices)>1]
@@ -161,11 +152,10 @@ def check_split_and_seed_identity(device):
     device.queue.write_buffer(core.grid_vel,0,grid.reshape(-1,2))
     for _ in range(256):
         run_g2p(core)
-        bits=read_rest(core,14)[:,12:18].copy().reshape(-1,2).view(np.uint32)
+        bits=read_rest(core,14)[:,8:14].copy().reshape(-1,2).view(np.uint32)
         for indices in duplicates:
             np.testing.assert_array_equal(bits[indices],np.tile(bits[indices[0]],(len(indices),1)))
     print('[PASS] split endpoints preserved, opposite-winding midpoints identical, shared seed corners bit-identical for 256 steps')
-
 
 if __name__=='__main__':
     device=pick_device()

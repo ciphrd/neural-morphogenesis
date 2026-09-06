@@ -23,11 +23,9 @@ from distance import chamfer_distance
 # envnca/alignment.py's own TRAIN_NUM_ANGLES.
 TRAIN_NUM_ANGLES = 16
 
-
 def _rotation_matrix(theta: float) -> np.ndarray:
     c, s = np.cos(theta), np.sin(theta)
     return np.array([[c, -s], [s, c]])
-
 
 def best_alignment(
     points: np.ndarray, target_points: np.ndarray, num_angles: int = TRAIN_NUM_ANGLES
@@ -55,7 +53,6 @@ def best_alignment(
             best_dist = dist
             best_points = rotated
     return best_dist, best_points
-
 
 def training_alignment_distance(
     points: np.ndarray, target_points: np.ndarray, num_angles: int = TRAIN_NUM_ANGLES

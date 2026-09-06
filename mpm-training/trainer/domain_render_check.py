@@ -10,7 +10,6 @@ from triangle_vertices import vertices_from_edges
 from device import pick_device
 from shader_template import template_shader
 
-
 def check():
     device = pick_device()
     source = (Path(__file__).resolve().parents[1]/'viewer/src/gpu/render.wgsl').read_text()
@@ -28,8 +27,8 @@ def check():
                                  ([.005,.005],[[.3,.08],[.02,.25]],1),
                                  ([.5,.5],[[.09,.02],[.01,.07]],4)]:
         center, edges = np.array(center,np.float32), np.array(edges,np.float32)
-        rest = np.zeros(20,np.float32)
-        rest[12:18] = vertices_from_edges([center],[edges])[0]
+        rest = np.zeros(16,np.float32)
+        rest[8:14] = vertices_from_edges([center],[edges])[0]
         # Zero marker alpha and appearance: outlines must remain visible.
         positions = device.create_buffer_with_data(data=center,usage=wgpu.BufferUsage.STORAGE)
         domains = device.create_buffer_with_data(data=rest,usage=wgpu.BufferUsage.STORAGE)
@@ -79,7 +78,6 @@ def check():
         from PIL import Image
         Image.fromarray(np.concatenate(images,axis=1)).save(sys.argv[1])
     print('[PASS] rendered outlines match domain edges at 1x/4x zoom, wrap both seams, and ignore marker opacity')
-
 
 if __name__ == '__main__':
     check()

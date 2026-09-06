@@ -21,7 +21,6 @@ from policy_parameters import (
 from simulation_settings import CHEM_CHANNELS, HIDDEN_DIM
 from update_rule import UpdateRule
 
-
 def main() -> None:
     model = UpdateRule(CHEM_CHANNELS)
     flat = get_weights(model)
@@ -80,8 +79,8 @@ def main() -> None:
         CHEM_CHANNELS, stateful_hidden, np.random.default_rng(31), STATEFUL_ARCHITECTURE
     )
     assert stateful_flat.size == stateful_random.size
-    assert [head.name for head in policy_heads(CHEM_CHANNELS, STATEFUL_ARCHITECTURE)][-2:] == [
-        "stateDelta", "stateGate"
+    assert [head.name for head in policy_heads(CHEM_CHANNELS, STATEFUL_ARCHITECTURE)][-3:] == [
+        "stateDelta", "stateGate", "color"
     ]
     stateful_mutated = mutate(
         stateful_flat, sigma, np.random.default_rng(32), STATEFUL_ARCHITECTURE
@@ -102,13 +101,15 @@ def main() -> None:
         PERSISTENT_ENVIRONMENT_ARCHITECTURE,
         CELL_OWNED_PROJECTION_ARCHITECTURE,
     )
-    assert normalize_chemical_communication_architecture(None) == CELL_OWNED_PROJECTION_ARCHITECTURE
+    try:
+        normalize_chemical_communication_architecture(None)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Missing architecture must be rejected")
     for chemical_architecture in CHEMICAL_COMMUNICATION_ARCHITECTURES:
         assert normalize_chemical_communication_architecture(chemical_architecture) == chemical_architecture
-    assert resolve_chemical_communication_architecture(None, 0.91) == PERSISTENT_ENVIRONMENT_ARCHITECTURE
-    assert resolve_chemical_communication_architecture(None, 0.0) == CELL_OWNED_PROJECTION_ARCHITECTURE
     print("[PASS] chemical communication architecture selection is validated independently of policy shape")
-
 
 if __name__ == "__main__":
     main()

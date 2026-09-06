@@ -10,7 +10,6 @@ from targets import TargetShape, load_target
 
 ROOT = Path(__file__).resolve().parents[1]
 
-
 def tiled_target(target):
     half = target.texel_size()/2
     triangles = []
@@ -19,12 +18,10 @@ def tiled_target(target):
         triangles.extend([[a,b,c],[a,c,d]])
     return np.array(triangles)
 
-
 def subdivide(t):
     a,b,c = t[:,0],t[:,1],t[:,2]
     m = (a+b)/2
     return np.concatenate([np.stack([a,m,c],1),np.stack([m,b,c],1)])
-
 
 def check_geometry():
     rng = np.random.default_rng(71)
@@ -60,7 +57,6 @@ def check_geometry():
     assert evaluate_domains(extra,target,target_mask(target,64)).match.error > 1
     print('[PASS] Exact area, subdivision, periodic translation, holes, missing/spill/overlap, invalid geometry')
 
-
 def check_stop():
     good=MatchMetrics(.01,.01,.01); bad=MatchMetrics(.2,0,0)
     s=StableMatchStop(interval=5,confirmations=2,settle_steps=7)
@@ -80,7 +76,6 @@ def check_stop():
     assert not StableMatchStop(enabled=False).due(10)
     print('[PASS] Confirmation reset, failed settling resumes growth, full settling duration, capacity failure, disabled stop')
 
-
 def check_browser():
     fixtures=[]
     for name in ('circle','donut','legs'):
@@ -92,9 +87,9 @@ def check_browser():
                 'expected':evaluate_domains(vertices,t,target_mask(t,64)).match})
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run([str(ROOT/'viewer/node_modules/.bin/tsc'),str(ROOT/'viewer/src/gpu/shapeMatch.ts'),
-            '--target','ES2020','--module','commonjs','--outDir',tmp,'--skipLibCheck'],check=True)
+            '--target','ES2020','--module','commonjs','--outDir',tmp,'--skipLibCheck','--resolveJsonModule','--esModuleInterop'],check=True)
         script=Path(tmp)/'check.cjs'
-        script.write_text('''const {matchDomains,targetMask,StableMatchStop}=require('./shapeMatch.js');
+        script.write_text('''const {matchDomains,targetMask,StableMatchStop}=require('./viewer/src/gpu/shapeMatch.js');
 const data=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const results=data.map(f=>matchDomains(f.vertices,f.target,targetMask(f.target,64)));
 const s=new StableMatchStop({stableStop:true,shapeTarget:data[0].target,shapeCheckInterval:5,shapeConfirmations:2,shapeSettleSteps:7});
@@ -111,7 +106,6 @@ process.stdout.write(JSON.stringify({results,states}));''')
             states.append([s.complete,s.growth_enabled])
         assert states==actual['states']
     print('[PASS] Python/browser geometry metrics and stopping state parity')
-
 
 if __name__=='__main__':
     check_geometry();check_stop();check_browser()

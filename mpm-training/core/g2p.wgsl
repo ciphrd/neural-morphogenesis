@@ -1,20 +1,4 @@
-// Grid-to-particle transfer + the MLS-MPM deformation-gradient update +
-// snow plasticity clamp — direct port of the G2P half of
-// mls-mpm88-explained.cpp's advance(). See p2g.wgsl's own header for why
-// 2x2 matrices are plain vec4<f32>(m00,m01,m10,m11) rather than WGSL's
-// column-major mat2x2<f32>.
-//
-// Independent copy of mls-mpm/src/gpu/g2p.wgsl (this project's own
-// sandbox) — this file was already pure physics, no mouse/repulsion/
-// attract coupling of any kind; the one functional change from that
-// walled reference is TOROIDAL wraparound (see wrapIndex() and the
-// fract()-based position update below) — this project's own domain has
-// no walls (see gridUpdate.wgsl's own module docstring).
-//
-// The reference's `plastic` flag is a compile-time `true` for every
-// particle — there is no UI here to disable it, so the clamp below is
-// unconditional rather than porting the reference's
-// `for (i<2*int(plastic))` loop literally.
+
 
 const GRID_N: u32 = __GRID_N__u;
 const INV_DX: f32 = __INV_DX__;
@@ -26,90 +10,50 @@ const GROWTH_CH_TENSOR_XY: u32 = 3u;
 const GROWTH_CH_TENSOR_YY: u32 = 4u;
 const GROWTH_CH_WEIGHT: u32 = 5u;
 const GROWTH_FIELD_SCALE: f32 = 8192.0;
-// Channel 7 in one-based UI language: the channel immediately before the
-// final (index 7) growth-admission channel.
-const FLUIDITY_CHANNEL: u32 = 6u;
+
 
 @group(0) @binding(0) var<storage, read_write> particlePos: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read_write> particleVel: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read_write> particleF: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> particleC: array<vec4<f32>>;
-// Per-particle rest-state bookkeeping (growthF / jp / cycleActive) — see
-// core/agents.wgsl's own ParticleRest struct for the full field-by-field
-// docs. THIS SHADER advances `jp` (the plastic clamp below) and `growthF`
-// (the substrate-driven growth law below). `cycleActive` and
-// growth-control state is owned by core/agents.wgsl and must be PRESERVED on write — the
-// element used to be a bare f32 this shader could overwrite wholesale,
-// and it no longer is.
+
 struct ParticleRest {
   growthF: vec4<f32>,
   jp: f32,
-  cycleActive: f32,
-  growthAngle: f32,
-  growthAnisotropy: f32,
-  divisionBias: f32, // Original world area (legacy ABI name).
-  growthFrameAngle: f32,
-  appearanceScale: f32,
+  growthVectorX: f32,
+  growthVectorY: f32,
+  budgetGrowthRatio: f32,
+  verticesAB: vec4<f32>,
+  vertexC: vec2<f32>,
+  originalArea: f32,
   quadratureWeight: f32,
-  // Explicit wrapped vertices: domain.xy=A, domain.zw=B, vertexC=C.
-  domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>,
 }
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
 
-// Live particle count — see p2g.wgsl's own comment on why (a fixed-
-// capacity buffer with a live count, not a compile-time PARTICLE_COUNT).
 @group(0) @binding(6) var<uniform> activeCount: u32;
 
-// Same Material struct/buffer p2g.wgsl binds (see that file's own
-// comment on why one shared struct) — this shader reads
-// yieldLow/yieldHigh (the plasticity clamp bounds just below) and the
-// growth params (the growth relaxation just below that), but never
-// mu0/lambda0/hardening.
 struct Material {
   mu0: f32,
   lambda0: f32,
   hardening: f32,
   yieldLow: f32,
   yieldHigh: f32,
-  // Exponential area-growth rate while the substrate-triggered cell cycle
-  // is active. 0 disables growth.
+
   growthRate: f32,
-  // Legacy uniform slot retained for host-layout compatibility. Division
-  // is fixed at area ratio 2 below because any other value would make one
-  // parent -> two baseline daughters non-conservative.
-  growthMax: f32,
-  // Global multiplier on the policy's per-particle anisotropy. The trainer
-  // uses 1; the viewer exposes [0,1] as a live blob-vs-tendril bias.
+
   growthAnisotropy: f32,
   particleMass: f32,
   particleVolume: f32,
-  // Dimensionless elastic areal-compression feedback. Compression is
-  // c=max(0,-log(det(Fe))); the smooth start/stop interval avoids chatter.
+
   growthCompressionStart: f32,
   growthCompressionStop: f32,
   growthCompressionFeedback: f32,
-  // Global, per-substep shear-relaxation fraction. This is deliberately a
-  // material state control rather than velocity damping: it turns stored
-  // elastic shear into fluid-like behavior while retaining bulk response.
-  fluidity: f32,
 }
 @group(0) @binding(7) var<uniform> material: Material;
 
-// Read-only view of Agents' packed cell state. ParticleMeta begins at byte
-// 256, and its chemical state begins 72 bytes into each 112-byte record.
-struct ParticleChemical {
-  _prefix: array<u32, 18>,
-  levels: array<f32, CHEMICAL_CHANNELS>,
-  _tail: array<u32, 2>,
-}
-struct ChemicalState {
-  _header: array<u32, 64>,
-  particles: array<ParticleChemical>,
-}
-@group(0) @binding(8) var<storage, read> chemicalState: ChemicalState;
-// Volume-weighted vector/tensor field scattered once per neural macro step by
-// growthField.wgsl and held constant across this macro step's physics substeps.
+
+
 @group(0) @binding(9) var<storage, read_write> growthField: array<atomic<i32>>;
 
 fn matMul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
@@ -141,9 +85,6 @@ fn identityPlusScaled(m: vec4<f32>, s: f32) -> vec4<f32> {
   return vec4<f32>(1.0 + s * m.x, s * m.y, s * m.z, 1.0 + s * m.w);
 }
 
-// Exact exponential of a symmetric 2x2 matrix. This keeps a positive growth
-// tensor positive and makes det(exp(A)) = exp(trace(A)) without a time-step
-// dependent Euler approximation.
 fn symmetricExp(m: vec4<f32>) -> vec4<f32> {
   let traceHalf = 0.5 * (m.x + m.w);
   let diagonal = 0.5 * (m.x - m.w);
@@ -165,10 +106,6 @@ struct Polar {
   s: vec4<f32>,
 };
 
-// Same closed-form 2x2 polar decomposition as p2g.wgsl — duplicated
-// rather than shared (WGSL has no #include), see this project's own
-// design notes on why a little duplication across small, self-contained
-// shader files beats introducing a build-time concatenation step.
 fn polarDecompose(m: vec4<f32>) -> Polar {
   let x = m.x + m.w;
   let y = m.z - m.y;
@@ -193,21 +130,12 @@ struct Svd {
   v: vec4<f32>,
 };
 
-// 2x2 SVD built on top of polarDecompose: M = R*S (R rotation, S
-// symmetric PSD) => S's eigendecomposition S = V*Sigma*V^T gives
-// Sigma's diagonal as M's singular values (S=sqrt(M^T M) is a standard
-// polar-decomposition identity) and U = R*V. S is symmetric, so its
-// eigenvectors are automatically orthogonal — v2 is built as v1 rotated
-// 90° rather than solved for separately, which also guarantees V stays
-// a proper rotation (det=+1), matching R's own convention.
 fn svd2(m: vec4<f32>) -> Svd {
   let polar = polarDecompose(m);
   let r = polar.r;
   let s = polar.s;
   let a = s.x;
-  // Average the two off-diagonal entries — S is symmetric by
-  // construction (S = R^T*M with R from polarDecompose), so s.y and s.z
-  // should already be equal; this only guards float roundoff.
+
   let b = 0.5 * (s.y + s.z);
   let d = s.w;
 
@@ -217,10 +145,6 @@ fn svd2(m: vec4<f32>) -> Svd {
   let lambda1 = tr * 0.5 + radius;
   let lambda2 = tr * 0.5 - radius;
 
-  // Eigenvector for lambda1, solved from (S-lambda1*I)v=0's second row
-  // (b*vx + (d-lambda1)*vy = 0 => v=(lambda1-d, b)); falls back to the
-  // first row's form, then to (1,0), for the degenerate cases where one
-  // or both formulas vanish (S already diagonal).
   var v1 = vec2<f32>(lambda1 - d, b);
   if (length(v1) < 1e-6) {
     v1 = vec2<f32>(b, lambda1 - a);
@@ -238,9 +162,6 @@ fn svd2(m: vec4<f32>) -> Svd {
   return out;
 }
 
-// Euclidean modulo — see p2g.wgsl's own copy of this exact function for
-// why (must agree with it exactly: G2P has to gather from the same
-// wrapped stencil P2G scattered into this same step).
 fn wrapIndex(i: i32) -> u32 {
   let n = i32(GRID_N);
   return u32(((i % n) + n) % n);
@@ -257,11 +178,8 @@ fn quadraticWeights(fx: vec2<f32>) -> array<vec2<f32>, 3> {
   return w;
 }
 
-// Passive material vertices follow the same quadratic grid velocity field,
-// evaluated at their own positions rather than extrapolated from a centroid.
 fn velocityAtVertex(position: vec2<f32>) -> vec2<f32> {
-  // Only wrap the sampling coordinate. Edge vectors stay unwrapped so a
-  // seam-crossing triangle keeps its local shape and centroid.
+
   let y = fract(position) * INV_DX;
   let base = vec2<i32>(floor(y - vec2<f32>(0.5)));
   let w = quadraticWeights(y - vec2<f32>(base));
@@ -317,61 +235,33 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
     }
   }
-  var domainNew = rest0.domain;
+  var domainNew = rest0.verticesAB;
   var vertexCNew = rest0.vertexC;
   var newPos = fract(pos + DT*v);
-  // Uninitialized point-only scenes retain point advection until the growth
-  // pass supplies geometry. Live triangle records always have positive A0.
-  if (rest0.divisionBias > 0.0) {
-    let a = fract(rest0.domain.xy + DT*velocityAtVertex(rest0.domain.xy));
-    let b = fract(rest0.domain.zw + DT*velocityAtVertex(rest0.domain.zw));
+
+  if (rest0.originalArea > 0.0) {
+    let a = fract(rest0.verticesAB.xy + DT*velocityAtVertex(rest0.verticesAB.xy));
+    let b = fract(rest0.verticesAB.zw + DT*velocityAtVertex(rest0.verticesAB.zw));
     let c = fract(rest0.vertexC + DT*velocityAtVertex(rest0.vertexC));
     domainNew = vec4<f32>(a,b);
     vertexCNew = c;
-    // Short periodic edge displacements are used only to derive the center;
-    // NEVER reconstruct or recenter the authoritative vertices from it.
+
     let ab = b-a;
     let ac = c-a;
     let u = ab-floor(ab+vec2<f32>(0.5));
     let w = ac-floor(ac+vec2<f32>(0.5));
     newPos = fract(a+(u+w)/3.0);
   }
-  // Retain the point-based momentum gather and constitutive gradient. The
-  // geometric centroid transport is now distinct from this sampled velocity
-  // in non-affine flow; vertices carry no independent mass or momentum.
+
   let newVel = v;
 
   var F = matMul(identityPlusScaled(C, DT), F0);
 
   let FeTrial = matMul(F, matInverse(Fg0));
   let svd = svd2(FeTrial);
-  // Relax principal stretches toward their geometric mean. Their product
-  // (elastic area) is retained while their difference (shear) decays.
-  // fluidity=0 is precisely the previous plasticity path.
-  // The seventh chemical channel selects a particle's fraction of the global
-  // fluidity maximum, using the same positive-only [0,1] convention as the
-  // dedicated division drive: zero/negative is solid and +1 is fully fluid.
-  var chemicalFluidity = 1.0;
-  if (CHEMICAL_CHANNELS > FLUIDITY_CHANNEL) {
-    chemicalFluidity = clamp(chemicalState.particles[pi].levels[FLUIDITY_CHANNEL], 0.0, 1.0);
-  }
-  let shearRelaxation = clamp(material.fluidity, 0.0, 1.0) * chemicalFluidity;
-  let isotropicStretch = sqrt(max(abs(matDet(FeTrial)), 1e-8));
-  let relaxedSigma = mix(svd.sigma, vec2<f32>(isotropicStretch), shearRelaxation);
-  // Bounds are the world's own Material.yieldLow/yieldHigh — how much of
-  // a stretch/compression the corotated elastic term is allowed to fully
-  // recover from versus how much gets baked in as permanent (plastic)
-  // deformation via Jp below.
-  //
-  // Yield is a property of ELASTIC strain, so the clamp belongs directly
-  // on Fe's singular values, never raw F's. This matters a lot: otherwise
-  // accumulated growth would eventually push total F's singular values
-  // past the yield bounds all on its own and get
-  // silently converted into plastic deformation, which is precisely the
-  // "elasticity fights growth" failure the whole decomposition exists to
-  // eliminate.
+
   let sigma = clamp(
-    relaxedSigma,
+    svd.sigma,
     vec2<f32>(material.yieldLow),
     vec2<f32>(material.yieldHigh)
   );
@@ -384,24 +274,8 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let JpNew = clamp(Jp0 * oldJe / newJe, 0.6, 20.0);
 
-  // CONTINUOUS FIELD-DRIVEN GROWTH. The MPM-grid tensor is a smooth,
-  // represented-volume-normalized continuum quantity. Its trace is the local
-  // areal growth command; its eigenvectors/eigenvalues describe directional
-  // coherence. No stochastic admission or per-sample growth event exists.
   var FgNew = Fg0;
-  // A newborn's visible disc area follows the exact normalized rest-area
-  // growth curve: exp(rate*t)-1 goes from 0 to 1 over the same interval in
-  // which active morphoelastic growth goes from g=1 to g=2. This state is
-  // rendering-only; conservative mass and stress remain fully present
-  // immediately after division.
-  var appearanceScaleNew = clamp(rest0.appearanceScale, 0.0, 1.0);
-  if (appearanceScaleNew < 1.0 && material.growthRate > 0.0) {
-    appearanceScaleNew = min(
-      (appearanceScaleNew + 1.0)
-        * exp(material.growthRate * DT) - 1.0,
-      1.0,
-    );
-  }
+
   let fieldRate = max(growthTensor.x + growthTensor.z, 0.0);
   if (fieldRate > 1e-8 && material.growthRate > 0.0) {
     let compression = max(0.0, -log(max(newJe, 1e-6)));
@@ -413,15 +287,12 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
         compression
       );
     } else if (compression < material.growthCompressionStart) {
-      // Equal thresholds intentionally select a hard contact-inhibition
-      // cutoff instead of manufacturing an epsilon-wide smooth interval.
+
       pressureGate = 1.0;
     }
     let feedback = clamp(material.growthCompressionFeedback, 0.0, 1.0);
     let effectiveGrowthRate = material.growthRate * mix(1.0, pressureGate, feedback);
-    // The global anisotropy control interpolates between isotropic growth and
-    // the integrated tensor without changing its trace (hence total material
-    // creation). The NN itself still outputs only one two-component vector.
+
     let anisotropy = clamp(material.growthAnisotropy, 0.0, 1.0);
     let isotropic = 0.5 * fieldRate;
     var worldRate = vec4<f32>(
@@ -430,15 +301,13 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       growthTensor.y * anisotropy,
       mix(isotropic, growthTensor.z, anisotropy),
     );
-    // Baseline growth follows the published tensor; sampling never redirects it.
-    // Fg lives in the intermediate material configuration. Pull the world
-    // tensor back through Fe's elastic rotation before exponentiating it.
+
     let rotation = polarDecompose(FeTrial).r;
     let materialRate = matMul(matMul(matTranspose(rotation), worldRate), rotation);
     var growthDt = effectiveGrowthRate * DT;
     let budgetRatio = bitcast<f32>(atomicLoad(&growthField[7]));
     if (budgetRatio > 0.0) {
-      let limit = max(rest0.growthAnisotropy, 1e-6) * budgetRatio;
+      let limit = max(rest0.budgetGrowthRatio, 1e-6) * budgetRatio;
       let remainingLogArea = max(log(limit / max(matDet(Fg0), 1e-6)), 0.0);
       growthDt = min(growthDt, remainingLogArea / max(fieldRate, 1e-8));
     }
@@ -450,13 +319,10 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   particleVel[pi] = newVel;
   particleF[pi] = F;
   particleC[pi] = C;
-  // cycleActive carried through untouched — owned by core/agents.wgsl (see
-  // this file's own ParticleRest comment); this element is shared now,
-  // not a bare f32 to overwrite wholesale.
+
   particleRest[pi] = ParticleRest(
-    FgNew, JpNew, rest0.cycleActive, rest0.growthAngle,
-    rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameAngle,
-    appearanceScaleNew,
-    rest0.quadratureWeight, domainNew, vertexCNew, rest0.domainPadding
+    FgNew, JpNew, rest0.growthVectorX, rest0.growthVectorY,
+    rest0.budgetGrowthRatio, domainNew, vertexCNew,
+    rest0.originalArea, rest0.quadratureWeight
   );
 }

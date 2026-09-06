@@ -51,8 +51,8 @@ function activeTangentThreshold(value: number): number {
 export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
     key: "neuralUpdatesPerMacro",
-    label: "Neural updates / tick",
-    hint: "Neural evaluations before one MLS-MPM update. Memory and turning are timestep-scaled. Persistent substrate stays frozen and uses only the final output; cell-owned chemistry can evolve between rounds. Material emission commits only on the final round.",
+    label: "Communication ticks / frame",
+    hint: "Each tick evaluates the neural policy and updates chemistry. Persistent substrate diffuses and decays between evaluations. Total communication time stays fixed; growth commits on the final tick.",
     min: 1,
     max: 16,
     step: 1,
@@ -61,7 +61,7 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
     key: "communicationSpeed",
     label: "Communication speed",
-    hint: "Communication time per mechanical tick. It scales cell-owned chemistry, memory, turning, and the one end-of-tick persistent-field evolution; neural updates only divide the agent-state timestep.",
+    hint: "Chemical and memory time per mechanical frame, divided across communication ticks. Increase this to let communication evolve further before the shape moves.",
     min: 0,
     max: 4,
     step: 0.05,

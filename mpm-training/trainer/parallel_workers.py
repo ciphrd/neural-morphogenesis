@@ -40,25 +40,15 @@ from device import pick_device
 from environment_gpu import EnvironmentGPU
 from mpm_core import MpmCore
 from simulation_settings import (
-    ANGULAR_DAMPING,
     CHEM_CHANNELS,
-    CHIRALITY,
     CHEMICAL_CHANNEL_PROFILES,
     DECAY,
-    DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
     NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-    DEPOSIT_DENSITY_REFERENCE,
-    DEPOSIT_SIGMA,
-    DIVISION_COOLDOWN,
     FIELD_N,
     FRICTION,
-    MAX_ACCEL,
-    MAX_ANGULAR_ACCEL,
-    MAX_ANGULAR_VELOCITY,
     MAX_ENV_WRITE,
-    MAX_STRAFE,
-    SPLIT_DISPLACEMENT,
+    SAMPLE_SPACING,
 )
 from policy_parameters import policy_hidden_dim
 from targets import TargetShape
@@ -75,7 +65,6 @@ _target: Optional[TargetShape] = None
 _target_raster: Optional[np.ndarray] = None
 _target_distance_field: Optional[np.ndarray] = None
 _args: Optional[argparse.Namespace] = None
-
 
 def _worker_init(
     particles: int,
@@ -98,44 +87,12 @@ def _worker_init(
     # docstring for why one line is enough on a single machine).
     wgpu_device = pick_device(verbose=False)
     _core = MpmCore(wgpu_device)
-    _environment = EnvironmentGPU(
-        wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE,
-        args.chemical_communication_architecture,
-        NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-        DEPOSIT_DENSITY_REFERENCE,
-        grid_velocity=_core.grid_vel,
-        channel_profiles=CHEMICAL_CHANNEL_PROFILES,
-    )
-    _agents = AgentsGPU(
-        wgpu_device,
-        _core,
-        _environment,
-        CHEM_CHANNELS,
-        policy_hidden_dim(args.policy_architecture),
-        MAX_ACCEL,
-        MAX_STRAFE,
-        MAX_ENV_WRITE,
-        MAX_ANGULAR_ACCEL,
-        ANGULAR_DAMPING,
-        MAX_ANGULAR_VELOCITY,
-        CHIRALITY,
-        DEPOSIT_DISTANCE,
-        particles,
-        SPLIT_DISPLACEMENT,
-        DIVISION_COOLDOWN,
-        FRICTION,
-        DEPOSIT_SIGMA,
-        1.0,
-        args.spawn_x,
-        args.spawn_y,
-        policy_architecture=args.policy_architecture,
-        chemical_communication_architecture=args.chemical_communication_architecture,
-    )
+    _environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE, args.chemical_communication_architecture, NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY, grid_velocity=_core.grid_vel, channel_profiles=CHEMICAL_CHANNEL_PROFILES)
+    _agents = AgentsGPU(wgpu_device, _core, _environment, CHEM_CHANNELS, policy_hidden_dim(args.policy_architecture), MAX_ENV_WRITE, particles, SAMPLE_SPACING, FRICTION, 1.0, args.spawn_x, args.spawn_y, policy_architecture=args.policy_architecture, chemical_communication_architecture=args.chemical_communication_architecture)
     _target = target
     _target_raster = target_raster
     _target_distance_field = target_distance_field
     _args = args
-
 
 def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1.0) -> float:
     """The only thing actually sent to a worker per candidate — `weights`
@@ -153,7 +110,6 @@ def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1
         weights, _target, _target_raster, _target_distance_field, _args, seed,
         _core, _agents, _environment, density_multiplier=density_multiplier,
     )
-
 
 def build_pool(
     num_workers: int,

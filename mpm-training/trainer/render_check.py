@@ -22,7 +22,6 @@ from simulation_settings import MATERIAL_E, MATERIAL_HARDENING, MATERIAL_NU, SUB
 
 IMG_SIZE = 512
 
-
 def seed_blob(count: int, center: tuple[float, float], half_width: float, rng: np.random.Generator):
     positions = center + rng.uniform(-half_width, half_width, size=(count, 2))
     velocities = np.zeros((count, 2), dtype=np.float32)
@@ -30,7 +29,6 @@ def seed_blob(count: int, center: tuple[float, float], half_width: float, rng: n
     C = np.zeros((count, 4), dtype=np.float32)
     Jp = np.ones((count,), dtype=np.float32)
     return positions.astype(np.float32), velocities, F, C, Jp
-
 
 def rasterize(positions: np.ndarray, size: int = IMG_SIZE) -> Image.Image:
     img = np.zeros((size, size), dtype=np.uint8)
@@ -45,7 +43,6 @@ def rasterize(positions: np.ndarray, size: int = IMG_SIZE) -> Image.Image:
             xx = np.clip(xs + dx, 0, size - 1)
             img[yy, xx] = 255
     return Image.fromarray(img, mode="L")
-
 
 def main() -> int:
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "render_out"
@@ -76,7 +73,6 @@ def main() -> int:
 
     print(f"\nDone — inspect PNGs in {out_dir}")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

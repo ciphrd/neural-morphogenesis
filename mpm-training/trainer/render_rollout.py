@@ -1,9 +1,3 @@
-"""Render checkpoint rollouts, honoring saved material budgets and stable stopping.
-
-The pictures use legacy point-cloud alignment for a diagnostic overlay; live
-training fitness and stopping use transported material domains. Usage:
-    python render_rollout.py [out_dir]
-"""
 from __future__ import annotations
 
 import json
@@ -21,23 +15,14 @@ from environment_gpu import EnvironmentGPU
 from evolve import CHECKPOINTS_DIR
 from mpm_core import PARTICLE_MASS, VOL, MpmCore
 from simulation_settings import (
-    ANGULAR_DAMPING,
     CHEM_CHANNELS,
     CHEMICAL_GRADIENT_INPUT_SCALE,
-    CHIRALITY,
     DAMPING_LOSS_FRACTION,
     DECAY,
-    DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
     NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
-    DEPOSIT_DENSITY_REFERENCE,
-    DEPOSIT_SIGMA,
-    DIVISION_COOLDOWN,
-    DIVISION_DRIVE_BOOST,
-    DIVISION_DIRECTIONALITY,
     FIELD_N,
     FRICTION,
-    GROWTH_MAX,
     GROWTH_DURATION_MACRO_STEPS,
     GROWTH_COMPRESSION_START,
     GROWTH_COMPRESSION_STOP,
@@ -48,14 +33,10 @@ from simulation_settings import (
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
-    MAX_ACCEL,
-    MAX_ANGULAR_ACCEL,
-    MAX_ANGULAR_VELOCITY,
     MAX_ENV_WRITE,
-    MAX_STRAFE,
     MORPHOLOGY_BLUR_SIGMA,
     MORPHOLOGY_DENSITY_REFERENCE,
-    SPLIT_DISPLACEMENT,
+    SAMPLE_SPACING,
     REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
@@ -65,7 +46,6 @@ from chemical_channels import homogeneous_channel_profiles, resolve_channel_prof
 from training_sim import TrainingRollout
 from domain_fitness import StableMatchStop, target_mask, evaluate_domains
 from policy_parameters import STATELESS_ARCHITECTURE, policy_hidden_dim, resolve_chemical_communication_architecture
-
 
 def main() -> int:
     out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "render_out"
@@ -78,50 +58,36 @@ def main() -> int:
         meta,
         DensityReference(
             particle_cap=int(meta["particles"]),
-            initial_particles=int(meta.get("initial_particle_count", INITIAL_PARTICLE_COUNT)),
-            chemical_field_n=int(meta.get("field_n", FIELD_N)),
+            initial_particles=int(meta['initial_particle_count']),
+            chemical_field_n=int(meta['field_n']),
             particle_mass=PARTICLE_MASS,
             particle_volume=VOL,
-            deposit_sigma=DEPOSIT_SIGMA,
             chemical_gradient_input_scale=CHEMICAL_GRADIENT_INPUT_SCALE,
-            repulsion_strength=float(meta.get("repulsion_strength", REPULSION_STRENGTH)),
-            repulsion_max_delta=float(meta.get("repulsion_max_delta", REPULSION_MAX_DELTA)),
+            repulsion_strength=float(meta['repulsion_strength']),
+            repulsion_max_delta=float(meta['repulsion_max_delta']),
         ),
-        legacy_split_displacement=SPLIT_DISPLACEMENT,
-        legacy_deposit_sigma=DEPOSIT_SIGMA,
-        legacy_splat_radius=SPLAT_RADIUS,
     )
 
     wgpu_device = pick_device()
 
     core = MpmCore(wgpu_device)
     core.set_morphology(
-        meta.get("morphology_blur_sigma", MORPHOLOGY_BLUR_SIGMA),
-        meta.get("morphology_density_reference", MORPHOLOGY_DENSITY_REFERENCE),
+        meta['morphology_blur_sigma'],
+        meta['morphology_density_reference'],
     )
     material_kwargs = {
-        "growth_max": meta.get("growth_max", GROWTH_MAX),
-        "growth_anisotropy": meta.get(
-            "growth_anisotropy_authority", GROWTH_ANISOTROPY_AUTHORITY
-        ),
-        "growth_compression_start": meta.get("growth_compression_start", GROWTH_COMPRESSION_START),
-        "growth_compression_stop": meta.get("growth_compression_stop", GROWTH_COMPRESSION_STOP),
-        "growth_compression_feedback": meta.get("growth_compression_feedback", 0.0),
+        "growth_anisotropy": meta['growth_anisotropy_authority'],
+        "growth_compression_start": meta['growth_compression_start'],
+        "growth_compression_stop": meta['growth_compression_stop'],
+        "growth_compression_feedback": meta['growth_compression_feedback'],
     }
-    if "growth_rate" in meta and "growth_duration_macro_steps" not in meta:
-        # Preserve exact playback of checkpoints created before growth was
-        # expressed in controller ticks.
-        material_kwargs["growth_rate"] = meta["growth_rate"]
-    else:
-        material_kwargs["growth_duration_macro_steps"] = meta.get(
-            "growth_duration_macro_steps", GROWTH_DURATION_MACRO_STEPS
-        )
-        material_kwargs["substeps_per_macro"] = meta["substeps_per_macro"]
+    material_kwargs["growth_duration_macro_steps"] = meta['growth_duration_macro_steps']
+    material_kwargs["substeps_per_macro"] = meta["substeps_per_macro"]
     core.set_material(
         MATERIAL_E,
         MATERIAL_NU,
         MATERIAL_HARDENING,
-        elasticity=meta.get("material_elasticity", MATERIAL_ELASTICITY),
+        elasticity=meta['material_elasticity'],
         particle_mass=density.particle_mass,
         particle_volume=density.particle_volume,
         **material_kwargs,
@@ -130,69 +96,13 @@ def main() -> int:
     core.set_splat_radius(density.splat_radius)
     core.set_repulsion_strength(density.repulsion_strength, density.repulsion_max_delta)
 
-    architecture = meta.get("policy_architecture", STATELESS_ARCHITECTURE)
-    chemical_architecture = resolve_chemical_communication_architecture(
-        meta.get("chemical_communication_architecture"), meta.get("decay", DECAY)
-    )
-    hidden_dim = int(meta.get("hidden_dim", policy_hidden_dim(architecture)))
-    environment = EnvironmentGPU(
-        wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, meta.get("decay", DECAY),
-        meta.get("deposit_rate", DEPOSIT_RATE), chemical_architecture,
-        meta.get("normalize_deposits_by_local_density", NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY),
-        meta.get("deposit_density_reference", DEPOSIT_DENSITY_REFERENCE),
-        grid_velocity=core.grid_vel,
-        channel_profiles=resolve_channel_profiles(
-            CHEM_CHANNELS,
-            meta.get("chemical_channel_profiles", homogeneous_channel_profiles(CHEM_CHANNELS)),
-        ),
-    )
-    agents = AgentsGPU(
-        wgpu_device,
-        core,
-        environment,
-        CHEM_CHANNELS,
-        hidden_dim,
-        MAX_ACCEL,
-        MAX_STRAFE,
-        MAX_ENV_WRITE,
-        MAX_ANGULAR_ACCEL,
-        ANGULAR_DAMPING,
-        MAX_ANGULAR_VELOCITY,
-        # Falls back to the current constant/value for older checkpoints
-        # saved before "chirality"/"deposit_distance"/"split_displacement"/
-        # "division_cooldown"/"friction"/"mass_ramp_macro_steps" rode along in
-        # best_meta.json —
-        # "particles" itself has ALWAYS been recorded, but meant "starting
-        # count" on any checkpoint trained before growth existed; using it
-        # as the growth cap here regardless is still correct (evolve.py's
-        # own module docstring: a policy that never learns to use the
-        # division drive just stays at 1 particle forever either way, same
-        # as this used to be the ONLY option for an old, pre-growth
-        # checkpoint).
-        meta.get("chirality", CHIRALITY),
-        meta.get("deposit_distance", DEPOSIT_DISTANCE),
-        density.particle_cap,
-        density.spacing,
-        meta.get("division_cooldown", DIVISION_COOLDOWN),
-        meta.get("friction", FRICTION),
-        density.deposit_sigma,
-        1.0,
-        meta["spawn_x"],
-        meta["spawn_y"],
-        meta.get("elastic_strain_scale", 0.15),
-        meta.get("elastic_strain_inputs_enabled", False),
-        policy_architecture=architecture,
-        internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
-        division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
-        division_drive_boost=meta.get("division_drive_boost", DIVISION_DRIVE_BOOST),
-        chemical_communication_architecture=chemical_architecture,
-        growth_compression_start=meta.get("growth_compression_start", GROWTH_COMPRESSION_START),
-        growth_compression_stop=meta.get("growth_compression_stop", GROWTH_COMPRESSION_STOP),
-        growth_compression_feedback=meta.get("growth_compression_feedback", 0.0),
-    )
+    architecture = meta['policy_architecture']
+    chemical_architecture = resolve_chemical_communication_architecture(meta["chemical_communication_architecture"])
+    hidden_dim = int(meta['hidden_dim'])
+    environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, meta['decay'], meta['deposit_rate'], chemical_architecture, meta['normalize_deposits_by_local_density'], grid_velocity=core.grid_vel, channel_profiles=resolve_channel_profiles(CHEM_CHANNELS, meta['chemical_channel_profiles']))
+    agents = AgentsGPU(wgpu_device, core, environment, CHEM_CHANNELS, hidden_dim, MAX_ENV_WRITE, density.particle_cap, density.spacing, meta['friction'], 1.0, meta['spawn_x'], meta['spawn_y'], meta['elastic_strain_scale'], meta['elastic_strain_inputs_enabled'], policy_architecture=architecture, internal_state_speed=meta['internal_state_speed'], chemical_communication_architecture=chemical_architecture,   )
     agents.load_weights(weights)
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
-    agents.set_chemical_projection_weight(density.chemical_projection_weight)
 
     target = load_target(meta["target"])
 
@@ -201,34 +111,33 @@ def main() -> int:
         agents,
         environment,
         spawn_center=(meta["spawn_x"], meta["spawn_y"]),
-        spawn_half_width=meta["spawn_half_width"],
         gravity=meta["gravity"],
-        seed=meta.get("winner_seed", meta["seed"]),
+        seed=meta['winner_seed'],
         # Checkpoints predating multi-rate communication were trained with
         # exactly one neural/environment round per mechanical macro step.
-        neural_updates_per_macro=meta.get("neural_updates_per_macro", 1),
-        communication_speed=meta.get("communication_speed", 1.0),
+        neural_updates_per_macro=meta['neural_updates_per_macro'],
+        communication_speed=meta['communication_speed'],
         initial_particle_count=density.initial_particles,
-        initial_condition=meta.get("initial_condition", "none"),
-        initial_condition_strength=meta.get("initial_condition_strength", 0.3),
-        initial_condition_channel=meta.get("initial_condition_channel", 0),
-        material_area_budget=meta.get("material_area_budget", 0.0),
+        initial_condition=meta['initial_condition'],
+        initial_condition_strength=meta['initial_condition_strength'],
+        initial_condition_channel=meta['initial_condition_channel'],
+        material_area_budget=meta['material_area_budget'],
     )
 
-    shape = meta.get("shape_settings", {})
-    stopping = StableMatchStop(shape.get("stableStop", False), shape.get("shapeCheckInterval", 10),
-        shape.get("shapeConfirmations", 3), shape.get("shapeSettleSteps", 20),
-        shape.get("shapeMissingTolerance", .02), shape.get("shapeSpillTolerance", .02),
-        shape.get("shapeOverlapTolerance", .02))
-    mask = target_mask(target, meta.get("raster_resolution", 256))
-    growth_steps = meta.get("growth_steps")
+    shape = meta['shape_settings']
+    stopping = StableMatchStop(shape["stableStop"], shape["shapeCheckInterval"],
+        shape["shapeConfirmations"], shape["shapeSettleSteps"],
+        shape["shapeMissingTolerance"], shape["shapeSpillTolerance"],
+        shape["shapeOverlapTolerance"])
+    mask = target_mask(target, meta['raster_resolution'])
+    growth_steps = meta['growth_steps']
     for i in range(meta["macro_steps"]):
         sim.macro_step(
             meta["substeps_per_macro"],
             growth_enabled=stopping.growth_enabled and (growth_steps is None or i < growth_steps),
         )
         if stopping.due(i+1):
-            evaluation = evaluate_domains(core.read_rest_state()[:, 12:18], target, mask)
+            evaluation = evaluate_domains(core.read_rest_state()[:, 8:14], target, mask)
             stopping.observe(i+1, evaluation.match, evaluation.total,
                 sampling_blocked=core.active_count >= agents.max_active_particles or agents.capacity_blocked or agents.unresolved_samples > 0)
         if i % 4 == 0 or i == meta["macro_steps"] - 1 or stopping.complete:
@@ -244,7 +153,6 @@ def main() -> int:
 
     print(f"\nDone (target={meta['target']!r}, checkpoint fitness={meta['fitness']:.4f}) — gray=target, white=grown")
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

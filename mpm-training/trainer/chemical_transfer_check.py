@@ -9,22 +9,17 @@ from capture_policy_inputs import PolicyInputProbe, META_NAMES
 from environment_gpu import EnvironmentGPU
 from mpm_core import MpmCore
 
-
 def lattice(n: int) -> np.ndarray:
     x, y = np.meshgrid((np.arange(n) + 0.375) / n, (np.arange(n) + 0.625) / n)
     return np.column_stack((x.ravel(), y.ravel())).astype(np.float32)
-
 
 def main() -> None:
     device = pick_device()
     core = MpmCore(device)
     levels = np.array([0.6, -0.4, 0, 0.2, -0.1, 0.8, -0.7, 0.3], np.float32)
     for resolution in (16, 32, 64):
-        env = EnvironmentGPU(device, 8, resolution, resolution, 1.0, 1.0,
-                             normalize_deposits_by_local_density=True)
-        agents = AgentsGPU(device, core, env, 8, 128,
-                           0., 0., 1., 1.4, .8, .1, False, 0.,
-                           32768, .01, 1., 1., .01, 1., .5, .5)
+        env = EnvironmentGPU(device, 8, resolution, resolution, 1.0, 1.0, normalize_deposits_by_local_density=True, chemical_communication_architecture="cell-owned-projection")
+        agents = AgentsGPU(device, core, env, 8, 128, 1.0, 32768, 0.01, 1.0, 1.0, 0.5, 0.5, chemical_communication_architecture="cell-owned-projection")
 
         def project(pos, areas, values=levels, growth=1.0):
             count = len(pos)
@@ -32,11 +27,11 @@ def main() -> None:
                             np.tile([1, 0, 0, 1], (count, 1)).astype(np.float32),
                             np.zeros((count, 4), np.float32), np.ones(count, np.float32))
             rest = core.read_rest_state()
-            rest[:, 8] = areas
+            rest[:, 14] = areas
             rest[:, 0] = rest[:, 3] = np.sqrt(growth)
             device.queue.write_buffer(core.rest, 0, rest.astype(np.float32))
             agents.set_active_count(count)
-            agents.reset_state(3)
+            agents.reset_state()
             raw = device.queue.read_buffer(agents._agent_state_buffer,
                                            PARTICLE_META_BUFFER_OFFSET,
                                            count * agents._particle_meta_dtype.itemsize)
@@ -93,12 +88,11 @@ def main() -> None:
         np.testing.assert_allclose(tiny.sum(axis=(1, 2)) / resolution**2,
                                    1e-12 * levels, rtol=2e-6, atol=1e-19)
         # Secretion mode retains physical quantity per texel area.
-        env.set_deposit_normalization(False, 1.)
+        env.set_deposit_normalization(False)
         env.set_communication_timestep(1, 1.)
         secreted = project(lattice(64), 2 / 64**2)
         np.testing.assert_allclose(secreted, np.broadcast_to(2 * levels[:, None, None], secreted.shape), atol=2e-6)
         print(f'[PASS] {resolution}²: resolution/refinement, compression, coverage, growth, wrapping, cancellation, tiny areas, secretion')
-
 
 if __name__ == '__main__':
     main()

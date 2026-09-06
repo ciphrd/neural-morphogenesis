@@ -47,7 +47,8 @@ import gridUpdateSrc from "../../../core/gridUpdate.wgsl?raw";
 import g2pSrc from "../../../core/g2p.wgsl?raw";
 import repulsionSrc from "../../../core/repulsion.wgsl?raw";
 import morphologySrc from "../../../core/morphology.wgsl?raw";
-import coreConstants from "../../../core/constants.json";
+import coreConstantsConfig from "../../../core/config.json";
+const coreConstants = coreConstantsConfig.simulation;
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
 import type { SceneData } from "./types";
@@ -59,24 +60,22 @@ export const DX: number = coreConstants.DX;
 // math (see that file's own module docstring).
 export const INV_DX: number = coreConstants.INV_DX;
 const DT: number = coreConstants.DT;
-export const PARTICLE_MASS: number = coreConstants.PARTICLE_MASS;
-export const PARTICLE_VOLUME: number = coreConstants.VOL;
+export const PARTICLE_MASS: number = coreConstantsConfig.run.particleMass;
+export const PARTICLE_VOLUME: number = coreConstantsConfig.run.particleVolume;
 export const MAX_PARTICLES: number = coreConstants.MAX_PARTICLES;
-// core/constants.json's own FIELD_N is the repulsion density texture's
+// core/config.json's own FIELD_N is the repulsion density texture's
 // resolution — renamed here to avoid collision with the chemical field's
 // own (unrelated) FIELD_N in gpu/environment.ts.
-export const REPULSION_FIELD_N: number = coreConstants.FIELD_N;
+export const REPULSION_FIELD_N: number = coreConstants.MORPHOLOGY_FIELD_N;
 
 export const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
 const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
-// growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-// growthFrameAngle, appearanceScale, quadratureWeight, vertices(6), padding(2) — 80 bytes.
-export const REST_FIELDS = 20;
+export const REST_FIELDS = 16;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own
- * tensor-rest layout, defaulting growthF=I and cycleActive=0.
+ * tensor-rest layout, defaulting growthF=I and growthVectorX=0.
  * Mirrors trainer/mpm_core.py's _pack_rest. Scene loading overlays explicit
  * triangle domains and material weights after generic reset defaults. */
 function packRest(jp: Float32Array): Float32Array {
@@ -85,8 +84,8 @@ function packRest(jp: Float32Array): Float32Array {
     packed[i * REST_FIELDS] = 1;
     packed[i * REST_FIELDS + 3] = 1;
     packed[i * REST_FIELDS + 4] = jp[i];
-    packed[i * REST_FIELDS + 10] = 1;
-    packed[i * REST_FIELDS + 11] = 1;
+
+    packed[i * REST_FIELDS + 15] = 1;
   }
   return packed;
 }
@@ -102,10 +101,10 @@ function lameParams(e: number, nu: number): [number, number] {
   return [mu0, lambda0];
 }
 
-const SNOW_YIELD_LOW = 1.0 - 2.5e-2;
-const SNOW_YIELD_HIGH = 1.0 + 7.5e-3;
-const WIDE_YIELD_LOW = 0.5;
-const WIDE_YIELD_HIGH = 2.0;
+const SNOW_YIELD_LOW = coreConstants.SNOW_YIELD_LOW;
+const SNOW_YIELD_HIGH = coreConstants.SNOW_YIELD_HIGH;
+const WIDE_YIELD_LOW = coreConstants.WIDE_YIELD_LOW;
+const WIDE_YIELD_HIGH = coreConstants.WIDE_YIELD_HIGH;
 
 function yieldBounds(elasticity: number): [number, number] {
   const t = Math.min(Math.max(elasticity, 0.0), 1.0);
@@ -173,7 +172,6 @@ export class MpmCore {
   private readonly gridUpdateBindGroup: GPUBindGroup;
   private readonly g2pPipeline: GPUComputePipeline;
   private g2pBindGroup: GPUBindGroup;
-  private readonly chemicalStateFallback: GPUBuffer;
 
   private readonly clearDensityPipeline: GPUComputePipeline;
   private readonly clearDensityBindGroup: GPUBindGroup;
@@ -208,10 +206,6 @@ export class MpmCore {
     this.F = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.C = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.rest = device.createBuffer({ size: MAX_PARTICLES * REST_FIELDS * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-    this.chemicalStateFallback = device.createBuffer({
-      size: 256 + MAX_PARTICLES * 112,
-      usage: GPUBufferUsage.STORAGE,
-    });
 
     this.gridAccum = device.createBuffer({ size: NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage: GPUBufferUsage.STORAGE });
     this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
@@ -221,8 +215,6 @@ export class MpmCore {
     });
 
     this.gravityUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    // 64 bytes — fourteen material/growth/fluidity floats plus padding,
-    // matching ../../../core/p2g.wgsl's and g2p.wgsl's identical Material.
     this.materialUniform = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.activeCountUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.dampingUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -279,7 +271,6 @@ export class MpmCore {
         { binding: 5, resource: { buffer: this.gridVel } },
         { binding: 6, resource: { buffer: this.activeCountUniform } },
         { binding: 7, resource: { buffer: this.materialUniform } },
-        { binding: 8, resource: { buffer: this.chemicalStateFallback } },
         { binding: 9, resource: { buffer: this.growthField } },
       ],
     });
@@ -384,7 +375,7 @@ export class MpmCore {
   loadScene(scene: SceneData): void {
     if (scene.count > MAX_PARTICLES) throw new Error(`scene.count (${scene.count}) exceeds MAX_PARTICLES (${MAX_PARTICLES})`);
     if (scene.domain && scene.domainGeometry !== "triangle-vertices") {
-      throw new Error('Explicit domains require domainGeometry="triangle-vertices"; convert legacy geometry first');
+      throw new Error('Explicit domains require domainGeometry="triangle-vertices"');
     }
     const rest = packRest(scene.Jp);
     if (scene.quadratureWeights) {
@@ -392,7 +383,7 @@ export class MpmCore {
       for (let i = 0; i < scene.count; i++) {
         const weight = scene.quadratureWeights[i];
         if (!Number.isFinite(weight) || weight <= 0) throw new Error("Scene weights must be finite and positive");
-        rest[i*REST_FIELDS+11] = weight;
+        rest[i*REST_FIELDS+15] = weight;
       }
     }
     if (scene.domain) {
@@ -409,9 +400,9 @@ export class MpmCore {
         if (!Number.isFinite(det) || !Number.isFinite(detF) || det <= 0 || detF <= 0) {
           throw new Error("Scene triangles and deformation must have finite positive determinants");
         }
-        rest.set(vertices, i*REST_FIELDS+12);
-        rest[i*REST_FIELDS+8] = .5*det/detF;
-        if (!Number.isFinite(rest[i*REST_FIELDS+8]) || rest[i*REST_FIELDS+8] <= 0) {
+        rest.set(vertices, i*REST_FIELDS+8);
+        rest[i*REST_FIELDS+14] = .5*det/detF;
+        if (!Number.isFinite(rest[i*REST_FIELDS+14]) || rest[i*REST_FIELDS+14] <= 0) {
           throw new Error("Scene rest areas must be finite and positive");
         }
       }
@@ -469,7 +460,7 @@ export class MpmCore {
       await staging.mapAsync(GPUMapMode.READ);
       const rest = new Float32Array(staging.getMappedRange());
       const triangles = new Float32Array(count * 6);
-      for (let i = 0; i < count; i++) triangles.set(rest.subarray(i*REST_FIELDS+12, i*REST_FIELDS+18), i*6);
+      for (let i = 0; i < count; i++) triangles.set(rest.subarray(i*REST_FIELDS+8, i*REST_FIELDS+14), i*6);
       return triangles;
     } finally { staging.destroy(); }
   }
@@ -563,15 +554,13 @@ export class MpmCore {
     hardening: number,
     elasticity: number,
     growthDuration: number,
-    growthMax: number,
     growthAnisotropy: number,
     substepsPerMacro: number,
     particleMass: number = PARTICLE_MASS,
     particleVolume: number = PARTICLE_VOLUME,
-    growthCompressionStart: number = 0.10,
-    growthCompressionStop: number = 0.10,
-    growthCompressionFeedback: number = 1.0,
-    fluidity: number = 0,
+    growthCompressionStart: number = coreConstantsConfig.run.growthCompressionStart,
+    growthCompressionStop: number = coreConstantsConfig.run.growthCompressionStop,
+    growthCompressionFeedback: number = coreConstantsConfig.run.growthCompressionFeedback,
   ): void {
     if (!(particleMass > 0) || !(particleVolume > 0)) {
       throw new Error("particle mass and volume must be positive");
@@ -596,31 +585,11 @@ export class MpmCore {
       0,
       new Float32Array([
         mu0, lambda0, hardening, yieldLow,
-        yieldHigh, growthRate, growthMax, growthAnisotropy,
+        yieldHigh, growthRate, growthAnisotropy,
         particleMass, particleVolume,
         growthCompressionStart, growthCompressionStop, growthCompressionFeedback,
-        fluidity,
       ])
     );
-  }
-
-  /** Supplies the persistent per-cell chemistry used by fluidity. */
-  setChemicalStateBuffer(buffer: GPUBuffer): void {
-    this.g2pBindGroup = this.device.createBindGroup({
-      layout: this.g2pPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.positions } },
-        { binding: 1, resource: { buffer: this.velocities } },
-        { binding: 2, resource: { buffer: this.F } },
-        { binding: 3, resource: { buffer: this.C } },
-        { binding: 4, resource: { buffer: this.rest } },
-        { binding: 5, resource: { buffer: this.gridVel } },
-        { binding: 6, resource: { buffer: this.activeCountUniform } },
-        { binding: 7, resource: { buffer: this.materialUniform } },
-        { binding: 8, resource: { buffer } },
-        { binding: 9, resource: { buffer: this.growthField } },
-      ],
-    });
   }
 
   setSplatRadius(sigma: number): void {

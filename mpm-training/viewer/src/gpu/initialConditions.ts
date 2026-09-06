@@ -1,4 +1,5 @@
-import defaults from '../../../core/initial_conditions.json';
+import defaultsConfig from '../../../core/config.json';
+const defaults = defaultsConfig.initialConditions;
 import { spawnUniform01 } from './rng';
 import type { SceneData } from './types';
 import type { Environment } from './environment';

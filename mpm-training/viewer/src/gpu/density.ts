@@ -1,5 +1,5 @@
-import densityModel from "../../../core/density.json";
-import coreConstants from "../../../core/constants.json";
+import densityModelConfig from "../../../core/config.json";
+const densityModel = densityModelConfig.density;
 
 export const DENSITY_MODEL_VERSION = densityModel.MODEL_VERSION;
 export const MIN_SUPPORTED_DENSITY = densityModel.MIN_SUPPORTED_MULTIPLIER;
@@ -11,7 +11,6 @@ export interface DensityReference {
   chemicalFieldN: number;
   particleMass: number;
   particleVolume: number;
-  depositSigma: number;
   chemicalGradientInputScale: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;
@@ -26,8 +25,6 @@ export interface ResolvedDensity {
   particleCap: number;
   particleMass: number;
   particleVolume: number;
-  depositSigma: number;
-  chemicalProjectionWeight: number;
   splatRadius: number;
   chemicalGradientInputScale: number;
   repulsionStrength: number;
@@ -62,7 +59,7 @@ export function resolveDensity(
   if (reference.chemicalFieldN < 1) throw new Error("chemical field resolution must be positive");
 
   const spacingScale = 1 / Math.sqrt(q);
-  const spacing = densityModel.REFERENCE_SPACING * spacingScale;
+  const spacing = densityModelConfig.run.sampleSpacing * spacingScale;
   return {
     modelVersion: DENSITY_MODEL_VERSION,
     multiplier: q,
@@ -72,8 +69,6 @@ export function resolveDensity(
     particleCap: Math.max(1, Math.floor(reference.particleCap * q + 0.5)),
     particleMass: reference.particleMass / q,
     particleVolume: reference.particleVolume / q,
-    depositSigma: reference.depositSigma,
-    chemicalProjectionWeight: 1 / q,
     splatRadius: densityModel.REPULSION_RADIUS_IN_CELLS * spacing,
     chemicalGradientInputScale: reference.chemicalGradientInputScale,
     repulsionStrength: reference.repulsionStrength * spacingScale * spacingScale,
@@ -84,12 +79,11 @@ export function resolveDensity(
 /** Resolve a reference q=1 run configuration into an actual playback config. */
 export function configAtDensity<T extends {
   particles: number;
-  initialParticleCount?: number;
+  initialParticleCount: number;
   fieldN: number;
-  particleMass?: number;
-  particleVolume?: number;
-  depositSigma?: number;
-  chemicalGradientInputScale?: number;
+  particleMass: number;
+  particleVolume: number;
+  chemicalGradientInputScale: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;
 }>(config: T, multiplier: number): T & {
@@ -97,18 +91,14 @@ export function configAtDensity<T extends {
   particleMass: number;
   particleVolume: number;
   chemicalGradientInputScale: number;
-  chemicalProjectionWeight: number;
 } {
   const resolved = resolveDensity({
     particleCap: config.particles,
-    initialParticles: config.initialParticleCount ?? coreConstants.INITIAL_PARTICLE_COUNT,
+    initialParticles: config.initialParticleCount,
     chemicalFieldN: config.fieldN,
-    particleMass: typeof config.particleMass === "number" ? config.particleMass : coreConstants.PARTICLE_MASS,
-    particleVolume: typeof config.particleVolume === "number" ? config.particleVolume : coreConstants.VOL,
-    depositSigma: typeof config.depositSigma === "number" ? config.depositSigma : 0.0006328125,
-    chemicalGradientInputScale: typeof config.chemicalGradientInputScale === "number"
-      ? config.chemicalGradientInputScale
-      : coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
+    particleMass: config.particleMass,
+    particleVolume: config.particleVolume,
+    chemicalGradientInputScale: config.chemicalGradientInputScale,
     repulsionStrength: config.repulsionStrength,
     repulsionMaxDelta: config.repulsionMaxDelta,
   }, multiplier, true);
@@ -120,9 +110,7 @@ export function configAtDensity<T extends {
     particleMass: resolved.particleMass,
     particleVolume: resolved.particleVolume,
     chemicalGradientInputScale: resolved.chemicalGradientInputScale,
-    chemicalProjectionWeight: resolved.chemicalProjectionWeight,
-    depositSigma: resolved.depositSigma,
-    splitDisplacement: resolved.spacing,
+    sampleSpacing: resolved.spacing,
     splatRadius: resolved.splatRadius,
     repulsionStrength: resolved.repulsionStrength,
     repulsionMaxDelta: resolved.repulsionMaxDelta,

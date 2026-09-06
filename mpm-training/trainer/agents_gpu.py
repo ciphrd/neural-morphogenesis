@@ -1,23 +1,7 @@
-"""The evolved per-particle policy, GPU-resident — Python (wgpu-py) port
-of ../viewer/src/gpu/agents.ts, wrapping the exact same shared shader
-module (../core/agents.wgsl) mpm_core.py already loads its own
-core/*.wgsl passes from. Replaces update_rule.py's own UpdateRule.forward()
-in the hot per-candidate training path — see training_sim.py's own
-module docstring for why (eliminating the torch/MPS<->wgpu/Metal host
-round-trip that dominated the old per-macro-step cost). UpdateRule/torch
-itself isn't gone — evolve.py still uses it for random weight
-initialization and checkpoint JSON export, both one-off/off-hot-path
-uses that don't need a live forward pass.
-
-One instance is built ONCE per training run (like MpmCore/EnvironmentGPU
-— see evolve.py's own module docstring on why rebuilding wgpu pipelines
-per candidate is real, avoidable overhead) and load_weights()/
-reset_state() are called per candidate/rollout instead, mirroring
-agents.ts's own instance lifetime (rebuilt only when particle/channel/
-field/hidden-dim shape changes, which never happens mid-run here since
-those are fixed CLI args)."""
+"""GPU policy and adaptive refinement pipelines shared with the browser through core WGSL. Particle metadata contains color, alignment, growth magnitude, private state, and chemistry."""
 from __future__ import annotations
 
+from config import CONFIG
 import numpy as np
 import wgpu
 
@@ -25,20 +9,13 @@ from simulation_settings import (
     BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEMICAL_GRADIENT_INPUT_SCALE,
     CHEMICAL_VALUE_INPUT_MULTIPLIER,
-    DIVISION_DRIVE_BOOST,
-    DIVISION_DIRECTIONALITY,
     ELASTIC_STRAIN_INPUTS_ENABLED,
     ELASTIC_STRAIN_SCALE,
-    GROWTH_ANISOTROPY_RESPONSE_RATE,
-    GROWTH_COMPRESSION_FEEDBACK,
-    GROWTH_COMPRESSION_START,
-    GROWTH_COMPRESSION_STOP,
     INTERNAL_STATE_SPEED,
     MORPHOLOGY_GRADIENT_INPUT_SCALE,
 )
 
 from environment_gpu import EnvironmentGPU, ceil_div
-from density import SPATIAL_RANDOM_CELLS
 from mpm_core import GRID_N, INV_DX, NODE_COUNT, MpmCore, REPULSION_FIELD_N
 from shader_template import load_core_shader
 from policy_parameters import (
@@ -55,7 +32,6 @@ from policy_parameters import (
 
 WORKGROUP = 64
 PARTICLE_META_BUFFER_OFFSET = 256
-
 
 def _hash_u32(x: np.ndarray) -> np.ndarray:
     """Bit-exact, portable integer hash (Chris Wellons' "lowbias32" —
@@ -75,86 +51,15 @@ def _hash_u32(x: np.ndarray) -> np.ndarray:
     x ^= x >> np.uint32(16)
     return x
 
-
-def _growth_seed(seed: int, count: int) -> np.ndarray:
-    """particleMeta.rng's own initial per-particle seed — bit-exact with
-    ../viewer/src/gpu/rng.ts's own growthSeed(seed, index), see that
-    function's own comment. `seed` is the rollout's own raw seed
-    (evolve.py's own rollout(seed, ...) argument / render_rollout.py's
-    own meta["seed"]) — the ENTIRE rollout's starting condition (this,
-    reset_heading()'s own heading fill below, and training_sim.py's own
-    seed_blob()/back-to-back theta) is now a pure function of this one
-    integer, no numpy Generator/mulberry32 involved anywhere in the
-    seeding path — see _spawn_uniform01()'s own comment for why growth
-    keeps its own SEPARATE hash domain from that function rather than
-    sharing it (near-critical branching process, chaotically sensitive
-    to its own seed stream — the two are never meant to correlate
-    regardless). Low=1 for any hash that comes out 0 — xorshift32's own
-    fixed point, same guarantee reset_heading() used to get from
-    rng.integers(1, ...) before this was hash-based."""
-    index = np.arange(count, dtype=np.uint32)
-    combined = np.uint32(seed) ^ _hash_u32(index + np.uint32(1))
-    hashed = _hash_u32(combined)
-    hashed[hashed == 0] = np.uint32(1)
-    return hashed
-
-
-# Magic domain-separator XOR'd into the index before hashing — keeps
-# _spawn_uniform01() below's own output space disjoint from
-# _growth_seed() above even when both happen to be called with the same
-# (seed, index) pair (training_sim.py's own spawn-jitter/heading indices
-# are small integers, the same range _growth_seed() iterates particle
-# slots over) — same "don't reuse one stream for two kinds of
-# randomness" reasoning this project already applies elsewhere (e.g.
-# growth's own child-reseeding, core/agents.wgsl's own agentStep()
-# comment). Arbitrary, just needs to be nonzero.
 _SPAWN_HASH_DOMAIN = np.uint32(0xC0FFEE00)
-_SPATIAL_DIVISION_DOMAIN = np.uint32(0x44495245)
-
 
 def _spawn_uniform01(seed: int, index: int) -> float:
-    """One deterministic float in [0,1), bit-exact with
-    ../viewer/src/gpu/rng.ts's own spawnUniform01(seed, index) — the
-    portable hash EVERY piece of a rollout's own starting-condition
-    randomness that ISN'T growth now goes through: training_sim.py's own
-    seed_blob() (spawn-position jitter) and back-to-back theta, and
-    reset_heading() below's own per-slot heading fill. Domain-separated
-    from _growth_seed() above via _SPAWN_HASH_DOMAIN (see that constant's
-    own comment). Top 24 bits of the hash -> a uniform float, same "use
-    every bit of f32 mantissa precision" convention core/agents.wgsl's
-    own xorshift32-derived draw already uses
-    (`f32(rngNext >> 8u) * (1.0/16777216.0)`)."""
     combined = np.uint32(seed) ^ _hash_u32(np.array([_SPAWN_HASH_DOMAIN ^ np.uint32(index)]))[0]
     hashed = _hash_u32(np.array([combined]))[0]
     return float(hashed >> np.uint32(8)) / 16777216.0
 
-
-def _spawn_uniform01_batch(seed: int, indices: np.ndarray) -> np.ndarray:
-    """Vectorized _spawn_uniform01() — same formula, called once over an
-    array of indices rather than per-scalar, for reset_heading() below's
-    own per-slot fill (up to max_active_particles draws every rollout)."""
-    indices = indices.astype(np.uint32)
-    combined = np.uint32(seed) ^ _hash_u32(_SPAWN_HASH_DOMAIN ^ indices)
-    hashed = _hash_u32(combined)
-    return (hashed >> np.uint32(8)).astype(np.float64) / 16777216.0
-
-
-def _spatial_uniform01_batch(seed: int, positions: np.ndarray, domain: np.uint32) -> np.ndarray:
-    """Sample a fixed world-space random field, independent of slot and q."""
-    wrapped = np.mod(np.asarray(positions, dtype=np.float64), 1.0)
-    cells = np.floor(wrapped * SPATIAL_RANDOM_CELLS).astype(np.uint32)
-    combined = (
-        np.uint32(seed)
-        ^ _hash_u32(cells[:, 0] + np.uint32(0x9E3779B9))
-        ^ _hash_u32(cells[:, 1] + np.uint32(0x85EBCA6B))
-        ^ domain
-    )
-    hashed = _hash_u32(combined)
-    return (hashed >> np.uint32(8)).astype(np.float64) / 16777216.0
-
-
 def weight_layout(
-    channels: int, hidden_dim: int, architecture: str = STATELESS_ARCHITECTURE
+    channels: int, hidden_dim: int, architecture: str = CONFIG["run"]["policyArchitecture"]
 ) -> dict[str, int]:
     # core/agents.wgsl's own IN_DIM: value + density-frame forward/lateral
     # gradients per channel, with no positional inputs.
@@ -177,7 +82,6 @@ def weight_layout(
         "total_floats": total_floats,
     }
 
-
 class AgentsGPU:
     def __init__(
         self,
@@ -186,32 +90,18 @@ class AgentsGPU:
         environment: EnvironmentGPU,
         channels: int,
         hidden_dim: int,
-        max_accel: float,
-        max_strafe: float,
         max_env_write: float,
-        max_angular_accel: float,
-        angular_damping: float,
-        max_angular_velocity: float,
-        chirality: bool,
-        deposit_distance: float,
         max_active_particles: int,
-        split_displacement: float,
-        division_cooldown: float,
+        sample_spacing: float,
         friction: float,
-        deposit_sigma: float,
         growth_enabled: float,
         spawn_x: float,
         spawn_y: float,
         elastic_strain_scale: float = ELASTIC_STRAIN_SCALE,
         elastic_strain_inputs_enabled: bool = ELASTIC_STRAIN_INPUTS_ENABLED,
-        policy_architecture: str = STATELESS_ARCHITECTURE,
+        policy_architecture: str = CONFIG["run"]["policyArchitecture"],
         internal_state_speed: float = INTERNAL_STATE_SPEED,
-        division_directionality: float = DIVISION_DIRECTIONALITY,
-        chemical_communication_architecture: str = CELL_OWNED_PROJECTION_ARCHITECTURE,
-        growth_compression_start: float = GROWTH_COMPRESSION_START,
-        growth_compression_stop: float = GROWTH_COMPRESSION_STOP,
-        growth_compression_feedback: float = GROWTH_COMPRESSION_FEEDBACK,
-        division_drive_boost: float = DIVISION_DRIVE_BOOST,
+        chemical_communication_architecture: str = CONFIG["run"]["chemicalCommunicationArchitecture"],
     ) -> None:
         self.unresolved_samples = 0
         self.capacity_blocked = False
@@ -223,13 +113,12 @@ class AgentsGPU:
             chemical_communication_architecture
         )
         self._internal_state_speed = max(0.0, float(internal_state_speed))
-        self._division_directionality = max(0.0, min(1.0, float(division_directionality)))
         self._particle_capacity = max(1, int(max_active_particles))
         self._max_active_particles = self._particle_capacity
         # Public rollout geometry setting: TrainingRollout uses the same
         # displacement configured on this agent instance for its coordinated
         # two-particle seed, keeping diagnostic/replay overrides consistent.
-        self.split_displacement = float(split_displacement)
+        self.sample_spacing = float(sample_spacing)
 
         layout = weight_layout(channels, hidden_dim, self.policy_architecture)
         self._total_floats = layout["total_floats"]
@@ -241,19 +130,11 @@ class AgentsGPU:
         # NOT written by set_physics() below; see set_spawn_center()'s own
         # docstring for why those get a separate setter into this same
         # buffer instead.
-        self._physics_uniform = device.create_buffer(size=128, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
+        self._physics_uniform = device.create_buffer(size=80, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_physics(
-            max_accel,
-            max_strafe,
             max_env_write,
-            max_angular_accel,
-            angular_damping,
-            max_angular_velocity,
-            deposit_distance,
-            split_displacement,
-            division_cooldown,
+            sample_spacing,
             friction,
-            deposit_sigma,
             growth_enabled,
         )
         self.set_spawn_center(spawn_x, spawn_y)
@@ -261,72 +142,31 @@ class AgentsGPU:
         self.set_elastic_strain_scale(elastic_strain_scale)
         self.set_chemical_gradient_input_scale(CHEMICAL_GRADIENT_INPUT_SCALE)
         self.set_chemical_value_input_multiplier(CHEMICAL_VALUE_INPUT_MULTIPLIER)
-        self.set_division_drive_boost(division_drive_boost)
-        self.set_chemical_projection_weight(1.0)
-        self.set_rollout_seed(0)
+
         self.set_boundary_tangent_min_gradient(BOUNDARY_TANGENT_MIN_GRADIENT)
-        self.set_growth_compression_feedback(
-            growth_compression_start,
-            growth_compression_stop,
-            growth_compression_feedback,
-        )
+
         # Lab-only override is disabled during training. This trailing ABI
         # slot is shared with the browser's scheduled-scenario support.
         self.device.queue.write_buffer(
-            self._physics_uniform, 80, np.array([0xFFFFFFFF], dtype=np.uint32)
+            self._physics_uniform, 40, np.array([0xFFFFFFFF], dtype=np.uint32)
         )
         self.device.queue.write_buffer(
-            self._physics_uniform, 84, np.array([0], dtype=np.uint32)
+            self._physics_uniform, 44, np.array([0], dtype=np.uint32)
         )
         self.device.queue.write_buffer(
-            self._physics_uniform, 88, np.array([1.0, 0.0], dtype=np.float32)
+            self._physics_uniform, 48, np.array([1.0, 0.0], dtype=np.float32)
         )
         self.device.queue.write_buffer(
-            self._physics_uniform, 96, np.array([0xFFFFFFFF], dtype=np.uint32)
+            self._physics_uniform, 56, np.array([0xFFFFFFFF], dtype=np.uint32)
         )
         self._forced_growth_field_override = False
         self.set_forced_growth_field_override(False)
 
-        # Persistent per-particle state — owned here (not MpmCore, not
-        # EnvironmentGPU), zeroed at creation (reseeded
-        # properly once reset_state() is called with a real rng — once
-        # per rollout, see training_sim.py's own TrainingRollout.__init__)
-        # and whenever reset_state() is called again after that. Sized
-        # to max_active_particles, NOT the single particle every rollout
-        # actually starts with — growth (core/agents.wgsl's own
-        # agentStep()) can write particleMeta[newIndex] for any newIndex
-        # up to max_active_particles, at runtime, with no rebuild (mirrors
-        # agents.ts's own reasoning for sizing THOSE buffers to
-        # MAX_PARTICLES, for the "Add Particle" tool's own runtime growth
-        # — same underlying need, smaller ceiling since this class has no
-        # such interactive tool of its own).
-        #
-        # rng/cooldown/current channel-index-3 alignment plus aligned neural RGBA —
-        # packed into one aligned per-particle buffer (112 bytes at C=8)
-        # (core/agents.wgsl's own ParticleMeta struct), not four separate
-        # buffers: this shader hit a REAL, confirmed CreateComputePipeline
-        # validation error the first time particleF/particleC/particleJp
-        # tried to add 3 more bindings on top of heading/angularVelocity/
-        # growthState each having their own — Chrome's own Dawn backend
-        # reports a hard 10-storage-buffer-per-stage ceiling on real
-        # browser adapters (NOT the much higher number wgpu-native/Metal
-        # reports headlessly on this side, which is why this constructor
-        # never hit the problem itself) — see core/agents.wgsl's own
-        # module docstring for the full account. rng+cooldown were
-        # already packed together once before, for the exact same reason,
-        # when `velocities` was added; heading/angularVelocity joined them
-        # here to free the 2 slots particleF/particleJp needed (particleC
-        # was dropped instead of freeing a 3rd — see core/agents.wgsl's
-        # own comment on why that one's safe to skip).
-        chemical_padding_floats = (-(76 + channels * 4)) % 16 // 4
+        chemical_padding_floats = (-(60 + channels * 4)) % 16 // 4
         self._particle_meta_dtype = np.dtype([
-            ("rng", "<u4"),
-            ("cooldown", "<f4"),
-            ("alignment", "<f4", (2,)),
             ("color", "<f4", (4,)),
-            ("divisionHazard", "<f4"),
-            ("divisionThreshold", "<f4"),
-            ("mitosisPropensity", "<f4"),
+            ("alignment", "<f4", (2,)),
+            ("growthMagnitude", "<f4"),
             ("privateState", "<f4", (PRIVATE_STATE_DIM,)),
             ("chemicalState", "<f4", (channels,)),
             ("_padding", "<f4", (chemical_padding_floats,)),
@@ -367,13 +207,10 @@ class AgentsGPU:
                     "OUT_DIM": layout["out_dim"],
                     **environment.shader_constants,
                     "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
-                    "SPATIAL_RANDOM_CELLS": SPATIAL_RANDOM_CELLS,
                     "MORPHOLOGY_GRADIENT_INPUT_SCALE": repr(MORPHOLOGY_GRADIENT_INPUT_SCALE),
-                    "GROWTH_ANISOTROPY_RESPONSE_RATE": repr(GROWTH_ANISOTROPY_RESPONSE_RATE),
                     # WGSL wants lowercase `true`/`false` — Python's own
                     # str(bool) gives "True"/"False", invalid WGSL syntax,
                     # so this can't just be passed through as-is.
-                    "CHIRALITY": "true" if chirality else "false",
                     "STATEFUL": "true" if policy_has_recurrence(self.policy_architecture) else "false",
                     "CELL_OWNED_CHEMISTRY": (
                         "true" if self.chemical_communication_architecture == CELL_OWNED_PROJECTION_ARCHITECTURE else "false"
@@ -385,7 +222,7 @@ class AgentsGPU:
                         if policy_has_recurrence(self.policy_architecture) else ""
                     ),
                     "POLICY_TAIL_DECODE": (
-                        "out.color = vec3<f32>(0.5);\n"
+                        "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 18u]), safeSigmoid(outVec[ENV_WRITE_DIM + 19u]), safeSigmoid(outVec[ENV_WRITE_DIM + 20u]));\n"
                         "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
                             "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 2u + s]);\n"
                             "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]);\n"
@@ -434,12 +271,12 @@ class AgentsGPU:
         )
 
         self._step_mode_uniforms = [
-            device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
-            device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
+            device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
+            device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST),
         ]
         self.set_communication_timestep(1.0)
 
-        def bind_group(p: int, commit_lifecycle: int):
+        def bind_group(p: int, commit_growth: int):
             env_buf = environment.buffers[p]
             return device.create_bind_group(
                 layout=self._pipeline.get_bind_group_layout(0),
@@ -460,11 +297,11 @@ class AgentsGPU:
                     # particle inherits its parent's CURRENT deformation
                     # state at split time rather than starting undeformed
                     # with zero rest history). core.C is binding 8, completing APIC-state
-                    # inheritance across division.
+                    # inheritance across refinement.
                     {"binding": 10, "resource": {"buffer": core.F, "offset": 0, "size": core.F.size}},
                     {"binding": 11, "resource": {"buffer": core.rest, "offset": 0, "size": core.rest.size}},
                     {"binding": 12, "resource": core.morphology_texture.create_view()},
-                    {"binding": 13, "resource": {"buffer": self._step_mode_uniforms[commit_lifecycle]}},
+                    {"binding": 13, "resource": {"buffer": self._step_mode_uniforms[commit_growth]}},
                     *([{"binding": 14, "resource": morphology_sampler}] if morphology_sampler is not None else []),
                 ],
             )
@@ -496,7 +333,7 @@ class AgentsGPU:
         # Every stage ends a compute pass, providing a device-wide barrier.
         stages = [
             ("clearGrowthField", (3, 8), ceil_div(10 * NODE_COUNT, 256)),
-            ("scatterGrowthIntent", (0, 1, 2, 6, 8, 9), None),
+            ("scatterGrowthIntent", (0, 1, 2, 8), None),
             ("enforceGrowthField", (8, 9), ceil_div(NODE_COUNT, 256)),
             ("clearRefinement", (7,), ceil_div(refine_words, 256)),
             ("indexRefinementEdges", (1, 2, 7), None),
@@ -560,36 +397,20 @@ class AgentsGPU:
 
     def set_physics(
         self,
-        max_accel: float,
-        max_strafe: float,
         max_env_write: float,
-        max_angular_accel: float,
-        angular_damping: float,
-        max_angular_velocity: float,
-        deposit_distance: float,
-        split_displacement: float,
-        division_cooldown: float,
+        sample_spacing: float,
         friction: float,
-        deposit_sigma: float,
         growth_enabled: float,
     ) -> None:
-        self.split_displacement = float(split_displacement)
+        self.sample_spacing = float(sample_spacing)
         self.device.queue.write_buffer(
             self._physics_uniform,
             0,
             np.array(
                 [
-                    max_accel,
-                    max_strafe,
                     max_env_write,
-                    max_angular_accel,
-                    angular_damping,
-                    max_angular_velocity,
-                    deposit_distance,
-                    split_displacement,
-                    division_cooldown,
+                    sample_spacing,
                     friction,
-                    deposit_sigma,
                     growth_enabled,
                 ],
                 dtype=np.float32,
@@ -603,7 +424,7 @@ class AgentsGPU:
         """
         if not np.isfinite(area) or area < 0:
             raise ValueError("material area budget must be finite and nonnegative")
-        self.device.queue.write_buffer(self._physics_uniform, 124, np.array([area], np.float32))
+        self.device.queue.write_buffer(self._physics_uniform, 68, np.array([area], np.float32))
 
     def set_growth_enabled(self, enabled: bool) -> None:
         """Enable publication of neural growth vectors (uniform byte 44).
@@ -613,18 +434,17 @@ class AgentsGPU:
         """
         self.device.queue.write_buffer(
             self._physics_uniform,
-            44,
+            12,
             np.array([1.0 if enabled else 0.0], dtype=np.float32),
         )
 
     def set_communication_timestep(self, dt: float) -> None:
         """Set the neural substep clock while retaining two lifecycle modes."""
         for commit, buffer in enumerate(self._step_mode_uniforms):
-            data = np.zeros(8, dtype=np.uint32)
+            data = np.zeros(4, dtype=np.uint32)
             data[0] = commit
             data.view(np.float32)[1] = max(0.0, float(dt))
             data.view(np.float32)[2] = self._internal_state_speed
-            data.view(np.float32)[3] = self._division_directionality
             self.device.queue.write_buffer(buffer, 0, data)
 
     def set_internal_state_speed(self, speed: float) -> None:
@@ -635,22 +455,8 @@ class AgentsGPU:
                 buffer, 8, np.array([self._internal_state_speed], dtype=np.float32)
             )
 
-    def set_division_directionality(self, strength: float) -> None:
-        """Retained settings ABI slot; continuous-vector growth ignores it."""
-        self._division_directionality = max(0.0, min(1.0, float(strength)))
-        for buffer in self._step_mode_uniforms:
-            self.device.queue.write_buffer(
-                buffer, 12, np.array([self._division_directionality], dtype=np.float32)
-            )
-
     def set_spawn_center(self, spawn_x: float, spawn_y: float) -> None:
-        """Writes the legacy AgentPhysics spawn slots at byte offset 48.
-
-        Spawn coordinates still configure rollout initialization, but the
-        policy no longer reads them. The slots remain to preserve the uniform
-        ABI while old and new frontend/backend processes overlap.
-        """
-        self.device.queue.write_buffer(self._physics_uniform, 48, np.array([spawn_x, spawn_y], dtype=np.float32))
+        self.device.queue.write_buffer(self._physics_uniform, 16, np.array([spawn_x, spawn_y], dtype=np.float32))
 
     def set_max_active_particles(self, max_active_particles: int) -> None:
         """Writes AgentPhysics.maxActiveParticles at byte offset 56."""
@@ -660,27 +466,21 @@ class AgentsGPU:
         self._max_active_particles = cap
         self.device.queue.write_buffer(
             self._physics_uniform,
-            56,
+            24,
             np.array([cap], dtype=np.uint32),
         )
 
-    def set_density_geometry(self, split_displacement: float, deposit_sigma: float) -> None:
-        """Update the two particle-scale lengths without disturbing other physics."""
-        if split_displacement <= 0.0 or deposit_sigma <= 0.0:
-            raise ValueError("density geometry lengths must be positive")
-        self.split_displacement = float(split_displacement)
-        self.device.queue.write_buffer(
-            self._physics_uniform, 28, np.array([split_displacement], dtype=np.float32)
-        )
-        self.device.queue.write_buffer(
-            self._physics_uniform, 40, np.array([deposit_sigma], dtype=np.float32)
-        )
+    def set_density_geometry(self, sample_spacing: float) -> None:
+        if sample_spacing <= 0:
+            raise ValueError("sample spacing must be positive")
+        self.sample_spacing = float(sample_spacing)
+        self.device.queue.write_buffer(self._physics_uniform, 4, np.array([sample_spacing], np.float32))
 
     def set_elastic_strain_scale(self, scale: float) -> None:
         """Writes AgentPhysics.elasticStrainScale at byte offset 60."""
         self.device.queue.write_buffer(
             self._physics_uniform,
-            60,
+            28,
             np.array([max(float(scale), 1e-6)], dtype=np.float32),
         )
 
@@ -688,7 +488,7 @@ class AgentsGPU:
         """Writes density-resolved AgentPhysics scale at byte offset 64."""
         self.device.queue.write_buffer(
             self._physics_uniform,
-            64,
+            32,
             np.array([max(float(scale), 1e-6)], dtype=np.float32),
         )
 
@@ -696,56 +496,16 @@ class AgentsGPU:
         """Write the live chemical-concentration neural gain at byte offset 112."""
         self.device.queue.write_buffer(
             self._physics_uniform,
-            112,
+            60,
             np.array([max(float(multiplier), 0.0)], dtype=np.float32),
-        )
-
-    def set_division_drive_boost(self, boost: float) -> None:
-        """Blend signed division drive toward [-1,1] -> [0,1] at byte 116."""
-        self.device.queue.write_buffer(
-            self._physics_uniform,
-            116,
-            np.array([max(0.0, min(1.0, float(boost)))], dtype=np.float32),
-        )
-
-    def set_chemical_projection_weight(self, weight: float) -> None:
-        """Writes represented chemical area at AgentPhysics byte offset 68."""
-        if weight <= 0.0:
-            raise ValueError("chemical projection weight must be positive")
-        self.device.queue.write_buffer(
-            self._physics_uniform,
-            68,
-            np.array([float(weight)], dtype=np.float32),
-        )
-
-    def set_rollout_seed(self, seed: int) -> None:
-        """Write the common spatial-random-field seed at byte offset 72."""
-        self.device.queue.write_buffer(
-            self._physics_uniform,
-            72,
-            np.array([int(seed) & 0xFFFFFFFF], dtype=np.uint32),
         )
 
     def set_boundary_tangent_min_gradient(self, threshold: float) -> None:
         """Write the flat-interior cutoff at AgentPhysics byte offset 76."""
         self.device.queue.write_buffer(
             self._physics_uniform,
-            76,
+            36,
             np.array([max(0.0, float(threshold))], dtype=np.float32),
-        )
-
-    def set_growth_compression_feedback(
-        self, start: float, stop: float, strength: float
-    ) -> None:
-        """Write contact-inhibition controls into trailing AgentPhysics ABI slots."""
-        if start < 0.0 or stop < start:
-            raise ValueError("growth compression thresholds require 0 <= start <= stop")
-        if not 0.0 <= strength <= 1.0:
-            raise ValueError("growth compression feedback must be in [0, 1]")
-        self.device.queue.write_buffer(
-            self._physics_uniform,
-            100,
-            np.array([start, stop, strength], dtype=np.float32),
         )
 
     def set_forced_growth_field_override(self, enabled: bool) -> None:
@@ -753,7 +513,7 @@ class AgentsGPU:
         self._forced_growth_field_override = bool(enabled)
         self.device.queue.write_buffer(
             self._physics_uniform,
-            120,
+            64,
             np.array([1 if enabled else 0], dtype=np.uint32),
         )
 
@@ -764,7 +524,7 @@ class AgentsGPU:
         current active_count — called once per rollout (training_sim.py's
         own TrainingRollout.__init__) and again every macro step growth
         actually changes the count (that module's own macro_step(), after
-        reading read_grown_count() back). Deliberately does NOT touch
+        reading read_sample_count() back). Deliberately does NOT touch
         core.active_count_uniform itself — MpmCore.set_active_count() (a
         distinct method, on a distinct object) owns that, since it's
         shared with p2g/gridUpdate-adjacent/g2p/repulsion too, not just
@@ -773,7 +533,7 @@ class AgentsGPU:
         self._dispatch = ceil_div(active_count, WORKGROUP)
         self.device.queue.write_buffer(self._agent_state_buffer, 0, np.array([active_count], dtype=np.uint32))
 
-    def read_grown_count(self) -> int:
+    def read_sample_count(self) -> int:
         """Reads back growth's own atomic counter (core/agents.wgsl's own
         module docstring) — a real, deliberate 12-byte status readback,
         once per macro step (training_sim.py's own macro_step() is the
@@ -792,8 +552,8 @@ class AgentsGPU:
         self.capacity_blocked = bool(status[2])
         return int(status[0])
 
-    def reset_state(self, seed: int, chemical_state=None, private_state=None) -> None:
-        """Clear rollout-scoped neural/lifecycle state.
+    def reset_state(self, chemical_state=None, private_state=None) -> None:
+        """Clear rollout-scoped neural state.
 
         Alignment starts at zero and is reconstructed from chemical channel
         3's gradient by every agentStep; it is never randomized or
@@ -807,10 +567,6 @@ class AgentsGPU:
         # ParticleMeta struct exactly (see this class's own __init__
         # comment for why the state fields are packed into one buffer).
         particle_meta = np.zeros(count, dtype=self._particle_meta_dtype)
-        # This field is a lineage-generation counter in density model v3.
-        # Threshold and fallback-angle randomness comes from a common spatial
-        # field in WGSL, so numerical particle slot identity never enters it.
-        particle_meta["rng"] = 0
         if chemical_state is not None:
             particle_meta["chemicalState"][:len(chemical_state)] = chemical_state
         if private_state is not None:
@@ -819,21 +575,15 @@ class AgentsGPU:
         self.device.queue.write_buffer(
             self._growth_field, 0, np.zeros(self._growth_field.size // 4, dtype=np.int32)
         )
-        self.set_rollout_seed(seed)
 
-    def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int, *, commit_lifecycle: bool = True) -> None:
-        """Encodes the NN forward pass — reads environment's current
-        parity buffer (must match `parity`), writes the policy's growth
-        direction into MpmCore's particle-rest buffer, optionally applies
-        that signal to velocity through maxStrafe, and integrates chemical
-        deltas into cell-owned state. Does not submit."""
+    def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int, *, commit_growth: bool = True) -> None:
         p = encoder.begin_compute_pass()
         p.set_pipeline(self._pipeline)
-        groups = self._commit_bind_groups if commit_lifecycle else self._communication_bind_groups
+        groups = self._commit_bind_groups if commit_growth else self._communication_bind_groups
         p.set_bind_group(0, groups[parity])
         p.dispatch_workgroups(self._dispatch)
         p.end()
-        if commit_lifecycle:
+        if commit_growth:
             self.encode_growth_field(encoder)
 
     def encode_growth_field(self, encoder: wgpu.GPUCommandEncoder) -> None:

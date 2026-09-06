@@ -17,7 +17,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { randomWeights } from "../gpu/agents";
 import type { GenerationRecord, RunSettings, SimulationConfig } from "../gpu/types";
-import { loadInitialRunSettings } from "./settingsStorage";
+import { DEFAULT_RUN_SETTINGS, loadInitialRunSettings } from "./settingsStorage";
 
 export interface GenerationStat {
   generation: number;
@@ -49,7 +49,7 @@ function placeholderRecord(settings: RunSettings): GenerationRecord {
     worst: NaN,
     allTimeBest: NaN,
     seed: 0,
-    weights: randomWeights(settings.channels, settings.hiddenDim, settings.policyArchitecture ?? "stateless-128"),
+    weights: randomWeights(settings.channels, settings.hiddenDim, settings.policyArchitecture),
   };
 }
 
@@ -66,6 +66,14 @@ export interface Accumulator {
 export const EMPTY_ACCUMULATOR: Accumulator = { settings: null, records: new Map() };
 
 export function applySettings(prev: Accumulator, settings: RunSettings): Accumulator {
+  if (settings.growthModelVersion !== DEFAULT_RUN_SETTINGS.growthModelVersion ||
+      settings.densityModelVersion !== DEFAULT_RUN_SETTINGS.densityModelVersion ||
+      settings.domainGeometry !== DEFAULT_RUN_SETTINGS.domainGeometry) {
+    throw new Error("Run schema does not match the current simulation; start a new run.");
+  }
+  for (const key of Object.keys(DEFAULT_RUN_SETTINGS)) {
+    if (!(key in settings)) throw new Error(`Run settings missing required field: ${key}`);
+  }
   return { ...prev, settings };
 }
 

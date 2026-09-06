@@ -63,7 +63,6 @@ app = FastAPI()
 # MpmCore's own fixed [0,1]^2 domain — matches evolve.py's own RASTER_EXTENT.
 EXTENT = (0.0, 1.0, 0.0, 1.0)
 
-
 def _raster_to_data_uri(raster: np.ndarray) -> str:
     """Same pixel conversion as debug_images.save_raster_image() (row-
     flip for this project's y-up domain, clip to [0,1] since a sum-
@@ -75,7 +74,6 @@ def _raster_to_data_uri(raster: np.ndarray) -> str:
     Image.fromarray((img * 255.0).astype(np.uint8), mode="L").save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
-
 def _finite(v: float) -> float | None:
     """chamfer_distance()/best_alignment()/training_raster_distance() all
     return float('inf') for an empty point cloud (e.g. before any
@@ -86,24 +84,19 @@ def _finite(v: float) -> float | None:
     fmt() already treats anything that fails Number.isFinite() as "∞"."""
     return v if np.isfinite(v) else None
 
-
 class ScoreRequest(BaseModel):
     target: str
     points: list[list[float]]
     raster_resolution: int = 128
-    raster_sigma: float = 1.5
     outside_weight: float = 1.0
-
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return (Path(__file__).parent / "distance_playground.html").read_text()
 
-
 @app.get("/targets")
 def list_targets() -> dict:
     return {"targets": available_targets()}
-
 
 @app.get("/target/{name}")
 def get_target(name: str) -> dict:
@@ -112,7 +105,6 @@ def get_target(name: str) -> dict:
     except SystemExit as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     return {"points": shape.points.tolist(), "texelSize": shape.texel_size()}
-
 
 @app.post("/score")
 def score(req: ScoreRequest) -> JSONResponse:
@@ -177,7 +169,6 @@ def score(req: ScoreRequest) -> JSONResponse:
             "alignedPoints": aligned_points.tolist(),
         }
     )
-
 
 if __name__ == "__main__":
     import uvicorn

@@ -1,7 +1,7 @@
 // TS wrapper around environment.wgsl's two chemical lifecycles. Cell-owned
 // projection materializes per-cell state into buffer 0 each round; persistent
 // environment ping-pongs a spatial field through diffusion/decay and adds
-// the final neural round's signed deltas. Both expose the same parity-indexed sensing buffers.
+// each neural round's signed deltas. Both expose the same parity-indexed sensing buffers.
 
 import environmentSrc from "../../../core/environment.wgsl?raw";
 import {
@@ -19,11 +19,9 @@ export interface EnvironmentConfig {
   channels: number;
   width: number;
   height: number;
-  // Legacy run-metadata fields; transient fields do not use either value.
   decay: number;
   depositRate: number;
   normalizeDepositsByLocalDensity?: boolean;
-  depositDensityReference?: number;
   advectionDt?: number;
   chemicalCommunicationArchitecture?: ChemicalCommunicationArchitecture;
   channelProfiles?: readonly ChemicalChannelProfile[];
@@ -51,7 +49,6 @@ export class Environment {
   private baseDecay: number;
   private baseDepositRate: number;
   private normalizeDepositsByLocalDensity: boolean;
-  private depositDensityReference: number;
   private advectionDt: number;
   private readonly physicsUniform: GPUBuffer;
 
@@ -63,8 +60,10 @@ export class Environment {
   private readonly computeGradientBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly mergeDepositPipeline: GPUComputePipeline;
   private readonly diffuseDecayPipeline: GPUComputePipeline;
+  private readonly stationaryDiffuseDecayPipeline: GPUComputePipeline;
   private readonly mergeDepositBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly diffuseDecayBindGroups: [GPUBindGroup, GPUBindGroup];
+  private readonly stationaryDiffuseDecayBindGroups: [GPUBindGroup, GPUBindGroup];
 
   private readonly clearDispatch: [number, number];
   private readonly gridDispatch: [number, number, number];
@@ -82,10 +81,6 @@ export class Environment {
     this.layout = packChemicalChannelLayout(
       config.width,
       config.height,
-      // A legacy server/run may predate chemicalChannelProfiles. The viewer's
-      // fallback comes from core/chemical_channels.json, the same canonical
-      // configuration read by trainer/simulation_settings.py, rather than a
-      // separate homogeneous frontend default.
       config.channelProfiles ?? defaultChemicalChannelProfiles(config.channels),
     );
     this.maxWidth = this.layout.maxWidth;
@@ -94,12 +89,10 @@ export class Environment {
     this.baseDecay = config.decay;
     this.baseDepositRate = config.depositRate;
     this.normalizeDepositsByLocalDensity = config.normalizeDepositsByLocalDensity ?? false;
-    this.depositDensityReference = Math.max(0, config.depositDensityReference ?? 1.0);
     this.advectionDt = Math.max(0, config.advectionDt ?? 0);
 
     const total = this.layout.total;
-    // Float numerator + matched world area + one unused compatibility slot.
-    const scratchTotal = total * 2 + 1;
+    const scratchTotal = total * 2;
     const f32 = 4;
 
     this.buffers = [
@@ -139,6 +132,11 @@ export class Environment {
     this.mergeDepositPipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "mergeDeposit" } });
     this.diffuseDecayPipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "diffuseDecay" } });
 
+    this.stationaryDiffuseDecayPipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module, entryPoint: "diffuseDecayStationary" },
+    });
+
     this.computeGradientBindGroups = [0, 1].map((p) =>
       device.createBindGroup({
         layout: this.computeGradientPipeline.getBindGroupLayout(0),
@@ -169,6 +167,17 @@ export class Environment {
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];
+    this.stationaryDiffuseDecayBindGroups = [0, 1].map((p) =>
+      device.createBindGroup({
+        layout: this.stationaryDiffuseDecayPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.buffers[p] } },
+          { binding: 3, resource: { buffer: this.buffers[1 - p] } },
+          { binding: 4, resource: { buffer: this.physicsUniform } },
+          { binding: 5, resource: { buffer: mpmGridVelocity } },
+        ],
+      })
+    ) as [GPUBindGroup, GPUBindGroup];
 
     this.clearDispatch = flatDispatch2D(
       scratchTotal,
@@ -182,18 +191,16 @@ export class Environment {
     ];
   }
 
-  /** Configure one persistent-field evolution per macro tick, while returning
-   * the smaller dt used by each of that tick's neural deliberation rounds. */
+  /** Scale chemistry and neural state by the same per-round timestep. */
   setCommunicationTimestep(rounds: number, speed: number): number {
     const macroDt = Math.max(0, speed);
     const neuralDt = macroDt / Math.max(1, Math.round(rounds));
-    const decay = Math.pow(Math.max(0, Math.min(1, this.baseDecay)), macroDt);
+    const decay = Math.pow(Math.max(0, Math.min(1, this.baseDecay)), neuralDt);
     writeFloat32(this.device, this.physicsUniform, 0, new Float32Array([
       decay,
-      this.baseDepositRate * macroDt,
-      Math.min(macroDt, 1),
+      this.baseDepositRate * neuralDt,
+      Math.min(neuralDt, 1),
       this.normalizeDepositsByLocalDensity ? 1 : 0,
-      this.depositDensityReference,
       this.advectionDt,
       0, 0,
     ]));
@@ -206,18 +213,16 @@ export class Environment {
     rounds: number,
     speed: number,
     normalizeDepositsByLocalDensity = false,
-    depositDensityReference = 1.0,
   ): number {
     this.baseDecay = decay;
     this.baseDepositRate = depositRate;
     this.normalizeDepositsByLocalDensity = normalizeDepositsByLocalDensity;
-    this.depositDensityReference = Math.max(0, depositDensityReference);
     return this.setCommunicationTimestep(rounds, speed);
   }
 
   setAdvectionTimestep(dt: number): void {
     this.advectionDt = Math.max(0, dt);
-    writeFloat32(this.device, this.physicsUniform, 5 * 4, new Float32Array([this.advectionDt]));
+    writeFloat32(this.device, this.physicsUniform, 4 * 4, new Float32Array([this.advectionDt]));
   }
 
   /** Zeroes both grid buffers and resets parity to 0 — call at the start
@@ -259,19 +264,18 @@ export class Environment {
     pass.end();
   }
 
-  /** Bring persistent substrate forward through the previous MPM motion
-   * before the policy senses it, including divergent growth flow. */
-  encodePreparePersistent(encoder: GPUCommandEncoder): void {
+  /** Diffuse/decay each round; transport preceding motion only on the first. */
+  encodePreparePersistent(encoder: GPUCommandEncoder, transport = true): void {
     if (this.chemicalCommunicationArchitecture !== "persistent-environment") return;
     let pass = encoder.beginComputePass();
-    pass.setPipeline(this.diffuseDecayPipeline);
-    pass.setBindGroup(0, this.diffuseDecayBindGroups[this._parity]);
+    pass.setPipeline(transport ? this.diffuseDecayPipeline : this.stationaryDiffuseDecayPipeline);
+    pass.setBindGroup(0, (transport ? this.diffuseDecayBindGroups : this.stationaryDiffuseDecayBindGroups)[this._parity]);
     pass.dispatchWorkgroups(...this.gridDispatch);
     pass.end();
     this._parity = 1 - this._parity;
   }
 
-  /** Add the final neural round's signed chemical deltas to the field. */
+  /** Add this communication round's signed chemical deltas to the field. */
   encodeMergePersistent(encoder: GPUCommandEncoder): void {
     if (this.chemicalCommunicationArchitecture !== "persistent-environment") return;
     const pass = encoder.beginComputePass();

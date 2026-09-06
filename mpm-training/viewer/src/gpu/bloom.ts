@@ -1,3 +1,4 @@
+import { VIEWER_DEFAULTS } from "../viewerConfig";
 import bloomSrc from "./bloom.wgsl?raw"
 import { writeFloat32 } from "./gpuUtil"
 
@@ -35,14 +36,7 @@ export class BloomPostProcess {
   private compositeBindGroup: GPUBindGroup
   private width = 1
   private height = 1
-  private settings: BloomSettings = {
-    enabled: true,
-    intensity: 0.8,
-    threshold: 0.65,
-    radiusPx: 1,
-    scatter: 0.8,
-    levels: 6,
-  }
+  private settings: BloomSettings = { ...VIEWER_DEFAULTS.rendering.bloom }
 
   constructor(device: GPUDevice, outputFormat: GPUTextureFormat) {
     this.device = device

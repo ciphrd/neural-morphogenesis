@@ -15,12 +15,10 @@ from targets import TargetShape, load_target
 EXTENT = (0.0, 1.0, 0.0, 1.0)
 EXPECTED_PARTICLES = 400
 
-
 def _sample_target(target: TargetShape, rng: np.random.Generator) -> np.ndarray:
     indices = rng.integers(target.points.shape[0], size=EXPECTED_PARTICLES)
     jitter = rng.uniform(-0.45, 0.45, size=(EXPECTED_PARTICLES, 2)) * target.texel_size()
     return target.points[indices].astype(np.float64) + jitter
-
 
 def _score(
     points: np.ndarray,
@@ -49,7 +47,6 @@ def _score(
         particle_weight=particle_weight,
         expected_weighted_particles=EXPECTED_PARTICLES,
     ))
-
 
 def main() -> None:
     for target_index, name in enumerate(("circle", "donut", "legs", "line2")):
@@ -97,7 +94,6 @@ def main() -> None:
             )
 
     print("[PASS] bounded raster fitness ordering and particle-density invariance")
-
 
 if __name__ == "__main__":
     main()

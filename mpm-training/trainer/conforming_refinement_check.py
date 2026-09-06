@@ -7,17 +7,15 @@ from vertex_transport_check import load_triangles, run_g2p
 from triangle_vertices import domain_edges
 from device import pick_device
 
-
 def demands(rest):
-    v = rest[:, 12:18].astype(float).reshape(-1, 3, 2)
+    v = rest[:, 8:14].astype(float).reshape(-1, 3, 2)
     edges = np.roll(v, -1, axis=1)-v
     edges -= np.floor(edges+.5)
     return np.sum(edges*edges, axis=(1, 2))/(4*np.sqrt(3)*SPACING**2)
 
-
 def assert_disk(rest):
     """Exact endpoint topology detects hanging vertices, cracks and overlaps."""
-    vertices = rest[:, 12:18].copy().view(np.uint32).reshape(-1, 3, 2)
+    vertices = rest[:, 8:14].copy().view(np.uint32).reshape(-1, 3, 2)
     edges = Counter()
     points = set()
     for tri in vertices:
@@ -31,11 +29,9 @@ def assert_disk(rest):
     assert boundary and all(degree == 2 for degree in boundary.values()), 'cracked boundary'
     assert np.all(np.linalg.det(domain_edges(rest)) > 0)
 
-
 def fixture(core, agents, vertices):
     load_triangles(core, vertices)
     agents.set_active_count(len(vertices))
-
 
 def check_pair_capacity(device):
     # Only one of the two triangles exceeds the threshold. Their common edge
@@ -59,9 +55,15 @@ def check_pair_capacity(device):
         else:
             assert n == 4 and agents.unresolved_samples == 0
             assert_disk(read_rest(core, n))
-            np.testing.assert_allclose(read_rest(core, n)[:, 11].sum(), 2)
+            np.testing.assert_allclose(read_rest(core, n)[:, 15].sum(), 2)
     print('[PASS] one-sided demand splits both neighbors; one free slot leaves the pair intact and pauses growth')
 
+def allow_fine_refinement(core):
+    # Geometry-only fixtures represent grown material, allowing enough child
+    # weight for several refinement levels under the configured weight floor.
+    rest = read_rest(core, core.active_count)
+    rest[:, 0] = rest[:, 3] = 4
+    core.device.queue.write_buffer(core.rest, 0, rest)
 
 def check_dependency(device):
     # Triangle zero wants AB; its neighbor wants the longer boundary AD first.
@@ -69,20 +71,20 @@ def check_dependency(device):
     a, b, c, d = np.array([[.4, .4], [.409, .4], [.4045, .399], [.409, .411]])
     core, agents = make_system(device, capacity=128)
     fixture(core, agents, [[a, c, b], [b, d, a]])
+    allow_fine_refinement(core)
     before = read_rest(core, 2)
     for step in range(20):
         run_growth_field(device, agents)
         n = synchronize_count(core, agents)
         rest = read_rest(core, n)
         assert_disk(rest)
-        np.testing.assert_allclose(rest[:, 11].sum(), 2)
-        np.testing.assert_allclose(rest[:, 8].sum(), before[:, 8].sum(), rtol=2e-6)
+        np.testing.assert_allclose(rest[:, 15].sum(), 2)
+        np.testing.assert_allclose(rest[:, 14].sum(), before[:, 14].sum(), rtol=2e-6)
         if step == 0:
             assert n == 3
-            np.testing.assert_array_equal(rest[0, 12:18], before[0, 12:18])
+            np.testing.assert_array_equal(rest[0, 8:14], before[0, 8:14])
     assert np.max(demands(rest)) < 1.75
     print('[PASS] a different neighbor longest edge is refined first; every stage remains conforming and converges')
-
 
 def check_long_dependency(device):
     # A path longer than one workgroup: every radial edge is longer than the
@@ -100,10 +102,9 @@ def check_long_dependency(device):
     assert synchronize_count(core, agents) == count+1
     assert agents.unresolved_samples == 0
     after = read_rest(core, count+1)
-    np.testing.assert_array_equal(after[:-2, 12:18], before[:-1, 12:18])
+    np.testing.assert_array_equal(after[:-2, 8:14], before[:-1, 8:14])
     assert_disk(after)
     print('[PASS] 257-triangle dependency path resolves to one boundary operation across workgroups')
-
 
 def grid_triangles(origin):
     points = np.array([[origin + np.array([i*.004, j*.004]) for j in range(5)]
@@ -117,13 +118,13 @@ def grid_triangles(origin):
             triangles.extend(([a,b,d], [a,d,c]))
     return triangles
 
-
 def check_mesh_and_transport(device):
     core, agents = make_system(device, capacity=1024)
     x, y = np.meshgrid(np.arange(GRID_N+1)*DX, np.arange(GRID_N+1)*DX, indexing='ij')
     grid = np.stack((1+.5*np.sin(8*np.pi*y), .4*np.cos(8*np.pi*x)), axis=-1).astype(np.float32)
     for origin in (np.array([.3, .3]), np.array([.995, .995])):
         fixture(core, agents, grid_triangles(origin))
+        allow_fine_refinement(core)
         before = read_rest(core, core.active_count)
         initial_area = .5*np.linalg.det(domain_edges(before)).sum()
         for _ in range(24):
@@ -131,7 +132,7 @@ def check_mesh_and_transport(device):
             n = synchronize_count(core, agents)
             rest = read_rest(core, n)
             assert_disk(rest)
-            np.testing.assert_allclose(rest[:, 11].sum(), 32)
+            np.testing.assert_allclose(rest[:, 15].sum(), 32)
             np.testing.assert_allclose(.5*np.linalg.det(domain_edges(rest)).sum(), initial_area, rtol=5e-5)
         assert np.max(demands(rest)) < 1.75 and n > 32
         # Then continue nonlinear vertex transport and subdivision together.
@@ -144,21 +145,20 @@ def check_mesh_and_transport(device):
             assert_disk(read_rest(core, core.active_count))
     print('[PASS] sheared mesh converges without hanging edges; exact topology survives refinement and 128 nonlinear steps across seams')
 
-
 def check_partial_batch(device):
     core, agents = make_system(device, capacity=73)
     fixture(core, agents, grid_triangles(np.array([.3, .3])))
+    allow_fine_refinement(core)
     blocked = False
     for _ in range(16):
         run_growth_field(device, agents)
         n = synchronize_count(core, agents)
         assert n <= 73
         assert_disk(read_rest(core, n))
-        np.testing.assert_allclose(read_rest(core, n)[:, 11].sum(), 32)
+        np.testing.assert_allclose(read_rest(core, n)[:, 15].sum(), 32)
         blocked |= agents.capacity_blocked
     assert blocked
     print('[PASS] competing boundary and interior groups preserve a complete mesh at an odd capacity')
-
 
 def check_seed_refinement(device):
     from training_sim import seed_blob
@@ -166,11 +166,12 @@ def check_seed_refinement(device):
     scene = seed_blob(37, (.5, .5), SPACING, 17)
     core.load_scene(*scene)
     agents.set_active_count(core.active_count)
+    allow_fine_refinement(core)
     rest = read_rest(core, core.active_count)
     assert_disk(rest)
     # Apply an identical affine stretch to every duplicate vertex before
     # refining the actual startup mesh, preserving shared coordinate bits.
-    vertices = rest[:, 12:18].reshape(-1, 3, 2)
+    vertices = rest[:, 8:14].reshape(-1, 3, 2)
     vertices[..., 0] = .5 + 4*(vertices[..., 0]-.5)
     vertices[..., 1] = .5 + .25*(vertices[..., 1]-.5)
     device.queue.write_buffer(core.rest, 0, rest)
@@ -179,10 +180,9 @@ def check_seed_refinement(device):
         n = synchronize_count(core, agents)
         rest = read_rest(core, n)
         assert_disk(rest)
-        np.testing.assert_allclose(rest[:, 11].sum(), 37)
+        np.testing.assert_allclose(rest[:, 15].sum(), 37)
     assert np.max(demands(rest)) < 1.75 and n > 74
     print('[PASS] actual circular startup mesh stays conforming through isochoric stretch refinement')
-
 
 def check_metric():
     rng = np.random.default_rng(217)
@@ -200,14 +200,12 @@ def check_metric():
             assert np.sum(child_edges*child_edges) <= .75*score*(1+1e-12)
     print('[PASS] squared-edge sum is 36 times centroid second moment; longest-edge children score at most 3/4 of parent')
 
-
 def main():
     check_metric()
     device = pick_device()
     for check in (check_pair_capacity, check_dependency, check_long_dependency,
                   check_mesh_and_transport, check_partial_batch, check_seed_refinement):
         check(device)
-
 
 if __name__ == '__main__':
     main()

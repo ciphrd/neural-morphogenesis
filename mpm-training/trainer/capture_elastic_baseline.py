@@ -1,13 +1,4 @@
-"""Capture the tensor-Fg isotropic-equivalence elastic baseline.
-
-The base scenario uses a saturated dedicated division-drive output to force
-every eligible particle into a cell cycle. The
-``--directional`` selects the local-forward axis and saturates the
-independent anisotropy and division-bias controls for comparison.
-
-Run from trainer/:
-    .venv/bin/python capture_elastic_baseline.py
-"""
+"""Capture constitutive diagnostics for continuous growth followed by settling."""
 from __future__ import annotations
 
 import argparse
@@ -24,35 +15,25 @@ from elastic_diagnostics import measure_core
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, MpmCore
 from simulation_settings import (
-    ANGULAR_DAMPING,
     CHEM_CHANNELS,
-    CHIRALITY,
-    DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
-    DEPOSIT_SIGMA,
-    DIVISION_COOLDOWN,
     DAMPING_LOSS_FRACTION,
     FIELD_N,
     FRICTION,
-    GROWTH_MAX,
     HIDDEN_DIM,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
-    MAX_ACCEL,
-    MAX_ANGULAR_ACCEL,
-    MAX_ANGULAR_VELOCITY,
     MAX_ENV_WRITE,
-    MAX_STRAFE,
     REPULSION_MAX_DELTA,
     SPLAT_RADIUS,
 )
 from training_sim import TrainingRollout
 
 ROOT = Path(__file__).parent.parent
-ISOTROPIC_OUTPUT = Path(__file__).parent / "snapshots" / "tensor_growth_isotropic_equivalence.json"
-DIRECTIONAL_OUTPUT = Path(__file__).parent / "snapshots" / "tensor_growth_directional_strafe.json"
+ISOTROPIC_OUTPUT = Path(__file__).parent / "snapshots" / "continuous_growth_isotropic.json"
+DIRECTIONAL_OUTPUT = Path(__file__).parent / "snapshots" / "continuous_growth_directional.json"
 SEED = 20260822
 MAX_ACTIVE = 16
 SUBSTEPS = 16
@@ -64,39 +45,14 @@ CHECKPOINTS = {0, 8, 16, 24, 32, 40, 48, 64, 80}
 # deliberately retains its old low-level rate.
 BASELINE_GROWTH_RATE = 50.0
 BASELINE_DECAY = 0.91
-BASELINE_SPLIT_DISPLACEMENT = 0.01
+BASELINE_SAMPLE_SPACING = 0.01
 BASELINE_REPULSION_STRENGTH = 0.2
-
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
-
 def _build_agents(device, core: MpmCore, environment: EnvironmentGPU) -> AgentsGPU:
-    return AgentsGPU(
-        device,
-        core,
-        environment,
-        CHEM_CHANNELS,
-        HIDDEN_DIM,
-        MAX_ACCEL,
-        MAX_STRAFE,
-        MAX_ENV_WRITE,
-        MAX_ANGULAR_ACCEL,
-        ANGULAR_DAMPING,
-        MAX_ANGULAR_VELOCITY,
-        CHIRALITY,
-        DEPOSIT_DISTANCE,
-        MAX_ACTIVE,
-        BASELINE_SPLIT_DISPLACEMENT,
-        DIVISION_COOLDOWN,
-        FRICTION,
-        DEPOSIT_SIGMA,
-        1.0,
-        0.5,
-        0.5,
-    )
-
+    return AgentsGPU(device, core, environment, CHEM_CHANNELS, HIDDEN_DIM, MAX_ENV_WRITE, MAX_ACTIVE, BASELINE_SAMPLE_SPACING, FRICTION, 1.0, 0.5, 0.5)
 
 def _assert_close(actual, expected, path: str = "snapshot") -> None:
     """Recursively compare a fresh GPU capture to the saved baseline."""
@@ -113,7 +69,6 @@ def _assert_close(actual, expected, path: str = "snapshot") -> None:
     else:
         assert actual == expected, f"{path}: {actual!r} != {expected!r}"
 
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -124,7 +79,7 @@ def main() -> None:
     parser.add_argument(
         "--directional",
         action="store_true",
-        help="bias the former strafe output toward local-forward to capture directional rather than isotropic tensor growth",
+        help="use full growth anisotropy instead of isotropic growth",
     )
     args = parser.parse_args()
     output_path = DIRECTIONAL_OUTPUT if args.directional else ISOTROPIC_OUTPUT
@@ -135,16 +90,7 @@ def main() -> None:
     weights = np.zeros(agents._total_floats, dtype=np.float32)
     layout = weight_layout(CHEM_CHANNELS, HIDDEN_DIM)
     env_write_dim = CHEM_CHANNELS
-    weights[layout["fc2b_offset"] + env_write_dim + 4] = 20.0
-    if args.directional:
-        # Saturated anisotropy/polarity plus a local-forward axis.
-        weights[layout["fc2b_offset"] + env_write_dim] = 20.0
-        weights[layout["fc2b_offset"] + env_write_dim + 1] = 20.0
-        weights[layout["fc2b_offset"] + env_write_dim + 2] = 1.0
-    else:
-        # A zero anisotropy logit targets 0.5; force the preserved isotropic
-        # baseline's persistent state toward zero explicitly.
-        weights[layout["fc2b_offset"] + env_write_dim] = -20.0
+    weights[layout["fc2b_offset"] + env_write_dim] = 20.0
     agents.load_weights(weights)
 
     core.set_material(
@@ -153,6 +99,7 @@ def main() -> None:
         MATERIAL_HARDENING,
         MATERIAL_ELASTICITY,
         growth_rate=BASELINE_GROWTH_RATE,
+        growth_anisotropy=1.0 if args.directional else 0.0,
     )
     core.set_damping(DAMPING_LOSS_FRACTION, SUBSTEPS)
     core.set_splat_radius(SPLAT_RADIUS)
@@ -162,7 +109,6 @@ def main() -> None:
         agents,
         environment,
         spawn_center=(0.5, 0.5),
-        spawn_half_width=0.0,
         gravity=0.0,
         seed=SEED,
         neural_updates_per_macro=1,
@@ -184,7 +130,7 @@ def main() -> None:
         measurements.append(row)
         print(
             f"step={step:2d} phase={row['phase']:<8} n={row['particle_count']:2d} "
-            f"cycles={row['active_cycle_count']:2d} radius={row['geometry']['rms_radius']:.6f} "
+            f"radius={row['geometry']['rms_radius']:.6f} "
             f"Eel={row['total_elastic_energy']:.6f} Ekin={row['total_kinetic_energy']:.6f}"
         )
 
@@ -195,7 +141,7 @@ def main() -> None:
             capture(step)
 
     source_files = [
-        ROOT / "core" / "constants.json",
+        ROOT / "core" / "config.json",
         ROOT / "core" / "agents.wgsl",
         ROOT / "core" / "p2g.wgsl",
         ROOT / "core" / "g2p.wgsl",
@@ -217,26 +163,20 @@ def main() -> None:
         "scenario": {
             "name": "saturated_growth_then_settle",
             "purpose": (
-                "network-directed tensor-Fg growth plus signed division-polarity comparison"
+                "directional continuous tensor-Fg growth"
                 if args.directional
-                else "tensor-Fg isotropic-equivalence, recoil, and residual-strain baseline"
+                else "isotropic continuous tensor-Fg growth and residual-strain baseline"
             ),
             "seed": SEED,
             "initial_particles": 2,
             "max_active_particles": MAX_ACTIVE,
-            "division_drive": "dedicated signed policy output saturated at +1",
-            "policy_weights": "division drive and anisotropy/polarity logits=20, local-forward direction bias=1" if args.directional else "division drive logit=20; all other outputs zero except anisotropy=-20",
-            "growth_direction": (
-                "normalized local-forward axis with sigmoid anisotropy=1 and division bias=1"
-                if args.directional
-                else "zero vector"
-            ),
+            "policy_weights": "local-forward growth-vector bias saturated at +1",
+            "growth_anisotropy": 1.0 if args.directional else 0.0,
             "macro_steps": TOTAL_STEPS,
             "growth_enabled_through_macro_step": GROWTH_STEPS,
             "substeps_per_macro": SUBSTEPS,
             "dt": DT,
             "gravity": 0.0,
-            "spawn_half_width": 0.0,
             "material": {
                 "E": MATERIAL_E,
                 "nu": MATERIAL_NU,
@@ -244,10 +184,8 @@ def main() -> None:
                 "elasticity": MATERIAL_ELASTICITY,
             },
             "growth": {
-                "legacy_internal_rate": BASELINE_GROWTH_RATE,
-                "division_area_ratio": GROWTH_MAX,
-                "split_displacement": BASELINE_SPLIT_DISPLACEMENT,
-                "division_cooldown": DIVISION_COOLDOWN,
+                "internal_growth_rate": BASELINE_GROWTH_RATE,
+                "sample_spacing": BASELINE_SAMPLE_SPACING,
             },
             "repulsion": {
                 "strength": BASELINE_REPULSION_STRENGTH,
@@ -270,7 +208,6 @@ def main() -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
         print(f"wrote {output_path}")
-
 
 if __name__ == "__main__":
     main()

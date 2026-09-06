@@ -7,7 +7,6 @@ Euclidean angular momentum. Tensor entries use ordinary row-major matrices.
 from dataclasses import dataclass, replace
 import numpy as np
 
-
 @dataclass
 class Domain:
     x: np.ndarray
@@ -39,7 +38,6 @@ class Domain:
     def moment(self, dx):
         return np.eye(2)*dx**2/4 + self.h @ self.h.T/3
 
-
 def stencil(domain, dx, order=3):
     """Return node -> (integrated normalized basis, integrated gradient)."""
     xi, wi = np.polynomial.legendre.leggauss(order)
@@ -61,7 +59,6 @@ def stencil(domain, dx, order=3):
                     nodes[node] = nodes.get(node, np.zeros(3)) + value
     return nodes
 
-
 def scatter(domains, dx, order=3, dt=0.0):
     """Node -> mass, momentum x/y, force x/y."""
     grid = {}
@@ -74,7 +71,6 @@ def scatter(domains, dx, order=3, dt=0.0):
             grid[node] = grid.get(node, np.zeros(5)) + entry
     return grid
 
-
 def gather(domain, grid_velocity, dx, order=3):
     velocity = np.zeros(2)
     moment = np.zeros((2, 2))
@@ -85,7 +81,6 @@ def gather(domain, grid_velocity, dx, order=3):
         moment += w*np.outer(v, np.array(node)*dx-domain.x)
         gradient += np.outer(v, [gx, gy])
     return velocity, moment@np.linalg.inv(domain.moment(dx)), gradient
-
 
 def check_reference():
     dx = 1/256
@@ -116,7 +111,6 @@ def check_reference():
     assert coarse_error < 0.01, coarse_error
     print(f'[PASS] CPU domain transfers: mass/linear/angular momentum, stress balance, affine reproduction; '
           f'L1 nodal mass error {coarse_error:.6g} -> {refined_error:.6g} after bisection')
-
 
 if __name__ == '__main__':
     check_reference()

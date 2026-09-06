@@ -1,25 +1,6 @@
-import densityModel from "../../../core/density.json";
+import densityModelConfig from "../../../core/config.json";
+const densityModel = densityModelConfig.density;
 import type { SceneData } from "./types";
-
-// Deterministic, bit-exact PRNG for a rollout's ENTIRE starting condition
-// — spawn-position jitter (seedBlob() below), back-to-back theta
-// (gpu/simulation.ts's own restartRollout()), and heading's own per-slot
-// fill (Agents.resetHeading()) all derive from a portable integer hash,
-// mirrored exactly by ../../../trainer/agents_gpu.py's own
-// _spawn_uniform01()/_spawn_uniform01_batch() — no numpy Generator or
-// mulberry32 stream involved on either side anymore. This used to be a
-// deliberately-accepted, NOT-bit-exact gap (mulberry32 here vs numpy's
-// own Generator/PCG64 on the Python trainer) — "a replay only needs to
-// *look* like a plausible rollout from the same seed, not reproduce the
-// Python trainer's exact float sequence" — but that gap turned out to
-// matter more than expected: since MLS-MPM elastic material + repulsion
-// + growth is a real, chaotic dynamical system, even a tiny difference
-// in starting position/heading compounds over a rollout's own macro
-// steps into a visibly different (if structurally similar) final shape,
-// not just cosmetic noise. Fully closing it (this file, matching
-// growthSeed() below's own already-bit-exact precedent) is what actually
-// makes a frontend replay reproduce the exact same rollout a checkpoint
-// was trained under.
 
 // Bit-exact, portable integer hash (Chris Wellons' "lowbias32" — public
 // domain), mirrored exactly by ../../../trainer/agents_gpu.py's own
@@ -36,58 +17,10 @@ function hashU32(x: number): number {
   return x;
 }
 
-const SPATIAL_HEADING_DOMAIN = 0x48454144;
-
 /** Fixed world-space random field shared by every sampling density. */
-export function spatialUniform01(seed: number, x: number, y: number, domain = SPATIAL_HEADING_DOMAIN): number {
-  const cells = densityModel.SPATIAL_RANDOM_CELLS;
-  const cellX = Math.floor((((x % 1) + 1) % 1) * cells) >>> 0;
-  const cellY = Math.floor((((y % 1) + 1) % 1) * cells) >>> 0;
-  const combined = (
-    (seed >>> 0)
-    ^ hashU32((cellX + 0x9e3779b9) >>> 0)
-    ^ hashU32((cellY + 0x85ebca6b) >>> 0)
-    ^ (domain >>> 0)
-  ) >>> 0;
-  return (hashU32(combined) >>> 8) / 16777216;
-}
 
-/** particleMeta.rng's own initial per-particle seed — bit-exact with
- * agents_gpu.py's own _growth_seed(seed, count). `seed` is the
- * rollout's own raw seed (config.seed on this side, matching evolve.py's
- * own rollout(seed, ...) argument on the Python side). A DELIBERATELY
- * SEPARATE hash domain from spawnUniform01() below (no shared magic
- * constant) — see that function's own comment for why the two must
- * never correlate despite both being bit-exact now: growth is a near-
- * critical branching process (agentStep()'s own split-decision logic),
- * so even a merely-correlated seed stream risks a systematic bias in
- * which particles tend to split together. Nonzero always (xorshift32's
- * own fixed point at 0 — core/agents.wgsl's own comment). */
-export function growthSeed(seed: number, index: number): number {
-  const combined = ((seed >>> 0) ^ hashU32((index + 1) >>> 0)) >>> 0;
-  return hashU32(combined) || 1;
-}
-
-// Magic domain-separator XOR'd into the index before hashing — keeps
-// spawnUniform01() below's own output space disjoint from growthSeed()
-// above even when both happen to be called with the same (seed, index)
-// pair (seedBlob()'s/resetHeading()'s own indices are small integers,
-// the same range growthSeed() iterates particle slots over) — mirrors
-// ../../../trainer/agents_gpu.py's own _SPAWN_HASH_DOMAIN exactly (must
-// match bit-for-bit). Arbitrary, just needs to be nonzero.
 const SPAWN_HASH_DOMAIN = 0xc0ffee00;
 
-/** One deterministic float in [0,1), bit-exact with
- * ../../../trainer/agents_gpu.py's own _spawn_uniform01(seed, index) —
- * the portable hash EVERY piece of a rollout's own starting-condition
- * randomness that ISN'T growth now goes through: seedBlob() below's own
- * spawn-position jitter, gpu/simulation.ts's own back-to-back theta, and
- * Agents.resetHeading()'s own per-slot heading fill. Domain-separated
- * from growthSeed() above via SPAWN_HASH_DOMAIN (see that constant's own
- * comment). Top 24 bits of the hash -> a uniform float, same "use every
- * bit of f32 mantissa precision" convention core/agents.wgsl's own
- * xorshift32-derived draw already uses
- * (`f32(rngNext >> 8u) * (1.0/16777216.0)`). */
 export function spawnUniform01(seed: number, index: number): number {
   const combined = ((seed >>> 0) ^ hashU32((SPAWN_HASH_DOMAIN ^ index) >>> 0)) >>> 0;
   const hashed = hashU32(combined);

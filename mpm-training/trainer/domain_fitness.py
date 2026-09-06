@@ -4,6 +4,9 @@ Pixels are cell averages on [0,1]^2. Triangle/pixel intersections are integrated
 exactly before rotation alignment (bilinear image resampling). The unblurred
 area fractions drive stopping; multiscale losses drive evolutionary selection.
 """
+from config import CONFIG
+_DEFAULTS = CONFIG["run"]
+
 from dataclasses import dataclass
 import numpy as np
 from scipy.ndimage import affine_transform, distance_transform_edt
@@ -11,7 +14,6 @@ from raster import RasterFitnessBreakdown, _average_pool, _boundary_loss
 from triangle_vertices import unwrap_vertices
 
 FITNESS_MODEL_VERSION = 2
-
 
 def target_mask(target, resolution):
     result = np.zeros((resolution, resolution), dtype=float)
@@ -25,7 +27,6 @@ def target_mask(target, resolution):
         wy = np.maximum(0, np.minimum(ys+1, (y+half)*resolution)-np.maximum(ys, (y-half)*resolution))
         result[np.ix_(ys, xs)] += wy[:, None]*wx
     return np.clip(result, 0, 1)
-
 
 def centered_triangles(vertices, center):
     triangles = unwrap_vertices(vertices)
@@ -47,7 +48,6 @@ def centered_triangles(vertices, center):
     centroid = np.sum(triangles.mean(axis=1)*areas[:, None], axis=0)/total
     return triangles-centroid+center, total
 
-
 def _raster_batches(triangles, resolution):
     scaled = np.asarray(triangles, float).reshape(-1, 3, 2)*resolution
     if not len(scaled):
@@ -64,7 +64,6 @@ def _raster_batches(triangles, resolution):
         cells += count
     if start < len(scaled):
         yield scaled[start:]
-
 
 def rasterize_triangles(triangles, resolution):
     """Add exact triangle/pixel intersection areas using batched convex clipping."""
@@ -111,7 +110,6 @@ def rasterize_triangles(triangles, resolution):
         np.add.at(out, (ys, xs), area)
     return out
 
-
 def rotate_density(density, angle, center):
     # Row-vector geometry uses raster.py's clockwise rotation convention.
     c, s = np.cos(angle), np.sin(angle)
@@ -119,7 +117,6 @@ def rotate_density(density, angle, center):
     origin = np.array(center)[::-1]*len(density)-0.5
     return affine_transform(density, matrix, offset=origin-matrix@origin,
                             output_shape=density.shape, order=1, mode='grid-constant', cval=0, prefilter=False)
-
 
 @dataclass(frozen=True)
 class MatchMetrics:
@@ -131,7 +128,6 @@ class MatchMetrics:
     def error(self):
         return self.missing+self.spill+self.overlap
 
-
 @dataclass
 class DomainEvaluation:
     total: float
@@ -139,9 +135,8 @@ class DomainEvaluation:
     breakdown: RasterFitnessBreakdown | None
     match: MatchMetrics
 
-
-def evaluate_domains(vertices, target, mask, *, coverage_weight=1., spill_weight=1.,
-                     boundary_weight=.25, crowding_weight=.05, outside_weight=1.,
+def evaluate_domains(vertices, target, mask, *, coverage_weight=_DEFAULTS["fitnessCoverageWeight"], spill_weight=_DEFAULTS["fitnessSpillWeight"],
+                     boundary_weight=_DEFAULTS["fitnessBoundaryWeight"], crowding_weight=_DEFAULTS["fitnessCrowdingWeight"], outside_weight=_DEFAULTS["outsideWeight"],
                      num_angles=16, refinement_steps=2):
     fail = DomainEvaluation(float('inf'), None, None, MatchMetrics(float('inf'), float('inf'), float('inf')))
     vertices = np.asarray(vertices, float).reshape(-1, 3, 2)
@@ -193,11 +188,10 @@ def evaluate_domains(vertices, target, mask, *, coverage_weight=1., spill_weight
     best.match = best_match
     return best
 
-
 class StableMatchStop:
     """External growth controller; failed settling resumes growth on next step."""
-    def __init__(self, enabled=True, interval=10, confirmations=3, settle_steps=20,
-                 missing=.02, spill=.02, overlap=.02):
+    def __init__(self, enabled=_DEFAULTS["stableStop"], interval=_DEFAULTS["shapeCheckInterval"], confirmations=_DEFAULTS["shapeConfirmations"], settle_steps=_DEFAULTS["shapeSettleSteps"],
+                 missing=_DEFAULTS["shapeMissingTolerance"], spill=_DEFAULTS["shapeSpillTolerance"], overlap=_DEFAULTS["shapeOverlapTolerance"]):
         self.enabled, self.interval = enabled, interval
         self.confirmations, self.settle_steps = confirmations, settle_steps
         self.limits = (missing, spill, overlap)
@@ -229,12 +223,10 @@ class StableMatchStop:
                 self.settling_scores = [score]
         return self.complete
 
-
 def stopping_from_args(args):
     return StableMatchStop(args.stable_stop, args.shape_check_interval, args.shape_confirmations,
                           args.shape_settle_steps, args.shape_missing_tolerance,
                           args.shape_spill_tolerance, args.shape_overlap_tolerance)
-
 
 def score_domains(vertices, target, mask, args):
     return evaluate_domains(vertices, target, mask, coverage_weight=args.fitness_coverage_weight,

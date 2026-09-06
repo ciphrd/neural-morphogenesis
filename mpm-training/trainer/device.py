@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import wgpu
 
-
 def pick_device(verbose: bool = True) -> wgpu.GPUDevice:
     """Requests a high-performance adapter and its default device,
     logging which backend actually got picked — on this project's own

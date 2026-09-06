@@ -1,3 +1,4 @@
+import config from "../../../core/config.json";
 /** Material-area stopping metrics. Keep in parity with trainer/domain_fitness.py.
  * Exact triangle/cell intersections precede bilinear rotation alignment.
  */
@@ -159,17 +160,17 @@ export class StableMatchStop {
   get enabled() { return this.settings.stableStop === true && !!this.settings.shapeTarget; }
   get growthEnabled() { return this.settlingSince === null && !this.complete; }
   due(step: number) {
-    return this.enabled && (step % (this.settings.shapeCheckInterval ?? 10) === 0 ||
-      (this.settlingSince !== null && step-this.settlingSince >= (this.settings.shapeSettleSteps ?? 20)));
+    return this.enabled && (step % (this.settings.shapeCheckInterval ?? config.run.shapeCheckInterval) === 0 ||
+      (this.settlingSince !== null && step-this.settlingSince >= (this.settings.shapeSettleSteps ?? config.run.shapeSettleSteps)));
   }
   observe(step: number, match: MatchMetrics, blocked = false) {
     this.match = match;
     const good = !blocked && [match.missing, match.spill, match.overlap].every((v, i) =>
-      Number.isFinite(v) && v <= [this.settings.shapeMissingTolerance ?? .02,
-        this.settings.shapeSpillTolerance ?? .02, this.settings.shapeOverlapTolerance ?? .02][i]);
+      Number.isFinite(v) && v <= [this.settings.shapeMissingTolerance ?? config.run.shapeMissingTolerance,
+        this.settings.shapeSpillTolerance ?? config.run.shapeSpillTolerance, this.settings.shapeOverlapTolerance ?? config.run.shapeOverlapTolerance][i]);
     if (!good) { this.streak = 0; this.settlingSince = null; }
-    else if (this.settlingSince !== null) this.complete = step-this.settlingSince >= (this.settings.shapeSettleSteps ?? 20);
-    else if (++this.streak >= (this.settings.shapeConfirmations ?? 3)) this.settlingSince = step;
+    else if (this.settlingSince !== null) this.complete = step-this.settlingSince >= (this.settings.shapeSettleSteps ?? config.run.shapeSettleSteps);
+    else if (++this.streak >= (this.settings.shapeConfirmations ?? config.run.shapeConfirmations)) this.settlingSince = step;
     return this.complete;
   }
 }

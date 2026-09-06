@@ -1,90 +1,9 @@
-"""Ties MpmCore (headless MLS-MPM physics) + EnvironmentGPU (GPU-resident
-chemical field) + AgentsGPU (the evolved policy's GPU-resident forward
-pass) into one rollout — the mpm-training analogue of envnca/simulation.py,
-adapted to a real physics substrate instead of a bare point-agent grid.
-
-Fully GPU-resident, matching ../viewer/src/gpu/simulation.ts's own
-"GPU-resident is the whole point" design for every data-related buffer
-(positions, velocities, F/C/ParticleRest, the transient chemical field, weights): each macro
-step rebuilds the field from cell-owned chemistry before every agents.encode_step,
-then submits once, immediately followed
-by core.step(substeps_per_macro)'s own physics submission — see
-macro_step()'s own comment for why that's two submits, not one. The ONE
-exception is activeCount itself, now that growth exists (see this
-module's own "Growth" paragraph below) — macro_step() reads back a
-single 4-byte atomic counter every macro step to learn whether the count
-changed, a real, deliberate, budgeted host round-trip, not an oversight.
-
-This is a real architectural change from an earlier revision of this
-module, which ran the chemical field + NN forward pass entirely in torch
-(on MPS/CUDA) while MpmCore's own physics ran on wgpu-native/Metal — two
-separate GPU compute frameworks sharing no buffers, so every handoff
-between "what the network senses" and "what MpmCore's physics did"
-needed a real, blocking host round-trip: read_positions()/
-read_velocities() (wgpu GPU -> CPU), torch.from_numpy(...).to(device)
-(CPU -> torch GPU) for positions/heading, several more torch GPU -> CPU
-downloads for the network's own outputs, then write_buffer() (CPU ->
-wgpu GPU) to push the result back into MpmCore. At realistic training
-settings (tens of macro steps x population x generations) this dominated
-the actual compute cost. EnvironmentGPU/AgentsGPU are Python (wgpu-py)
-ports of the exact same WGSL shaders (../core/environment.wgsl,
-../core/agents.wgsl) the browser viewer already runs fully GPU-resident
-— reusing them here, on MpmCore's own wgpu device/queue, removes that
-crossing entirely rather than trying to paper over it with zero-copy
-interop between two unrelated GPU frameworks.
-
-The other host round-trip in this module is positions() — evolve.py's
-own rollout() still needs particle positions back on the host for
-raster.py's own numpy/scipy fitness scoring (rotation search + a
-Euclidean distance transform, neither of which has an obvious WGSL
-equivalent worth chasing), but that's called at only the ~5
-CAPTURE_OFFSETS snapshots near the end of a rollout, not every macro
-step — a fixed, small cost per rollout rather than one paid
-`macro_steps` times.
-
-Local-frame sensing/action rotation now lives entirely inside
-AgentsGPU/core/agents.wgsl. The frame is reconstructed from the L2-clipped
-gradient of chemical channel index 3 on every evaluation; there is no persistent heading
-or angular-velocity state.
-
-The two former strafe channels directly set the local-space tensor-growth direction
-on every neural evaluation, without temporal smoothing. The agent shader rotates
-that direction through the current channel-index-3-gradient frame and
-relaxes persistent anisotropy toward its sigmoid target; a
-separate sigmoid controls signed division placement. MAX_STRAFE independently
-controls whether the reconstructed world direction also acts as physical
-acceleration and is zero by default.
-
-Growth: every rollout starts with the configured initial particle count;
-core/agents.wgsl's own agentStep() may spawn new ones from there based on
-the policy's dedicated signed division drive, up to evolve.py's own
---particles (now a CAP, not a fixed starting count). A policy that never
-produces enough effective division drive stays at that initial count (with the
-default zero division-drive boost). This is the
-ONE exception to "zero host round-trips for anything data-related" this
-module's own docstring boasts about above: macro_step() reads back a
-single 4-byte atomic counter every macro step (agents.read_grown_count())
-to learn whether growth changed the count, and if so propagates it to
-core/agents' own dispatch sizing before this step's own physics
-substeps run — a real, deliberate host round-trip (not an oversight),
-needed because dispatch sizing for every pass (P2G/gridUpdate/G2P/
-repulsion, and Agents' own next agentStep()) is decided on the CPU, and
-nothing else would ever learn growth happened purely on the GPU
-otherwise. See agents_gpu.py's own read_grown_count()/set_active_count()
-for why this is cheap (mpm_core.py's own step() already pays an
-equivalent 4-byte sync once per macro step, for a different reason —
-see that method's own docstring) rather than a new, unbudgeted cost
-class. A newly split particle only starts getting its own agentStep()/
-physics one macro step after it split (this readback+propagate happens
-AFTER agentStep() already ran for this step) — see core/agents.wgsl's
-own module docstring for why that one-step activation lag was a
-deliberate choice, not a limitation worth working around.
-"""
+"""GPU rollout orchestration: morphology, neural communication, growth/refinement, and MPM. Production seeds are conforming triangle meshes; material growth and numerical sample count are distinct."""
 from __future__ import annotations
 
 import numpy as np
 
-from simulation_settings import MATERIAL_AREA_BUDGET, COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, NEURAL_UPDATES_PER_MACRO
+from simulation_settings import DEFAULT_RUN_SETTINGS, MATERIAL_AREA_BUDGET, COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, NEURAL_UPDATES_PER_MACRO
 
 from agents_gpu import AgentsGPU, _spawn_uniform01
 from density import INITIAL_PACKING_SPACING_SCALE
@@ -92,7 +11,6 @@ from initial_conditions import InitialCondition, validate_initial_condition
 from policy_parameters import policy_has_recurrence
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, MpmCore
-
 
 def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int) -> tuple:
     """Seed an area-weighted circular triangle mesh; mirrored in rng.ts."""
@@ -105,7 +23,6 @@ def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int
             np.tile(np.array([1, 0, 0, 1], np.float32), (samples, 1)),
             np.zeros((samples, 4), np.float32), np.ones(samples, np.float32),
             domain, weights, 'triangle-vertices')
-
 
 class TrainingRollout:
     """One rollout's worth of *state*. `core`/`agents`/`environment` (all
@@ -131,7 +48,6 @@ class TrainingRollout:
         agents: AgentsGPU,
         environment: EnvironmentGPU,
         spawn_center: tuple[float, float],
-        spawn_half_width: float,
         gravity: float,
         seed: int,
         mpm_enabled: bool = True,
@@ -139,9 +55,9 @@ class TrainingRollout:
         communication_speed: float = COMMUNICATION_SPEED,
         initial_particle_count: int = INITIAL_PARTICLE_COUNT,
         material_area_budget: float = MATERIAL_AREA_BUDGET,
-        initial_condition: str = "none",
-        initial_condition_strength: float = 0.3,
-        initial_condition_channel: int = 0,
+        initial_condition: str = DEFAULT_RUN_SETTINGS["initialCondition"],
+        initial_condition_strength: float = DEFAULT_RUN_SETTINGS["initialConditionStrength"],
+        initial_condition_channel: int = DEFAULT_RUN_SETTINGS["initialConditionChannel"],
     ) -> None:
         self.core = core
         self.agents = agents
@@ -161,26 +77,17 @@ class TrainingRollout:
 
         agents.set_material_area_budget(material_area_budget)
         core.set_gravity(gravity)
-        # Every rollout — same "run-constant in practice today, but a
-        # rollout-scoped setter regardless" reasoning set_gravity() above
-        # already follows. The Agents uniform retains legacy spawn slots for
-        # wire compatibility, although position is no longer a policy input.
         agents.set_spawn_center(*spawn_center)
-        # Retained in the constructor/checkpoint schema for compatibility;
-        # compact multi-cell seeding is now governed by split_displacement.
-        _ = spawn_half_width
         if agents.max_active_particles < 2:
             raise ValueError('A tiled triangle seed requires capacity for at least two samples')
-        # The legacy initial count denotes material units; the disk mesh
-        # uses two triangles per unit, including when capacity limits startup.
         initial_cells = min(agents.max_active_particles // 2, max(1, int(initial_particle_count)))
         scene = seed_blob(
-            initial_cells, spawn_center, agents.split_displacement, seed
+            initial_cells, spawn_center, agents.sample_spacing, seed
         )
         validate_initial_condition(initial_condition, initial_condition_strength,
                                    initial_condition_channel, agents.channels,
                                    policy_has_recurrence(agents.policy_architecture))
-        radius = np.sqrt(initial_cells*(agents.split_displacement*INITIAL_PACKING_SPACING_SCALE)**2*np.sqrt(3)/(2*np.pi))
+        radius = np.sqrt(initial_cells*(agents.sample_spacing*INITIAL_PACKING_SPACING_SCALE)**2*np.sqrt(3)/(2*np.pi))
         perturbation = InitialCondition(initial_condition, initial_condition_strength,
                                         initial_condition_channel, seed, spawn_center, radius)
         perturbation.deform(scene)
@@ -199,7 +106,7 @@ class TrainingRollout:
         environment.reset()
         agents.set_active_count(initial_count)
         chemistry, private = perturbation.states(scene[0], agents.channels)
-        agents.reset_state(seed, chemistry, private)
+        agents.reset_state(chemistry, private)
         if environment.chemical_communication_architecture == "persistent-environment":
             perturbation.seed_environment(environment)
 
@@ -229,25 +136,19 @@ class TrainingRollout:
         )
         # Transport the old persistent substrate through the preceding MPM
         # motion before the first neural read of this tick.
-        self.environment.encode_prepare_persistent(encoder)
         for communication_round in range(self.neural_updates_per_macro):
             final_round = communication_round == self.neural_updates_per_macro - 1
-            if (
-                self.environment.chemical_communication_architecture == "cell-owned-projection"
-                or final_round
-            ):
-                self.environment.encode_clear(encoder)
+            self.environment.encode_prepare_persistent(encoder, transport=communication_round == 0)
+            self.environment.encode_clear(encoder)
             if self.environment.chemical_communication_architecture == "cell-owned-projection":
                 self.agents.encode_splat_chemical_state(encoder)
             self.environment.encode_sense(encoder)
             self.agents.encode_step(
                 encoder,
                 self.environment.parity,
-                commit_lifecycle=final_round,
+                commit_growth=final_round,
             )
-        # Persistent mode merges only the final neural round's signed delta deposits
-        # after the transported field has been sensed.
-        self.environment.encode_merge_persistent(encoder)
+            self.environment.encode_merge_persistent(encoder)
         core.device.queue.submit([encoder.finish()])
 
         # Growth's own readback — see this module's own module docstring
@@ -258,7 +159,7 @@ class TrainingRollout:
         # dispatches. A plain != check, not unconditional writes, so a
         # macro step where nothing actually split (the overwhelmingly
         # common case early in a rollout, or for a policy that never
-        # produces a positive division drive) costs one 4-byte read
+        # requests growth) costs one 4-byte read
         # and nothing else.
         # min(...) — the atomic itself can overshoot max_active_particles
         # slightly (several agents claiming a slot the same step, right
@@ -267,7 +168,7 @@ class TrainingRollout:
         # clamping the *reported* count here is what actually enforces
         # the cap, since core/agents.wgsl itself already refuses to WRITE
         # a claimed slot past max_active_particles either way.
-        grown = min(self.agents.read_grown_count(), self.agents.max_active_particles)
+        grown = min(self.agents.read_sample_count(), self.agents.max_active_particles)
         if grown != core.active_count:
             core.set_active_count(grown)
             self.agents.set_active_count(grown)

@@ -11,7 +11,7 @@ interface NetworkPanelProps {
    * picking those three fields apart at every call site. null before
    * the first generation loads. */
   config: SimulationConfig | null
-  /** maxEnvWrite/maxAngularAccel give their output bars' true domains. */
+
   physics: PhysicsSettings | null
 }
 
@@ -288,8 +288,6 @@ function buildChannelHeatmaps(
   elastic: ManualElasticInput,
   manualChannelCount: number,
   maxEnvWrite: number,
-  maxAngularAccel: number,
-  maxStrafe: number,
   architecture: PolicyArchitecture,
 ): Float32Array[] {
   const res = VECTOR_PAD_HEATMAP_RESOLUTION
@@ -305,7 +303,7 @@ function buildChannelHeatmaps(
         const dx = res > 1 ? -DOMAIN + (2 * DOMAIN * gx) / (res - 1) : 0
         input[channels + c] = dx
         input[2 * channels + c] = dy
-        const result = evalPolicy(input, weights, channels, hiddenDim, maxEnvWrite, maxAngularAccel, maxStrafe, architecture)
+        const result = evalPolicy(input, weights, channels, hiddenDim, maxEnvWrite, architecture)
         grid[gy * res + gx] = result.envWrite[c]
       }
     }
@@ -328,8 +326,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
   const hiddenDim = config?.hiddenDim ?? 0
   const architecture = config?.policyArchitecture ?? "stateless-128"
   const maxEnvWrite = physics?.maxEnvWrite ?? 1
-  const maxAngularAccel = physics?.maxAngularAccel ?? 1
-  const maxStrafe = physics?.maxStrafe ?? 1
   const elasticInputsEnabled = config?.elasticStrainInputsEnabled ?? false
   const weightsError = config?.weights
     ? policyWeightsShapeError(config.weights, channels, hiddenDim, architecture)
@@ -358,8 +354,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       channels,
       hiddenDim,
       maxEnvWrite,
-      maxAngularAccel,
-      maxStrafe,
       architecture
     )
   }, [
@@ -371,8 +365,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     elastic,
     elasticInputsEnabled,
     maxEnvWrite,
-    maxAngularAccel,
-    maxStrafe,
     architecture,
     weightsError,
   ])
@@ -390,8 +382,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       elasticInputsEnabled ? elastic : { volume: 0, axial: 0, shear: 0 },
       manualChannelCount,
       maxEnvWrite,
-      maxAngularAccel,
-      maxStrafe,
       architecture
     )
   }, [
@@ -404,8 +394,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     elasticInputsEnabled,
     manualChannelCount,
     maxEnvWrite,
-    maxAngularAccel,
-    maxStrafe,
     architecture,
     weightsError,
   ])
@@ -581,7 +569,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           )}
 
           <div className="nn-block">
-            <h3>{policyHasRecurrence(architecture) ? "Derived color — zero private state" : "Output — cell color"}</h3>
+            <h3>Output — cell color [0, 1]</h3>
             <div
               aria-label="Current neural RGB color"
               style={{

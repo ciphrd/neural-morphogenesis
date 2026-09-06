@@ -37,8 +37,6 @@ fn prefilter(color: vec3<f32>) -> vec3<f32> {
   return color * contribution;
 }
 
-// First-reduction Karis weighting stops a single hot pixel from dominating
-// every coarser level of the pyramid.
 fn karis(color: vec3<f32>) -> vec3<f32> {
   if (downsampleSettings.prefilter < 0.5) { return color; }
   return color / (1.0 + luminance(color));

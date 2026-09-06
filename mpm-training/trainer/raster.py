@@ -1,9 +1,3 @@
-"""Legacy Gaussian point-cloud scoring and reusable raster-loss primitives.
-
-New training runs use domain_fitness.py's material-domain coverage. The point
-rasterizer remains available to distance_playground.py and historical checks;
-its occupancy calibration intentionally retains the original point semantics.
-"""
 
 from __future__ import annotations
 
@@ -24,7 +18,6 @@ FITNESS_MODEL_VERSION = 1
 FITNESS_PYRAMID_FACTORS = (1, 2, 4, 8)
 FITNESS_PYRAMID_WEIGHTS = (0.50, 0.25, 0.15, 0.10)
 
-
 @dataclass(frozen=True)
 class RasterFitnessBreakdown:
     """Individually inspectable terms from one aligned raster score."""
@@ -36,11 +29,9 @@ class RasterFitnessBreakdown:
     crowding: float
     angle: float
 
-
 def _rotation_matrix(theta: float) -> np.ndarray:
     c, s = np.cos(theta), np.sin(theta)
     return np.array([[c, -s], [s, c]])
-
 
 def rasterize_points(
     points: np.ndarray,
@@ -145,7 +136,6 @@ def rasterize_points(
 
     return raster
 
-
 def rasterize_points_sum(
     points: np.ndarray,
     resolution: int,
@@ -216,14 +206,12 @@ def rasterize_points_sum(
 
     return raster
 
-
 def raster_distance(a: np.ndarray, b: np.ndarray) -> float:
     """Mean squared error between two same-shaped [0,1] rasters —
     resolution-independent (doesn't scale with pixel count), unlike a
     raw sum of squared differences."""
     diff = a - b
     return float(np.mean(diff * diff))
-
 
 def occupancy_reference(
     target_raster: np.ndarray,
@@ -251,13 +239,11 @@ def occupancy_reference(
     expected_density = expected_weighted_particles * kernel_mass / target_mass
     return expected_density / -np.log1p(-target_occupancy)
 
-
 def bounded_occupancy(weighted_density: np.ndarray, reference: float) -> np.ndarray:
     """Map additive particle density to a smooth occupancy field in [0, 1]."""
     if not np.isfinite(reference) or reference <= 0.0:
         raise ValueError("occupancy reference must be finite and positive")
     return -np.expm1(-np.maximum(weighted_density, 0.0) / reference)
-
 
 def _average_pool(field: np.ndarray, factor: int) -> np.ndarray:
     if factor == 1:
@@ -268,7 +254,6 @@ def _average_pool(field: np.ndarray, factor: int) -> np.ndarray:
         raise ValueError(f"pooling factor {factor} exceeds raster shape {field.shape}")
     cropped = field[:height, :width]
     return cropped.reshape(height // factor, factor, width // factor, factor).mean(axis=(1, 3))
-
 
 def _multiscale_shape_terms(
     target: np.ndarray,
@@ -295,7 +280,6 @@ def _multiscale_shape_terms(
         spill += weight * float(np.sum((1.0 - t) * c * c) / target_mass)
     return coverage / weight_sum, spill / weight_sum
 
-
 def _boundary_loss(target: np.ndarray, candidate: np.ndarray, sampling_factor: int = 4) -> float:
     """Compare silhouette edges after suppressing individual-particle grain.
 
@@ -314,7 +298,6 @@ def _boundary_loss(target: np.ndarray, candidate: np.ndarray, sampling_factor: i
     diff = target_edge - candidate_edge
     return float(np.sum(diff * diff) / denominator)
 
-
 def _crowding_loss(
     weighted_density: np.ndarray,
     expected_density: float,
@@ -326,7 +309,6 @@ def _crowding_loss(
     excess = np.maximum(relative - tolerance, 0.0)
     target_mass = max(float(target_raster.sum()), np.finfo(np.float64).eps)
     return float(np.sum(np.log1p(excess * excess)) / target_mass)
-
 
 def build_target_raster(
     target_points: np.ndarray,
@@ -346,7 +328,6 @@ def build_target_raster(
     targets.py) — see rasterize_points()'s own docstring for why a
     target point needs a nonzero footprint and a particle doesn't."""
     return rasterize_points(target_points, resolution, extent, sigma, half_size=half_size)
-
 
 def build_target_distance_field(target_raster: np.ndarray, threshold: float = 0.5) -> np.ndarray:
     """Precompute once per training run, alongside target_raster (the
@@ -376,7 +357,6 @@ def build_target_distance_field(target_raster: np.ndarray, threshold: float = 0.
         return np.zeros_like(target_raster)
     return distance_transform_edt(~inside)
 
-
 def _bilinear_sample(field: np.ndarray, points: np.ndarray, extent: tuple[float, float, float, float]) -> np.ndarray:
     """Samples `field` (resolution x resolution) at each of `points`
     (N,2), which live in the same coordinate space as `extent` — same
@@ -402,7 +382,6 @@ def _bilinear_sample(field: np.ndarray, points: np.ndarray, extent: tuple[float,
     top = field[y0, x0] * (1.0 - fx) + field[y0, x1] * fx
     bottom = field[y1, x0] * (1.0 - fx) + field[y1, x1] * fx
     return top * (1.0 - fy) + bottom * fy
-
 
 def outside_shape_penalty(
     points: np.ndarray,
@@ -435,7 +414,6 @@ def outside_shape_penalty(
     d_raster = _bilinear_sample(target_distance_field, points, extent)
     d_extent_fraction = d_raster / raster_px_per_extent_unit / (xmax - xmin)
     return float(np.mean(d_extent_fraction * d_extent_fraction))
-
 
 def training_raster_distance(
     points: np.ndarray,

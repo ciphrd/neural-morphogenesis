@@ -18,19 +18,16 @@ from pressure_diagnostics import read_snapshot, measure
 
 SPACING = .0027
 
-
 def build(device, density, divisor, capacity, damping):
     core = MpmCore(device, physics_dt=DT/divisor)
-    env = EnvironmentGPU(device, 1, 32, 32, .5, 1.)
-    agents = AgentsGPU(device, core, env, 1, 128,
-                      0., 0., 1., 1.4, .8, .1, False, 0.,
-                      capacity, SPACING/np.sqrt(density), 0., 1., .4, 1., .5, .5)
+    env = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0, chemical_communication_architecture="cell-owned-projection")
+    agents = AgentsGPU(device, core, env, 1, 128, 1.0, capacity, SPACING / np.sqrt(density), 1.0, 1.0, 0.5, 0.5, chemical_communication_architecture="cell-owned-projection")
     core.set_gravity(0)
     core.set_repulsion_strength(0, 40)
     core.set_damping(damping, 16)
     core.set_material(10000, .2, 3, .5, growth_rate=120, growth_anisotropy=1,
                       growth_compression_feedback=1, particle_mass=10/density,
-                      particle_volume=1/density, fluidity=0)
+                      particle_volume=1/density, )
     core.load_scene(*seed_blob(5*density, (.5, .5), SPACING/np.sqrt(density), 17))
     agents.set_active_count(core.active_count)
     rest = read_snapshot(core)['rest']
@@ -38,13 +35,11 @@ def build(device, density, divisor, capacity, damping):
     device.queue.write_buffer(core.rest, 0, rest)
     return core, agents, env
 
-
 def write_csv(path, rows):
     with path.open('w') as handle:
         writer = csv.DictWriter(handle, fieldnames=rows[0].keys())
         writer.writeheader()
         writer.writerows(rows)
-
 
 def grow(device, density, divisor, args):
     core, agents, env = build(device, density, divisor, args.capacity*density, args.damping)
@@ -60,7 +55,7 @@ def grow(device, density, divisor, args):
         encoder = device.create_command_encoder()
         agents.encode_growth_field(encoder)
         device.queue.submit([encoder.finish()])
-        count = agents.read_grown_count()
+        count = agents.read_sample_count()
         core.set_active_count(count)
         agents.set_active_count(count)
         after = read_snapshot(core)
@@ -97,7 +92,6 @@ def grow(device, density, divisor, args):
     print(json.dumps(summary), flush=True)
     return summary, checkpoint
 
-
 def replay(device, snapshot, density, divisor, args):
     core = MpmCore(device, physics_dt=DT/divisor)
     core.set_gravity(0)
@@ -105,10 +99,10 @@ def replay(device, snapshot, density, divisor, args):
     # Remove external growth and damping. Keep the actual plastic/hardening law.
     core.set_damping(0, 16)
     core.set_material(10000, .2, 3, .5, growth_rate=0, particle_mass=10/density,
-                      particle_volume=1/density, fluidity=0)
+                      particle_volume=1/density, )
     rest = snapshot['rest']
     core.load_scene(snapshot['positions'], snapshot['velocities'], snapshot['deformation'],
-                    snapshot['affine'], rest[:, 4], rest[:, 12:18], rest[:, 11], 'triangle-vertices')
+                    snapshot['affine'], rest[:, 4], rest[:, 8:14], rest[:, 15], 'triangle-vertices')
     device.queue.write_buffer(core.rest, 0, rest)
     rows = [dict(t=0., **measure(snapshot, density=density))]
     for tick in range(32):
@@ -123,7 +117,6 @@ def replay(device, snapshot, density, divisor, args):
                    inverted_triangles=rows[-1]['inverted_triangles'])
     print('replay '+json.dumps(summary), flush=True)
     return summary
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -152,10 +145,8 @@ def main():
                 replays.append(replay(device, baseline, density, divisor, args))
     metadata = dict(settings={k:str(v) if isinstance(v, Path) else v for k,v in vars(args).items()},
                     reference_dt=DT, grid_n=GRID_N, seed=17, base_ticks_per_macro=32,
-                    base_spacing=SPACING, initial_seed_cells_per_density=5, material=dict(E=10000, nu=.2, hardening=3, elasticity=.5,
-                    fluidity=0, growth_rate=120, growth_axis=[1,0]), runs=summaries, replays=replays)
+                    base_spacing=SPACING, initial_seed_cells_per_density=5, material=dict(E=10000, nu=.2, hardening=3, elasticity=.5), summaries=summaries, replays=replays)
     (args.output/'summary.json').write_text(json.dumps(metadata, indent=2)+'\n')
-
 
 if __name__ == '__main__':
     main()

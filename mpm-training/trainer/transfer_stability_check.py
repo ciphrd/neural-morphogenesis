@@ -4,7 +4,6 @@ from continuous_growth_check import make_system, load_samples, read_rest, p2g_gr
 from device import pick_device
 from mpm_core import MpmCore
 
-
 def check_force_free_motion(device):
     core, agents = make_system(device)
     core.set_damping(0, 32)
@@ -15,7 +14,7 @@ def check_force_free_motion(device):
             load_samples(core, agents, [[.501, .503]], [[0, 0]],
                          domains=[[.0001, 0, 0, .0001]])
             rest = read_rest(core, 1)
-            rest[:, 11] = weight
+            rest[:, 15] = weight
             device.queue.write_buffer(core.rest, 0, rest)
             velocity = np.array([[1.3, -.7]], np.float32)
             device.queue.write_buffer(core.velocities, 0, velocity)
@@ -28,7 +27,6 @@ def check_force_free_motion(device):
                 affine = np.frombuffer(device.queue.read_buffer(core.C, 0, 16), np.float32)
                 assert np.linalg.norm(affine) < .05, (density, weight, affine)
     print('[PASS] 1x/4x force-free motion stays uniform over 256 steps down to q=1e-7; no artificial mass floor')
-
 
 def check_accumulator_headroom(device):
     core = MpmCore(device)
@@ -51,7 +49,6 @@ def check_accumulator_headroom(device):
     np.testing.assert_allclose(core.read_velocities(), np.tile(velocity, (count, 1)), rtol=1e-4)
     print('[PASS] concentrated momentum exceeds old i32 range without wraparound or a velocity spike')
 
-
 def check_compression(device):
     from triangle_seed import triangulate_seed_cells
     from triangle_vertices import domain_edges
@@ -70,7 +67,7 @@ def check_compression(device):
                         np.zeros((n, 4), np.float32), np.ones(n, np.float32),
                         domains, weights, 'triangle-vertices')
         rest = read_rest(core, n)
-        rest[:, 12:18] = .5+.3*(rest[:, 12:18]-.5)
+        rest[:, 8:14] = .5+.3*(rest[:, 8:14]-.5)
         positions = .5+.3*(positions-.5)
         device.queue.write_buffer(core.rest, 0, rest)
         device.queue.write_buffer(core.positions, 0, positions)
@@ -90,13 +87,11 @@ def check_compression(device):
         assert peak < 50, (density, peak)
         print(f'[PASS] {density}x compressed material survives 1024 steps; peak speed={peak:.3f}')
 
-
 def main():
     device = pick_device()
     check_force_free_motion(device)
     check_accumulator_headroom(device)
     check_compression(device)
-
 
 if __name__ == '__main__':
     main()

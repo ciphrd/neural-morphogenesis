@@ -1,0 +1,336 @@
+{
+  "simulation": {
+    "GRID_N": 128,
+    "DX": 0.0078125,
+    "INV_DX": 128,
+    "DT": 1.5625e-05,
+    "MAX_PARTICLES": 200000,
+    "MORPHOLOGY_GRADIENT_INPUT_SCALE": 0.018,
+    "REFINEMENT_THRESHOLD": 1.75,
+    "MIN_CHILD_WEIGHT": 0.3125,
+    "MORPHOLOGY_MAX_RADIUS": 8,
+    "MAX_GRID_DISPLACEMENT_CELLS": 0.5,
+    "SNOW_YIELD_LOW": 0.975,
+    "SNOW_YIELD_HIGH": 1.0075,
+    "WIDE_YIELD_LOW": 0.5,
+    "WIDE_YIELD_HIGH": 2.0,
+    "MORPHOLOGY_FIELD_N": 512
+  },
+  "run": {
+    "target": "circle",
+    "particles": 400,
+    "initialParticleCount": 5,
+    "densityModelVersion": 3,
+    "trainingDensityMultipliers": [
+      1.0
+    ],
+    "densityAggregation": "worst",
+    "particleCapacity": 400,
+    "particleMass": 10.0,
+    "particleVolume": 1.0,
+    "chemicalValueInputMultiplier": 1.0,
+    "chemicalGradientInputScale": 0.045,
+    "macroSteps": 160,
+    "growthSteps": null,
+    "substepsPerMacro": 32,
+    "gravity": 0.0,
+    "spawnX": 0.5,
+    "spawnY": 0.5,
+    "channels": 9,
+    "fieldN": 512,
+    "morphologyBlurSigma": 0.01,
+    "morphologyDensityReference": 1.0,
+    "boundaryTangentMinGradient": 1.0,
+    "neuralUpdatesPerMacro": 1,
+    "communicationSpeed": 4.0,
+    "internalStateSpeed": 4.0,
+    "elasticStrainScale": 0.15,
+    "elasticStrainInputsEnabled": true,
+    "hiddenDim": 128,
+    "hiddenLayers": [
+      128
+    ],
+    "cellMemory": "none",
+    "policyArchitecture": "stateless-128",
+    "chemicalCommunicationArchitecture": "persistent-environment",
+    "decay": 0.91,
+    "depositRate": 4.0,
+    "normalizeDepositsByLocalDensity": true,
+    "maxEnvWrite": 1.0,
+    "friction": 0.9,
+    "growthDuration": 12.0,
+    "growthCompressionStart": 0.1,
+    "growthCompressionStop": 0.1,
+    "growthCompressionFeedback": 1.0,
+    "growthModelVersion": 13,
+    "materialAreaBudget": 0.0,
+    "growthAnisotropy": 1.0,
+    "mpmEnabled": true,
+    "damping": 0.039306956424563166,
+    "materialE": 10000.0,
+    "materialNu": 0.2,
+    "materialHardening": 3.0,
+    "materialElasticity": 1.0,
+    "splatRadius": 0.004,
+    "repulsionStrength": 0.0,
+    "repulsionMaxDelta": 40.0,
+    "population": 16,
+    "seedsPerCandidate": 1,
+    "elites": 3,
+    "mutationSigma": 0.05,
+    "rasterResolution": 256,
+    "outsideWeight": 1.0,
+    "fitnessCoverageWeight": 1.0,
+    "fitnessSpillWeight": 1.0,
+    "fitnessBoundaryWeight": 0.25,
+    "fitnessCrowdingWeight": 0.05,
+    "fitnessTemporalWorstWeight": 0.3,
+    "runSeed": 0,
+    "totalGenerations": 50,
+    "checkpointEvery": 5,
+    "materialBudgetMode": "target",
+    "materialBudgetScale": 1.0,
+    "stableStop": true,
+    "shapeCheckInterval": 10,
+    "shapeConfirmations": 3,
+    "shapeSettleSteps": 20,
+    "shapeMissingTolerance": 0.02,
+    "shapeSpillTolerance": 0.02,
+    "shapeOverlapTolerance": 0.02,
+    "sampleSpacing": 0.0027,
+    "initialCondition": "none",
+    "initialConditionStrength": 0.3,
+    "initialConditionChannel": 0,
+    "domainGeometry": "triangle-vertices"
+  },
+  "density": {
+    "MODEL_VERSION": 3,
+    "INITIAL_PACKING_SPACING_SCALE": 0.8,
+    "REPULSION_RADIUS_IN_CELLS": 1.4814814814814814,
+    "MIN_SUPPORTED_MULTIPLIER": 0.5,
+    "MAX_SUPPORTED_MULTIPLIER": 4.0
+  },
+  "chemistry": {
+    "version": 1,
+    "preset": "developmental-3-3-3",
+    "profiles": {
+      "global": {
+        "resolutionScale": 0.25,
+        "relaxationTime": 24.0,
+        "fieldResponseTime": 24.0,
+        "decayExponent": 0.1,
+        "diffusionMultiplier": 0.001
+      },
+      "regional": {
+        "resolutionScale": 0.5,
+        "relaxationTime": 10.0,
+        "fieldResponseTime": 10.0,
+        "decayExponent": 0.5,
+        "diffusionMultiplier": 1.0
+      },
+      "local": {
+        "resolutionScale": 1.0,
+        "relaxationTime": 3.0,
+        "fieldResponseTime": 3.0,
+        "decayExponent": 1.0,
+        "diffusionMultiplier": 1.0
+      }
+    },
+    "channels": [
+      {
+        "scale": "global"
+      },
+      {
+        "scale": "global"
+      },
+      {
+        "scale": "global"
+      },
+      {
+        "scale": "regional"
+      },
+      {
+        "scale": "regional"
+      },
+      {
+        "scale": "regional"
+      },
+      {
+        "scale": "local"
+      },
+      {
+        "scale": "local"
+      },
+      {
+        "scale": "local"
+      }
+    ],
+    "homogeneous": {
+      "scale": "local",
+      "resolutionScale": 1.0,
+      "relaxationTime": 1.0,
+      "fieldResponseTime": 1.0,
+      "decayExponent": 1.0,
+      "diffusionMultiplier": 1.0
+    }
+  },
+  "policy": {
+    "trunk": {
+      "weightGain": 1.0,
+      "biasJitter": 0.0,
+      "mutationScale": 1.0
+    },
+    "heads": {
+      "chemical": {
+        "weightGain": 0.5,
+        "biasCenter": [
+          0.0
+        ],
+        "biasJitter": 0.05,
+        "mutationScale": 0.5
+      },
+      "growthVector": {
+        "weightGain": 0.25,
+        "biasCenter": [
+          0.0,
+          0.0
+        ],
+        "biasJitter": 0.1,
+        "mutationScale": 0.2
+      },
+      "color": {
+        "weightGain": 0.5,
+        "biasCenter": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "biasJitter": 0.5,
+        "mutationScale": 0.5
+      },
+      "stateDelta": {
+        "weightGain": 0.25,
+        "biasCenter": [
+          0.0
+        ],
+        "biasJitter": 0.1,
+        "mutationScale": 0.2
+      },
+      "stateGate": {
+        "weightGain": 0.25,
+        "biasCenter": [
+          -2.0
+        ],
+        "biasJitter": 0.25,
+        "mutationScale": 0.15
+      }
+    }
+  },
+  "initialConditions": {
+    "presets": [
+      {
+        "id": "none",
+        "label": "None"
+      },
+      {
+        "id": "chemical-pole",
+        "label": "Chemical pole"
+      },
+      {
+        "id": "chemical-gradient",
+        "label": "Chemical gradient"
+      },
+      {
+        "id": "chemical-noise",
+        "label": "Smooth chemical noise"
+      },
+      {
+        "id": "geometric-bias",
+        "label": "Geometric elongation"
+      },
+      {
+        "id": "internal-state",
+        "label": "Internal-state patch"
+      },
+      {
+        "id": "mechanical-bias",
+        "label": "Mechanical strain patch"
+      },
+      {
+        "id": "handed-chemistry",
+        "label": "Handed chemical patches"
+      }
+    ]
+  },
+  "viewer": {
+    "playback": {
+      "loopAtTrainedSteps": false,
+      "paused": false,
+      "particleCap": null,
+      "initialParticleCount": null,
+      "particleDensityMultiplier": null,
+      "substrateResolution": null
+    },
+    "rendering": {
+      "fieldMode": "none",
+      "substrateChannelStart": 0,
+      "substrateZeroIsBlack": false,
+      "boundaryGradientZeroIsBlack": false,
+      "morphologyGradientVisible": true,
+      "morphologyDensityVisible": true,
+      "accent": 0,
+      "blur": 0,
+      "gradientExponent": 1,
+      "particleShape": "dot",
+      "particleColorMode": "neural-memory",
+      "particleAlpha": 0.4,
+      "directionalLineVisible": false,
+      "growthLineVisible": false,
+      "boundaryGradientScale": 0.01,
+      "zoom": 1,
+      "autoZoom": {
+        "enabled": true,
+        "sampleEveryFrames": 12,
+        "maxSamples": 256,
+        "fitFraction": 0.5,
+        "padding": 1.2,
+        "smoothing": 0.01
+      },
+      "bloom": {
+        "enabled": true,
+        "intensity": 1.3,
+        "threshold": 0.22,
+        "radiusPx": 2.5,
+        "scatter": 0.5,
+        "levels": 4
+      },
+      "particleRadiusPx": 1,
+      "targetVisible": true,
+      "growthMagnitudeBoost": 1,
+      "internalStateChannelStart": 0,
+      "chemicalMemoryOpponentSubtraction": 0,
+      "domainVisible": false
+    },
+    "tools": {
+      "selected": "none",
+      "deform": {
+        "direction": "outward",
+        "strength": 1,
+        "radius": 0.08,
+        "mode": "velocity"
+      }
+    },
+    "lab": {
+      "scenario": "boundary-tangent"
+    },
+    "policyExploration": {
+      "weightGain": 1,
+      "mutationStrength": 5e-06
+    }
+  },
+  "server": {
+    "host": "localhost",
+    "port": 8003,
+    "bindHost": "0.0.0.0"
+  }
+}

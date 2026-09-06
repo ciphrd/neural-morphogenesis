@@ -8,7 +8,6 @@ import numpy as np
 
 from growth_resampling_math_check import totals
 
-
 @dataclass
 class Triangle:
     x: np.ndarray
@@ -40,12 +39,10 @@ class Triangle:
         offsets = self.vertices()-self.x
         return offsets.T @ offsets / 12
 
-
 def triangulate_parallelogram(x, h):
     a, b = h[:, 0], h[:, 1]
     return (Triangle.from_vertices([x-a-b, x+a-b, x+a+b]),
             Triangle.from_vertices([x-a-b, x+a+b, x-a+b]))
-
 
 def check():
     rng = np.random.default_rng(731)
@@ -104,7 +101,6 @@ def check():
         np.testing.assert_allclose(max(lengths), 1., atol=1e-12)
     print(f'[PASS] {cases} bisections: exact partition, signed area, centroid, covariance, point APIC totals')
     print('[PASS] affine transport, seed conversion, third-edge selection, area/length trigger distinctions')
-
 
 if __name__ == '__main__':
     check()

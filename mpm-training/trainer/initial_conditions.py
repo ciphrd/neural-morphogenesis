@@ -4,9 +4,9 @@ from pathlib import Path
 import numpy as np
 from agents_gpu import _spawn_uniform01
 
-DEFAULTS = json.loads((Path(__file__).resolve().parent.parent / 'core/initial_conditions.json').read_text())
+from config import CONFIG
+DEFAULTS = CONFIG["initialConditions"]
 PRESETS = tuple(p['id'] for p in DEFAULTS['presets'])
-
 
 def validate_initial_condition(preset, strength, channel, channels, recurrent):
     if preset not in PRESETS:
@@ -19,7 +19,6 @@ def validate_initial_condition(preset, strength, channel, channels, recurrent):
         raise ValueError('Internal-state initial condition requires recurrent cell memory')
     if preset == 'handed-chemistry' and channels < 2:
         raise ValueError('Handed chemistry requires at least two chemical channels')
-
 
 class InitialCondition:
     def __init__(self, preset, strength, channel, seed, center, radius):

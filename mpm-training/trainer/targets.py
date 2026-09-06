@@ -36,7 +36,6 @@ TARGETS_DIR = Path(__file__).parent / "targets"
 # immediately wrapping around on itself — 0.5 leaves real margin.
 TARGET_SPAN_FRACTION = 0.5
 
-
 @dataclass
 class TargetShape:
     points: np.ndarray  # (N, 2), MpmCore domain coords
@@ -79,10 +78,8 @@ class TargetShape:
         points = (centers - centroid) * scale + 0.5  # centered in the domain
         return cls(points=points.astype(np.float32), resolution=(nx, ny))
 
-
 def available_targets() -> list[str]:
     return sorted(p.stem for p in TARGETS_DIR.glob("*.json"))
-
 
 def load_target(name: str) -> TargetShape:
     path = TARGETS_DIR / f"{name}.json"

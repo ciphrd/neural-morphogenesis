@@ -13,8 +13,6 @@ from density import (
     validate_multiplier,
 )
 from raster import rasterize_points_sum
-from agents_gpu import _SPATIAL_DIVISION_DOMAIN, _spatial_uniform01_batch
-
 
 def main() -> None:
     cases = json.loads((Path(__file__).parent.parent / "core" / "density_cases.json").read_text())
@@ -25,20 +23,17 @@ def main() -> None:
         chemical_field_n=ref["chemicalFieldN"],
         particle_mass=ref["particleMass"],
         particle_volume=ref["particleVolume"],
-        deposit_sigma=ref["depositSigma"],
         chemical_gradient_input_scale=ref["chemicalGradientInputScale"],
         repulsion_strength=ref["repulsionStrength"],
         repulsion_max_delta=ref["repulsionMaxDelta"],
     )
     fields = (
-        "spacing", "particle_mass", "particle_volume", "deposit_sigma", "chemical_projection_weight", "splat_radius",
+        "spacing", "particle_mass", "particle_volume", "splat_radius",
         "chemical_gradient_input_scale", "repulsion_strength", "repulsion_max_delta",
     )
     json_names = {
         "particle_mass": "particleMass",
         "particle_volume": "particleVolume",
-        "deposit_sigma": "depositSigma",
-        "chemical_projection_weight": "chemicalProjectionWeight",
         "splat_radius": "splatRadius",
         "chemical_gradient_input_scale": "chemicalGradientInputScale",
         "repulsion_strength": "repulsionStrength",
@@ -55,7 +50,6 @@ def main() -> None:
 
     q1 = resolve_density(reference, 1.0)
     assert q1.spacing == 0.0027
-    assert q1.deposit_sigma == 0.0006328125
     assert q1.splat_radius == 0.004
     for invalid in (0.0, -1.0, float("nan"), float("inf"), 0.25, 8.0):
         try:
@@ -72,17 +66,7 @@ def main() -> None:
         particle_weight=0.5,
     )
     assert np.allclose(reference_raster, doubled_raster)
-    spatial_points = np.array([
-        [0.5001, 0.5001], [0.5002, 0.5003], [0.72, 0.31], [0.5001, 0.5001],
-    ], dtype=np.float32)
-    spatial = _spatial_uniform01_batch(12345, spatial_points, _SPATIAL_DIVISION_DOMAIN)
-    # Same spatial cell/value regardless of numerical particle identity/order.
-    assert spatial[0] == spatial[1] == spatial[3]
-    permuted = _spatial_uniform01_batch(12345, spatial_points[[2, 0]], _SPATIAL_DIVISION_DOMAIN)
-    assert permuted[0] == spatial[2] and permuted[1] == spatial[0]
-    assert _spatial_uniform01_batch(54321, spatial_points[:1], _SPATIAL_DIVISION_DOMAIN)[0] != spatial[0]
-    print("[PASS] density resolver, q=1 constants, spatial RNG, and validation")
-
+    print("[PASS] density resolver, q=1 constants, and validation")
 
 if __name__ == "__main__":
     main()

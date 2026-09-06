@@ -1,28 +1,4 @@
-"""Headless MLS-MPM simulation — the MpmSimulation-equivalent for this
-project's Python trainer, scoped to exactly core/'s passes (clearDensity,
-splatDensity, densityToTexture, applyRepulsion, clearGrid, p2g,
-gridUpdate, g2p). Mirrors mls-mpm/src/gpu/mpm.ts's own MpmSimulation
-class structure (buffer layout, bind groups, step() ordering) as closely
-as possible so the two stay easy to compare by eye, minus everything
-sandbox-only (Mouse uniform, attract-to-point, field-visualize
-diagnostic channels — see ../core/README.md).
-
-Repulsion (clearDensity/splatDensity/densityToTexture/applyRepulsion,
-all from core/repulsion.wgsl) runs FIRST each substep, before
-clearGrid/p2g/gridUpdate/g2p — applyRepulsion nudges particleVel from
-THIS substep's own freshly-built density field, at each particle's own
-exact position, so the push reaches the grid through the very same
-substep's own P2G->gridUpdate->G2P transfer immediately rather than
-sitting stale for one substep. See core/repulsion.wgsl's own module
-docstring for the full 3-revision history of this mechanism, including
-why a 4th revision (moving the push into gridUpdate.wgsl as a per-node
-acceleration, to fully eliminate P2G's own momentum-cancellation for
-overlapping particles) was tried and reverted: it traded that partial
-cancellation for a worse problem, capping the push's effective spatial
-resolution at the physics grid's own cell size — coarser than
-core/agents.wgsl's own growth-spawn displacement — confirmed empirically
-to leave freshly-spawned overlapping particles barely separated at all.
-"""
+"""Headless MLS-MPM/APIC mechanics with explicit advected triangle geometry. ParticleRest uses 16 floats: growthF, Jp, growth vector, budget snapshot, six vertex coordinates, original area, and quadrature weight."""
 from __future__ import annotations
 
 import json
@@ -41,10 +17,8 @@ from simulation_settings import (
     GROWTH_COMPRESSION_STOP,
     GROWTH_DURATION_MACRO_STEPS,
     GROWTH_ANISOTROPY_AUTHORITY,
-    GROWTH_MAX,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
-    MATERIAL_FLUIDITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
     CHEM_CHANNELS,
@@ -57,20 +31,20 @@ from simulation_settings import (
 )
 
 CORE_DIR = Path(__file__).parent.parent / "core"
-CONSTANTS = json.loads((CORE_DIR / "constants.json").read_text())
+from config import CONFIG
+CONSTANTS = CONFIG["simulation"]
 
 GRID_N: int = CONSTANTS["GRID_N"]
 DX: float = CONSTANTS["DX"]
 INV_DX: int = CONSTANTS["INV_DX"]
 DT: float = CONSTANTS["DT"]
-PARTICLE_MASS: float = CONSTANTS["PARTICLE_MASS"]
-VOL: float = CONSTANTS["VOL"]
+PARTICLE_MASS: float = CONFIG["run"]["particleMass"]
+VOL: float = CONFIG["run"]["particleVolume"]
 MAX_PARTICLES: int = CONSTANTS["MAX_PARTICLES"]
-# core/constants.json's own FIELD_N is the repulsion density texture's
+# core/config.json's own FIELD_N is the repulsion density texture's
 # resolution — renamed on import to avoid any ambiguity with the
 # chemical field's own (unrelated) FIELD_N in simulation_settings.py.
-REPULSION_FIELD_N: int = CONSTANTS["FIELD_N"]
-
+REPULSION_FIELD_N: int = CONSTANTS["MORPHOLOGY_FIELD_N"]
 
 def growth_rate_for_duration(duration_macro_steps: float, substeps_per_macro: int) -> float:
     """Return the internal continuous rate for a controller-tick duration.
@@ -88,43 +62,28 @@ NODE_COUNT = (GRID_N + 1) * (GRID_N + 1)
 WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass
-# growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-# growthFrameAngle, appearanceScale, quadratureWeight, vertices(6), padding(2) — 80 bytes.
-REST_FIELDS = 20
+REST_FIELDS = 16
 REST_GROWTH_F = slice(0, 4)
 REST_JP = 4
-REST_CYCLE_ACTIVE = 5
-REST_APPEARANCE_SCALE = 10
-REST_QUADRATURE_WEIGHT = 11
-
+REST_GROWTH_VECTOR_X = 5
+REST_QUADRATURE_WEIGHT = 15
 
 def _pack_rest(jp: np.ndarray) -> np.ndarray:
-    """Expands a flat (count,) Jp array into ParticleRest's own
-    (count, 20) tensor-rest layout, defaulting growthF=I (baseline rest
-    configuration), cycleActive=0, direction/controls=0, appearanceScale=1,
-    and quadratureWeight=1.
-
-    load_scene overlays explicit triangle domains and material weights;
-    reset_growth_buffers uses these generic defaults before scene loading.
-    """
     count = jp.shape[0]
     packed = np.zeros((count, REST_FIELDS), dtype=np.float32)
     packed[:, 0] = 1.0
     packed[:, 3] = 1.0
     packed[:, REST_JP] = jp
-    packed[:, REST_APPEARANCE_SCALE] = 1.0
     packed[:, REST_QUADRATURE_WEIGHT] = 1.0
     return packed
 
-SNOW_YIELD_LOW = 1.0 - 2.5e-2
-SNOW_YIELD_HIGH = 1.0 + 7.5e-3
-WIDE_YIELD_LOW = 0.5
-WIDE_YIELD_HIGH = 2.0
-
+SNOW_YIELD_LOW = CONSTANTS["SNOW_YIELD_LOW"]
+SNOW_YIELD_HIGH = CONSTANTS["SNOW_YIELD_HIGH"]
+WIDE_YIELD_LOW = CONSTANTS["WIDE_YIELD_LOW"]
+WIDE_YIELD_HIGH = CONSTANTS["WIDE_YIELD_HIGH"]
 
 def ceil_div(a: int, b: int) -> int:
     return -(-a // b)
-
 
 def flat_dispatch_2d(
     total_threads: int,
@@ -143,7 +102,6 @@ def flat_dispatch_2d(
         )
     return x, y
 
-
 def per_substep_damping(loss_fraction: float, substeps: int) -> float:
     """Port of mpm.ts's perSubstepDamping() — verbatim, not
     reimplemented from description: converts a per-rendered-frame loss
@@ -152,13 +110,11 @@ def per_substep_damping(loss_fraction: float, substeps: int) -> float:
     clamped = min(max(loss_fraction, 0.0), 0.999)
     return (1 - clamped) ** (1 / max(substeps, 1))
 
-
 def lame_params(e: float, nu: float) -> tuple[float, float]:
     """Port of mpm.ts's lameParams() — verbatim: (mu0, lambda0)."""
     mu0 = e / (2 * (1 + nu))
     lambda0 = (e * nu) / ((1 + nu) * (1 - 2 * nu))
     return mu0, lambda0
-
 
 def yield_bounds(elasticity: float) -> tuple[float, float]:
     """Port of mpm.ts's yieldBounds() — verbatim: (yieldLow, yieldHigh)."""
@@ -167,27 +123,7 @@ def yield_bounds(elasticity: float) -> tuple[float, float]:
     yield_high = SNOW_YIELD_HIGH + t * (WIDE_YIELD_HIGH - SNOW_YIELD_HIGH)
     return yield_low, yield_high
 
-
 class MpmCore:
-    """Owns every GPU resource for the core MLS-MPM simulation and the
-    one step(substeps) entry point — runs `substeps` full advance()
-    iterations (optional clearDensity -> splatDensity -> densityToTexture ->
-    applyRepulsion, then clearGrid -> p2g -> gridUpdate -> g2p) in a single
-    submitted command buffer, each pass its own begin/end compute pass
-    (WebGPU gives no cross-dispatch visibility guarantee *within* one
-    pass, only across pass boundaries — same reasoning mpm.ts's own class
-    docstring documents).
-
-    Particle buffers are sized to MAX_PARTICLES (fixed capacity); load_scene()
-    writes into the head of each buffer and updates the small activeCount
-    uniform p2g/g2p gate their per-particle work on.
-
-    ``physics_dt`` is an optional compile-time override for diagnostic timestep
-    studies. Defaults remain unchanged. Callers must keep controller/refinement
-    cadence fixed in physical time and pass their actual substep count when
-    deriving a growth rate. Per-substep fluidity and capped repulsion need
-    separate treatment; pressure diagnostics disable both.
-    """
 
     def __init__(self, device: wgpu.GPUDevice, *, physics_dt: float = DT) -> None:
         if not np.isfinite(physics_dt) or physics_dt <= 0:
@@ -206,7 +142,7 @@ class MpmCore:
         )
         self.F = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC)
         self.C = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC)
-        # Per-particle rest state — growthF(4), jp, cycleActive, direction(2), see
+        # Per-particle rest state — growthF(4), jp, growthVectorX, direction(2), see
         # core/agents.wgsl's own ParticleRest struct. Was a bare
         # array<f32> of Jp alone; widened rather than adding sibling
         # buffers because core/agents.wgsl is at the hard
@@ -216,11 +152,7 @@ class MpmCore:
             size=MAX_PARTICLES * REST_FIELDS * f32,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
         )
-        # Neutral fallback for g2p's packed cell-chemistry view. Training's
-        # default fluidity is zero, so this is an exact legacy no-op.
-        self.chemical_state_fallback = device.create_buffer(
-            size=256 + MAX_PARTICLES * 112, usage=wgpu.BufferUsage.STORAGE
-        )
+
         # COPY_SRC supports the focused stability/headroom regressions; it
         # does not add a transfer to the hot path unless a check reads it.
         self.grid_accum = device.create_buffer(
@@ -255,7 +187,6 @@ class MpmCore:
             MATERIAL_NU,
             MATERIAL_HARDENING,
             MATERIAL_ELASTICITY,
-            growth_max=GROWTH_MAX,
             growth_duration_macro_steps=GROWTH_DURATION_MACRO_STEPS,
             substeps_per_macro=DEFAULT_SUBSTEPS_PER_MACRO,
             growth_compression_start=GROWTH_COMPRESSION_START,
@@ -326,7 +257,6 @@ class MpmCore:
                 {"binding": 5, "resource": {"buffer": self.grid_vel, "offset": 0, "size": self.grid_vel.size}},
                 {"binding": 6, "resource": {"buffer": self.active_count_uniform, "offset": 0, "size": self.active_count_uniform.size}},
                 {"binding": 7, "resource": {"buffer": self.material_uniform, "offset": 0, "size": self.material_uniform.size}},
-                {"binding": 8, "resource": {"buffer": self.chemical_state_fallback, "offset": 0, "size": self.chemical_state_fallback.size}},
                 {"binding": 9, "resource": {"buffer": self.growth_field, "offset": 0, "size": self.growth_field.size}},
             ],
         )
@@ -509,7 +439,7 @@ class MpmCore:
         count = positions.shape[0]
         assert count <= MAX_PARTICLES
         if domain is not None and domain_geometry != 'triangle-vertices':
-            raise ValueError('Explicit domains require domain_geometry="triangle-vertices"; convert legacy geometry first')
+            raise ValueError('Explicit domains require domain_geometry="triangle-vertices"')
         packed = _pack_rest(np.asarray(Jp, dtype=np.float32))
         if quadrature_weights is not None:
             weights = np.asarray(quadrature_weights, dtype=np.float32).reshape(count)
@@ -528,9 +458,9 @@ class MpmCore:
                     or not np.all(np.isfinite(determinant))
                     or np.any(determinant <= 0) or np.any(f_det <= 0)):
                 raise ValueError('Scene triangles and deformation must have finite positive determinants')
-            packed[:, 12:18] = vertices.reshape(count, 6)
-            packed[:, 8] = .5 * determinant / f_det
-            if not np.all(np.isfinite(packed[:, 8])) or np.any(packed[:, 8] <= 0):
+            packed[:, 8:14] = vertices.reshape(count, 6)
+            packed[:, 14] = .5 * determinant / f_det
+            if not np.all(np.isfinite(packed[:, 14])) or np.any(packed[:, 14] <= 0):
                 raise ValueError('Scene rest areas must be finite and positive')
         self.device.queue.write_buffer(self.positions, 0, positions.astype(np.float32))
         self.device.queue.write_buffer(self.velocities, 0, velocities.astype(np.float32))
@@ -586,7 +516,6 @@ class MpmCore:
         hardening: float,
         elasticity: float,
         growth_rate: float | None = None,
-        growth_max: float = GROWTH_MAX,
         growth_anisotropy: float = GROWTH_ANISOTROPY_AUTHORITY,
         growth_duration_macro_steps: float = GROWTH_DURATION_MACRO_STEPS,
         substeps_per_macro: int = DEFAULT_SUBSTEPS_PER_MACRO,
@@ -595,15 +524,7 @@ class MpmCore:
         growth_compression_start: float = GROWTH_COMPRESSION_START,
         growth_compression_stop: float = GROWTH_COMPRESSION_STOP,
         growth_compression_feedback: float = GROWTH_COMPRESSION_FEEDBACK,
-        fluidity: float = MATERIAL_FLUIDITY,
     ) -> None:
-        """Write elastic material and the derived internal growth rate.
-
-        Production callers specify a controller-tick duration and their real
-        substep count. ``growth_rate`` remains as an explicit low-level escape
-        hatch for analytical tests and legacy checkpoints that recorded the
-        old rate directly; when supplied it takes precedence.
-        """
         mu0, lambda0 = lame_params(e, nu)
         yield_low, yield_high = yield_bounds(elasticity)
         effective_growth_rate = (
@@ -617,8 +538,6 @@ class MpmCore:
             raise ValueError("growth compression feedback must be in [0, 1]")
         if growth_compression_start < 0.0 or growth_compression_stop < growth_compression_start:
             raise ValueError("growth compression thresholds require 0 <= start <= stop")
-        if not 0.0 <= fluidity <= 1.0:
-            raise ValueError("fluidity must be in [0, 1]")
         self.particle_mass = float(particle_mass)
         self.particle_volume = float(particle_volume)
         self.device.queue.write_buffer(
@@ -632,14 +551,12 @@ class MpmCore:
                     yield_low,
                     yield_high,
                     effective_growth_rate,
-                    growth_max,
                     growth_anisotropy,
                     self.particle_mass,
                     self.particle_volume,
                     growth_compression_start,
                     growth_compression_stop,
                     growth_compression_feedback,
-                    fluidity,
                 ],
                 dtype=np.float32,
             ),
@@ -802,15 +719,5 @@ class MpmCore:
         return np.frombuffer(raw, dtype=np.float32).reshape(-1, 4).copy()
 
     def read_rest_state(self) -> np.ndarray:
-        """Returns active particles' raw tensor-growth rest-state rows.
-
-        Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,growthAngle,
-        growthAnisotropy,divisionBias,growthFrameAngle,appearanceScale,
-        quadratureWeight]``.
-        This is diagnostic-only: COPY_SRC is present on the buffer, but the
-        normal simulation path performs no readback. Keeping the raw layout
-        visible here also makes scalar-vs-tensor growth snapshots explicit
-        when ParticleRest is upgraded later.
-        """
         raw = self.device.queue.read_buffer(self.rest, 0, self._active_count * REST_FIELDS * 4)
         return np.frombuffer(raw, dtype=np.float32).reshape(-1, REST_FIELDS).copy()

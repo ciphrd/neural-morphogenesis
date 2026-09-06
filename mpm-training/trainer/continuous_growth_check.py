@@ -17,18 +17,14 @@ SPACING = 0.0027
 LEG = np.sqrt(2)*SPACING  # Right triangle of area SPACING².
 DX = 1/GRID_N
 
-
 def make_system(device, capacity=32, include_environment=False):
     core = MpmCore(device)
-    environment = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0)
-    agents = AgentsGPU(device, core, environment, 1, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
-        capacity, SPACING, 0.0, 1.0, 0.4, 1.0, 0.5, 0.5)
+    environment = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0, chemical_communication_architecture="cell-owned-projection")
+    agents = AgentsGPU(device, core, environment, 1, 128, 1.0, capacity, SPACING, 1.0, 1.0, 0.5, 0.5, chemical_communication_architecture="cell-owned-projection")
     core.set_gravity(0)
     core.set_repulsion_strength(0, 40)
     core.set_material(0, 0.2, 0, 1, growth_rate=0)
     return (core, agents, environment) if include_environment else (core, agents)
-
 
 def load_samples(core, agents, positions, vectors, growth_f=None, domains=None):
     n = len(positions)
@@ -44,24 +40,20 @@ def load_samples(core, agents, positions, vectors, growth_f=None, domains=None):
     core.device.queue.write_buffer(core.rest, 0, rest)
     agents.set_active_count(n)
 
-
 def run_growth_field(device, agents):
     encoder = device.create_command_encoder()
     agents.encode_growth_field(encoder)
     device.queue.submit([encoder.finish()])
 
-
 def read_rest(core, count):
     return np.frombuffer(core.device.queue.read_buffer(core.rest, 0, count*REST_FIELDS*4),
                          np.float32).reshape(count, REST_FIELDS).copy()
 
-
 def synchronize_count(core, agents):
-    n = agents.read_grown_count()
+    n = agents.read_sample_count()
     core.set_active_count(n)
     agents.set_active_count(n)
     return n
-
 
 def p2g_grid(core):
     encoder = core.device.create_command_encoder()
@@ -75,7 +67,6 @@ def p2g_grid(core):
         p.end()
     core.device.queue.submit([encoder.finish()])
     return np.frombuffer(core.device.queue.read_buffer(core.grid_accum), np.float32).reshape(-1, 3).astype(float)
-
 
 def point_p2g(position, velocity, affine, mass):
     """Reference stress-free quadratic MLS-MPM point transfer."""
@@ -94,7 +85,6 @@ def point_p2g(position, velocity, affine, mass):
             result[index] += [momentum[0], momentum[1], weight * mass]
     return result
 
-
 def check_continuous_growth(device):
     core, agents = make_system(device)
     load_samples(core, agents, [[.5,.5]], [[.5,0]])
@@ -104,7 +94,6 @@ def check_continuous_growth(device):
     np.testing.assert_allclose(np.linalg.det(read_rest(core,1)[0,:4].reshape(2,2)),
                                np.exp(.5*12*DT), rtol=2e-5)
     print('[PASS] continuous exponential rest growth')
-
 
 def check_opposed_field(device):
     core, agents = make_system(device)
@@ -117,7 +106,6 @@ def check_opposed_field(device):
     core.step(16)
     np.testing.assert_allclose(read_rest(core,2)[:,:4], [[1,0,0,1]]*2, atol=1e-6)
     print('[PASS] opposing proposals cancel field and physical growth')
-
 
 def check_vector_blending(device):
     for vectors, expected in (([[.6,0],[.6,0]], [.6,0,0]),
@@ -134,7 +122,6 @@ def check_vector_blending(device):
         np.testing.assert_allclose(determinants, np.exp((expected[0]+expected[2])*12*DT*16),rtol=3e-5)
     print('[PASS] aligned, perpendicular, and unequal opposed vectors blend before tensor conversion')
 
-
 def check_subdivision(device):
     core,agents=make_system(device)
     h=np.array([[2*LEG,0],[0,2*LEG]],np.float32)
@@ -149,13 +136,13 @@ def check_subdivision(device):
         pairs = [t.split() for t in expected]
         expected = [pair[0] for pair in pairs]+[pair[1] for pair in pairs]
     rest=read_rest(core,4)
-    np.testing.assert_allclose(rest[:,11],.25)
+    np.testing.assert_allclose(rest[:, 15],.25)
     # GPU slot allocation order is not guaranteed; match by centroid.
     for position, row in zip(core.read_positions(), rest):
         target = min(expected, key=lambda t: np.linalg.norm(t.x-position))
         np.testing.assert_allclose(position,target.x,atol=1e-7)
         np.testing.assert_allclose(domain_edges(row),target.edges,atol=1e-7)
-        np.testing.assert_allclose(row[8],original[8]/4,rtol=2e-6)
+        np.testing.assert_allclose(row[14],original[14]/4,rtol=2e-6)
     np.testing.assert_allclose(rest[:,:4],np.tile(original[:4],(4,1)))
     offsets=core.read_positions()-.5
     np.testing.assert_allclose(offsets.mean(axis=0),0,atol=1e-7)
@@ -163,7 +150,6 @@ def check_subdivision(device):
             for d,r in zip(offsets,rest))
     np.testing.assert_allclose(cov,Triangle(np.zeros(2),h).covariance(),rtol=5e-5,atol=1e-10)
     print('[PASS] repeated bisection tiles the parent and preserves second moments')
-
 
 def check_geometric_refinement_criterion(device):
     core,agents=make_system(device)
@@ -175,7 +161,7 @@ def check_geometric_refinement_criterion(device):
     assert synchronize_count(core,agents)==1
     # A stretched triangle can need several rounds before every child is
     # spatially resolved; each longest-edge split reduces the squared-edge sum.
-    load_samples(core,agents,[[.5,.5]],[[0,0]],domains=[[2*LEG,0,0,LEG]])
+    load_samples(core,agents,[[.5,.5]],[[0,0]],growth_f=[[2,0,0,2]],domains=[[2*LEG,0,0,LEG]])
     run_growth_field(device,agents)
     assert synchronize_count(core,agents)==2
     for _ in range(12):
@@ -190,7 +176,6 @@ def check_geometric_refinement_criterion(device):
     run_growth_field(device,agents)
     assert synchronize_count(core,agents)==2
     print('[PASS] spatial second-moment criterion resolves expansion and isochoric stretch; rest growth alone does not split')
-
 
 def check_triangle_edges_and_seams(device):
     core,agents=make_system(device)
@@ -216,18 +201,9 @@ def check_triangle_edges_and_seams(device):
     except ValueError:
         pass
     else:
-        raise AssertionError('Untagged legacy geometry was accepted')
+        raise AssertionError('Invalid geometry was accepted')
     np.testing.assert_array_equal(core.read_positions(),before)
-    # A legacy point-only scene receives a canonical triangle of target area.
-    core.load_scene(*scene)
-    agents.set_active_count(1)
-    run_growth_field(device,agents)
-    row=read_rest(core,1)[0]
-    np.testing.assert_allclose(.5*np.linalg.det(domain_edges(row)),SPACING**2,rtol=5e-5)
-    np.testing.assert_allclose(row[8],SPACING**2,rtol=5e-5)
-    assert agents.read_grown_count()==1
-    print('[PASS] all three edge choices, periodic triangle splitting, legacy rejection and fallback area')
-
+    print('[PASS] all three edge choices, periodic triangle splitting and invalid geometry rejection')
 
 def check_point_p2g_and_split_conservation(device):
     core,agents=make_system(device)
@@ -263,7 +239,6 @@ def check_point_p2g_and_split_conservation(device):
     np.testing.assert_allclose(angular(after),angular(before),atol=2e-5)
     print('[PASS] point P2G ignores domain geometry; split conserves mass, momentum and angular momentum')
 
-
 def check_affine_transport(device):
     core,agents=make_system(device)
     h=np.array([[.001,.0003],[0,.001]],np.float32)
@@ -284,7 +259,6 @@ def check_affine_transport(device):
     assert abs(f[0,0]-(1+DT*l[0,0])) > .005
     print('[PASS] affine G2P reproduction and geometry transport independent of constitutive clamp')
 
-
 def check_courant_guard(device):
     core, agents = make_system(device)
     load_samples(core, agents, [[.5, .5]], [[0, 0]])
@@ -299,7 +273,6 @@ def check_courant_guard(device):
     assert np.isfinite(core.read_positions()).all()
     print(f'[PASS] grid CFL guard bounds extreme momentum at {max_grid_speed:g}')
 
-
 def check_capacity(device):
     core,agents=make_system(device,capacity=1)
     load_samples(core,agents,[[.5,.5]],[[1,0]],growth_f=[[2,0,0,1]],
@@ -307,12 +280,11 @@ def check_capacity(device):
     before=read_rest(core,1)
     before_positions=core.read_positions().copy()
     run_growth_field(device,agents)
-    assert agents.read_grown_count()==1 and agents.unresolved_samples==1
-    np.testing.assert_allclose(read_rest(core,1)[:,[0,1,2,3,8,11,12,13,14,15,16,17]],before[:,[0,1,2,3,8,11,12,13,14,15,16,17]])
+    assert agents.read_sample_count()==1 and agents.unresolved_samples==1
+    np.testing.assert_allclose(read_rest(core,1)[:,[0,1,2,3,14,15,8,9,10,11,12,13]],before[:,[0,1,2,3,14,15,8,9,10,11,12,13]])
     np.testing.assert_array_equal(core.read_positions(),before_positions)
     assert not np.any(np.frombuffer(device.queue.read_buffer(core.growth_field),np.int32))
     print('[PASS] failed capacity allocation preserves state and reports unresolved sampling')
-
 
 def check_uniform_rollout(device):
     core,agents=make_system(device,capacity=128)
@@ -325,13 +297,12 @@ def check_uniform_rollout(device):
         synchronize_count(core,agents)
         core.step(32)
     rest=read_rest(core,core.active_count)
-    area=np.sum(rest[:,11]*np.linalg.det(rest[:,:4].reshape(-1,2,2)))
+    area=np.sum(rest[:, 15]*np.linalg.det(rest[:,:4].reshape(-1,2,2)))
     np.testing.assert_allclose(area,np.exp(80*60*32*DT),rtol=3e-3)
     assert core.active_count>1
     assert np.isfinite(core.read_positions()).all() and np.isfinite(rest).all()
     assert np.all(np.linalg.det(domain_edges(rest))>0)
     print(f'[PASS] free uniform growth: area={area:.4f}, samples={core.active_count}, {time.perf_counter()-start:.2f}s')
-
 
 def check_capacity_rollout(device):
     # An odd cap may leave a spare slot when the next operation needs two.
@@ -357,12 +328,11 @@ def check_capacity_rollout(device):
     assert capped_steps >= 80, 'must exercise sustained physics after reaching capacity'
     print(f'[PASS] partial final allocation and {capped_steps * 32} post-cap physics steps stay finite; growth stops')
 
-
 def check_physical_budget(device):
     for capacity in (8, 32):
         core,agents=make_system(device,capacity=capacity)
         load_samples(core,agents,[[.5,.5]],[[1,0]])
-        initial_area=float(read_rest(core,1)[0,8])
+        initial_area=float(read_rest(core,1)[0,14])
         budget=initial_area*1.3
         agents.set_material_area_budget(budget)
         agents.set_forced_growth_field_override(True)
@@ -372,20 +342,30 @@ def check_physical_budget(device):
             synchronize_count(core,agents)
             core.step(64)
         rest=read_rest(core,core.active_count)
-        area=np.sum(rest[:,8]*np.linalg.det(rest[:,:4].reshape(-1,2,2)))
+        area=np.sum(rest[:, 14]*np.linalg.det(rest[:,:4].reshape(-1,2,2)))
         np.testing.assert_allclose(area,budget,rtol=.002)
         assert core.active_count==1
     print('[PASS] world-area growth budget stops independently of numerical sample capacity')
 
+def _projected_plane(environment, agents, channel):
+    environment.reset()
+    encoder = environment.device.create_command_encoder()
+    environment.encode_clear(encoder)
+    agents.encode_splat_chemical_state(encoder)
+    environment.encode_sense(encoder)
+    environment.device.queue.submit([encoder.finish()])
+    offset = environment.channel_offsets[channel]
+    width, height = environment.channel_widths[channel], environment.channel_heights[channel]
+    raw = environment.device.queue.read_buffer(environment.buffers[0], offset*4, width*height*4)
+    return np.frombuffer(raw, np.float32).reshape(height, width).copy()
 
 def check_projected_fields_and_state(device, scale=1.0):
     from agents_gpu import PARTICLE_META_BUFFER_OFFSET
-    from density_gpu_check import _projected_plane
     core,agents,environment=make_system(device,include_environment=True)
     load_samples(core,agents,[[.5025,.5033]],[[0,0]],growth_f=[[2,0,0,1]],
                  domains=[[2*LEG*scale,0,0,LEG*scale]])
     # Keep the area-to-target ratio fixed while refining the sample geometry.
-    agents.set_density_geometry(SPACING*scale, .4)
+    agents.set_density_geometry(SPACING*scale)
     meta=np.zeros(1,dtype=agents._particle_meta_dtype)
     meta["chemicalState"][:]=.5
     meta["privateState"][0]=np.linspace(-.3,.4,8)
@@ -417,7 +397,6 @@ def check_projected_fields_and_state(device, scale=1.0):
     print(f'[PASS] subdivision inherits chemistry/private state; projection L1 changes chemical={chemical_error:.3g}, morphology={morphology_error:.3g}')
     return morphology_error
 
-
 def check_seed_reset(device):
     from training_sim import seed_blob
     core,agents=make_system(device)
@@ -425,22 +404,21 @@ def check_seed_reset(device):
     core.reset_growth_buffers(32);core.load_scene(*scene)
     rest=core.read_rest_state()
     assert len(rest)==14
-    np.testing.assert_allclose(rest[:,12:18],scene[5])
-    np.testing.assert_allclose(rest[:,8],.5*np.linalg.det(domain_edges(rest)))
+    np.testing.assert_allclose(rest[:,8:14],scene[5])
+    np.testing.assert_allclose(rest[:, 14],.5*np.linalg.det(domain_edges(rest)))
     # Validate the scene's physical weights rather than assuming all seed
     # triangles have equal area (circular disk seeds are area-weighted).
-    np.testing.assert_allclose(rest[:,11],scene[6])
-    np.testing.assert_allclose(rest[:,11].sum(),7,rtol=2e-6)
-    assert np.all(rest[:,11]>0)
+    np.testing.assert_allclose(rest[:, 15],scene[6])
+    np.testing.assert_allclose(rest[:, 15].sum(),7,rtol=2e-6)
+    assert np.all(rest[:, 15]>0)
     area=.5*np.linalg.det(domain_edges(rest))
-    np.testing.assert_allclose(rest[:,11],7*area/area.sum(),rtol=2e-4)
+    np.testing.assert_allclose(rest[:, 15],7*area/area.sum(),rtol=2e-4)
     next_scene=seed_blob(1,(.4,.4),SPACING,21)
     core.reset_growth_buffers(32);core.load_scene(*next_scene)
     assert core.active_count==2
-    np.testing.assert_allclose(core.read_rest_state()[:,12:18],next_scene[5])
-    np.testing.assert_allclose(core.read_rest_state()[:,11],.5)
+    np.testing.assert_allclose(core.read_rest_state()[:,8:14],next_scene[5])
+    np.testing.assert_allclose(core.read_rest_state()[:, 15],.5)
     print('[PASS] seed geometry and represented weights survive rollout reset/load order')
-
 
 def check_periodic_transfer(device):
     core,agents=make_system(device)
@@ -454,7 +432,6 @@ def check_periodic_transfer(device):
     expected=point_p2g(x,velocity,np.zeros((2,2)),100)
     np.testing.assert_allclose(actual,expected,atol=.003,rtol=1e-3)
     print('[PASS] point transfers wrap at both toroidal seams without clipping')
-
 
 def main():
     device=pick_device()

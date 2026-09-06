@@ -1,10 +1,8 @@
 const GRID_N: u32 = __GRID_N__u;
 const NODE_COUNT: u32 = (GRID_N + 1u) * (GRID_N + 1u);
 const DT: f32 = __DT__;
-// P2G stores f32 values as atomic integer bits. The Courant guard remains
-// a last-resort bound for extreme inputs; it is not a replacement for an
-// elastic wave-speed timestep restriction.
-const MAX_GRID_DISPLACEMENT_CELLS: f32 = 0.5;
+
+const MAX_GRID_DISPLACEMENT_CELLS: f32 = __MAX_GRID_DISPLACEMENT_CELLS__;
 const MAX_GRID_SPEED: f32 = MAX_GRID_DISPLACEMENT_CELLS / (f32(GRID_N) * DT);
 const CH_MOM_X: u32 = 0u;
 const CH_MOM_Y: u32 = 1u;
@@ -29,7 +27,6 @@ fn gridUpdate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let momY = bitcast<f32>(atomicLoad(&gridAccum[base + CH_MOM_Y]));
   var v = (vec2<f32>(momX, momY) / mass) * damping;
   v.y = v.y - DT * gravity;
-  // Component-wise bound is the square-grid CFL condition: neither axis may
-  // travel farther than half a background cell in one explicit substep.
+
   gridVel[idx] = clamp(v, vec2<f32>(-MAX_GRID_SPEED), vec2<f32>(MAX_GRID_SPEED));
 }

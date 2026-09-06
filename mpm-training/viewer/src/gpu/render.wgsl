@@ -1,18 +1,4 @@
-// Particle rendering — instanced quads drawn straight from a positions
-// storage buffer, same approach mls-mpm/src/gpu/render.wgsl uses for its
-// own particles (no density/color texture, no full-screen present pass):
-// each instance is a 6-vertex unit quad offset by pointRadius (an NDC-
-// space, device-pixel-derived constant — see render.ts's own
-// setCanvasSizePx()) around the particle's own position, a circle carved
-// out of it in the fragment shader by discarding outside the unit disc.
-// One pipeline, two bind groups (see render.ts) — the exact same shader
-// draws both the grown particles and the target point cloud overlay,
-// just with a different positions buffer/color/radius bound in.
-//
-// Domain is [0,1]^2, +Y-up (core/gridUpdate.wgsl's own convention,
-// gravity pulls toward y=0) — same as WebGPU's own NDC, so `pos*2-1` is
-// the entire mapping, no Y-flip needed (matches mls-mpm/src/gpu/render.wgsl's
-// own comment on this exact point).
+
 
 struct VOut {
   @builtin(position) position: vec4<f32>,
@@ -27,11 +13,7 @@ const QUAD_OFFSETS = array<vec2<f32>, 6>(
 @group(0) @binding(0) var<storage, read> pointPositions: array<vec2<f32>>;
 @group(0) @binding(1) var<uniform> pointRadius: f32;
 @group(0) @binding(2) var<uniform> pointColor: vec4<f32>;
-// View zoom is applied in the geometry vertex stage. Particle quads are still
-// rasterized directly at the canvas's native resolution; no completed image
-// is enlarged in a later presentation pass.
-// x: zoom, y: particle shape (0 dot, 1 heading-oriented triangle),
-// z: unified particle alpha.
+
 @group(1) @binding(0) var<uniform> viewStyle: vec4<f32>;
 
 fn viewCenter(center: vec2<f32>) -> vec2<f32> {
@@ -41,15 +23,13 @@ fn viewCenter(center: vec2<f32>) -> vec2<f32> {
 struct ParticleRest {
   growthF: vec4<f32>,
   jp: f32,
-  cycleActive: f32,
-  growthAngle: f32,
-  growthAnisotropy: f32,
-  divisionBias: f32, // Original world area (legacy ABI name).
-  growthFrameAngle: f32,
-  appearanceScale: f32,
+  growthVectorX: f32,
+  growthVectorY: f32,
+  budgetGrowthRatio: f32,
+  verticesAB: vec4<f32>,
+  vertexC: vec2<f32>,
+  originalArea: f32,
   quadratureWeight: f32,
-  // Explicit wrapped vertices: domain.xy=A, domain.zw=B, vertexC=C.
-  domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>,
 }
 
 struct DomainOut {
@@ -57,16 +37,12 @@ struct DomainOut {
   @location(0) world: vec2<f32>,
 }
 
-// True transported triangle, independent of marker size, heading or opacity.
-// Draw neighboring periodic images without wrapping the individual vertices:
-// wrapping endpoints would create false edges across the entire canvas.
 @vertex
 fn domainVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> DomainOut {
   let rest = particleRest[instanceIndex];
-  let a = rest.domain.xy;
-  // Lift stored endpoints by integer periods only. Rebuilding B/C as A+edge
-  // would reintroduce triangle-dependent rounding in the visible corners.
-  let b = rest.domain.zw-floor(rest.domain.zw-a+vec2<f32>(0.5));
+  let a = rest.verticesAB.xy;
+
+  let b = rest.verticesAB.zw-floor(rest.verticesAB.zw-a+vec2<f32>(0.5));
   let c = rest.vertexC-floor(rest.vertexC-a+vec2<f32>(0.5));
   let corners = array<vec2<f32>, 3>(a,b,c);
   let ends = array<u32, 6>(0u, 1u, 1u, 2u, 2u, 0u);
@@ -86,13 +62,9 @@ fn domainFragment(in: DomainOut) -> @location(0) vec4<f32> {
 }
 
 struct ParticleMeta {
-  rng: u32,
-  cooldown: f32,
-  alignment: vec2<f32>,
   color: vec4<f32>,
-  divisionHazard: f32,
-  divisionThreshold: f32,
-  mitosisPropensity: f32,
+  alignment: vec2<f32>,
+  growthMagnitude: f32,
   privateState: array<f32, 8>,
   chemicalState: array<f32, __CHANNELS__>,
 }
@@ -122,11 +94,8 @@ fn outsideParticleShape(uv: vec2<f32>) -> bool {
   return viewStyle.y < 0.5 && dot(uv, uv) > 1.0;
 }
 
-// Marker size is a visualization setting, independent of numerical quadrature
-// weight. Refinement changes physical integration density, not the configured
-// point radius shown by the renderer.
-fn appearanceRadiusScale(instanceIndex: u32) -> f32 {
-  return sqrt(clamp(particleRest[instanceIndex].appearanceScale, 0.0, 1.0));
+fn materialRadiusScale(instanceIndex: u32) -> f32 {
+  return sqrt(clamp(1.0, 0.0, 1.0));
 }
 
 @vertex
@@ -135,14 +104,13 @@ fn particleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_ind
   let offset = particleOffset(vertexIndex, instanceIndex);
   var out: VOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * appearanceRadiusScale(instanceIndex) * viewStyle.x,
+    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
     0.0, 1.0
   );
   out.uv = offset;
   return out;
 }
 
-// Target points have no particle rest state and remain constant-sized.
 @vertex
 fn targetVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VOut {
   let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
@@ -167,11 +135,6 @@ fn targetFragment(in: VOut) -> @location(0) vec4<f32> {
   return pointColor;
 }
 
-// --- growth-neuron activation dots ------------------------------------------
-// Hue encodes the growth-vector direction and saturation/brightness
-// increases with its magnitude. This reads ParticleRest
-// directly, exactly like the directional-arrow pass below.
-
 struct ActivationDotOut {
   @builtin(position) position: vec4<f32>,
   @location(0) uv: vec2<f32>,
@@ -184,12 +147,12 @@ fn activationParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(in
   let offset = particleOffset(vertexIndex, instanceIndex);
   var out: ActivationDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * appearanceRadiusScale(instanceIndex) * viewStyle.x,
+    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
     0.0, 1.0
   );
   out.uv = offset;
   let rest = particleRest[instanceIndex];
-  out.activation = vec2<f32>(rest.cycleActive, rest.growthAngle);
+  out.activation = vec2<f32>(rest.growthVectorX, rest.growthVectorY);
   return out;
 }
 
@@ -218,39 +181,12 @@ fn activationParticleFragment(in: ActivationDotOut) -> @location(0) vec4<f32> {
   return vec4<f32>(neuronActivationColor(in.activation), viewStyle.z);
 }
 
-// --- heading triangles: same positions/radius/color bindings as the
-// circle pipeline above, plus Agents' own per-particle alignment cache
-// buffer (binding 3 — additive, not colliding with 0-2). Only ever bound
-// against MpmCore's/Agents' own live particle buffers, never the static
-// target-point overlay (which has no heading to point toward) — see
-// render.ts's own Renderer for which pipeline draws which.
-//
-// Heading is NOT derived from velocity here (an earlier revision did
-// atan2(vel.y,vel.x) — see agents.wgsl's own module docstring for why
-// that coupling was removed project-wide): it is the channel-index-3-gradient
-// alignment cache agents.wgsl refreshes every controller evaluation.
-//
-// ParticleMeta is a small, deliberate DUPLICATE of core/agents.wgsl's
-// own struct of the same name (WGSL has no cross-module share
-// mechanism) — heading used to be its own tightly-packed array<f32>
-// buffer; it got folded into this packed struct alongside rng/cooldown/
-// angularVelocity and neural color specifically to free storage-buffer slots
-// core/agents.wgsl needed for growth's parent-state inheritance (see
-// that file's own module docstring) — this pipeline only ever reads the
-// few fields each render mode needs, but the FULL struct layout (every
-// field, in this exact order) has to match agents.wgsl's own for the
-// stride/offsets to line up, since both shaders bind the exact same
-// GPUBuffer. ---
-
-// x: alpha, y: saturation amplification, z: contrast around sigmoid neutral,
-// w: visualization-only gain for growth-vector magnitude.
 @group(0) @binding(7) var<uniform> neuralColorStyle: vec4<f32>;
 struct InternalStateStyle {
   channels: vec4<u32>,
   alpha: f32,
   opponentSubtraction: f32,
-  // Scalars deliberately keep this uniform at 32 bytes. A vec3 here would
-  // align to the next 16-byte boundary and inflate the required binding to 48.
+
   _padding1: f32,
   _padding2: f32,
 }
@@ -262,9 +198,7 @@ fn stateSigmoid(x: f32) -> f32 {
 
 fn privateStateDisplayColor(rawState: vec3<f32>) -> vec3<f32> {
   var normalized = rawState;
-  // Preserve relative channel strengths instead of letting a large positive
-  // state drive one or more sigmoid-mapped RGB components into saturation.
-  // Values already within the display range retain the previous mapping.
+
   let maxComponent = max(normalized.x, max(normalized.y, normalized.z));
   if (maxComponent > 1.0) {
     normalized = normalized / vec3<f32>(maxComponent);
@@ -275,8 +209,6 @@ fn privateStateDisplayColor(rawState: vec3<f32>) -> vec3<f32> {
     stateSigmoid(normalized.z),
   );
 }
-
-// --- neural RGB dots --------------------------------------------------------
 
 struct NeuralColorDotOut {
   @builtin(position) position: vec4<f32>,
@@ -290,7 +222,7 @@ fn neuralColorParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(i
   let offset = particleOffset(vertexIndex, instanceIndex);
   var out: NeuralColorDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * appearanceRadiusScale(instanceIndex) * viewStyle.x,
+    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
     0.0, 1.0
   );
   out.uv = offset;
@@ -304,9 +236,7 @@ fn neuralColorParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> 
   if (viewStyle.y < 0.5 && radiusSquared > 1.0) {
     discard;
   }
-  // Expand small differences between sigmoid RGB channels so early neural
-  // colors don't all read as neutral gray. This affects visualization only;
-  // the inspector and particle state retain the exact raw values.
+
   let contrasted = vec3<f32>(0.5) + (in.color - vec3<f32>(0.5)) * neuralColorStyle.z;
   let luminance = dot(contrasted, vec3<f32>(0.2126, 0.7152, 0.0722));
   let boosted = clamp(
@@ -316,8 +246,6 @@ fn neuralColorParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> 
   );
   return vec4<f32>(boosted, viewStyle.z);
 }
-
-// --- growth-magnitude dots -------------------------------------------------
 
 const BERLIN = array<vec3<f32>, 17>(
   vec3<f32>(0.62108, 0.69018, 0.99951),
@@ -346,17 +274,17 @@ fn berlin(value: f32) -> vec3<f32> {
 }
 
 @vertex
-fn mitosisPropensityParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
+fn growthMagnitudeParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
   let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let offset = particleOffset(vertexIndex, instanceIndex);
   var out: NeuralColorDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * appearanceRadiusScale(instanceIndex) * viewStyle.x,
+    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
     0.0, 1.0
   );
   out.uv = offset;
   let boostedMagnitude = clamp(
-    particleMeta[instanceIndex].mitosisPropensity * neuralColorStyle.w,
+    particleMeta[instanceIndex].growthMagnitude * neuralColorStyle.w,
     0.0,
     1.0,
   );
@@ -365,7 +293,7 @@ fn mitosisPropensityParticleVertex(@builtin(vertex_index) vertexIndex: u32, @bui
 }
 
 @fragment
-fn mitosisPropensityParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
+fn growthMagnitudeParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
   if (outsideParticleShape(in.uv)) { discard; }
   return vec4<f32>(in.color, viewStyle.z);
 }
@@ -377,7 +305,7 @@ fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
   let state = particleMeta[instanceIndex].privateState;
   var out: NeuralColorDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * appearanceRadiusScale(instanceIndex) * viewStyle.x,
+    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
     0.0, 1.0
   );
   out.uv = offset;
@@ -386,16 +314,13 @@ fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
     state[internalStateStyle.channels.y],
     state[internalStateStyle.channels.z],
   );
-  // The next triplet acts as opponent color channels. Wrap across the eight
-  // private-state slots so every selectable RGB window has a valid opponent.
+
   let opponentState = vec3<f32>(
     state[(internalStateStyle.channels.x + 3u) % 8u],
     state[(internalStateStyle.channels.y + 3u) % 8u],
     state[(internalStateStyle.channels.z + 3u) % 8u],
   );
-  // Transform both triplets into the particle display color space first;
-  // opponent subtraction is intentionally a color operation, not a mutation
-  // or comparison of the underlying chemical-memory values.
+
   out.color = clamp(
     privateStateDisplayColor(colorState)
       - privateStateDisplayColor(opponentState) * internalStateStyle.opponentSubtraction,
@@ -412,12 +337,11 @@ fn chemicalLevelsParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builti
   let levels = particleMeta[instanceIndex].chemicalState;
   var out: NeuralColorDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * appearanceRadiusScale(instanceIndex) * viewStyle.x,
+    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
     0.0, 1.0
   );
   out.uv = offset;
-  // Match substrate background's signed graypoint convention at accent=0:
-  // raw 0 is neutral 0.5 and SUBSTRATE_MAX=2 maps levels linearly around it.
+
   let raw = vec3<f32>(
     levels[internalStateStyle.channels.x],
     levels[internalStateStyle.channels.y],
@@ -437,16 +361,6 @@ fn internalStateParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32
   if (outsideParticleShape(in.uv)) { discard; }
   return vec4<f32>(in.color, viewStyle.z);
 }
-
-// --- boundary-value dots ---------------------------------------------------
-//
-// Shows the exact scalar proposed for boundary weighting:
-//   wb = |grad(rho)| / (|grad(rho)| + g0)
-// rho is MpmCore's policy morphology texture, sampled with the same wrapped
-// bilinear interpolation and +/- one-texel central difference as
-// core/agents.wgsl. This is deliberately a particle mode rather than a
-// background: it shows the value each policy-controlled cell observes at its
-// own position. The sequential blue -> teal -> yellow ramp maps wb in [0,1].
 
 @group(0) @binding(9) var boundaryMorphologyTexture: texture_2d<f32>;
 @group(0) @binding(10) var<uniform> boundaryGradientScale: f32;
@@ -504,7 +418,7 @@ fn boundaryValueParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
 
   var out: NeuralColorDotOut;
   out.position = vec4<f32>(
-    center + offset * pointRadius * appearanceRadiusScale(instanceIndex) * viewStyle.x,
+    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
     0.0,
     1.0,
   );
@@ -519,11 +433,6 @@ fn boundaryValueParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32
   return vec4<f32>(in.color, viewStyle.z);
 }
 
-// Optional one-pixel heading indicator, independently composited over either
-// particle shape and every color mode. ParticleMeta.alignment stores the
-// L2-clipped chemical-channel-index-3 gradient, so its magnitude is confidence, not
-// a useful display length. Normalize it here to keep every defined heading
-// visible; a flat field still produces a zero-length line.
 @group(0) @binding(5) var<uniform> directionalLineStyle: vec4<f32>;
 @vertex
 fn headingLineVertex(
@@ -543,7 +452,6 @@ fn headingLineFragment() -> @location(0) vec4<f32> {
   return vec4<f32>(pointColor.rgb, viewStyle.z);
 }
 
-// World-space continuous growth vector written by the neural policy.
 @vertex
 fn growthLineVertex(
   @builtin(vertex_index) vertexIndex: u32,
@@ -551,7 +459,7 @@ fn growthLineVertex(
 ) -> @builtin(position) vec4<f32> {
   let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
   let rest = particleRest[instanceIndex];
-  let vector = vec2<f32>(rest.cycleActive, rest.growthAngle);
+  let vector = vec2<f32>(rest.growthVectorX, rest.growthVectorY);
   let magnitude = min(length(vector), 1.0);
   let direction = select(vec2<f32>(0.0), vector / max(length(vector), 1e-8), magnitude > 1e-8);
   let offset = select(vec2<f32>(0.0), direction * directionalLineStyle.y * 1.5 * magnitude, vertexIndex == 1u);

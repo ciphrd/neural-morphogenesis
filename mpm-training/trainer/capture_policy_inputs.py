@@ -25,23 +25,7 @@ from device import pick_device
 from environment_gpu import EnvironmentGPU
 from mpm_core import PARTICLE_MASS, VOL, MpmCore, REPULSION_FIELD_N, ceil_div
 from shader_template import load_core_shader
-from simulation_settings import (
-    ANGULAR_DAMPING, CHEM_CHANNELS, CHIRALITY, COMMUNICATION_SPEED,
-    CHEMICAL_GRADIENT_INPUT_SCALE, CHEMICAL_VALUE_INPUT_MULTIPLIER,
-    DAMPING_LOSS_FRACTION, DECAY, DEPOSIT_DISTANCE, DEPOSIT_RATE,
-    NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY, DEPOSIT_DENSITY_REFERENCE,
-    DEPOSIT_SIGMA, DIVISION_COOLDOWN, DIVISION_DRIVE_BOOST, DIVISION_DIRECTIONALITY, ELASTIC_STRAIN_INPUTS_ENABLED,
-    ELASTIC_STRAIN_SCALE, FIELD_N, FRICTION, GROWTH_DURATION_MACRO_STEPS,
-    GROWTH_COMPRESSION_START, GROWTH_COMPRESSION_STOP,
-    GROWTH_ANISOTROPY_AUTHORITY, GROWTH_MAX, INITIAL_PARTICLE_COUNT,
-    INTERNAL_STATE_SPEED,
-    MATERIAL_E, MATERIAL_ELASTICITY, MATERIAL_HARDENING, MATERIAL_NU,
-    MAX_ACCEL, MAX_ANGULAR_ACCEL, MAX_ANGULAR_VELOCITY, MAX_ENV_WRITE,
-    MAX_STRAFE, MORPHOLOGY_BLUR_SIGMA, MORPHOLOGY_DENSITY_REFERENCE,
-    MORPHOLOGY_GRADIENT_INPUT_SCALE,
-    NEURAL_UPDATES_PER_MACRO, REPULSION_MAX_DELTA, REPULSION_STRENGTH,
-    SPLAT_RADIUS, SPLIT_DISPLACEMENT,
-)
+from simulation_settings import CHEM_CHANNELS, COMMUNICATION_SPEED, CHEMICAL_GRADIENT_INPUT_SCALE, CHEMICAL_VALUE_INPUT_MULTIPLIER, DAMPING_LOSS_FRACTION, DECAY, DEPOSIT_RATE, NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY, ELASTIC_STRAIN_INPUTS_ENABLED, ELASTIC_STRAIN_SCALE, FIELD_N, FRICTION, GROWTH_DURATION_MACRO_STEPS, GROWTH_COMPRESSION_START, GROWTH_COMPRESSION_STOP, GROWTH_ANISOTROPY_AUTHORITY, INITIAL_PARTICLE_COUNT, INTERNAL_STATE_SPEED, MATERIAL_E, MATERIAL_ELASTICITY, MATERIAL_HARDENING, MATERIAL_NU, MAX_ENV_WRITE, MORPHOLOGY_BLUR_SIGMA, MORPHOLOGY_DENSITY_REFERENCE, MORPHOLOGY_GRADIENT_INPUT_SCALE, NEURAL_UPDATES_PER_MACRO, REPULSION_MAX_DELTA, REPULSION_STRENGTH, SPLAT_RADIUS, SAMPLE_SPACING
 from training_sim import TrainingRollout
 from policy_parameters import (
     STATEFUL_ARCHITECTURE, STATELESS_ARCHITECTURE,
@@ -51,12 +35,10 @@ from policy_parameters import (
 )
 
 META_NAMES = [
-    "valid", "position_x", "position_y", "alignment_angle", "cooldown",
-    "division_hazard", "division_threshold", "cycle_active",
-    "growth_area", "growth_direction_angle", "growth_anisotropy",
-    "division_bias",
+    "valid", "position_x", "position_y", "alignment_angle",
+    "growth_vector_x", "growth_vector_y", "growth_area",
+    "budget_growth_ratio", "original_area",
 ]
-
 
 def feature_names(channels: int, architecture: str = STATELESS_ARCHITECTURE) -> list[str]:
     names = (
@@ -70,7 +52,6 @@ def feature_names(channels: int, architecture: str = STATELESS_ARCHITECTURE) -> 
         names += [f"private_state_{i}" for i in range(8)]
     return names
 
-
 def random_policy_weights(
     layout: dict[str, int], hidden_dim: int, rng: np.random.Generator,
     architecture: str = STATELESS_ARCHITECTURE,
@@ -81,7 +62,6 @@ def random_policy_weights(
     if out.size != layout["total_floats"]:
         raise ValueError(f"policy initializer produced {out.size} values, expected {layout['total_floats']}")
     return out
-
 
 class PolicyInputProbe:
     def __init__(
@@ -167,7 +147,6 @@ class PolicyInputProbe:
         raw = self.device.queue.read_buffer(self.output, 0, self.tracked * self.stride * 4)
         return np.frombuffer(raw, np.float32).reshape(self.tracked, self.stride).copy()
 
-
 def percentile_summary(values: list[list[float]], names: list[str]) -> list[dict[str, float | str | int]]:
     if not values:
         return []
@@ -182,7 +161,6 @@ def percentile_summary(values: list[list[float]], names: list[str]) -> list[dict
             "mean": float(x.mean()), "std": float(x.std()),
         })
     return rows
-
 
 def build_html(report: dict[str, Any]) -> str:
     data = json.dumps(report, separators=(",", ":"))
@@ -234,7 +212,6 @@ function drawHeat(p){{const c=document.querySelector('#heatmap'),[x,w,h]=setup(c
 psel.onchange=gsel.onchange=draw;space.onchange=()=>{{renderStats();draw()}};addEventListener('resize',()=>{{drawPopulation();draw()}});gsel.value='Chemical values';renderStats();drawPopulation();draw();
 </script></body></html>"""
 
-
 def parse_args() -> argparse.Namespace:
     root = Path(__file__).parent
     p = argparse.ArgumentParser(description=__doc__)
@@ -263,7 +240,6 @@ def parse_args() -> argparse.Namespace:
         help="seed for reproducible policy randomization (default: rollout seed)",
     )
     return p.parse_args()
-
 
 def resolve_checkpoint_path(path: Path, root: Path, label: str) -> Path:
     """Resolve inputs from either the caller's cwd or trainer/ and provide
@@ -295,7 +271,6 @@ def resolve_checkpoint_path(path: Path, root: Path, label: str) -> Path:
         )
     raise SystemExit(f"{label} file not found: {path}{hint}")
 
-
 def main() -> int:
     args = parse_args()
     if (
@@ -309,33 +284,29 @@ def main() -> int:
     args.weights = resolve_checkpoint_path(args.weights, root, "weights")
     meta = json.loads(args.meta.read_text())
     weights = np.load(args.weights).astype(np.float32)
-    channels = int(meta.get("channels", CHEM_CHANNELS))
-    architecture = meta.get("policy_architecture", STATELESS_ARCHITECTURE)
-    hidden = int(meta.get("hidden_dim", policy_hidden_dim(architecture)))
+    channels = int(meta['channels'])
+    architecture = meta['policy_architecture']
+    hidden = int(meta['hidden_dim'])
     layout = weight_layout(channels, hidden, architecture)
     expected = layout["total_floats"]
     if len(weights) != expected:
         raise SystemExit(f"incompatible weights: checkpoint has {len(weights)} floats, current {channels}×{hidden} policy expects {expected}")
     steps = int(args.steps if args.steps is not None else meta["macro_steps"])
-    seed = int(args.seed if args.seed is not None else meta.get("winner_seed", meta.get("seed", 0)))
-    growth_steps = meta.get("growth_steps")
-    field_n = int(meta.get("field_n", FIELD_N))
+    seed = int(args.seed if args.seed is not None else meta['winner_seed'])
+    growth_steps = meta['growth_steps']
+    field_n = int(meta['field_n'])
     density = resolve_checkpoint_density(
         meta,
         DensityReference(
             particle_cap=int(meta["particles"]),
-            initial_particles=int(meta.get("initial_particle_count", INITIAL_PARTICLE_COUNT)),
+            initial_particles=int(meta['initial_particle_count']),
             chemical_field_n=field_n,
-            particle_mass=float(meta.get("particle_mass", PARTICLE_MASS)),
-            particle_volume=float(meta.get("particle_volume", VOL)),
-            deposit_sigma=float(meta.get("deposit_sigma", DEPOSIT_SIGMA)),
-            chemical_gradient_input_scale=float(meta.get("chemical_gradient_input_scale", CHEMICAL_GRADIENT_INPUT_SCALE)),
-            repulsion_strength=float(meta.get("repulsion_strength", REPULSION_STRENGTH)),
-            repulsion_max_delta=float(meta.get("repulsion_max_delta", REPULSION_MAX_DELTA)),
+            particle_mass=float(meta['particle_mass']),
+            particle_volume=float(meta['particle_volume']),
+            chemical_gradient_input_scale=float(meta['chemical_gradient_input_scale']),
+            repulsion_strength=float(meta['repulsion_strength']),
+            repulsion_max_delta=float(meta['repulsion_max_delta']),
         ),
-        legacy_split_displacement=SPLIT_DISPLACEMENT,
-        legacy_deposit_sigma=DEPOSIT_SIGMA,
-        legacy_splat_radius=SPLAT_RADIUS,
     )
     initial_particle_count = int(
         args.initial_particles
@@ -349,72 +320,37 @@ def main() -> int:
         )
     device = pick_device()
     core = MpmCore(device)
-    core.set_morphology(meta.get("morphology_blur_sigma", MORPHOLOGY_BLUR_SIGMA), meta.get("morphology_density_reference", MORPHOLOGY_DENSITY_REFERENCE))
-    substeps = int(meta.get("substeps_per_macro", 1))
+    core.set_morphology(meta['morphology_blur_sigma'], meta['morphology_density_reference'])
+    substeps = int(meta['substeps_per_macro'])
     core.set_material(
-        meta.get("material_e", MATERIAL_E), meta.get("material_nu", MATERIAL_NU),
-        meta.get("material_hardening", MATERIAL_HARDENING),
-        elasticity=meta.get("material_elasticity", MATERIAL_ELASTICITY),
-        growth_duration_macro_steps=meta.get("growth_duration_macro_steps", GROWTH_DURATION_MACRO_STEPS),
-        growth_max=meta.get("growth_max", GROWTH_MAX),
-        growth_anisotropy=meta.get(
-            "growth_anisotropy_authority", GROWTH_ANISOTROPY_AUTHORITY
-        ),
-        growth_compression_start=meta.get("growth_compression_start", GROWTH_COMPRESSION_START),
-        growth_compression_stop=meta.get("growth_compression_stop", GROWTH_COMPRESSION_STOP),
-        growth_compression_feedback=meta.get("growth_compression_feedback", 0.0),
+        meta['material_e'], meta['material_nu'],
+        meta['material_hardening'],
+        elasticity=meta['material_elasticity'],
+        growth_duration_macro_steps=meta['growth_duration_macro_steps'],
+        growth_anisotropy=meta['growth_anisotropy_authority'],
+        growth_compression_start=meta['growth_compression_start'],
+        growth_compression_stop=meta['growth_compression_stop'],
+        growth_compression_feedback=meta['growth_compression_feedback'],
         substeps_per_macro=substeps,
         particle_mass=density.particle_mass,
         particle_volume=density.particle_volume,
     )
-    core.set_damping(meta.get("damping_loss_fraction", meta.get("damping", DAMPING_LOSS_FRACTION)), substeps)
+    core.set_damping(meta['damping_loss_fraction'], substeps)
     core.set_splat_radius(density.splat_radius)
     core.set_repulsion_strength(
         density.repulsion_strength, density.repulsion_max_delta,
     )
-    chemical_architecture = resolve_chemical_communication_architecture(
-        meta.get("chemical_communication_architecture"), meta.get("decay", DECAY)
-    )
-    environment = EnvironmentGPU(
-        device, channels, field_n, field_n, meta.get("decay", DECAY),
-        meta.get("deposit_rate", DEPOSIT_RATE), chemical_architecture,
-        meta.get("normalize_deposits_by_local_density", NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY),
-        meta.get("deposit_density_reference", DEPOSIT_DENSITY_REFERENCE),
-        grid_velocity=core.grid_vel,
-        channel_profiles=resolve_channel_profiles(
-            channels, meta.get("chemical_channel_profiles", homogeneous_channel_profiles(channels))
-        ),
-    )
-    agents = AgentsGPU(
-        device, core, environment, channels, hidden,
-        meta.get("max_accel", MAX_ACCEL), meta.get("max_strafe", MAX_STRAFE), meta.get("max_env_write", MAX_ENV_WRITE),
-        meta.get("max_angular_accel", MAX_ANGULAR_ACCEL), meta.get("angular_damping", ANGULAR_DAMPING),
-        meta.get("max_angular_velocity", MAX_ANGULAR_VELOCITY), meta.get("chirality", CHIRALITY),
-        meta.get("deposit_distance", DEPOSIT_DISTANCE), particle_cap,
-        density.spacing, meta.get("division_cooldown", DIVISION_COOLDOWN),
-        meta.get("friction", FRICTION), density.deposit_sigma, 1.0,
-        meta.get("spawn_x", 0.5), meta.get("spawn_y", 0.5),
-        meta.get("elastic_strain_scale", ELASTIC_STRAIN_SCALE),
-        meta.get("elastic_strain_inputs_enabled", ELASTIC_STRAIN_INPUTS_ENABLED),
-        density.chemical_gradient_input_scale,
-        policy_architecture=architecture,
-        internal_state_speed=meta.get("internal_state_speed", INTERNAL_STATE_SPEED),
-        division_directionality=meta.get("division_directionality", DIVISION_DIRECTIONALITY),
-        division_drive_boost=meta.get("division_drive_boost", DIVISION_DRIVE_BOOST),
-        chemical_communication_architecture=chemical_architecture,
-        growth_compression_start=meta.get("growth_compression_start", GROWTH_COMPRESSION_START),
-        growth_compression_stop=meta.get("growth_compression_stop", GROWTH_COMPRESSION_STOP),
-        growth_compression_feedback=meta.get("growth_compression_feedback", 0.0),
-    )
+    chemical_architecture = resolve_chemical_communication_architecture(meta["chemical_communication_architecture"])
+    environment = EnvironmentGPU(device, channels, field_n, field_n, meta['decay'], meta['deposit_rate'], chemical_architecture, meta['normalize_deposits_by_local_density'], grid_velocity=core.grid_vel, channel_profiles=resolve_channel_profiles(channels, meta['chemical_channel_profiles']))
+    agents = AgentsGPU(device, core, environment, channels, hidden, meta['max_env_write'], particle_cap, density.spacing, meta['friction'], 1.0, meta['spawn_x'], meta['spawn_y'], meta['elastic_strain_scale'], meta['elastic_strain_inputs_enabled'], policy_architecture=architecture, internal_state_speed=meta['internal_state_speed'], chemical_communication_architecture=chemical_architecture,   )
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
-    agents.set_chemical_projection_weight(density.chemical_projection_weight)
+
     def restart_rollout() -> TrainingRollout:
         return TrainingRollout(
-            core, agents, environment,
-            spawn_center=(meta.get("spawn_x", 0.5), meta.get("spawn_y", 0.5)),
-            spawn_half_width=meta.get("spawn_half_width", 0.08), gravity=meta.get("gravity", 0.0), seed=seed,
-            neural_updates_per_macro=meta.get("neural_updates_per_macro", NEURAL_UPDATES_PER_MACRO),
-            communication_speed=meta.get("communication_speed", COMMUNICATION_SPEED),
+            core, agents, environment, gravity=meta["gravity"], seed=seed,
+            spawn_center=(meta['spawn_x'], meta['spawn_y']),
+            neural_updates_per_macro=meta['neural_updates_per_macro'],
+            communication_speed=meta['communication_speed'],
             initial_particle_count=initial_particle_count,
         )
 
@@ -426,12 +362,8 @@ def main() -> int:
         )
         state = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)[0]
         rest = core.read_rest_state()[0]
-        growth_area = float(rest[11] * (rest[0] * rest[3] - rest[1] * rest[2]))
-        return (
-            f"hazard={float(state['divisionHazard']):.5f}/"
-            f"{float(state['divisionThreshold']):.5f}, "
-            f"cycle={'on' if rest[5] > 0.5 else 'off'}, growth_area={growth_area:.5f}"
-        )
+        growth_area = float(rest[15] * (rest[0] * rest[3] - rest[1] * rest[2]))
+        return f"growth_magnitude={float(state['growthMagnitude']):.5f}, growth_area={growth_area:.5f}"
 
     search_attempt: int | None = None
     search_split_step: int | None = None
@@ -485,8 +417,9 @@ def main() -> int:
         print(f"[measure] using checkpoint brain {args.weights}")
     probe = PolicyInputProbe(
         device, core, agents, environment, args.tracked,
-        meta.get("elastic_strain_scale", ELASTIC_STRAIN_SCALE),
-        meta.get("elastic_strain_inputs_enabled", ELASTIC_STRAIN_INPUTS_ENABLED),
+        meta['elastic_strain_scale'],
+        meta['elastic_strain_inputs_enabled'],
+        density.chemical_gradient_input_scale,
     )
     names = feature_names(channels, architecture)
     particles = [{"slot": i, "spawn_step": None, "samples": []} for i in range(args.tracked)]
@@ -561,7 +494,6 @@ def main() -> int:
     print(f"wrote {args.output}")
     print(f"wrote {json_path}")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

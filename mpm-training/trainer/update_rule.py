@@ -1,44 +1,7 @@
-"""The evolved stateless-128/stateful-64 policies with logical output heads —
-architecture/shape reference and a CPU-only utility class (random weight
-init via a fresh instance's own initialized parameters, JSON export via
-export_weights()), NOT the live forward pass anymore. That now runs
-entirely as a wgpu compute shader, core/agents.wgsl (see agents_gpu.py's
-own AgentsGPU, and training_sim.py's own module docstring for why:
-running this as torch/MPS ops required a real, blocking host round-trip
-every macro step to bridge wgpu-native's own physics device and torch's
-own MPS/CUDA device, which share no buffers). forward() below is kept as
-a readable, executable reference for the exact math core/agents.wgsl's
-own agentStep() implements — evolve.py/train_server.py never call it.
-The hidden activation is bounded, monotonic tanh. This replaces the earlier
-experimental sine activation to make evolved responses smoother under input
-changes and mutation.
-
-The LOCAL frame is constructed directly from chemical channel index 3's gradient
-by core/agents.wgsl. It is not stored or controlled by the cell. The shader
-uses that frame to rotate sensed gradients in and growth-direction outputs
-back out to world space —
-see core/agents.wgsl's own module docstring
-for the exact rotation (training_sim.py, unlike an earlier revision, no
-longer does any of this itself — it only orchestrates GPU buffers/
-pipelines now).
-
-- Input: value (C) + grad_forward (C) + grad_lateral (C), followed by
-  morphology occupancy/forward-gradient/lateral-gradient (3) — the
-  *rotated*, local-frame gradient the caller (core/agents.wgsl, or this
-  method's own torch equivalent if called directly) computes, followed by
-  three elastic-strain inputs, for 3*C+6 total.
-  There is no absolute or spawn-relative position input. This module itself
-  is frame-agnostic; the gradient rotation and robust input normalization are
-  entirely the caller's job.
-- Output: env_write (C) — retained ABI name for one bounded signed chemical
-  delta rate per channel — plus one continuous local 2-D growth vector whose
-  magnitude is growth rate. Stateless-128 ends with RGB logits (3);
-  stateful-64 instead ends with private-state residuals (8) and gates (8),
-  all raw/local-frame. The widths are C+5 stateless outputs or C+18 stateful
-  outputs.
-"""
+"""Tanh policy reference, initialization and checkpoint export. Live rollout inference uses core/agents.wgsl."""
 from __future__ import annotations
 
+from config import CONFIG
 import torch
 import torch.nn as nn
 
@@ -54,7 +17,7 @@ from policy_parameters import (
 )
 
 class UpdateRule(nn.Module):
-    def __init__(self, num_channels: int = CHEM_CHANNELS, architecture: str = STATELESS_ARCHITECTURE) -> None:
+    def __init__(self, num_channels: int = CHEM_CHANNELS, architecture: str = CONFIG["run"]["policyArchitecture"]) -> None:
         super().__init__()
         self.num_channels = num_channels
         self.architecture = normalize_architecture(architecture)
@@ -105,7 +68,7 @@ class UpdateRule(nn.Module):
         (training_sim.py/core/agents.wgsl); this method is frame-agnostic and
         simply concatenates the three channel blocks. Returns
         (env_write, growth_vector, tail), all raw/un-squashed;
-        tail is RGB for stateless-128 or concatenated state residual/gate for stateful-64
+        tail is RGB for stateless policies or concatenated state residual/gate/RGB for recurrent policies
         and still in LOCAL frame — squashing (tanh for vectors and chemical deltas;
         and rotating the growth vector to world frame are all training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
@@ -123,7 +86,7 @@ class UpdateRule(nn.Module):
         tail = (
             self.heads["color"](hidden)
             if not policy_has_recurrence(self.architecture)
-            else torch.cat([self.heads["stateDelta"](hidden), self.heads["stateGate"](hidden)], dim=-1)
+            else torch.cat([self.heads["stateDelta"](hidden), self.heads["stateGate"](hidden), self.heads["color"](hidden)], dim=-1)
         )
         return env_write, growth_vector, tail
 

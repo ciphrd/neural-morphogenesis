@@ -1,3 +1,4 @@
+import { VIEWER_DEFAULTS } from "../viewerConfig";
 // Canvas rendering — particles (render.wgsl) and mls-mpm's own
 // field-visualize background system (field.wgsl), ported with the same
 // options mls-mpm/src/gpu/render.ts
@@ -37,7 +38,7 @@ import { templateShader } from "./shaderTemplate";
 
 export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "gradient" | "growth";
 export type ParticleShape = "dot" | "triangle";
-export type ParticleColorMode = "white" | "neural-color" | "mitosis-drive" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
+export type ParticleColorMode = "white" | "neural-color" | "growth-magnitude" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
 export const MAX_ZOOM = 32;
 
 const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "orientation" | "gradient" | "growth">, number> = {
@@ -66,7 +67,6 @@ const HEADING_LINE_LENGTH_PX = 4;
 // project's particle counts run smaller by default (hundreds, not
 // thousands), so 2px reads better at a typical viewport size; still a
 // starting guess, same as that project's own, not derived from anything.
-const DEFAULT_PARTICLE_RADIUS_PX = 2.0;
 const TARGET_RADIUS_PX = 1.75;
 
 function alphaBlend(): GPUBlendState {
@@ -88,7 +88,7 @@ export class Renderer {
   private readonly particleCirclePipeline: GPURenderPipeline;
   private readonly domainPipeline: GPURenderPipeline;
   private readonly domainBindGroup: GPUBindGroup;
-  private domainVisible = false;
+  private domainVisible = VIEWER_DEFAULTS.rendering.domainVisible;
 
   private readonly particleRadiusUniform: GPUBuffer;
   private readonly particleColorUniform: GPUBuffer;
@@ -96,7 +96,7 @@ export class Renderer {
   private readonly activationParticlePipeline: GPURenderPipeline;
   private readonly activationParticleBindGroup: GPUBindGroup;
   private readonly neuralColorParticlePipeline: GPURenderPipeline;
-  private readonly mitosisPropensityParticlePipeline: GPURenderPipeline;
+  private readonly growthMagnitudeParticlePipeline: GPURenderPipeline;
   private readonly neuralColorParticleBindGroup: GPUBindGroup;
   private readonly neuralColorStyleUniform: GPUBuffer;
   private readonly internalStateParticlePipeline: GPURenderPipeline;
@@ -119,14 +119,14 @@ export class Renderer {
   private targetPositions: GPUBuffer | null = null;
   private targetBindGroup: GPUBindGroup | null = null;
   private targetCount = 0;
-  private targetVisible = true;
+  private targetVisible = VIEWER_DEFAULTS.rendering.targetVisible;
 
-  private particleColorMode: ParticleColorMode = "white";
-  private directionalLineVisible = false;
-  private growthLineVisible = false;
-  private mitosisSignalBoost = 1.0;
-  private internalStateChannelStart = 0;
-  private particleRadiusPx = DEFAULT_PARTICLE_RADIUS_PX;
+  private particleColorMode: ParticleColorMode = VIEWER_DEFAULTS.rendering.particleColorMode;
+  private directionalLineVisible = VIEWER_DEFAULTS.rendering.directionalLineVisible;
+  private growthLineVisible = VIEWER_DEFAULTS.rendering.growthLineVisible;
+  private growthMagnitudeBoost = VIEWER_DEFAULTS.rendering.growthMagnitudeBoost;
+  private internalStateChannelStart = VIEWER_DEFAULTS.rendering.internalStateChannelStart;
+  private particleRadiusPx = VIEWER_DEFAULTS.rendering.particleRadiusPx;
   private canvasMinDimPx = 512;
 
   // --- field-visualize background (field.wgsl) ---
@@ -220,7 +220,7 @@ export class Renderer {
   private readonly growthVectorBindGroup: GPUBindGroup;
   private readonly growthDispatch: [number, number];
 
-  private fieldMode: FieldMode = "none";
+  private fieldMode: FieldMode = VIEWER_DEFAULTS.rendering.fieldMode;
 
   constructor(
     device: GPUDevice,
@@ -345,14 +345,14 @@ export class Renderer {
       fragment: { module: renderModule, entryPoint: "neuralColorParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
-    this.mitosisPropensityParticlePipeline = device.createRenderPipeline({
+    this.growthMagnitudeParticlePipeline = device.createRenderPipeline({
       layout: device.createPipelineLayout({ bindGroupLayouts: [neuralColorLayout, viewLayout] }),
-      vertex: { module: renderModule, entryPoint: "mitosisPropensityParticleVertex" },
-      fragment: { module: renderModule, entryPoint: "mitosisPropensityParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
+      vertex: { module: renderModule, entryPoint: "growthMagnitudeParticleVertex" },
+      fragment: { module: renderModule, entryPoint: "growthMagnitudeParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
       primitive: { topology: "triangle-list" },
     });
     this.neuralColorStyleUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    // Neural alpha, saturation, contrast, and mitosis display gain.
+    // Neural alpha, saturation, contrast, and growth magnitude display gain.
     writeFloat32(device, this.neuralColorStyleUniform, 0, new Float32Array([1.0, 4.0, 1.5, 1.0]));
     this.neuralColorParticleBindGroup = device.createBindGroup({
       layout: neuralColorLayout,
@@ -901,9 +901,9 @@ export class Renderer {
     );
   }
 
-  setMitosisSignalBoost(boost: number): void {
-    this.mitosisSignalBoost = Math.min(10, Math.max(1, boost));
-    writeFloat32(this.device, this.neuralColorStyleUniform, 12, new Float32Array([this.mitosisSignalBoost]));
+  setGrowthMagnitudeBoost(boost: number): void {
+    this.growthMagnitudeBoost = Math.min(10, Math.max(1, boost));
+    writeFloat32(this.device, this.neuralColorStyleUniform, 12, new Float32Array([this.growthMagnitudeBoost]));
   }
 
   setInternalStateChannelStart(start: number): void {
@@ -1101,8 +1101,8 @@ export class Renderer {
         pass.setPipeline(this.neuralColorParticlePipeline);
         pass.setBindGroup(0, this.neuralColorParticleBindGroup);
         pass.draw(6, activeCount);
-      } else if (this.particleColorMode === "mitosis-drive") {
-        pass.setPipeline(this.mitosisPropensityParticlePipeline);
+      } else if (this.particleColorMode === "growth-magnitude") {
+        pass.setPipeline(this.growthMagnitudeParticlePipeline);
         pass.setBindGroup(0, this.neuralColorParticleBindGroup);
         pass.draw(6, activeCount);
       } else if (this.particleColorMode === "neural-memory") {
