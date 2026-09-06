@@ -14,6 +14,10 @@ const CH_TENSOR_XY: u32 = 3u;
 const CH_TENSOR_YY: u32 = 4u;
 const CH_WEIGHT: u32 = 5u;
 
+// Scatter uses native integer additions; enforceGrowthField publishes f32 bits
+// after the accumulation barrier. Geometry uses a finer world-length scale.
+const FIELD_SCALE: f32 = __GROWTH_ACCUM_SCALE__.0;
+const BOUNDARY_SCALE: f32 = __GROWTH_BOUNDARY_ACCUM_SCALE__.0;
 const CH_NORMAL_X: u32 = 8u;
 const CH_NORMAL_Y: u32 = 9u;
 const CH_BOUNDARY_SUPPORT: u32 = 10u;
@@ -266,15 +270,9 @@ fn fieldIndex(node: u32, channel: u32) -> u32 {
   return node * FIELD_CHANNELS + channel;
 }
 
-fn addFieldFloat(index: u32, value: f32) {
-  if (value == 0.0) { return; }
-  var previous = atomicLoad(&growthField[index]);
-  loop {
-    let next = bitcast<i32>(bitcast<f32>(previous) + value);
-    let result = atomicCompareExchangeWeak(&growthField[index], previous, next);
-    if (result.exchanged) { return; }
-    previous = result.old_value;
-  }
+fn addFieldFixed(index: u32, value: f32, scale: f32) {
+  let encoded = i32(round(value * scale));
+  if (encoded != 0) { atomicAdd(&growthField[index], encoded); }
 }
 
 // The edge index must be complete, and domains must not change until this
@@ -317,9 +315,9 @@ fn scatterGrowthBoundary(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var j = 0u; j < 3u; j++) {
           let node = wrapIndex(base.x+i32(i))*NODE_STRIDE + wrapIndex(base.y+i32(j));
           let contribution = weights[qi] * w[i].x * w[j].y;
-          addFieldFloat(fieldIndex(node, CH_NORMAL_X), contribution * normalMeasure.x);
-          addFieldFloat(fieldIndex(node, CH_NORMAL_Y), contribution * normalMeasure.y);
-          addFieldFloat(fieldIndex(node, CH_BOUNDARY_SUPPORT), contribution * length(edge));
+          addFieldFixed(fieldIndex(node, CH_NORMAL_X), contribution * normalMeasure.x, BOUNDARY_SCALE);
+          addFieldFixed(fieldIndex(node, CH_NORMAL_Y), contribution * normalMeasure.y, BOUNDARY_SCALE);
+          addFieldFixed(fieldIndex(node, CH_BOUNDARY_SUPPORT), contribution * length(edge), BOUNDARY_SCALE);
         }
       }
     }
@@ -356,9 +354,9 @@ fn scatterGrowthIntent(@builtin(global_invocation_id) gid: vec3<u32>) {
       for (var j = 0u; j < 3u; j++) {
         let node = wrapIndex(base.x+i32(i))*NODE_STRIDE + wrapIndex(base.y+i32(j));
         let contribution = representedVolume * GROWTH_QUADRATURE[qi].z * w[i].x * w[j].y;
-        addFieldFloat(fieldIndex(node, CH_VECTOR_X), contribution * vector.x);
-        addFieldFloat(fieldIndex(node, CH_VECTOR_Y), contribution * vector.y);
-        addFieldFloat(fieldIndex(node, CH_WEIGHT), contribution);
+        addFieldFixed(fieldIndex(node, CH_VECTOR_X), contribution * vector.x, FIELD_SCALE);
+        addFieldFixed(fieldIndex(node, CH_VECTOR_Y), contribution * vector.y, FIELD_SCALE);
+        addFieldFixed(fieldIndex(node, CH_WEIGHT), contribution, FIELD_SCALE);
       }
     }
   }
@@ -368,24 +366,32 @@ fn scatterGrowthIntent(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn enforceGrowthField(@builtin(global_invocation_id) gid: vec3<u32>) {
   let node = gid.x;
   if (node >= NODE_COUNT) { return; }
+  let weight = f32(atomicLoad(&growthField[fieldIndex(node, CH_WEIGHT)])) / FIELD_SCALE;
+  let vectorSum = vec2<f32>(
+    f32(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_X)])),
+    f32(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_Y)]))) / FIELD_SCALE;
+  let normalSum = vec2<f32>(
+    f32(atomicLoad(&growthField[fieldIndex(node, CH_NORMAL_X)])),
+    f32(atomicLoad(&growthField[fieldIndex(node, CH_NORMAL_Y)]))) / BOUNDARY_SCALE;
+  let support = f32(atomicLoad(&growthField[fieldIndex(node, CH_BOUNDARY_SUPPORT)])) / BOUNDARY_SCALE;
+  // No other invocation reads this node during finalization. Keep the existing
+  // finalized-field ABI for G2P and visualization, including signed tensors.
+  atomicStore(&growthField[fieldIndex(node, CH_VECTOR_X)], bitcast<i32>(vectorSum.x));
+  atomicStore(&growthField[fieldIndex(node, CH_VECTOR_Y)], bitcast<i32>(vectorSum.y));
+  atomicStore(&growthField[fieldIndex(node, CH_WEIGHT)], bitcast<i32>(weight));
+  atomicStore(&growthField[fieldIndex(node, CH_NORMAL_X)], bitcast<i32>(normalSum.x));
+  atomicStore(&growthField[fieldIndex(node, CH_NORMAL_Y)], bitcast<i32>(normalSum.y));
+  atomicStore(&growthField[fieldIndex(node, CH_BOUNDARY_SUPPORT)], bitcast<i32>(support));
   if (physics.forcedGrowthFieldMode != 1u) {
-
-    let weight = bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_WEIGHT)]));
     var tensor = vec3<f32>(0.0);
     if (weight > 0.0) {
-      let vector = vec2<f32>(
-        bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_X)])),
-        bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_VECTOR_Y)]))) / weight;
+      let vector = vectorSum / weight;
       let magnitude = length(vector);
       let direction = vector / max(magnitude, 1e-8);
       tensor = min(magnitude, 1.0) * vec3<f32>(
         direction.x * direction.x, direction.x * direction.y, direction.y * direction.y);
-      let normalSum = vec2<f32>(
-        bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_NORMAL_X)])),
-        bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_NORMAL_Y)])));
-      let support = bitcast<f32>(atomicLoad(&growthField[fieldIndex(node, CH_BOUNDARY_SUPPORT)]));
       // Do not normalize roundoff when opposing boundary faces cancel.
-      if (length(normalSum) > max(1e-20, support * 1e-4)) {
+      if (length(normalSum) > max(1.0 / BOUNDARY_SCALE, support * 1e-4)) {
         let normal = normalize(normalSum);
         let inward = min(magnitude, 1.0) * max(-dot(direction, normal), 0.0);
         // Pure inward intent reverses normal expansion into contraction;

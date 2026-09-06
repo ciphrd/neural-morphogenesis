@@ -37,11 +37,13 @@ The shared layout must agree in all shader declarations, Python structured array
 
 `density_cases.json` is a set of cross-language test cases, not a default configuration file.
 
-Growth model 16 projects the field over triangle domains with the shared
+Growth model 18 projects the field over triangle domains with the shared
 `growthSampling.wgsl` quadrature, then gathers once at each triangle centroid
 using the velocity stencil. Exposed edges define outward normals; inward
 commands contract rest material instead of losing their sign. The growth grid
-uses 12 words per node, storing f32 bits (including signed tensors), not fixed
-point integers. Compression feedback gates expansion. See
+uses 12 words per node: scatter accumulates fixed-point integers with native
+atomic additions, and finalization converts them to f32 bits (including signed
+tensors) for G2P and rendering. Vector/weight scale is 8192; geometric boundary
+scale is 16777216. Small contributions can round to zero. Compression feedback gates expansion. See
 `../GROWTH_MODEL.md` for the law, mass coupling and resolution limits, and run
 `trainer/.venv/bin/python trainer/signed_growth_check.py` from the project root.

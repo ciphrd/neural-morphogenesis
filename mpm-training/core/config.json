@@ -2,6 +2,8 @@
   "simulation": {
     "GRID_N": 64,
     "GROWTH_FIELD_CHANNELS": 12,
+    "GROWTH_ACCUM_SCALE": 8192,
+    "GROWTH_BOUNDARY_ACCUM_SCALE": 16777216,
     "DX": 0.015625,
     "INV_DX": 64,
     "DT": 1.5625e-5,
@@ -47,7 +49,7 @@
     "growthCompressionStart": 0.1,
     "growthCompressionStop": 0.1,
     "growthCompressionFeedback": 1.0,
-    "growthModelVersion": 17,
+    "growthModelVersion": 18,
     "growthAnisotropy": 1.0,
     "mpmEnabled": true,
     "damping": 0.039306956424563166,

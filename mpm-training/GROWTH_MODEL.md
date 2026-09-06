@@ -1,4 +1,4 @@
-# Domain-integrated signed material growth (model version 17)
+# Domain-integrated signed material growth (model version 18)
 
 The material grows continuously; numerical samples are added by subdividing
 transported material domains. `GROWTH_REDESIGN.md` records the pre-implementation
@@ -64,14 +64,24 @@ a quadratic B-spline writes to a 3×3 MPM stencil. Each contribution has weight
 `q det(G) quadratureWeight Ni(x)`. The projected node vector is the signed
 weighted mean, `u_i = sum(weight*u) / sum(weight)`. Zero commands still contribute
 weight. Opposite requests cancel before conversion; identical requests do not
-amplify the rate. Arbitrarily small positive q is retained without a mass floor.
+amplify the rate. Fixed-point rounding can discard sufficiently small contributions.
 
-Growth sums accumulate as f32 via integer atomic compare/exchange,
-matching the portable strategy used for mechanical transfers. The old 1/8192
-rounding is removed. The 12-word node record contains weighted vector x/y (0–1),
+Growth vector and material-weight sums accumulate with native signed integer
+atomic additions at scale `GROWTH_ACCUM_SCALE=8192`. Boundary normal and support
+sums use `GROWTH_BOUNDARY_ACCUM_SCALE=16777216`, since they measure world-space
+edge lengths. Each contribution is rounded before addition; weak commands and
+small weights can disappear, and subdivision changes rounding error. Positive
+node weight must stay below 262144 and boundary support below 128 world units
+per node to avoid signed 32-bit overflow (including rounding). These sums are
+not saturated.
+
+Each projection clears integer scratch, scatters integer sums, then runs
+`enforceGrowthField` once to decode them and publish f32 bit patterns. Tensor
+construction remains floating point, without further fixed-point quantization.
+G2P and rendering consume only the finalized field. The 12-word node record contains weighted vector x/y (0–1),
 weighted signed tensor xx/xy/yy (2–4), material weight (5), reserved words (6–7),
 geometric outward-normal measure x/y (8–9), boundary support length (10), and a
-reserved word (11). All these quantities are stored as f32 bit patterns;
+reserved word (11). After finalization, all these quantities are stored as f32 bit patterns;
 consumers must bitcast, not numerically convert the integers.
 
 The complete half-edge hash is built before field projection. Only exposed
@@ -121,7 +131,8 @@ bypassing the signed boundary conversion. Capacity exhaustion still pauses the
 entire growth/remodeling field as a numerical safety rule.
 
 Seven-point quadrature exactly integrates the B-spline polynomial on a triangle
-contained within one polynomial patch (up to floating-point error). Triangles
+contained within one polynomial patch; accumulation adds fixed-point rounding
+and floating-point error. Triangles
 crossing spline knots remain an approximation, and under-resolved large domains
 still require refinement. The grid remains 64×64 by default; opposite surfaces
 closer than grid support can blend or cancel. Projection runs once per macro
@@ -233,7 +244,7 @@ P2G mass and momentum now accumulate as f32 values using integer atomic
 compare/exchange on their bit patterns. The buffer remains three 32-bit words
 per node; grid update and the density renderer decode those words as floats.
 No optional floating-point atomic feature is required. Diagnostic accumulators retain their own independent fixed-point encodings;
-the growth field now uses the same floating-point accumulation strategy.
+growth projection uses the separate fixed-point encodings described above.
 
 The previous 1/4096 mass/momentum quantization produced artificial velocity
 gradients at small quadrature weights: a force-free particle with q=0.001 at
@@ -379,7 +390,7 @@ Different coarse seed polygons can produce different signed boundary responses;
 learned-policy morphology convergence across densities is not established.
 
 This changes physical discretization and sample trajectories. New runs record
-`growthModelVersion=17` and `domainGeometry=triangle`; previous policy weights
+`growthModelVersion=18` and `domainGeometry=triangle`; previous policy weights
 remain loadable, but old trajectory
 snapshots are historical evidence rather than expected exact replay results.
 
@@ -413,3 +424,27 @@ Model 17 removes the grown-rest-area budget and its global/per-particle
 accounting. Positive growth is now limited only by compression feedback and
 numerical sample capacity; target coverage, spill and overlap remain fitness
 signals rather than hard growth constraints.
+
+
+Model 18 restores native integer atomic accumulation for growth projection,
+removing floating-point compare/exchange retry loops. Seven-point projection,
+centroid gathering, and signed boundary contraction remain in place. Regression
+checks cover rounding bounds, loss of tiny contributions, deterministic sums,
+weight headroom, subdivision error, and the signed material response. On the
+boundary-opposition fixture, passive displacement was 0.0009557 versus 0.00002337
+with inward intent (about 97.5% less).
+
+An interleaved projection-only microbenchmark on Apple M2 Max compared the same
+pipeline with the previous float-CAS shader and the integer shader. Median GPU
+submission/completion times over five measurements (16 projections each) were:
+
+| Samples | Square width | Float CAS (ms) | Integer add (ms) | Speedup |
+| --- | --- | --- | --- | --- |
+| 392 | 0.125 | 0.7490 | 0.2754 | 2.72× |
+| 392 | 0.0125 | 1.6972 | 0.2615 | 6.49× |
+| 2048 | 0.125 | 0.8117 | 0.2892 | 2.81× |
+| 2048 | 0.0125 | 5.4901 | 0.2792 | 19.66× |
+
+This includes clearing, edge indexing, scattering and finalization, excluding
+CPU command encoding and physics substeps. It does not measure full training
+throughput. Mechanical P2G still uses floating-point CAS accumulation.
