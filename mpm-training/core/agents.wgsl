@@ -54,7 +54,6 @@ struct AgentPhysics {
   maxActiveParticles: u32,
   elasticStrainScale: f32,
   chemicalGradientInputScale: f32,
-  boundaryTangentMinGradient: f32,
   forcedGrowthStart: u32,
   forceGrowthMagnitude: u32,
   forcedGrowthDirection: vec2<f32>,
@@ -429,25 +428,12 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let forcedGrowth = pi >= physics.forcedGrowthStart
     && pi <= physics.forcedGrowthEnd;
-  let forcedBoundaryTangent = forcedGrowth
-    && length(physics.forcedGrowthDirection) < 0.5;
 
   let growthForward = vec2<f32>(cos(alignmentAngle), sin(alignmentAngle));
   let growthLateral = vec2<f32>(-growthForward.y, growthForward.x);
   var growthVectorWorld = growthForward * result.growthVectorLocal.x
     + growthLateral * result.growthVectorLocal.y;
-  let lifecycleMorphologyGradient = vec2<f32>(morphologyGx, morphologyGy);
-  let lifecycleMorphologyGradientMagnitude = length(lifecycleMorphologyGradient);
-  if (forcedBoundaryTangent
-      && lifecycleMorphologyGradientMagnitude > physics.boundaryTangentMinGradient) {
-
-    let forcedMagnitude = max(length(growthVectorWorld), select(0.0, 1.0, physics.forceGrowthMagnitude != 0u));
-    growthVectorWorld = vec2<f32>(
-      -lifecycleMorphologyGradient.y,
-      lifecycleMorphologyGradient.x,
-    ) / lifecycleMorphologyGradientMagnitude * forcedMagnitude;
-  } else if (forcedGrowth && !forcedBoundaryTangent) {
-
+  if (forcedGrowth) {
     let forcedMagnitude = max(length(growthVectorWorld), select(0.0, 1.0, physics.forceGrowthMagnitude != 0u));
     growthVectorWorld = normalize(physics.forcedGrowthDirection) * forcedMagnitude;
   }

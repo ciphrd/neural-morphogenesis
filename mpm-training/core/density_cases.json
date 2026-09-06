@@ -1,7 +1,7 @@
 {
   "reference": {
     "particleCap": 400,
-    "initialParticles": 5,
+    "initialParticles": 20,
     "chemicalFieldN": 256,
     "particleMass": 1.0,
     "particleVolume": 1.0,
@@ -11,52 +11,69 @@
   },
   "cases": [
     {
+      "multiplier": 0.25,
+      "spacing": 0.0216,
+      "initialParticles": 5,
+      "particleCap": 100,
+      "particleMass": 4.0,
+      "particleVolume": 4.0,
+      "splatRadius": 0.032,
+      "chemicalGradientInputScale": 0.045,
+      "repulsionStrength": 0.0,
+      "repulsionMaxDelta": 80.0,
+      "initialSpacing": 0.0432
+    },
+    {
       "multiplier": 0.5,
-      "spacing": 0.0038183766184073566,
-      "initialParticles": 3,
+      "spacing": 0.015273506473629427,
+      "initialParticles": 10,
       "particleCap": 200,
       "particleMass": 2.0,
       "particleVolume": 2.0,
-      "splatRadius": 0.00565685424949238,
+      "splatRadius": 0.02262741699796952,
       "chemicalGradientInputScale": 0.045,
       "repulsionStrength": 0.0,
-      "repulsionMaxDelta": 56.5685424949238
+      "repulsionMaxDelta": 56.5685424949238,
+      "initialSpacing": 0.030547012947258854
     },
     {
       "multiplier": 1.0,
-      "spacing": 0.0027,
-      "initialParticles": 5,
+      "spacing": 0.0108,
+      "initialParticles": 20,
       "particleCap": 400,
       "particleMass": 1.0,
       "particleVolume": 1.0,
-      "splatRadius": 0.004,
+      "splatRadius": 0.016,
       "chemicalGradientInputScale": 0.045,
       "repulsionStrength": 0.0,
-      "repulsionMaxDelta": 40.0
+      "repulsionMaxDelta": 40.0,
+      "initialSpacing": 0.0216
     },
     {
       "multiplier": 2.0,
-      "spacing": 0.0019091883092036783,
-      "initialParticles": 10,
+      "spacing": 0.007636753236814713,
+      "initialParticles": 40,
       "particleCap": 800,
       "particleMass": 0.5,
       "particleVolume": 0.5,
-      "splatRadius": 0.00282842712474619,
+      "splatRadius": 0.01131370849898476,
       "chemicalGradientInputScale": 0.045,
       "repulsionStrength": 0.0,
-      "repulsionMaxDelta": 28.2842712474619
+      "repulsionMaxDelta": 28.2842712474619,
+      "initialSpacing": 0.015273506473629427
     },
     {
       "multiplier": 4.0,
-      "spacing": 0.00135,
-      "initialParticles": 20,
+      "spacing": 0.0054,
+      "initialParticles": 80,
       "particleCap": 1600,
       "particleMass": 0.25,
       "particleVolume": 0.25,
-      "splatRadius": 0.002,
+      "splatRadius": 0.008,
       "chemicalGradientInputScale": 0.045,
       "repulsionStrength": 0.0,
-      "repulsionMaxDelta": 20.0
+      "repulsionMaxDelta": 20.0,
+      "initialSpacing": 0.0108
     }
   ]
 }

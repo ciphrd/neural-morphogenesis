@@ -37,18 +37,36 @@ struct DomainOut {
   @location(0) world: vec2<f32>,
 }
 
-@vertex
-fn domainVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> DomainOut {
-  let rest = particleRest[instanceIndex];
+fn domainWorldPosition(cornerIndex: u32, tile: u32, particleIndex: u32) -> vec2<f32> {
+  let rest = particleRest[particleIndex];
   let a = rest.verticesAB.xy;
-
   let b = rest.verticesAB.zw-floor(rest.verticesAB.zw-a+vec2<f32>(0.5));
   let c = rest.vertexC-floor(rest.vertexC-a+vec2<f32>(0.5));
   let corners = array<vec2<f32>, 3>(a,b,c);
+  let low = min(a, min(b, c));
+  let high = max(a, max(b, c));
+  let wrapShift = select(
+    select(vec2<f32>(0.0), vec2<f32>(-1.0), high >= vec2<f32>(1.0)),
+    vec2<f32>(1.0),
+    low < vec2<f32>(0.0),
+  );
+  let useWrapX = (tile & 1u) != 0u;
+  let useWrapY = (tile & 2u) != 0u;
+  let shift = vec2<f32>(
+    select(0.0, wrapShift.x, useWrapX),
+    select(0.0, wrapShift.y, useWrapY),
+  );
+  let valid = (!useWrapX || wrapShift.x != 0.0) && (!useWrapY || wrapShift.y != 0.0);
+  return select(vec2<f32>(-2.0), corners[cornerIndex] + shift, valid);
+}
+
+@vertex
+fn domainVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> DomainOut {
   let ends = array<u32, 6>(0u, 1u, 1u, 2u, 2u, 0u);
   let tile = vertexIndex / 6u;
-  let shift = vec2<f32>(f32(i32(tile % 3u)-1), f32(i32(tile / 3u)-1));
-  let world = corners[ends[vertexIndex % 6u]] + shift;
+  // A sub-half-period triangle can cross at most one seam on each axis.
+  // These combinations cover the base image and only needed neighbors.
+  let world = domainWorldPosition(ends[vertexIndex % 6u], tile, instanceIndex);
   var out: DomainOut;
   out.position = vec4<f32>(viewCenter(world*2.0-vec2<f32>(1.0)), 0.0, 1.0);
   out.world = world;
@@ -98,16 +116,38 @@ fn materialRadiusScale(instanceIndex: u32) -> f32 {
   return sqrt(clamp(1.0, 0.0, 1.0));
 }
 
+struct ParticleGeometry {
+  position: vec4<f32>,
+  uv: vec2<f32>,
+  particleIndex: u32,
+}
+
+fn particleGeometry(vertexIndex: u32, instanceIndex: u32) -> ParticleGeometry {
+  var geometry: ParticleGeometry;
+  if (viewStyle.y > 1.5) {
+    geometry.particleIndex = instanceIndex / 4u;
+    let world = domainWorldPosition(vertexIndex, instanceIndex % 4u, geometry.particleIndex);
+    geometry.position = vec4<f32>(viewCenter(world * 2.0 - vec2<f32>(1.0)), 0.0, 1.0);
+    geometry.uv = vec2<f32>(0.0);
+    return geometry;
+  }
+  geometry.particleIndex = instanceIndex;
+  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0));
+  let offset = particleOffset(vertexIndex, instanceIndex);
+  geometry.position = vec4<f32>(
+    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
+    0.0, 1.0,
+  );
+  geometry.uv = offset;
+  return geometry;
+}
+
 @vertex
 fn particleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> VOut {
-  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
-  let offset = particleOffset(vertexIndex, instanceIndex);
+  let geometry = particleGeometry(vertexIndex, instanceIndex);
   var out: VOut;
-  out.position = vec4<f32>(
-    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
-    0.0, 1.0
-  );
-  out.uv = offset;
+  out.position = geometry.position;
+  out.uv = geometry.uv;
   return out;
 }
 
@@ -143,15 +183,11 @@ struct ActivationDotOut {
 
 @vertex
 fn activationParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> ActivationDotOut {
-  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
-  let offset = particleOffset(vertexIndex, instanceIndex);
+  let geometry = particleGeometry(vertexIndex, instanceIndex);
   var out: ActivationDotOut;
-  out.position = vec4<f32>(
-    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
-    0.0, 1.0
-  );
-  out.uv = offset;
-  let rest = particleRest[instanceIndex];
+  out.position = geometry.position;
+  out.uv = geometry.uv;
+  let rest = particleRest[geometry.particleIndex];
   out.activation = vec2<f32>(rest.growthVectorX, rest.growthVectorY);
   return out;
 }
@@ -218,15 +254,11 @@ struct NeuralColorDotOut {
 
 @vertex
 fn neuralColorParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
-  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
-  let offset = particleOffset(vertexIndex, instanceIndex);
+  let geometry = particleGeometry(vertexIndex, instanceIndex);
   var out: NeuralColorDotOut;
-  out.position = vec4<f32>(
-    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
-    0.0, 1.0
-  );
-  out.uv = offset;
-  out.color = particleMeta[instanceIndex].color.rgb;
+  out.position = geometry.position;
+  out.uv = geometry.uv;
+  out.color = particleMeta[geometry.particleIndex].color.rgb;
   return out;
 }
 
@@ -275,16 +307,12 @@ fn berlin(value: f32) -> vec3<f32> {
 
 @vertex
 fn growthMagnitudeParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
-  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
-  let offset = particleOffset(vertexIndex, instanceIndex);
+  let geometry = particleGeometry(vertexIndex, instanceIndex);
   var out: NeuralColorDotOut;
-  out.position = vec4<f32>(
-    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
-    0.0, 1.0
-  );
-  out.uv = offset;
+  out.position = geometry.position;
+  out.uv = geometry.uv;
   let boostedMagnitude = clamp(
-    particleMeta[instanceIndex].growthMagnitude * neuralColorStyle.w,
+    particleMeta[geometry.particleIndex].growthMagnitude * neuralColorStyle.w,
     0.0,
     1.0,
   );
@@ -300,15 +328,11 @@ fn growthMagnitudeParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f
 
 @vertex
 fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
-  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
-  let offset = particleOffset(vertexIndex, instanceIndex);
-  let state = particleMeta[instanceIndex].privateState;
+  let geometry = particleGeometry(vertexIndex, instanceIndex);
+  let state = particleMeta[geometry.particleIndex].privateState;
   var out: NeuralColorDotOut;
-  out.position = vec4<f32>(
-    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
-    0.0, 1.0
-  );
-  out.uv = offset;
+  out.position = geometry.position;
+  out.uv = geometry.uv;
   let colorState = vec3<f32>(
     state[internalStateStyle.channels.x],
     state[internalStateStyle.channels.y],
@@ -332,15 +356,11 @@ fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
 
 @vertex
 fn chemicalLevelsParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
-  let center = viewCenter(pointPositions[instanceIndex] * 2.0 - vec2<f32>(1.0, 1.0));
-  let offset = particleOffset(vertexIndex, instanceIndex);
-  let levels = particleMeta[instanceIndex].chemicalState;
+  let geometry = particleGeometry(vertexIndex, instanceIndex);
+  let levels = particleMeta[geometry.particleIndex].chemicalState;
   var out: NeuralColorDotOut;
-  out.position = vec4<f32>(
-    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
-    0.0, 1.0
-  );
-  out.uv = offset;
+  out.position = geometry.position;
+  out.uv = geometry.uv;
 
   let raw = vec3<f32>(
     levels[internalStateStyle.channels.x],
@@ -399,9 +419,8 @@ fn boundaryValueColor(value: f32) -> vec3<f32> {
 
 @vertex
 fn boundaryValueParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
-  let position = fract(pointPositions[instanceIndex]);
-  let center = viewCenter(position * 2.0 - vec2<f32>(1.0, 1.0));
-  let offset = particleOffset(vertexIndex, instanceIndex);
+  let geometry = particleGeometry(vertexIndex, instanceIndex);
+  let position = fract(pointPositions[geometry.particleIndex]);
   let dims = vec2<f32>(textureDimensions(boundaryMorphologyTexture));
   let fieldPos = position * dims;
   let gx = 0.5 * (
@@ -417,12 +436,8 @@ fn boundaryValueParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
   let boundaryValue = gradientMagnitude / (gradientMagnitude + g0);
 
   var out: NeuralColorDotOut;
-  out.position = vec4<f32>(
-    center + offset * pointRadius * materialRadiusScale(instanceIndex) * viewStyle.x,
-    0.0,
-    1.0,
-  );
-  out.uv = offset;
+  out.position = geometry.position;
+  out.uv = geometry.uv;
   out.color = boundaryValueColor(boundaryValue);
   return out;
 }

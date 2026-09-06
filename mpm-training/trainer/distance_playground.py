@@ -104,7 +104,7 @@ def get_target(name: str) -> dict:
         shape = load_target(name)
     except SystemExit as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    return {"points": shape.points.tolist(), "texelSize": shape.texel_size()}
+    return {"points": shape.overlay_points().tolist(), "texelSize": shape.texel_size()}
 
 @app.post("/score")
 def score(req: ScoreRequest) -> JSONResponse:
@@ -114,11 +114,9 @@ def score(req: ScoreRequest) -> JSONResponse:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
     points = np.array(req.points, dtype=np.float64).reshape(-1, 2)
-    target_points = target_shape.points.astype(np.float64)
+    target_points = target_shape.overlay_points(req.raster_resolution).astype(np.float64)
 
-    target_raster = build_target_raster(
-        target_points, req.raster_resolution, EXTENT, req.raster_sigma, half_size=target_shape.texel_size() / 2.0
-    )
+    target_raster = target_shape.mask(req.raster_resolution)
     target_distance_field = build_target_distance_field(target_raster)
 
     # --- Raw: points exactly as placed, no pose search. ---

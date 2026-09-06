@@ -91,6 +91,7 @@ def _build_sim(weights: np.ndarray, rollout_seed: int):
         neural_updates_per_macro=NEURAL_UPDATES_PER_MACRO,
         communication_speed=COMMUNICATION_SPEED,
         initial_particle_count=density.initial_particles,
+        initial_spacing=density.initial_spacing,
     )
     return core, sim
 

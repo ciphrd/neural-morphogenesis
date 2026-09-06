@@ -8,6 +8,7 @@ import numpy as np
 import wgpu
 from agents_gpu import AgentsGPU
 from device import pick_device
+from simulation_settings import SPLAT_RADIUS
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, GRID_N, MpmCore, REST_FIELDS
 from triangle_domain_check import Triangle
@@ -371,7 +372,7 @@ def check_projected_fields_and_state(device, scale=1.0):
     meta["privateState"][0]=np.linspace(-.3,.4,8)
     meta["color"][0]=[.2,.3,.4,1]
     device.queue.write_buffer(agents._agent_state_buffer,PARTICLE_META_BUFFER_OFFSET,meta.tobytes())
-    core.set_splat_radius(.004)
+    core.set_splat_radius(SPLAT_RADIUS)
     def morphology():
         encoder=device.create_command_encoder();core.encode_morphology(encoder)
         device.queue.submit([encoder.finish()]);return core.read_morphology()
@@ -388,8 +389,7 @@ def check_projected_fields_and_state(device, scale=1.0):
     chemical_error=np.abs(chemical_after-chemical_before).sum()/max(np.abs(chemical_before).sum(),1e-8)
     morphology_error=np.abs(morphology_after-morphology_before).sum()/max(np.abs(morphology_before).sum(),1e-8)
     assert chemical_error < .01, chemical_error
-    # The elongated triangular fixture displaces centroids farther than the
-    # previous rectangular fixture (1.29% versus 0.98% at this resolution).
+    # Check refinement invariance using the configured morphology splat width.
     assert morphology_error < .02, morphology_error
     if scale == 1.0:
         fine_error = check_projected_fields_and_state(device, .5)

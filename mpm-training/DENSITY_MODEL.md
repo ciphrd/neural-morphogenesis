@@ -1,11 +1,10 @@
 # Particle-density model
 
-Model version 4 note: initial lattice cells are now divided into two triangle
-samples, each with material weight 0.5. The initial-count setting and lattice
-area formulas below refer to seed cells; actual initial sample count is twice
-that count, while total material is unchanged. The compact packing scale also
-applies to startup spacing. Area-based subdivision retains the target spacing
-defined here. See `GROWTH_MODEL.md` for current initialization and capacity rules.
+Model version 4 derives seed spacing as twice the density-resolved refinement
+spacing. Initial lattice cells are divided into two triangle samples, each with
+material weight 0.5. The initial-count setting and lattice area formulas below
+refer to seed cells; actual initial sample count is twice that count, while total
+material is unchanged. See `GROWTH_MODEL.md` for initialization and capacity rules.
 
 ## Goal
 
@@ -30,7 +29,7 @@ s = particle_spacing / reference_particle_spacing = 1 / sqrt(q)
 The current preset is the reference:
 
 ```text
-reference_growth_sample_spacing h0 = 0.0027
+reference_growth_sample_spacing h0 = 0.0108
 reference density multiplier q = 1
 ```
 
@@ -51,6 +50,7 @@ and do not expose a large domain-dependent number to the user.
 
 ```text
 growth_sample_spacing(q) = h0 / sqrt(q) = h0 * s
+seed_spacing(q) = 2 * growth_sample_spacing(q)
 ```
 
 The particle cap and seeded population should describe the same initial and

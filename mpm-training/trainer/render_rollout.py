@@ -41,7 +41,7 @@ from simulation_settings import (
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
 )
-from targets import load_target
+from targets import target_from_checkpoint
 from chemical_channels import homogeneous_channel_profiles, resolve_channel_profiles
 from training_sim import TrainingRollout
 from domain_fitness import StableMatchStop, target_mask, evaluate_domains
@@ -104,7 +104,7 @@ def main() -> int:
     agents.load_weights(weights)
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
 
-    target = load_target(meta["target"])
+    target = target_from_checkpoint(meta)
 
     sim = TrainingRollout(
         core,
@@ -122,6 +122,7 @@ def main() -> int:
         initial_condition_strength=meta['initial_condition_strength'],
         initial_condition_channel=meta['initial_condition_channel'],
         material_area_budget=meta['material_area_budget'],
+        initial_spacing=density.initial_spacing,
     )
 
     shape = meta['shape_settings']
@@ -130,6 +131,7 @@ def main() -> int:
         shape["shapeMissingTolerance"], shape["shapeSpillTolerance"],
         shape["shapeOverlapTolerance"])
     mask = target_mask(target, meta['raster_resolution'])
+    target_points = target.overlay_points(meta['raster_resolution'])
     growth_steps = meta['growth_steps']
     for i in range(meta["macro_steps"]):
         sim.macro_step(
@@ -142,8 +144,8 @@ def main() -> int:
                 sampling_blocked=core.active_count >= agents.max_active_particles or agents.capacity_blocked or agents.unresolved_samples > 0)
         if i % 4 == 0 or i == meta["macro_steps"] - 1 or stopping.complete:
             pos = sim.positions()
-            _, aligned = best_alignment(pos, target.points)
-            img = rasterize(aligned, target.points)
+            _, aligned = best_alignment(pos, target_points)
+            img = rasterize(aligned, target_points)
             path = out_dir / f"rollout_{i:03d}.png"
             img.save(path)
             print(f"wrote {path}")

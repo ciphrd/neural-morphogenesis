@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import numpy as np
+from PIL import Image
 from domain_fitness import (rasterize_triangles, target_mask, evaluate_domains,
                             StableMatchStop, MatchMetrics)
 from targets import TargetShape, load_target
@@ -57,6 +58,32 @@ def check_geometry():
     assert evaluate_domains(extra,target,target_mask(target,64)).match.error > 1
     print('[PASS] Exact area, subdivision, periodic translation, holes, missing/spill/overlap, invalid geometry')
 
+def check_png_target():
+    with tempfile.TemporaryDirectory() as tmp:
+        path=Path(tmp)/'target.png'
+        rgba=np.zeros((8,8,4),dtype=np.uint8)
+        rgba[1,2]=[240,10,20,255]
+        rgba[6,5]=[10,220,30,128]
+        Image.fromarray(rgba,'RGBA').save(path)
+        target=TargetShape.from_png(path)
+        expected=(1+128/255)*target.texel_size()**2
+        np.testing.assert_allclose(target.filled_area(),expected,rtol=1e-7)
+        np.testing.assert_allclose(target.center,[.5,.5],atol=1e-12)
+        mask=target_mask(target,64)
+        np.testing.assert_allclose(mask.sum()/64**2,expected,atol=1e-12)
+        assert mask[32:].sum() > mask[:32].sum()  # top PNG pixel remains visually above
+        restored=TargetShape.from_wire(target.wire(64))
+        np.testing.assert_allclose(target_mask(restored,64),mask)
+        assert target.resolution==(8,8)
+        assert target.overlay_points(64).shape[0] <= 64**2
+
+        no_alpha=Path(tmp)/'rgb.png'
+        Image.fromarray(rgba[...,:3],'RGB').save(no_alpha)
+        try: TargetShape.from_png(no_alpha)
+        except ValueError: pass
+        else: raise AssertionError('RGB-only PNG should be rejected')
+    print('[PASS] PNG alpha occupancy, RGB independence, y conversion, area, and embedded-mask replay')
+
 def check_stop():
     good=MatchMetrics(.01,.01,.01); bad=MatchMetrics(.2,0,0)
     s=StableMatchStop(interval=5,confirmations=2,settle_steps=7)
@@ -83,7 +110,7 @@ def check_browser():
         tri=tiled_target(t)
         for vertices in (tri,subdivide(tri),(.78*(tri-.5)+.5+np.array([.48,.49]))%1,np.concatenate([tri,tri])):
             fixtures.append({'vertices':vertices.reshape(-1).tolist(),
-                'target':{'points':t.points.tolist(),'texelSize':t.texel_size()},
+                'target':t.wire(64),
                 'expected':evaluate_domains(vertices,t,target_mask(t,64)).match})
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run([str(ROOT/'viewer/node_modules/.bin/tsc'),str(ROOT/'viewer/src/gpu/shapeMatch.ts'),
@@ -108,4 +135,4 @@ process.stdout.write(JSON.stringify({results,states}));''')
     print('[PASS] Python/browser geometry metrics and stopping state parity')
 
 if __name__=='__main__':
-    check_geometry();check_stop();check_browser()
+    check_geometry();check_png_target();check_stop();check_browser()

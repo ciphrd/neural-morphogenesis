@@ -27,18 +27,6 @@ const TRAIN_API_URL = `http://${canonicalConfig.server.host}:${canonicalConfig.s
 const TRAIN_WS_URL = `ws://${canonicalConfig.server.host}:${canonicalConfig.server.port}/ws`
 const RECORDING_FORMAT = pickRecordingFormat()
 
-const BOUNDARY_TANGENT_SCENARIO: SimulationScenario = {
-  initialLayout: { kind: "rows", rows: 2, columns: 9 },
-  // seedRows emits pairs: slots 26/27 belong to the top-middle seed cell.
-  // Slot 26 remains the original particle's daughter after the first split,
-  // so targeting it again exercises the exact same lineage cell at step 200.
-  events: [
-    { step: 50, type: "grow", particleIndex: 26 },
-    { step: 200, type: "grow", particleIndex: 26 },
-  ],
-  suppressNaturalGrowth: true,
-}
-
 const VERTICAL_SPLIT_SCENARIO: SimulationScenario = {
   initialLayout: { kind: "rows", rows: 2, columns: 9 },
   // Fixed world-up growth axis. Slot 26 is retained as one daughter,
@@ -71,7 +59,7 @@ const RADIAL_INWARD_CIRCLE_SCENARIO: SimulationScenario = {
   growthFieldOverride: "radial-inward",
 }
 
-type LabScenarioId = "boundary-tangent" | "vertical" | "repeated-top-row" | "radial-inward-circle"
+type LabScenarioId = "vertical" | "repeated-top-row" | "radial-inward-circle"
 
 export function LabView() {
   const { latest } = useTrainingSocket(TRAIN_WS_URL, TRAIN_API_URL)
@@ -82,9 +70,7 @@ export function LabView() {
     ? RADIAL_INWARD_CIRCLE_SCENARIO
     : scenarioId === "repeated-top-row"
       ? REPEATED_TOP_ROW_GROWTH_SCENARIO
-      : scenarioId === "vertical"
-        ? VERTICAL_SPLIT_SCENARIO
-        : BOUNDARY_TANGENT_SCENARIO
+      : VERTICAL_SPLIT_SCENARIO
   const scenarioInitialCount = scenario.initialLayout.kind === "blob"
     ? scenario.initialLayout.count
     : scenario.initialLayout.rows * scenario.initialLayout.columns
@@ -94,9 +80,7 @@ export function LabView() {
   const scenarioMinimumSteps = scenarioId === "radial-inward-circle"
     ? 600
     : scenarioId === "repeated-top-row" ? 750 : 240
-  const scenarioAxisLabel = scenarioId === "boundary-tangent"
-    ? "Local boundary-tangent axis"
-    : scenarioId === "radial-inward-circle"
+  const scenarioAxisLabel = scenarioId === "radial-inward-circle"
       ? "Every growth-grid node points toward center"
       : "Fixed vertical axis"
   const baseConfig = useMemo(() => latest ? {
@@ -131,7 +115,7 @@ export function LabView() {
   const effectiveParticleDensity =
     particleDensityOverride ?? defaultParticleDensity
   const defaultSubstrateResolution =
-    VIEWER_DEFAULTS.playback.substrateResolution ?? baseConfig?.fieldN ?? 256
+    VIEWER_DEFAULTS.playback.substrateResolution ?? baseConfig?.baseResolution ?? 256
   const effectiveSubstrateResolution =
     substrateResolutionOverride ?? defaultSubstrateResolution
   const initialMemory = policyExploration?.cellMemory ?? (baseConfig ? cellMemoryFromConfig(baseConfig) : "none")
@@ -143,7 +127,7 @@ export function LabView() {
       ...baseConfig,
       ...initialConditionOverride,
       initialCondition: effectiveInitialCondition,
-      fieldN: effectiveSubstrateResolution,
+      baseResolution: effectiveSubstrateResolution,
       chemicalCommunicationArchitecture:
         chemicalArchitectureOverride ?? chemicalCommunicationArchitectureFromConfig(baseConfig),
     }, effectiveParticleDensity)
@@ -230,6 +214,10 @@ export function LabView() {
     Math.max(0, particleStateChannelCount - 3),
     internalStateChannelStart,
   )
+  const neuralMemoryControlsInactive =
+    particleColorMode === "neural-memory" &&
+    config !== null &&
+    cellMemoryFromConfig(config) !== "recurrent"
 
   return (
     <div className="training-layout lab-layout">
@@ -247,7 +235,6 @@ export function LabView() {
             }}
             aria-label="Lab scenario"
           >
-            <option value="boundary-tangent">2 × 9 — boundary-tangent growth</option>
             <option value="vertical">2 × 9 — vertical growth</option>
             <option value="repeated-top-row">2 × 9 — repeated top-row growth</option>
             <option value="radial-inward-circle">Circle — enforced inward growth grid</option>
@@ -344,7 +331,7 @@ export function LabView() {
                 setPhysicsOverride(null)
               }}
             >
-              {Array.from(new Set([0.5, 1, 2, 4, effectiveParticleDensity]))
+              {Array.from(new Set([0.25, 0.5, 1, 2, 4, effectiveParticleDensity]))
                 .sort((a, b) => a - b)
                 .map((density) => (
                   <option key={density} value={density}>{density}×</option>
@@ -402,42 +389,28 @@ export function LabView() {
             <Slider min={1} max={MAX_ZOOM} step={0.05} value={zoom} disabled={autoZoomEnabled} onChange={(value) => { setZoom(value); setEffectiveZoom(value) }} />
             <span className="slider-value">{(autoZoomEnabled ? effectiveZoom : zoom).toFixed(2)}×</span>
           </div>
-          <details className="settings-category">
-            <summary>Post-processing</summary>
-            <label className="checkbox-row"><input type="checkbox" checked={bloom.enabled} onChange={(event) => setBloom((value) => ({ ...value, enabled: event.target.checked }))} />Bloom</label>
-            {bloom.enabled && <>
-              <label className="slider-row"><span>Bloom intensity</span><Slider min={0} max={3} step={0.05} value={bloom.intensity} onChange={(intensity) => setBloom((value) => ({ ...value, intensity }))} /><span className="slider-value">{bloom.intensity.toFixed(2)}</span></label>
-              <label className="slider-row"><span>Bloom threshold</span><Slider min={0} max={1} step={0.01} value={bloom.threshold} onChange={(threshold) => setBloom((value) => ({ ...value, threshold }))} /><span className="slider-value">{bloom.threshold.toFixed(2)}</span></label>
-              <label className="slider-row"><span>Bloom radius</span><Slider min={0.25} max={8} step={0.25} value={bloom.radiusPx} onChange={(radiusPx) => setBloom((value) => ({ ...value, radiusPx }))} /><span className="slider-value">{bloom.radiusPx.toFixed(2)}px</span></label>
-              <label className="slider-row"><span>Bloom levels</span><Slider min={2} max={10} step={1} value={bloom.levels} onChange={(levels) => setBloom((value) => ({ ...value, levels }))} /><span className="slider-value">{bloom.levels}</span></label>
-              <label className="slider-row"><span>Bloom scatter</span><Slider min={0} max={1} step={0.01} value={bloom.scatter} onChange={(scatter) => setBloom((value) => ({ ...value, scatter }))} /><span className="slider-value">{bloom.scatter.toFixed(2)}</span></label>
-            </>}
-          </details>
           <label className="slider-row">
             <span>Particle size</span>
             <Slider min={1} max={16} step={1} value={particleRadiusPx} onChange={setParticleRadiusPx} />
             <span className="slider-value">{particleRadiusPx}px</span>
           </label>
-          <label className="slider-row"><span>Shape</span><select className="select" value={particleShape} onChange={(event) => setParticleShape(event.target.value as ParticleShape)}><option value="dot">Dot</option><option value="triangle">Triangle</option></select></label>
+          <label className="slider-row"><span>Shape</span><select className="select" value={particleShape} onChange={(event) => setParticleShape(event.target.value as ParticleShape)}><option value="dot">Dot</option><option value="triangle">Triangle</option><option value="domain">Domain</option></select></label>
           <label className="slider-row"><span>Color</span><select className="select" value={particleColorMode} onChange={(event) => setParticleColorMode(event.target.value as ParticleColorMode)}><option value="white">White</option><option value="neural-color">NN output</option><option value="growth-magnitude">Growth magnitude</option><option value="neural-memory">Neural memory</option><option value="chemical-memory">Chemical memory</option><option value="boundary-value">Boundary value</option><option value="neurons">Neurons</option></select></label>
           <label className="slider-row"><span>Alpha</span><Slider min={0} max={1} step={0.01} value={particleAlpha} onChange={setParticleAlpha} /><span className="slider-value">{particleAlpha.toFixed(2)}</span></label>
           <label className="checkbox-row"><input type="checkbox" checked={directionalLineVisible} onChange={(event) => setDirectionalLineVisible(event.target.checked)} />Heading direction (red)</label>
-          <label className="checkbox-row" title="Actual transported triangle boundaries; independent of marker size and opacity">
-            <input type="checkbox" checked={domainVisible} onChange={(event) => setDomainVisible(event.target.checked)} />
-            Show particle domains (triangles)
-          </label>
+          <label className="checkbox-row" title="Overlay actual transported triangle boundaries on Dot or Triangle markers"><input type="checkbox" checked={domainVisible} onChange={(event) => setDomainVisible(event.target.checked)} />Overlay particle domains</label>
           <label className="checkbox-row"><input type="checkbox" checked={growthLineVisible} onChange={(event) => setGrowthLineVisible(event.target.checked)} />Growth direction (green)</label>
           {particleColorMode === "growth-magnitude" && (
             <label className="slider-row"><span>Magnitude boost</span><Slider min={1} max={10} step={0.1} value={growthMagnitudeBoost} onChange={setGrowthMagnitudeBoost} /><span className="slider-value">{growthMagnitudeBoost.toFixed(1)}×</span></label>
           )}
           {(particleColorMode === "neural-memory" || particleColorMode === "chemical-memory") && (
             <>
-              <div className="channel-window-control">
+              <div className={`channel-window-control${neuralMemoryControlsInactive ? " is-inactive" : ""}`}>
                 <div className="channel-window-label"><span>Channels</span><span>{particleStateChannelStart}–{particleStateChannelStart + 2}</span></div>
                 <ChannelWindowSlider channels={particleStateChannelCount} value={particleStateChannelStart} onChange={setInternalStateChannelStart} />
               </div>
               {particleColorMode === "neural-memory" && (
-                <label className="slider-row"><span>Opponent subtraction</span><Slider min={0} max={1} step={0.01} value={chemicalMemoryOpponentSubtraction} onChange={setChemicalMemoryOpponentSubtraction} /><span className="slider-value">{chemicalMemoryOpponentSubtraction.toFixed(2)}</span></label>
+                <label className={`slider-row${neuralMemoryControlsInactive ? " is-inactive" : ""}`}><span>Opponent subtraction</span><Slider min={0} max={1} step={0.01} value={chemicalMemoryOpponentSubtraction} onChange={setChemicalMemoryOpponentSubtraction} /><span className="slider-value">{chemicalMemoryOpponentSubtraction.toFixed(2)}</span></label>
               )}
             </>
           )}
@@ -463,6 +436,17 @@ export function LabView() {
             <label className="slider-row"><span>Blur</span><Slider min={0} max={2} step={0.01} value={blur} onChange={setBlur} /><span className="slider-value">{blur.toFixed(2)}</span></label>
             <label className="slider-row"><span>Gradient exponent</span><Slider min={0.25} max={4} step={0.05} value={gradientExponent} onChange={setGradientExponent} /><span className="slider-value">{gradientExponent.toFixed(2)}</span></label>
           </>}
+          <details className="settings-category">
+            <summary>Post-processing</summary>
+            <label className="checkbox-row"><input type="checkbox" checked={bloom.enabled} onChange={(event) => setBloom((value) => ({ ...value, enabled: event.target.checked }))} />Bloom</label>
+            {bloom.enabled && <>
+              <label className="slider-row"><span>Bloom intensity</span><Slider min={0} max={3} step={0.05} value={bloom.intensity} onChange={(intensity) => setBloom((value) => ({ ...value, intensity }))} /><span className="slider-value">{bloom.intensity.toFixed(2)}</span></label>
+              <label className="slider-row"><span>Bloom threshold</span><Slider min={0} max={1} step={0.01} value={bloom.threshold} onChange={(threshold) => setBloom((value) => ({ ...value, threshold }))} /><span className="slider-value">{bloom.threshold.toFixed(2)}</span></label>
+              <label className="slider-row"><span>Bloom radius</span><Slider min={0.25} max={8} step={0.25} value={bloom.radiusPx} onChange={(radiusPx) => setBloom((value) => ({ ...value, radiusPx }))} /><span className="slider-value">{bloom.radiusPx.toFixed(2)}px</span></label>
+              <label className="slider-row"><span>Bloom levels</span><Slider min={2} max={10} step={1} value={bloom.levels} onChange={(levels) => setBloom((value) => ({ ...value, levels }))} /><span className="slider-value">{bloom.levels}</span></label>
+              <label className="slider-row"><span>Bloom scatter</span><Slider min={0} max={1} step={0.01} value={bloom.scatter} onChange={(scatter) => setBloom((value) => ({ ...value, scatter }))} /><span className="slider-value">{bloom.scatter.toFixed(2)}</span></label>
+            </>}
+          </details>
         </section>
         {trainedPhysics && physics && (
           <>
@@ -474,7 +458,6 @@ export function LabView() {
               onReset={() => setPhysicsOverride(null)}
             />
             <GrowthPanel
-              trained={trainedPhysics}
               value={physics}
               onChange={setPhysicsOverride}
               isOverridden={physicsOverride !== null}

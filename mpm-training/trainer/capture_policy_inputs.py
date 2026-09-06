@@ -352,6 +352,7 @@ def main() -> int:
             neural_updates_per_macro=meta['neural_updates_per_macro'],
             communication_speed=meta['communication_speed'],
             initial_particle_count=initial_particle_count,
+            initial_spacing=density.initial_spacing,
         )
 
     def growth_log_state() -> str:

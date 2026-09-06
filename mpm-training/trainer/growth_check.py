@@ -330,8 +330,30 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     np.testing.assert_allclose(samples[0]["privateState"], samples[1]["privateState"], atol=1e-7)
     print("[PASS] recurrent-128 policy emits bounded RGB independently of memory and new material samples inherit private state")
 
+def check_forced_growth_direction(device):
+    """Exercise the shared uniform offsets for retained explicit Lab directions."""
+    from continuous_growth_check import make_system, load_samples, read_rest
+    core, agents = make_system(device)
+    load_samples(core, agents, [[.5, .5]], [[0, 0]])
+    agents.load_weights(np.zeros(agents._total_floats, np.float32))
+    for direction in [(1., 0.), (0., 1.)]:
+        device.queue.write_buffer(agents._physics_uniform, 36, np.array([0, 1], np.uint32))
+        device.queue.write_buffer(agents._physics_uniform, 48, np.array(direction, np.float32))
+        device.queue.write_buffer(agents._physics_uniform, 56, np.array([0], np.uint32))
+        encoder = device.create_command_encoder()
+        agents.encode_step(encoder, 0)
+        device.queue.submit([encoder.finish()])
+        np.testing.assert_allclose(read_rest(core, 1)[0, 5:7], direction, atol=1e-6)
+    device.queue.write_buffer(agents._physics_uniform, 36, np.array([0xffffffff, 0], np.uint32))
+    encoder = device.create_command_encoder()
+    agents.encode_step(encoder, 0)
+    device.queue.submit([encoder.finish()])
+    np.testing.assert_allclose(read_rest(core, 1)[0, 5:7], [0, 0], atol=1e-6)
+    print('[PASS] explicit horizontal/vertical growth and return to policy control')
+
 def main() -> None:
     device = pick_device()
+    check_forced_growth_direction(device)
     check_morphology_occupancy(device)
     check_single_cell_rollout_seed(device)
     check_supersampled_communication_rounds(device)

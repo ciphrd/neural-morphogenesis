@@ -6,7 +6,6 @@ import numpy as np
 import wgpu
 
 from simulation_settings import (
-    BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEMICAL_GRADIENT_INPUT_SCALE,
     CHEMICAL_VALUE_INPUT_MULTIPLIER,
     ELASTIC_STRAIN_INPUTS_ENABLED,
@@ -101,7 +100,7 @@ class AgentsGPU:
         elastic_strain_inputs_enabled: bool = ELASTIC_STRAIN_INPUTS_ENABLED,
         policy_architecture: str = CONFIG["run"]["policyArchitecture"],
         internal_state_speed: float = INTERNAL_STATE_SPEED,
-        chemical_communication_architecture: str = CONFIG["run"]["chemicalCommunicationArchitecture"],
+        chemical_communication_architecture: str = CONFIG["chemistry"]["chemicalCommunicationArchitecture"],
     ) -> None:
         self.unresolved_samples = 0
         self.capacity_blocked = False
@@ -143,15 +142,14 @@ class AgentsGPU:
         self.set_chemical_gradient_input_scale(CHEMICAL_GRADIENT_INPUT_SCALE)
         self.set_chemical_value_input_multiplier(CHEMICAL_VALUE_INPUT_MULTIPLIER)
 
-        self.set_boundary_tangent_min_gradient(BOUNDARY_TANGENT_MIN_GRADIENT)
 
         # Lab-only override is disabled during training. This trailing ABI
         # slot is shared with the browser's scheduled-scenario support.
         self.device.queue.write_buffer(
-            self._physics_uniform, 40, np.array([0xFFFFFFFF], dtype=np.uint32)
+            self._physics_uniform, 36, np.array([0xFFFFFFFF], dtype=np.uint32)
         )
         self.device.queue.write_buffer(
-            self._physics_uniform, 44, np.array([0], dtype=np.uint32)
+            self._physics_uniform, 40, np.array([0], dtype=np.uint32)
         )
         self.device.queue.write_buffer(
             self._physics_uniform, 48, np.array([1.0, 0.0], dtype=np.float32)
@@ -498,14 +496,6 @@ class AgentsGPU:
             self._physics_uniform,
             60,
             np.array([max(float(multiplier), 0.0)], dtype=np.float32),
-        )
-
-    def set_boundary_tangent_min_gradient(self, threshold: float) -> None:
-        """Write the flat-interior cutoff at AgentPhysics byte offset 76."""
-        self.device.queue.write_buffer(
-            self._physics_uniform,
-            36,
-            np.array([max(0.0, float(threshold))], dtype=np.float32),
         )
 
     def set_forced_growth_field_override(self, enabled: bool) -> None:

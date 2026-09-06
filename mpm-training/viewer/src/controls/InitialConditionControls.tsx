@@ -9,7 +9,7 @@ export function InitialConditionControls({ config, recurrent, onChange }: {
 }) {
   const preset = config?.initialCondition ?? 'none'
   const strength = config?.initialConditionStrength ?? defaultsConfig.run.initialConditionStrength
-  const channel = config?.initialConditionChannel ?? defaultsConfig.run.initialConditionChannel
+  const channel = config?.initialConditionChannel ?? defaultsConfig.chemistry.initialConditionChannel
   const change = (patch: Partial<InitialConditionSettings>) => onChange({ initialCondition: preset,
     initialConditionStrength: strength, initialConditionChannel: channel, ...patch })
   const chemical = preset.startsWith('chemical-') || preset === 'handed-chemistry'

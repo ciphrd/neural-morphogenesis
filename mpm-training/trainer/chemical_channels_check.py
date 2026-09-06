@@ -34,12 +34,12 @@ def check_layout() -> None:
         "global", "global", "global", "regional", "regional", "regional", "local", "local", "local"
     ]
     assert all(profile.role is None for profile in profiles)
-    widths, heights = resolved_dimensions(512, 512, profiles)
+    widths, heights = resolved_dimensions(FIELD_N, FIELD_N, profiles)
     assert widths == heights
     assert widths[0] == widths[1] == widths[2]
     assert widths[3] == widths[4] == widths[5]
     assert widths[6] == widths[7] == widths[8]
-    assert 1 <= widths[0] < widths[3] < widths[6] == 512
+    assert widths == (FIELD_N,) * CHEM_CHANNELS
     offsets, total = packed_offsets(widths, heights)
     expected_offsets = []
     expected_total = 0
@@ -50,9 +50,9 @@ def check_layout() -> None:
     assert total == expected_total
     wire = profiles_to_wire(profiles)
     assert resolve_channel_profiles(CHEM_CHANNELS, wire) == profiles
-    constants = channel_shader_constants(512, 512, profiles)
+    constants = channel_shader_constants(FIELD_N, FIELD_N, profiles)
     assert constants["FIELD_TOTAL"] == total
-    assert constants["FIELD_MAX_WIDTH"] == 512
+    assert constants["FIELD_MAX_WIDTH"] == FIELD_N
     print("[PASS] 3/3/3 profiles resolve and round-trip through run metadata")
 
 def check_gpu_pipelines() -> None:

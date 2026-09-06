@@ -28,17 +28,21 @@ The viewer requires WebGPU. It starts with a random policy from the shared defau
 | Section | Responsibility |
 | --- | --- |
 | `simulation` | Grid, time step, numerical limits, refinement and material yield bounds |
-| `run` | Physics, growth, policy selection, chemistry, training, fitness and stop settings |
+| `run` | Physics, growth, policy selection, training, fitness and stop settings |
 | `density` | Numerical sampling-density scaling and supported range |
-| `chemistry` | Channel profiles and homogeneous experimental profile |
+| `chemistry` | Substrate resolution, transport, sensing, communication cadence, channel profiles and initial cue channel |
 | `policy` | Head initialization and mutation scales |
 | `initialConditions` | Available perturbation presets |
 | `viewer` | Playback, rendering, tools and lab defaults |
 | `server` | Default server host and port |
 
+Channel count is derived from `chemistry.channels`; there is no separate count to keep in sync. `chemistry.baseResolution` is the base substrate resolution. All substrate simulation defaults live alongside its channel profiles in `chemistry`.
+
+The default mechanics grid, morphology field, and all nine chemical channels are 64×64. Channel profiles retain different chemical response, decay and diffusion parameters, but each uses `resolutionScale: 1.0`. The mechanics grid uses `DX: 0.015625` and `INV_DX: 64`; particle density and timestep are independent settings.
+
 Python `config.py` loads the JSON; `simulation_settings.py` exposes typed values and derived quantities. TypeScript imports the JSON directly. CLI arguments and viewer controls override a run's settings. Saved run settings record that run's actual configuration; they are outputs, not another default source. `core/density_cases.json` contains parity test fixtures.
 
-The current growth schema is version 13. Older settings and checkpoints are not migrated or adapted; start new runs after this cleanup.
+The current growth schema is version 14. Older settings and checkpoints are not migrated or adapted; start new runs after this cleanup.
 
 ## Simulation
 
@@ -53,6 +57,12 @@ The policy senses chemical values and gradients in a local frame, morphology, an
 The default chemical architecture is a persistent environment with diffusion, decay, material advection, and triangle-area deposition. Cell-owned projection remains an explicit alternative. Nine default channels use three global, three regional, and three local profiles. Chemistry does not control fluidity or motility.
 
 Optional controls retained include repulsion, initial perturbations, recurrent memory, strain sensing, multi-density evaluation, material budgets and stable-shape stopping. Rendering includes material domains, growth vectors/magnitude, neural and chemical state, fields, and constitutive diagnostics.
+
+## Sampling and initial tissue
+
+`run.sampleSpacing: 0.0108` controls the geometric refinement target. Seed spacing is derived as twice the density-resolved sample spacing, placing initial triangles near the normal post-split scale instead of maintaining a separate startup resolution. The default 20 seed cells produce 40 triangle samples at 1× density and five cells at 0.25×; scaling count and spacing together keeps the startup area approximately density-independent.
+
+The default density-sensing splat radius is 0.016, about one texel at 64×64. The density resolver derives seed spacing from refinement spacing after applying the density multiplier. `sampling_density_check.py` checks seed geometry and material conservation under coarser refinement.
 
 ## Multi-density evaluation
 

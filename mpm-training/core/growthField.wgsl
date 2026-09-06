@@ -68,7 +68,6 @@ struct AgentPhysics {
   maxActiveParticles: u32,
   elasticStrainScale: f32,
   chemicalGradientInputScale: f32,
-  boundaryTangentMinGradient: f32,
   forcedGrowthStart: u32,
   forceGrowthMagnitude: u32,
   forcedGrowthDirection: vec2<f32>,

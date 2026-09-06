@@ -1,9 +1,9 @@
 {
   "simulation": {
-    "GRID_N": 128,
-    "DX": 0.0078125,
-    "INV_DX": 128,
-    "DT": 1.5625e-05,
+    "GRID_N": 64,
+    "DX": 0.015625,
+    "INV_DX": 64,
+    "DT": 1.5625e-5,
     "MAX_PARTICLES": 200000,
     "MORPHOLOGY_GRADIENT_INPUT_SCALE": 0.018,
     "REFINEMENT_THRESHOLD": 1.75,
@@ -14,55 +14,39 @@
     "SNOW_YIELD_HIGH": 1.0075,
     "WIDE_YIELD_LOW": 0.5,
     "WIDE_YIELD_HIGH": 2.0,
-    "MORPHOLOGY_FIELD_N": 512
+    "MORPHOLOGY_FIELD_N": 64
   },
   "run": {
     "target": "circle",
-    "particles": 400,
-    "initialParticleCount": 5,
-    "densityModelVersion": 3,
-    "trainingDensityMultipliers": [
-      1.0
-    ],
+    "particles": 3000,
+    "initialParticleCount": 20,
+    "densityModelVersion": 4,
+    "trainingDensityMultipliers": [1],
     "densityAggregation": "worst",
     "particleCapacity": 400,
     "particleMass": 10.0,
     "particleVolume": 1.0,
-    "chemicalValueInputMultiplier": 1.0,
-    "chemicalGradientInputScale": 0.045,
-    "macroSteps": 160,
+    "macroSteps": 2000,
     "growthSteps": null,
-    "substepsPerMacro": 32,
+    "substepsPerMacro": 16,
     "gravity": 0.0,
     "spawnX": 0.5,
     "spawnY": 0.5,
-    "channels": 9,
-    "fieldN": 512,
     "morphologyBlurSigma": 0.01,
     "morphologyDensityReference": 1.0,
-    "boundaryTangentMinGradient": 1.0,
-    "neuralUpdatesPerMacro": 1,
-    "communicationSpeed": 4.0,
     "internalStateSpeed": 4.0,
     "elasticStrainScale": 0.15,
     "elasticStrainInputsEnabled": true,
     "hiddenDim": 128,
-    "hiddenLayers": [
-      128
-    ],
+    "hiddenLayers": [128],
     "cellMemory": "none",
     "policyArchitecture": "stateless-128",
-    "chemicalCommunicationArchitecture": "persistent-environment",
-    "decay": 0.91,
-    "depositRate": 4.0,
-    "normalizeDepositsByLocalDensity": true,
-    "maxEnvWrite": 1.0,
     "friction": 0.9,
     "growthDuration": 12.0,
     "growthCompressionStart": 0.1,
     "growthCompressionStop": 0.1,
     "growthCompressionFeedback": 1.0,
-    "growthModelVersion": 13,
+    "growthModelVersion": 14,
     "materialAreaBudget": 0.0,
     "growthAnisotropy": 1.0,
     "mpmEnabled": true,
@@ -71,7 +55,7 @@
     "materialNu": 0.2,
     "materialHardening": 3.0,
     "materialElasticity": 1.0,
-    "splatRadius": 0.004,
+    "splatRadius": 0.016,
     "repulsionStrength": 0.0,
     "repulsionMaxDelta": 40.0,
     "population": 16,
@@ -97,32 +81,43 @@
     "shapeMissingTolerance": 0.02,
     "shapeSpillTolerance": 0.02,
     "shapeOverlapTolerance": 0.02,
-    "sampleSpacing": 0.0027,
+    "sampleSpacing": 0.0108,
     "initialCondition": "none",
     "initialConditionStrength": 0.3,
-    "initialConditionChannel": 0,
     "domainGeometry": "triangle-vertices"
   },
   "density": {
-    "MODEL_VERSION": 3,
+    "MODEL_VERSION": 4,
     "INITIAL_PACKING_SPACING_SCALE": 0.8,
+    "INITIAL_SPACING_IN_SAMPLE_SPACINGS": 2.0,
     "REPULSION_RADIUS_IN_CELLS": 1.4814814814814814,
-    "MIN_SUPPORTED_MULTIPLIER": 0.5,
+    "MIN_SUPPORTED_MULTIPLIER": 0.25,
     "MAX_SUPPORTED_MULTIPLIER": 4.0
   },
   "chemistry": {
+    "baseResolution": 64,
+    "chemicalCommunicationArchitecture": "persistent-environment",
+    "decay": 0.91,
+    "depositRate": 4.0,
+    "normalizeDepositsByLocalDensity": true,
+    "maxEnvWrite": 1.0,
+    "chemicalValueInputMultiplier": 1.0,
+    "chemicalGradientInputScale": 0.045,
+    "communicationSpeed": 4.0,
+    "neuralUpdatesPerMacro": 1,
+    "initialConditionChannel": 0,
     "version": 1,
     "preset": "developmental-3-3-3",
     "profiles": {
       "global": {
-        "resolutionScale": 0.25,
+        "resolutionScale": 1.0,
         "relaxationTime": 24.0,
         "fieldResponseTime": 24.0,
         "decayExponent": 0.1,
         "diffusionMultiplier": 0.001
       },
       "regional": {
-        "resolutionScale": 0.5,
+        "resolutionScale": 1.0,
         "relaxationTime": 10.0,
         "fieldResponseTime": 10.0,
         "decayExponent": 0.5,
@@ -183,44 +178,31 @@
     "heads": {
       "chemical": {
         "weightGain": 0.5,
-        "biasCenter": [
-          0.0
-        ],
+        "biasCenter": [0.0],
         "biasJitter": 0.05,
         "mutationScale": 0.5
       },
       "growthVector": {
         "weightGain": 0.25,
-        "biasCenter": [
-          0.0,
-          0.0
-        ],
+        "biasCenter": [0.0, 0.0],
         "biasJitter": 0.1,
         "mutationScale": 0.2
       },
       "color": {
         "weightGain": 0.5,
-        "biasCenter": [
-          0.0,
-          0.0,
-          0.0
-        ],
+        "biasCenter": [0.0, 0.0, 0.0],
         "biasJitter": 0.5,
         "mutationScale": 0.5
       },
       "stateDelta": {
         "weightGain": 0.25,
-        "biasCenter": [
-          0.0
-        ],
+        "biasCenter": [0.0],
         "biasJitter": 0.1,
         "mutationScale": 0.2
       },
       "stateGate": {
         "weightGain": 0.25,
-        "biasCenter": [
-          -2.0
-        ],
+        "biasCenter": [-2.0],
         "biasJitter": 0.25,
         "mutationScale": 0.15
       }
@@ -297,7 +279,7 @@
         "smoothing": 0.01
       },
       "bloom": {
-        "enabled": true,
+        "enabled": false,
         "intensity": 1.3,
         "threshold": 0.22,
         "radiusPx": 2.5,
@@ -321,11 +303,11 @@
       }
     },
     "lab": {
-      "scenario": "boundary-tangent"
+      "scenario": "vertical"
     },
     "policyExploration": {
       "weightGain": 1,
-      "mutationStrength": 5e-06
+      "mutationStrength": 5e-6
     }
   },
   "server": {

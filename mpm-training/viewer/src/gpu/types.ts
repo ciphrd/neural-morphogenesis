@@ -57,12 +57,11 @@ export interface RunSettings extends ShapeStopSettings {
   spawnX: number;
   spawnY: number;
   channels: number;
-  fieldN: number;
+  baseResolution: number;
   /** Per-channel spatial/temporal transport profile, packed into shared buffers. */
   chemicalChannelProfiles: ChemicalChannelProfile[];
   morphologyBlurSigma: number;
   morphologyDensityReference: number;
-  boundaryTangentMinGradient: number;
   neuralUpdatesPerMacro: number;
   communicationSpeed: number;
   internalStateSpeed: number;
@@ -192,7 +191,7 @@ export interface GenerationRecord {
 export type SimulationConfig = RunSettings & GenerationRecord;
 
 // The live-adjustable subset of SimulationConfig — everything else
-// (particles/macroSteps/channels/fieldN/hiddenDim/target/...) is baked
+// (particles/macroSteps/channels/baseResolution/hiddenDim/target/...) is baked
 // into GPU buffer sizes or WGSL compile-time consts, and changing it
 // mid-replay would need a full rebuild, not a live uniform write. Backed
 // by uniform buffers in the GPU layer (MpmCore's own set*() methods,
@@ -234,8 +233,6 @@ export interface PhysicsSettings {
   morphologyBlurSigma: number;
   /** Half-saturation density used by rho/(rho + reference). */
   morphologyDensityReference: number;
-  /** Gradient magnitude below which Lab tangent growth falls back to the policy. */
-  boundaryTangentMinGradient: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;
   mpmEnabled: boolean;
@@ -272,7 +269,6 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     splatRadius: config.splatRadius,
     morphologyBlurSigma: config.morphologyBlurSigma,
     morphologyDensityReference: config.morphologyDensityReference,
-    boundaryTangentMinGradient: config.boundaryTangentMinGradient,
     repulsionStrength: config.repulsionStrength,
     repulsionMaxDelta: config.repulsionMaxDelta,
     mpmEnabled: config.mpmEnabled,

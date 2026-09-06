@@ -37,7 +37,7 @@ import { DX, GRID_N, INV_DX, NODE_COUNT, REPULSION_FIELD_N, type MpmCore } from 
 import { templateShader } from "./shaderTemplate";
 
 export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "gradient" | "growth";
-export type ParticleShape = "dot" | "triangle";
+export type ParticleShape = "dot" | "triangle" | "domain";
 export type ParticleColorMode = "white" | "neural-color" | "growth-magnitude" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
 export const MAX_ZOOM = 32;
 
@@ -88,6 +88,7 @@ export class Renderer {
   private readonly particleCirclePipeline: GPURenderPipeline;
   private readonly domainPipeline: GPURenderPipeline;
   private readonly domainBindGroup: GPUBindGroup;
+  private particleShape: ParticleShape = VIEWER_DEFAULTS.rendering.particleShape;
   private domainVisible = VIEWER_DEFAULTS.rendering.domainVisible;
 
   private readonly particleRadiusUniform: GPUBuffer;
@@ -248,7 +249,6 @@ export class Renderer {
       entries: [{ binding: 0, resource: { buffer: this.viewUniform } }],
     });
     const domainLayout = device.createBindGroupLayout({ entries: [
-      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
       { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
     ] });
     this.domainPipeline = device.createRenderPipeline({
@@ -258,7 +258,6 @@ export class Renderer {
       primitive: { topology: "line-list" },
     });
     this.domainBindGroup = device.createBindGroup({ layout: domainLayout, entries: [
-      { binding: 0, resource: { buffer: mpmCore.positions } },
       { binding: 4, resource: { buffer: mpmCore.rest } },
     ] });
     this.pointLayout = device.createBindGroupLayout({
@@ -856,7 +855,9 @@ export class Renderer {
   }
 
   setParticleShape(shape: ParticleShape): void {
-    writeFloat32(this.device, this.viewUniform, 4, new Float32Array([shape === "triangle" ? 1 : 0]));
+    this.particleShape = shape;
+    const shapeCode = shape === "domain" ? 2 : shape === "triangle" ? 1 : 0;
+    writeFloat32(this.device, this.viewUniform, 4, new Float32Array([shapeCode]));
   }
 
   setParticleColorMode(mode: ParticleColorMode): void {
@@ -1093,34 +1094,38 @@ export class Renderer {
 
     if (activeCount > 0) {
       pass.setBindGroup(1, this.viewBindGroup);
+      // Domain mode expands each particle into at most four periodic triangle
+      // instances entirely in the vertex shader. Invalid copies are clipped.
+      const particleVertexCount = this.particleShape === "domain" ? 3 : 6;
+      const particleInstanceCount = this.particleShape === "domain" ? activeCount * 4 : activeCount;
       if (this.particleColorMode === "white") {
         pass.setPipeline(this.particleCirclePipeline);
         pass.setBindGroup(0, this.circleParticleBindGroup);
-        pass.draw(6, activeCount);
+        pass.draw(particleVertexCount, particleInstanceCount);
       } else if (this.particleColorMode === "neural-color") {
         pass.setPipeline(this.neuralColorParticlePipeline);
         pass.setBindGroup(0, this.neuralColorParticleBindGroup);
-        pass.draw(6, activeCount);
+        pass.draw(particleVertexCount, particleInstanceCount);
       } else if (this.particleColorMode === "growth-magnitude") {
         pass.setPipeline(this.growthMagnitudeParticlePipeline);
         pass.setBindGroup(0, this.neuralColorParticleBindGroup);
-        pass.draw(6, activeCount);
+        pass.draw(particleVertexCount, particleInstanceCount);
       } else if (this.particleColorMode === "neural-memory") {
         pass.setPipeline(this.internalStateParticlePipeline);
         pass.setBindGroup(0, this.internalStateParticleBindGroup);
-        pass.draw(6, activeCount);
+        pass.draw(particleVertexCount, particleInstanceCount);
       } else if (this.particleColorMode === "chemical-memory") {
         pass.setPipeline(this.chemicalLevelsParticlePipeline);
         pass.setBindGroup(0, this.internalStateParticleBindGroup);
-        pass.draw(6, activeCount);
+        pass.draw(particleVertexCount, particleInstanceCount);
       } else if (this.particleColorMode === "boundary-value") {
         pass.setPipeline(this.boundaryValueParticlePipeline);
         pass.setBindGroup(0, this.boundaryValueParticleBindGroup);
-        pass.draw(6, activeCount);
+        pass.draw(particleVertexCount, particleInstanceCount);
       } else {
         pass.setPipeline(this.activationParticlePipeline);
         pass.setBindGroup(0, this.activationParticleBindGroup);
-        pass.draw(6, activeCount);
+        pass.draw(particleVertexCount, particleInstanceCount);
       }
       if (this.growthLineVisible) {
         pass.setPipeline(this.growthLinePipeline);
@@ -1144,7 +1149,7 @@ export class Renderer {
       overlay.setPipeline(this.domainPipeline);
       overlay.setBindGroup(0, this.domainBindGroup);
       overlay.setBindGroup(1, this.viewBindGroup);
-      overlay.draw(54, activeCount); // Three edges in each of nine periodic images.
+      overlay.draw(24, activeCount); // Three edges in at most four visible periodic images.
       overlay.end();
     }
     this.device.queue.submit([encoder.finish()]);

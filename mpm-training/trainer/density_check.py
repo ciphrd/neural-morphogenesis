@@ -8,6 +8,7 @@ import numpy as np
 
 from density import (
     DENSITY_MODEL_VERSION,
+    INITIAL_PACKING_SPACING_SCALE,
     DensityReference,
     resolve_density,
     validate_multiplier,
@@ -28,10 +29,11 @@ def main() -> None:
         repulsion_max_delta=ref["repulsionMaxDelta"],
     )
     fields = (
-        "spacing", "particle_mass", "particle_volume", "splat_radius",
+        "spacing", "initial_spacing", "particle_mass", "particle_volume", "splat_radius",
         "chemical_gradient_input_scale", "repulsion_strength", "repulsion_max_delta",
     )
     json_names = {
+        "initial_spacing": "initialSpacing",
         "particle_mass": "particleMass",
         "particle_volume": "particleVolume",
         "splat_radius": "splatRadius",
@@ -39,8 +41,10 @@ def main() -> None:
         "repulsion_strength": "repulsionStrength",
         "repulsion_max_delta": "repulsionMaxDelta",
     }
+    resolved_cases = []
     for expected in cases["cases"]:
         actual = resolve_density(reference, expected["multiplier"])
+        resolved_cases.append(actual)
         assert actual.model_version == DENSITY_MODEL_VERSION
         assert actual.initial_particles == expected["initialParticles"]
         assert actual.particle_cap == expected["particleCap"]
@@ -48,10 +52,19 @@ def main() -> None:
             key = json_names.get(field, field)
             assert np.isclose(getattr(actual, field), expected[key], rtol=1e-12, atol=1e-12), (field, actual, expected)
 
+    seed_areas = np.array([
+        case.initial_particles
+        * (case.initial_spacing * INITIAL_PACKING_SPACING_SCALE) ** 2
+        * np.sqrt(3) / 2
+        for case in resolved_cases
+    ])
+    np.testing.assert_allclose(seed_areas, seed_areas[0], rtol=1e-12)
+
     q1 = resolve_density(reference, 1.0)
-    assert q1.spacing == 0.0027
-    assert q1.splat_radius == 0.004
-    for invalid in (0.0, -1.0, float("nan"), float("inf"), 0.25, 8.0):
+    assert q1.spacing == 0.0108
+    assert q1.initial_spacing == 0.0216
+    assert q1.splat_radius == 0.016
+    for invalid in (0.0, -1.0, float("nan"), float("inf"), 0.125, 8.0):
         try:
             validate_multiplier(invalid)
         except ValueError:

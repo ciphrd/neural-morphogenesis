@@ -3,12 +3,6 @@ import type { PhysicsSettings } from "../gpu/types"
 import { Slider } from "./Slider"
 
 interface GrowthPanelProps {
-  /** This generation's own trained values — the reset target, same
-   * contract PhysicsPanel has. Growth knobs live in PhysicsSettings
-   * alongside every other live-adjustable setting rather than in a
-   * parallel state object, so this panel reuses that whole
-   * value/onChange/isOverridden/onReset plumbing untouched. */
-  trained: PhysicsSettings
   value: PhysicsSettings
   onChange: (next: PhysicsSettings) => void
   isOverridden: boolean
@@ -17,7 +11,7 @@ interface GrowthPanelProps {
 
 export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  "growthDuration" | "growthSpeedMultiplier" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "boundaryTangentMinGradient" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
+  "growthDuration" | "growthSpeedMultiplier" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 export interface GrowthSliderSpec {
@@ -28,20 +22,6 @@ export interface GrowthSliderSpec {
   max: number
   step: number
   format: (v: number) => string
-}
-
-// Morphology occupancy is clamped to [0,1] before its centered finite
-// difference is measured, so its gradient magnitude cannot reach 1. Using 1
-// as the live threshold therefore disables every boundary-tangent branch
-// without requiring another GPU-uniform field.
-const TANGENT_DISABLED_THRESHOLD = 1
-const TANGENT_SLIDER_MAX = 0.05
-const DEFAULT_ACTIVE_TANGENT_THRESHOLD = 0.008
-
-function activeTangentThreshold(value: number): number {
-  return value < TANGENT_DISABLED_THRESHOLD
-    ? Math.min(value, TANGENT_SLIDER_MAX)
-    : DEFAULT_ACTIVE_TANGENT_THRESHOLD
 }
 
 // All absolute ranges, deliberately NOT PhysicsPanel's own
@@ -121,67 +101,16 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
     step: 0.002,
     format: (v) => `${(100 * v).toFixed(1)}%`,
   },
-  {
-    key: "boundaryTangentMinGradient",
-    label: "Tangent flat-gradient threshold",
-    hint: "For Lab tangent-growth scenarios, morphology gradients at or below this value are treated as flat. Above it, growth follows the boundary tangent.",
-    min: 0,
-    max: TANGENT_SLIDER_MAX,
-    step: 0.000001,
-    format: (v) => v.toExponential(2),
-  },
 ]
 
-/** Collapsible "Growth" section (default closed), sibling to
- * PhysicsPanel — controls for additive material-sample growth.
- *
- * Split into its own section rather than appended to PhysicsPanel's own
- * flat list because these controls behave as a group:
- * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
- * growthDuration controls refinement-sample rendering fade;
- * boundaryTangentMinGradient controls Lab tangent-growth diagnostics.
- * Same live-uniform-write path as every
- * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
- * any of these never disturbs the rollout in flight and never affects
- * training itself — playback only. */
+/** Live controls for continuous material growth and communication cadence. */
 export function GrowthPanel({
-  trained,
   value,
   onChange,
   isOverridden,
   onReset,
 }: GrowthPanelProps) {
   const [open, setOpen] = useState(false)
-  const [rememberedTangentThreshold, setRememberedTangentThreshold] = useState(
-    activeTangentThreshold(
-      value.boundaryTangentMinGradient < TANGENT_DISABLED_THRESHOLD
-        ? value.boundaryTangentMinGradient
-        : trained.boundaryTangentMinGradient
-    )
-  )
-  const tangentEnabled = value.boundaryTangentMinGradient < TANGENT_DISABLED_THRESHOLD
-
-  const setTangentEnabled = (enabled: boolean) => {
-    if (enabled) {
-      const trainedThreshold = activeTangentThreshold(trained.boundaryTangentMinGradient)
-      const restoredThreshold = Number.isFinite(rememberedTangentThreshold)
-        ? rememberedTangentThreshold
-        : trainedThreshold
-      onChange({
-        ...value,
-        boundaryTangentMinGradient: restoredThreshold,
-      })
-      return
-    }
-    if (tangentEnabled) {
-      setRememberedTangentThreshold(value.boundaryTangentMinGradient)
-    }
-    onChange({
-      ...value,
-      boundaryTangentMinGradient: TANGENT_DISABLED_THRESHOLD,
-    })
-  }
-
   return (
     <section>
       <div className="physics-panel-header">
@@ -215,48 +144,15 @@ export function GrowthPanel({
                 if (Number.isFinite(area) && area >= 0) onChange({ ...value, materialAreaBudget: area })
               }} />
           </label>
-          {GROWTH_SLIDER_SPECS.map((spec) => {
-            const isTangentThreshold = spec.key === "boundaryTangentMinGradient"
-            const displayedValue = isTangentThreshold && !tangentEnabled
-              ? rememberedTangentThreshold
-              : value[spec.key]
-            return (
-              <div key={spec.key}>
-                {isTangentThreshold && (
-                  <label
-                    className="checkbox-row"
-                    title="When disabled, diagnostic growth uses the neural growth direction instead of the morphology-boundary tangent."
-                  >
-                    <input
-                      type="checkbox"
-                      checked={tangentEnabled}
-                      onChange={(event) => setTangentEnabled(event.target.checked)}
-                    />
-                    Use boundary-tangent direction
-                  </label>
-                )}
-                <label className="slider-row" title={spec.hint}>
-                  <span>{spec.label}</span>
-                  <Slider
-                    min={spec.min}
-                    max={spec.max}
-                    step={spec.step}
-                    value={displayedValue}
-                    disabled={isTangentThreshold && !tangentEnabled}
-                    onChange={(v) => {
-                      if (isTangentThreshold) setRememberedTangentThreshold(v)
-                      onChange({ ...value, [spec.key]: v })
-                    }}
-                  />
-                  <span className="slider-value">
-                    {isTangentThreshold && !tangentEnabled
-                      ? "Disabled"
-                      : spec.format(displayedValue)}
-                  </span>
-                </label>
-              </div>
-            )
-          })}
+          {GROWTH_SLIDER_SPECS.map((spec) => (
+            <label key={spec.key} className="slider-row" title={spec.hint}>
+              <span>{spec.label}</span>
+              <Slider min={spec.min} max={spec.max} step={spec.step}
+                value={value[spec.key]}
+                onChange={(v) => onChange({ ...value, [spec.key]: v })} />
+              <span className="slider-value">{spec.format(value[spec.key])}</span>
+            </label>
+          ))}
         </div>
       )}
     </section>

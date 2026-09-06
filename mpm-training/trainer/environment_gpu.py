@@ -51,8 +51,8 @@ class EnvironmentGPU:
     def __init__(
         self, device: wgpu.GPUDevice, channels: int, width: int, height: int,
         decay: float, deposit_rate: float,
-        chemical_communication_architecture: str = CONFIG["run"]["chemicalCommunicationArchitecture"],
-        normalize_deposits_by_local_density: bool = CONFIG["run"]["normalizeDepositsByLocalDensity"],
+        chemical_communication_architecture: str = CONFIG["chemistry"]["chemicalCommunicationArchitecture"],
+        normalize_deposits_by_local_density: bool = CONFIG["chemistry"]["normalizeDepositsByLocalDensity"],
         *,
         grid_velocity: wgpu.GPUBuffer | None = None,
         advection_dt: float = 0.0,

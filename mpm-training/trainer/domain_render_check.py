@@ -1,4 +1,4 @@
-"""Offscreen GPU checks for true triangle outlines, zoom and periodic seams.
+"""Offscreen GPU checks for filled/outlined domains, zoom and periodic seams.
 
 Run: .venv/bin/python domain_render_check.py [optional-preview.png]
 """
@@ -18,6 +18,11 @@ def check():
         layout='auto', vertex={'module': module, 'entry_point': 'domainVertex'},
         primitive={'topology': 'line-list'},
         fragment={'module': module, 'entry_point': 'domainFragment',
+                  'targets': [{'format': 'rgba8unorm'}]})
+    fill_pipeline = device.create_render_pipeline(
+        layout='auto', vertex={'module': module, 'entry_point': 'particleVertex'},
+        primitive={'topology': 'triangle-list'},
+        fragment={'module': module, 'entry_point': 'particleFragment',
                   'targets': [{'format': 'rgba8unorm'}]})
     size = 512
     texture = device.create_texture(size=(size,size,1),format='rgba8unorm',
@@ -43,7 +48,7 @@ def check():
         render.set_pipeline(pipeline)
         render.set_bind_group(0,geometry)
         render.set_bind_group(1,camera)
-        render.draw(54,1)
+        render.draw(24,1)
         render.end()
         device.queue.submit([encoder.finish()])
         raw = device.queue.read_texture({'texture':texture}, {'bytes_per_row':size*4}, (size,size,1))
@@ -74,10 +79,49 @@ def check():
         images.append(rgba.copy())
         positions.destroy(); domains.destroy(); view.destroy()
     texture.destroy()
+
+    # Shape=Domain uses the normal particle color path, but expands one
+    # particle into four periodic triangle instances entirely on the GPU.
+    center = np.array([.5,.5],np.float32)
+    edges = np.array([[.3,.08],[.02,.25]],np.float32)
+    rest = np.zeros(16,np.float32)
+    rest[8:14] = vertices_from_edges([center],[edges])[0]
+    color = np.array([.2,.6,.9,1],np.float32)
+    resources = [
+        device.create_buffer_with_data(data=center,usage=wgpu.BufferUsage.STORAGE),
+        device.create_buffer_with_data(data=np.array([1],np.float32),usage=wgpu.BufferUsage.UNIFORM),
+        device.create_buffer_with_data(data=color,usage=wgpu.BufferUsage.UNIFORM),
+        device.create_buffer_with_data(data=np.zeros(96,np.uint8),usage=wgpu.BufferUsage.STORAGE),
+        device.create_buffer_with_data(data=rest,usage=wgpu.BufferUsage.STORAGE),
+        device.create_buffer_with_data(data=np.array([1,2,.5,0],np.float32),usage=wgpu.BufferUsage.UNIFORM),
+    ]
+    geometry = device.create_bind_group(layout=fill_pipeline.get_bind_group_layout(0),entries=[
+        {'binding':binding,'resource':{'buffer':resources[index]}}
+        for binding,index in [(0,0),(1,1),(2,2),(3,3),(4,4)]])
+    camera = device.create_bind_group(layout=fill_pipeline.get_bind_group_layout(1),entries=[
+        {'binding':0,'resource':{'buffer':resources[5]}}])
+    fill_texture = device.create_texture(size=(size,size,1),format='rgba8unorm',
+        usage=wgpu.TextureUsage.RENDER_ATTACHMENT | wgpu.TextureUsage.COPY_SRC)
+    encoder = device.create_command_encoder()
+    render = encoder.begin_render_pass(color_attachments=[{
+        'view':fill_texture.create_view(),'load_op':'clear','store_op':'store','clear_value':(0,0,0,0)}])
+    render.set_pipeline(fill_pipeline)
+    render.set_bind_group(0,geometry)
+    render.set_bind_group(1,camera)
+    render.draw(3,4)
+    render.end()
+    device.queue.submit([encoder.finish()])
+    rgba = np.frombuffer(device.queue.read_texture({'texture':fill_texture},
+        {'bytes_per_row':size*4},(size,size,1)),np.uint8).reshape(size,size,4)
+    expected = np.round(np.r_[color[:3],.5]*255).astype(np.uint8)
+    np.testing.assert_allclose(rgba[size//2,size//2],expected,atol=1)
+    assert not rgba[8,8].any(), 'Domain fill escaped the triangle'
+    fill_texture.destroy()
+    for resource in resources: resource.destroy()
     if len(sys.argv)>1:
         from PIL import Image
         Image.fromarray(np.concatenate(images,axis=1)).save(sys.argv[1])
-    print('[PASS] rendered outlines match domain edges at 1x/4x zoom, wrap both seams, and ignore marker opacity')
+    print('[PASS] GPU-filled domains use particle color/alpha; outlines match edges, zoom, and periodic seams')
 
 if __name__ == '__main__':
     check()

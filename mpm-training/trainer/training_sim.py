@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from simulation_settings import DEFAULT_RUN_SETTINGS, MATERIAL_AREA_BUDGET, COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, NEURAL_UPDATES_PER_MACRO
+from simulation_settings import DEFAULT_RUN_SETTINGS, MATERIAL_AREA_BUDGET, COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, INITIAL_SPACING, NEURAL_UPDATES_PER_MACRO
 
 from agents_gpu import AgentsGPU, _spawn_uniform01
 from density import INITIAL_PACKING_SPACING_SCALE
@@ -58,6 +58,7 @@ class TrainingRollout:
         initial_condition: str = DEFAULT_RUN_SETTINGS["initialCondition"],
         initial_condition_strength: float = DEFAULT_RUN_SETTINGS["initialConditionStrength"],
         initial_condition_channel: int = DEFAULT_RUN_SETTINGS["initialConditionChannel"],
+        initial_spacing: float = INITIAL_SPACING,
     ) -> None:
         self.core = core
         self.agents = agents
@@ -81,13 +82,15 @@ class TrainingRollout:
         if agents.max_active_particles < 2:
             raise ValueError('A tiled triangle seed requires capacity for at least two samples')
         initial_cells = min(agents.max_active_particles // 2, max(1, int(initial_particle_count)))
+        if not np.isfinite(initial_spacing) or initial_spacing <= 0:
+            raise ValueError("Initial spacing must be finite and positive")
         scene = seed_blob(
-            initial_cells, spawn_center, agents.sample_spacing, seed
+            initial_cells, spawn_center, initial_spacing, seed
         )
         validate_initial_condition(initial_condition, initial_condition_strength,
                                    initial_condition_channel, agents.channels,
                                    policy_has_recurrence(agents.policy_architecture))
-        radius = np.sqrt(initial_cells*(agents.sample_spacing*INITIAL_PACKING_SPACING_SCALE)**2*np.sqrt(3)/(2*np.pi))
+        radius = np.sqrt(initial_cells*(initial_spacing*INITIAL_PACKING_SPACING_SCALE)**2*np.sqrt(3)/(2*np.pi))
         perturbation = InitialCondition(initial_condition, initial_condition_strength,
                                         initial_condition_channel, seed, spawn_center, radius)
         perturbation.deform(scene)

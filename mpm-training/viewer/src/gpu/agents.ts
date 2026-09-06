@@ -37,7 +37,6 @@ export interface AgentsConfig {
   elasticStrainInputsEnabled: boolean;
   chemicalValueInputMultiplier: number;
   chemicalGradientInputScale: number;
-  boundaryTangentMinGradient: number;
 }
 
 function weightLayout(channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128") {
@@ -214,9 +213,6 @@ export class Agents {
 
     this.setChemicalGradientInputScale(config.chemicalGradientInputScale);
 
-    this.setBoundaryTangentMinGradient(
-      config.boundaryTangentMinGradient,
-    );
 
     this.setForcedGrowthControl(null, [1, 0], false);
     this.setForcedGrowthFieldOverride(null);
@@ -508,38 +504,23 @@ export class Agents {
     writeFloat32(this.device, this.physicsUniform, 60, new Float32Array([Math.max(multiplier, 0)]));
   }
 
-  /** Set the maximum absolute chemical write. */
-
-  /** Common spatial-random-field seed at AgentPhysics byte offset 72. */
-
-  /** Flat-interior morphology-gradient cutoff at AgentPhysics byte offset 76. */
-  setBoundaryTangentMinGradient(threshold: number): void {
-    writeFloat32(
-      this.device,
-      this.physicsUniform,
-      36,
-      new Float32Array([Math.max(0, threshold)]),
-    );
-  }
-
-  /** Contact inhibition from dimensionless elastic areal compression. */
-
-  /** Controls deterministic lab admission/direction without bypassing growth. */
+  /** Force growth along an explicit world-space direction for Lab scenarios. */
   setForcedGrowthControl(
     index: number | null,
-    direction: readonly [number, number] | null,
+    direction: readonly [number, number],
     forceMagnitude: boolean,
     particleCount = 1,
   ): void {
+    const x = direction[0];
+    const y = direction[1];
+    const length = Math.hypot(x, y);
+    if (!Number.isFinite(length) || length === 0) throw new Error("Forced growth requires a finite, nonzero direction");
     const value = index === null ? 0xffffffff : Math.max(0, Math.floor(index));
     const endValue = index === null
       ? 0xffffffff
       : value + Math.max(1, Math.floor(particleCount)) - 1;
-    this.device.queue.writeBuffer(this.physicsUniform, 40, new Uint32Array([value]));
-    this.device.queue.writeBuffer(this.physicsUniform, 44, new Uint32Array([forceMagnitude ? 1 : 0]));
-    const x = direction?.[0] ?? 0;
-    const y = direction?.[1] ?? 0;
-    const length = Math.hypot(x, y) || 1;
+    this.device.queue.writeBuffer(this.physicsUniform, 36, new Uint32Array([value]));
+    this.device.queue.writeBuffer(this.physicsUniform, 40, new Uint32Array([forceMagnitude ? 1 : 0]));
     writeFloat32(this.device, this.physicsUniform, 48, new Float32Array([
       x / length,
       y / length,

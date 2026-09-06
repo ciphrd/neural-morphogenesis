@@ -17,7 +17,7 @@ def main():
         chemical_field_n=FIELD_N, particle_mass=PARTICLE_MASS, particle_volume=VOL,
         chemical_gradient_input_scale=CHEMICAL_GRADIENT_INPUT_SCALE,
         repulsion_strength=REPULSION_STRENGTH, repulsion_max_delta=REPULSION_MAX_DELTA)
-    cases = [resolve_density(reference, q) for q in (.5, 1, 2, 4)]
+    cases = [resolve_density(reference, q) for q in (.25, .5, 1, 2, 4)]
     device = pick_device()
     core = MpmCore(device)
     environment = EnvironmentGPU(device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE)
@@ -37,7 +37,7 @@ def main():
         agents.set_density_geometry(case.spacing)
         agents.set_max_active_particles(case.particle_cap)
         sim = TrainingRollout(core, agents, environment, gravity=0, seed=11,
-            spawn_center=(.5,.5), initial_particle_count=case.initial_particles)
+            spawn_center=(.5,.5), initial_particle_count=case.initial_particles, initial_spacing=case.initial_spacing)
         rest = core.read_rest_state()
         np.testing.assert_allclose(rest[:,15].sum()*case.particle_volume,
             reference.initial_particles*reference.particle_volume, rtol=1e-6)
@@ -57,7 +57,7 @@ def main():
     # samplings; compare physical area, never numerical particle counts.
     areas = np.array(final_areas)
     np.testing.assert_allclose(areas, areas.mean(), rtol=.05)
-    print(f'[PASS] persistent pipelines switch 0.5/1/2/4x density: seed material conserved, growth active, final areas={areas}')
+    print(f'[PASS] persistent pipelines switch 0.25/0.5/1/2/4x density: seed material conserved, growth active, final areas={areas}')
 
 if __name__ == '__main__':
     main()

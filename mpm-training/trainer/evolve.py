@@ -11,7 +11,7 @@ import torch
 
 from agents_gpu import AgentsGPU
 from chemical_channels import profiles_to_wire
-from density import DENSITY_MODEL_VERSION, DensityReference, ResolvedDensity, parse_multipliers, resolve_density
+from density import DENSITY_MODEL_VERSION, INITIAL_SPACING_IN_SAMPLE_SPACINGS, DensityReference, ResolvedDensity, parse_multipliers, resolve_density
 from environment_gpu import EnvironmentGPU
 from mpm_core import MAX_PARTICLES, PARTICLE_MASS, VOL, MpmCore
 from parallel_workers import build_pool, worker_rollout
@@ -185,7 +185,9 @@ def shape_settings(args, target):
         "shapeMissingTolerance": args.shape_missing_tolerance,
         "shapeSpillTolerance": args.shape_spill_tolerance,
         "shapeOverlapTolerance": args.shape_overlap_tolerance,
-        "shapeTarget": {"points": target.points.tolist(), "texelSize": target.texel_size()},
+        # Embed the resolved fitness mask. Replays therefore remain identical
+        # even if the source PNG is subsequently edited or removed.
+        "shapeTarget": target.wire(args.raster_resolution),
     }
 
 def _aggregate_scores(scores, args):
@@ -208,8 +210,10 @@ def rollout(
     """Evaluate material domains over the late window, or a confirmed settling window.
 
     Periodic successful matches stop growth. Failed settling resumes growth;
-    reaching the rollout horizon alone never declares success. Capacity-blocked
-    sampling cannot qualify for a successful early stop.
+    reaching the rollout horizon alone never declares success. Reaching the
+    sample cap terminates immediately after the current macro step and scores
+    that terminal state; the already-required growth-count readback supplies
+    the stop signal without an additional host/device synchronization.
     """
     agents.load_weights(weights)
     density = resolve_run_density(args, density_multiplier)
@@ -249,24 +253,40 @@ def rollout(
         initial_condition_strength=getattr(args, "initial_condition_strength", 0.3),
         initial_condition_channel=getattr(args, "initial_condition_channel", 0),
         material_area_budget=resolved_material_budget(args, target),
+        initial_spacing=density.initial_spacing,
     )
 
     checkpoint_steps = {max(1, round(args.macro_steps * (1.0 - offset))) for offset in CAPTURE_OFFSETS}
     scores = []
     stopping = stopping_from_args(args)
     last_evaluation = None
-    for step in range(1, args.macro_steps + 1):
-        sim.macro_step(args.substeps_per_macro, growth_enabled=stopping.growth_enabled and
-                       (args.growth_steps is None or step <= args.growth_steps))
-        if step in checkpoint_steps or stopping.due(step):
-            vertices = core.read_rest_state()[:, 8:14]
-            last_evaluation = score_domains(vertices, target, target_raster, args)
-            if step in checkpoint_steps:
-                scores.append(last_evaluation.total)
-            if stopping.due(step) and stopping.observe(step, last_evaluation.match, last_evaluation.total,
-                    sampling_blocked=core.active_count >= agents.max_active_particles or agents.capacity_blocked or agents.unresolved_samples > 0):
-                scores = stopping.settling_scores
-                break
+    step = 0
+    stopped_at_capacity = core.active_count >= agents.max_active_particles
+    if stopped_at_capacity:
+        # An exactly-full initial seed is already terminal. This geometry read
+        # is the one required final fitness sample, not a per-step poll.
+        last_evaluation = score_domains(core.read_rest_state()[:, 8:14], target, target_raster, args)
+        scores.append(last_evaluation.total)
+    else:
+        for step in range(1, args.macro_steps + 1):
+            sim.macro_step(args.substeps_per_macro, growth_enabled=stopping.growth_enabled and
+                           (args.growth_steps is None or step <= args.growth_steps))
+            # macro_step() already read and cached these values to size the next
+            # GPU dispatch. Capacity termination therefore adds no bridge read.
+            stopped_at_capacity = (
+                core.active_count >= agents.max_active_particles or agents.capacity_blocked
+            )
+            if stopped_at_capacity or step in checkpoint_steps or stopping.due(step):
+                vertices = core.read_rest_state()[:, 8:14]
+                last_evaluation = score_domains(vertices, target, target_raster, args)
+                if stopped_at_capacity or step in checkpoint_steps:
+                    scores.append(last_evaluation.total)
+                if stopped_at_capacity:
+                    break
+                if stopping.due(step) and stopping.observe(step, last_evaluation.match, last_evaluation.total,
+                        sampling_blocked=core.active_count >= agents.max_active_particles or agents.capacity_blocked or agents.unresolved_samples > 0):
+                    scores = stopping.settling_scores
+                    break
     fitness = _aggregate_scores(scores, args)
     # Exposed to deterministic winner replay/debug callers without changing
     # the scalar worker protocol or existing return_positions callers.
@@ -275,6 +295,7 @@ def rollout(
         "settling": stopping.settling_since is not None and not stopping.complete,
         "capacityBlocked": bool(agents.capacity_blocked),
         "atCapacity": core.active_count >= agents.max_active_particles,
+        "stopReason": "capacity" if stopped_at_capacity else ("stable-match" if stopping.complete else "horizon"),
         "unresolvedSamples": int(agents.unresolved_samples),
         "materialAreaBudget": resolved_material_budget(args, target),
         "missing": last_evaluation.match.missing,
@@ -409,7 +430,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="checkpoint destination (useful for paired architecture comparisons)",
     )
     parser.add_argument(
-        "--target", default=DEFAULT_RUN_SETTINGS["target"], choices=available_targets(), help="target shape name (a .json file in ./targets/)"
+        "--target", default=DEFAULT_RUN_SETTINGS["target"], choices=available_targets(),
+        help="target shape name (an RGBA .png, or legacy .json, in ./targets/)"
     )
     parser.add_argument("--population", type=int, default=DEFAULT_RUN_SETTINGS["population"], help="number of candidate weight-sets per generation")
     parser.add_argument(
@@ -616,6 +638,8 @@ def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed
         'target': args.target,
         'particles': args.particles,
         'initial_particle_count': args.initial_particles,
+        'initial_spacing': INITIAL_SPACING_IN_SAMPLE_SPACINGS * DEFAULT_RUN_SETTINGS["sampleSpacing"],
+        'sample_spacing': DEFAULT_RUN_SETTINGS["sampleSpacing"],
         'initial_condition': args.initial_condition,
         'initial_condition_strength': args.initial_condition_strength,
         'initial_condition_channel': args.initial_condition_channel,

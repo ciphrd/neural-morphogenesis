@@ -21,6 +21,7 @@ export interface ResolvedDensity {
   multiplier: number;
   spacingScale: number;
   spacing: number;
+  initialSpacing: number;
   initialParticles: number;
   particleCap: number;
   particleMass: number;
@@ -65,6 +66,8 @@ export function resolveDensity(
     multiplier: q,
     spacingScale,
     spacing,
+    // Keep seed triangles near the normal post-split scale at every density.
+    initialSpacing: densityModel.INITIAL_SPACING_IN_SAMPLE_SPACINGS * spacing,
     initialParticles: Math.max(1, Math.floor(reference.initialParticles * q + 0.5)),
     particleCap: Math.max(1, Math.floor(reference.particleCap * q + 0.5)),
     particleMass: reference.particleMass / q,
@@ -80,7 +83,9 @@ export function resolveDensity(
 export function configAtDensity<T extends {
   particles: number;
   initialParticleCount: number;
-  fieldN: number;
+  sampleSpacing: number;
+  splatRadius: number;
+  baseResolution: number;
   particleMass: number;
   particleVolume: number;
   chemicalGradientInputScale: number;
@@ -95,7 +100,7 @@ export function configAtDensity<T extends {
   const resolved = resolveDensity({
     particleCap: config.particles,
     initialParticles: config.initialParticleCount,
-    chemicalFieldN: config.fieldN,
+    chemicalFieldN: config.baseResolution,
     particleMass: config.particleMass,
     particleVolume: config.particleVolume,
     chemicalGradientInputScale: config.chemicalGradientInputScale,
@@ -110,8 +115,8 @@ export function configAtDensity<T extends {
     particleMass: resolved.particleMass,
     particleVolume: resolved.particleVolume,
     chemicalGradientInputScale: resolved.chemicalGradientInputScale,
-    sampleSpacing: resolved.spacing,
-    splatRadius: resolved.splatRadius,
+    sampleSpacing: config.sampleSpacing * resolved.spacingScale,
+    splatRadius: config.splatRadius * resolved.spacingScale,
     repulsionStrength: resolved.repulsionStrength,
     repulsionMaxDelta: resolved.repulsionMaxDelta,
   };

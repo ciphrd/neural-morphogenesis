@@ -43,6 +43,10 @@ layouts require sufficient capacity and report an error if they do not fit.
 Density scaling still acts on seed cells, target spacing and mass/volume; the
 extra factor of two in initial sampling is offset by half weights.
 
+Seed spacing is not independently configurable. It is twice the resolved
+refinement spacing, so new triangles begin near the steady-state post-split
+scale at every sampling density.
+
 Reset buffers **before** loading seed geometry and weights. Explicit scene
 domains must carry `domain_geometry='triangle-vertices'` (Python) or
 `domainGeometry:'triangle-vertices'` (TypeScript); untagged/legacy domain arrays are
@@ -236,11 +240,13 @@ matrix. Symmetric placement and halved weights preserve global mass, linear
 momentum, and APIC angular momentum, although the nodal field can change at the
 instant of refinement. Rendered markers remain user-sized sample glyphs.
 
-In both Training and Lab, Rendering → “Show particle domains (triangles)”
-overlays the actual transported triangle boundaries in cyan. The outlines are
-independent of marker size/opacity, follow zoom and periodic boundaries, and
-are drawn after bloom to remain crisp. Lower particle opacity to inspect the
-domains alone. The overlay adds no render pass while disabled.
+In both Training and Lab, Rendering → Shape → Domain fully rasterizes the
+actual stored triangles using the selected particle Color and Alpha. The vertex
+shader unwraps B/C around A and emits only the four potentially visible
+periodic copies for seam crossings. It reads GPU domains directly, with no CPU
+readback or CPU-generated geometry. “Overlay particle domains” independently
+draws crisp cyan one-device-pixel edges after bloom for every shape selection,
+including Domain.
 
 ## Physical and numerical limits
 

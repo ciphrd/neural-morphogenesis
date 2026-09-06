@@ -19,6 +19,7 @@ _MODEL = CONFIG["density"]
 DENSITY_MODEL_VERSION: int = int(_MODEL["MODEL_VERSION"])
 REFERENCE_SPACING: float = float(CONFIG["run"]["sampleSpacing"])
 INITIAL_PACKING_SPACING_SCALE: float = float(_MODEL["INITIAL_PACKING_SPACING_SCALE"])
+INITIAL_SPACING_IN_SAMPLE_SPACINGS: float = float(_MODEL["INITIAL_SPACING_IN_SAMPLE_SPACINGS"])
 REPULSION_RADIUS_IN_CELLS: float = float(_MODEL["REPULSION_RADIUS_IN_CELLS"])
 MIN_SUPPORTED_MULTIPLIER: float = float(_MODEL["MIN_SUPPORTED_MULTIPLIER"])
 MAX_SUPPORTED_MULTIPLIER: float = float(_MODEL["MAX_SUPPORTED_MULTIPLIER"])
@@ -40,6 +41,7 @@ class ResolvedDensity:
     multiplier: float
     spacing_scale: float
     spacing: float
+    initial_spacing: float
     initial_particles: int
     particle_cap: int
     particle_mass: float
@@ -54,6 +56,7 @@ class ResolvedDensity:
             "density_model_version": self.model_version,
             "particle_density_multiplier": self.multiplier,
             "sample_spacing": self.spacing,
+            "initial_spacing": self.initial_spacing,
             "initial_particle_count": self.initial_particles,
             "particles": self.particle_cap,
             "particle_mass": self.particle_mass,
@@ -100,6 +103,10 @@ def resolve_density(
         multiplier=q,
         spacing_scale=spacing_scale,
         spacing=spacing,
+        # Seed triangles start near the steady-state post-split scale.  This is
+        # derived from the density-resolved refinement spacing, never tuned as
+        # an independent physical-size control.
+        initial_spacing=INITIAL_SPACING_IN_SAMPLE_SPACINGS * spacing,
         initial_particles=max(1, _round_positive(reference.initial_particles * q)),
         particle_cap=max(1, _round_positive(reference.particle_cap * q)),
         particle_mass=reference.particle_mass / q,
@@ -125,4 +132,8 @@ def parse_multipliers(values: list[float] | tuple[float, ...], *, allow_unsafe: 
 def resolve_checkpoint_density(metadata: Mapping[str, Any], reference: DensityReference) -> ResolvedDensity:
     if metadata["growth_model_version"] != CONFIG["run"]["growthModelVersion"]:
         raise ValueError("Checkpoint schema does not match the current simulation; start a new run")
-    return resolve_density(reference, float(metadata["winner_density_multiplier"]), allow_unsafe=True)
+    resolved = resolve_density(reference, float(metadata["winner_density_multiplier"]), allow_unsafe=True)
+    return replace(resolved,
+        spacing=float(metadata["sample_spacing"]) * resolved.spacing_scale,
+        initial_spacing=INITIAL_SPACING_IN_SAMPLE_SPACINGS * float(metadata["sample_spacing"]) * resolved.spacing_scale,
+        splat_radius=float(metadata["splat_radius"]) * resolved.spacing_scale)

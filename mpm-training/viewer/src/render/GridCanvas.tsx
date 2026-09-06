@@ -583,7 +583,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
             const spatial = spatialMetrics(positions);
             const metadata = {
               particleDensityMultiplier: sample.particleDensityMultiplier,
-              substrateResolution: sample.config.fieldN,
+              substrateResolution: sample.config.baseResolution,
               particleCap: sample.particleCap,
               initialParticleCount: sample.initialParticleCount,
               finalParticleCount: sim.particleCount,

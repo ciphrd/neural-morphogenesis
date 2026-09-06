@@ -46,7 +46,6 @@ from policy_parameters import mutation_scales, policy_hidden_dim
 from raster import build_target_distance_field
 from domain_fitness import FITNESS_MODEL_VERSION, target_mask, score_domains
 from simulation_settings import (
-    BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEM_CHANNELS,
     CHEMICAL_CHANNEL_PROFILES,
     CHEMICAL_GRADIENT_INPUT_SCALE,
@@ -82,7 +81,7 @@ from simulation_settings import (
     SPLAT_RADIUS,
     SAMPLE_SPACING,
 )
-from targets import TARGETS_DIR, load_target
+from targets import available_targets, load_target
 from update_rule import UpdateRule
 
 parser = build_arg_parser()
@@ -265,7 +264,7 @@ def _save_generation_images(
     agent_raster, breakdown = evaluation.raster, evaluation.breakdown
 
     prefix = f"gen_{generation:05d}"
-    save_grown_image(positions, target.points, IMAGES_DIR / f"{prefix}_grown.png")
+    save_grown_image(positions, target.overlay_points(args.raster_resolution), IMAGES_DIR / f"{prefix}_grown.png")
     save_raster_image(target_raster, IMAGES_DIR / f"{prefix}_target.png")
     if agent_raster is not None:
         save_raster_image(agent_raster, IMAGES_DIR / f"{prefix}_agents.png")
@@ -387,11 +386,10 @@ async def _training_loop_body() -> None:
         "spawnX": args.spawn_x,
         "spawnY": args.spawn_y,
         "channels": CHEM_CHANNELS,
-        "fieldN": FIELD_N,
+        "baseResolution": FIELD_N,
         "chemicalChannelProfiles": profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
         "morphologyBlurSigma": MORPHOLOGY_BLUR_SIGMA,
         "morphologyDensityReference": MORPHOLOGY_DENSITY_REFERENCE,
-        "boundaryTangentMinGradient": BOUNDARY_TANGENT_MIN_GRADIENT,
         "neuralUpdatesPerMacro": NEURAL_UPDATES_PER_MACRO,
         "communicationSpeed": COMMUNICATION_SPEED,
         "internalStateSpeed": INTERNAL_STATE_SPEED,
@@ -603,7 +601,7 @@ def run_settings(run_id: str) -> dict:
 @app.get("/target/points")
 def target_points() -> dict:
     """This server only ever has the one target it was launched with."""
-    return {"points": target.points.tolist()}
+    return {"points": target.overlay_points(args.raster_resolution).tolist()}
 
 @app.get("/targets/{name}/points")
 def named_target_points(name: str) -> dict:
@@ -612,11 +610,10 @@ def named_target_points(name: str) -> dict:
     against a different --target than this server's own (args.target),
     so the frontend's "load run" picker can't always rely on the fixed
     /target/points response when browsing history."""
-    path = TARGETS_DIR / f"{name}.json"
-    if not path.is_file():
+    if name not in available_targets():
         raise HTTPException(404, f"unknown target '{name}'")
     loaded = load_target(name)
-    return {"points": loaded.points.tolist()}
+    return {"points": loaded.overlay_points(args.raster_resolution).tolist()}
 
 def _find_latest_preview_prefix(images_dir: Path) -> Optional[str]:
     """Zero-padded generation prefix (e.g. "gen_00042") of the highest-

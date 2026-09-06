@@ -292,7 +292,7 @@ export function TrainingView() {
     )
   )
   const defaultSubstrateResolution =
-    VIEWER_DEFAULTS.playback.substrateResolution ?? activeConfig?.fieldN ?? canonicalConfig.run.fieldN
+    VIEWER_DEFAULTS.playback.substrateResolution ?? activeConfig?.baseResolution ?? canonicalConfig.chemistry.baseResolution
   const effectiveSubstrateResolution =
     substrateResolutionOverride ?? defaultSubstrateResolution
   const initialMemory = policyExploration?.cellMemory ?? (activeConfig ? cellMemoryFromConfig(activeConfig) : "none")
@@ -305,7 +305,7 @@ export function TrainingView() {
         ...activeConfig,
         ...initialConditionOverride,
         initialCondition: effectiveInitialCondition,
-        fieldN: effectiveSubstrateResolution,
+        baseResolution: effectiveSubstrateResolution,
         chemicalCommunicationArchitecture:
           chemicalArchitectureOverride ??
           chemicalCommunicationArchitectureFromConfig(activeConfig),
@@ -473,34 +473,21 @@ export function TrainingView() {
   // live run's own id — viewingRunId is null for that case.
   const activeRunId = viewingRunId ?? "current"
 
-  // Unlike the live server's own --target (fixed for its whole process
-  // lifetime), an *archived* run being browsed may have been trained
-  // against a completely different target — GET /targets/{name}/points
-  // (not the fixed /target/points) loads any target's points by name, so
-  // this re-fetches whenever the run/generation actually being viewed
-  // changes rather than once on mount. Points already arrive in
-  // MpmCore's own [0,1]^2 domain (targets.py's own TargetShape) — no
-  // grid_size/rescaling step needed, unlike envnca's pixel-space targets.
   const [shapeStatus, setShapeStatus] = useState<{ complete: boolean; settling: boolean; atCapacity: boolean; capacityBlocked: boolean; unresolvedSamples: number; match: { missing: number; spill: number; overlap: number } | null } | null>(null)
-  const [targetPoints, setTargetPoints] = useState<Float32Array | null>(null)
-  useEffect(() => {
-    if (!activeConfig) return
-    let cancelled = false
-    fetch(
-      `${TRAIN_API_URL}/targets/${encodeURIComponent(activeConfig.target)}/points`
-    )
-      .then((res) => res.json())
-      .then((data: { points: [number, number][] }) => {
-        if (cancelled) return
-        setTargetPoints(Float32Array.from(data.points.flat()))
-      })
-      .catch((err) =>
-        console.error("[mpm-training] failed to fetch target points", err)
-      )
-    return () => {
-      cancelled = true
+  // Derive a bounded overlay from the checkpoint-embedded mask. This keeps
+  // archived runs immutable and avoids uploading every source PNG pixel.
+  const targetPoints = useMemo(() => {
+    const shape = activeConfig?.shapeTarget
+    if (!shape) return null
+    if (shape.mask && shape.resolution) {
+      const points: number[] = [], n = shape.resolution
+      for (let i = 0; i < shape.mask.length; i++) if (shape.mask[i] >= 0.5) {
+        points.push((i % n + 0.5) / n, (Math.floor(i / n) + 0.5) / n)
+      }
+      return Float32Array.from(points)
     }
-  }, [activeConfig?.target])
+    return shape.points ? Float32Array.from(shape.points.flat()) : null
+  }, [activeConfig?.shapeTarget])
 
   // Toggles GridCanvas's own CanvasRecorder — click while idle starts
   // capturing (button reads "● REC"), click again stops and triggers
@@ -568,7 +555,7 @@ export function TrainingView() {
         const substrateResolution =
           combination.substrateResolution ?? effectiveSubstrateResolution
         const resolvedConfig = configAtDensity(
-          { ...weightedPreviewConfig, fieldN: substrateResolution },
+          { ...weightedPreviewConfig, baseResolution: substrateResolution },
           density
         )
         const physics = { ...basePhysics }
@@ -654,6 +641,10 @@ export function TrainingView() {
     Math.max(0, particleStateChannelCount - 3),
     internalStateChannelStart
   )
+  const neuralMemoryControlsInactive =
+    particleColorMode === "neural-memory" &&
+    previewConfig !== null &&
+    cellMemoryFromConfig(previewConfig) !== "recurrent"
 
   return (
     <div className="training-layout">
@@ -678,7 +669,7 @@ export function TrainingView() {
             <span>Chemical field</span>
             <span>
               {activeConfig
-                ? `${activeConfig.fieldN}×${activeConfig.fieldN}`
+                ? `${activeConfig.baseResolution}×${activeConfig.baseResolution}`
                 : "—"}
             </span>
           </div>
@@ -791,7 +782,7 @@ export function TrainingView() {
                   setPhysicsOverride(null)
                 }}
               >
-                {Array.from(new Set([0.5, 1, 2, 4, effectiveParticleDensity]))
+                {Array.from(new Set([0.25, 0.5, 1, 2, 4, effectiveParticleDensity]))
                   .sort((a, b) => a - b)
                   .map((density) => (
                     <option key={density} value={density}>
@@ -927,99 +918,6 @@ export function TrainingView() {
               {(autoZoomEnabled ? effectiveZoom : zoom).toFixed(2)}×
             </span>
           </div>
-          <details className="settings-category">
-            <summary>Post-processing</summary>
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={bloom.enabled}
-                onChange={(event) =>
-                  setBloom((value) => ({
-                    ...value,
-                    enabled: event.target.checked,
-                  }))
-                }
-              />
-              Bloom
-            </label>
-            {bloom.enabled && (
-              <>
-                <label className="slider-row">
-                  <span>Bloom intensity</span>
-                  <Slider
-                    min={0}
-                    max={3}
-                    step={0.05}
-                    value={bloom.intensity}
-                    onChange={(intensity) =>
-                      setBloom((value) => ({ ...value, intensity }))
-                    }
-                  />
-                  <span className="slider-value">
-                    {bloom.intensity.toFixed(2)}
-                  </span>
-                </label>
-                <label className="slider-row">
-                  <span>Bloom threshold</span>
-                  <Slider
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={bloom.threshold}
-                    onChange={(threshold) =>
-                      setBloom((value) => ({ ...value, threshold }))
-                    }
-                  />
-                  <span className="slider-value">
-                    {bloom.threshold.toFixed(2)}
-                  </span>
-                </label>
-                <label className="slider-row">
-                  <span>Bloom radius</span>
-                  <Slider
-                    min={0.25}
-                    max={8}
-                    step={0.25}
-                    value={bloom.radiusPx}
-                    onChange={(radiusPx) =>
-                      setBloom((value) => ({ ...value, radiusPx }))
-                    }
-                  />
-                  <span className="slider-value">
-                    {bloom.radiusPx.toFixed(2)}px
-                  </span>
-                </label>
-                <label className="slider-row">
-                  <span>Bloom levels</span>
-                  <Slider
-                    min={2}
-                    max={10}
-                    step={1}
-                    value={bloom.levels}
-                    onChange={(levels) =>
-                      setBloom((value) => ({ ...value, levels }))
-                    }
-                  />
-                  <span className="slider-value">{bloom.levels}</span>
-                </label>
-                <label className="slider-row">
-                  <span>Bloom scatter</span>
-                  <Slider
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={bloom.scatter}
-                    onChange={(scatter) =>
-                      setBloom((value) => ({ ...value, scatter }))
-                    }
-                  />
-                  <span className="slider-value">
-                    {bloom.scatter.toFixed(2)}
-                  </span>
-                </label>
-              </>
-            )}
-          </details>
           <label className="slider-row">
             <span>Particle size</span>
             <Slider
@@ -1042,6 +940,7 @@ export function TrainingView() {
             >
               <option value="dot">Dot</option>
               <option value="triangle">Triangle</option>
+              <option value="domain">Domain</option>
             </select>
           </label>
           <label className="slider-row">
@@ -1081,9 +980,9 @@ export function TrainingView() {
             />
             Heading direction (red)
           </label>
-          <label className="checkbox-row" title="Actual transported triangle boundaries; independent of marker size and opacity">
+          <label className="checkbox-row" title="Overlay actual transported triangle boundaries on Dot or Triangle markers">
             <input type="checkbox" checked={domainVisible} onChange={(event) => setDomainVisible(event.target.checked)} />
-            Show particle domains (triangles)
+            Overlay particle domains
           </label>
           <label className="checkbox-row">
             <input
@@ -1111,7 +1010,7 @@ export function TrainingView() {
           {(particleColorMode === "neural-memory" ||
             particleColorMode === "chemical-memory") && (
             <>
-              <div className="channel-window-control">
+              <div className={`channel-window-control${neuralMemoryControlsInactive ? " is-inactive" : ""}`}>
                 <div className="channel-window-label">
                   <span>Channels</span>
                   <span>
@@ -1130,7 +1029,7 @@ export function TrainingView() {
                 />
               </div>
               {particleColorMode === "neural-memory" && (
-                <label className="slider-row">
+                <label className={`slider-row${neuralMemoryControlsInactive ? " is-inactive" : ""}`}>
                   <span>Opponent subtraction</span>
                   <Slider
                     min={0}
@@ -1144,13 +1043,6 @@ export function TrainingView() {
                   </span>
                 </label>
               )}
-              {particleColorMode === "neural-memory" &&
-                previewConfig &&
-                cellMemoryFromConfig(previewConfig) !== "recurrent" && (
-                  <p className="hint">
-                    Neural memory is disabled, so these channels remain zero.
-                  </p>
-                )}
             </>
           )}
           {particleColorMode === "boundary-value" && (
@@ -1320,6 +1212,51 @@ export function TrainingView() {
               </label>
             </>
           )}
+          <details className="settings-category">
+            <summary>Post-processing</summary>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={bloom.enabled}
+                onChange={(event) =>
+                  setBloom((value) => ({
+                    ...value,
+                    enabled: event.target.checked,
+                  }))
+                }
+              />
+              Bloom
+            </label>
+            {bloom.enabled && (
+              <>
+                <label className="slider-row">
+                  <span>Bloom intensity</span>
+                  <Slider min={0} max={3} step={0.05} value={bloom.intensity} onChange={(intensity) => setBloom((value) => ({ ...value, intensity }))} />
+                  <span className="slider-value">{bloom.intensity.toFixed(2)}</span>
+                </label>
+                <label className="slider-row">
+                  <span>Bloom threshold</span>
+                  <Slider min={0} max={1} step={0.01} value={bloom.threshold} onChange={(threshold) => setBloom((value) => ({ ...value, threshold }))} />
+                  <span className="slider-value">{bloom.threshold.toFixed(2)}</span>
+                </label>
+                <label className="slider-row">
+                  <span>Bloom radius</span>
+                  <Slider min={0.25} max={8} step={0.25} value={bloom.radiusPx} onChange={(radiusPx) => setBloom((value) => ({ ...value, radiusPx }))} />
+                  <span className="slider-value">{bloom.radiusPx.toFixed(2)}px</span>
+                </label>
+                <label className="slider-row">
+                  <span>Bloom levels</span>
+                  <Slider min={2} max={10} step={1} value={bloom.levels} onChange={(levels) => setBloom((value) => ({ ...value, levels }))} />
+                  <span className="slider-value">{bloom.levels}</span>
+                </label>
+                <label className="slider-row">
+                  <span>Bloom scatter</span>
+                  <Slider min={0} max={1} step={0.01} value={bloom.scatter} onChange={(scatter) => setBloom((value) => ({ ...value, scatter }))} />
+                  <span className="slider-value">{bloom.scatter.toFixed(2)}</span>
+                </label>
+              </>
+            )}
+          </details>
         </section>
 
         {trainedPhysics && physicsValues && (
@@ -1332,7 +1269,6 @@ export function TrainingView() {
               onReset={() => setPhysicsOverride(null)}
             />
             <GrowthPanel
-              trained={trainedPhysics}
               value={physicsValues}
               onChange={setPhysicsOverride}
               isOverridden={physicsOverride !== null}

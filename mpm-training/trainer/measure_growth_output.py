@@ -45,7 +45,7 @@ from simulation_settings import (
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
 )
-from targets import load_target
+from targets import target_from_checkpoint
 from chemical_channels import homogeneous_channel_profiles, resolve_channel_profiles
 from training_sim import TrainingRollout
 from domain_fitness import StableMatchStop, target_mask, evaluate_domains
@@ -107,7 +107,7 @@ def main():
     agents.load_weights(weights)
     agents.set_chemical_gradient_input_scale(density.chemical_gradient_input_scale)
 
-    target = load_target(meta["target"])
+    target = target_from_checkpoint(meta)
 
     sim = TrainingRollout(
         core,
@@ -125,6 +125,7 @@ def main():
         initial_condition_strength=meta['initial_condition_strength'],
         initial_condition_channel=meta['initial_condition_channel'],
         material_area_budget=meta['material_area_budget'],
+        initial_spacing=density.initial_spacing,
     )
 
     rows = []

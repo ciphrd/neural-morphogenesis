@@ -27,8 +27,8 @@ export interface SimulationScenario {
     particleIndex: number;
     /** Number of contiguous particle slots participating in this event. */
     particleCount?: number;
-    /** Fixed world axis. Omit to follow the local boundary tangent. */
-    direction?: readonly [number, number];
+    /** Required, nonzero world-space growth axis. */
+    direction: readonly [number, number];
   }>;
   suppressNaturalGrowth?: boolean;
   /** Lab-only analytic override applied at every MPM growth-grid node. */
@@ -200,7 +200,7 @@ export class GpuSimulation {
     return [
       config.particles,
       config.channels,
-      config.fieldN,
+      config.baseResolution,
       JSON.stringify(config.chemicalChannelProfiles),
       config.hiddenDim,
       config.policyArchitecture,
@@ -232,8 +232,8 @@ export class GpuSimulation {
 
     const environment = new Environment(this.device, {
       channels: config.channels,
-      width: config.fieldN,
-      height: config.fieldN,
+      width: config.baseResolution,
+      height: config.baseResolution,
       decay: config.decay,
       // ?? 1.0 (= unchanged) guards a `generation` message from a
       // train_server.py process still running pre-depositRate code —
@@ -262,7 +262,6 @@ export class GpuSimulation {
       elasticStrainInputsEnabled: config.elasticStrainInputsEnabled,
       chemicalValueInputMultiplier: config.chemicalValueInputMultiplier,
       chemicalGradientInputScale: config.chemicalGradientInputScale,
-      boundaryTangentMinGradient: config.boundaryTangentMinGradient,
     });
     agents.loadWeights(config.weights);
 
@@ -320,6 +319,7 @@ export class GpuSimulation {
   restartRollout(): void {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     this.epoch++;
+    const initialSpacing = seedDensityModel.INITIAL_SPACING_IN_SAMPLE_SPACINGS * this.config.sampleSpacing;
     const initialCount = Math.min(
       Math.floor(this.particleCap / 2),
       Math.max(1, Math.floor(
@@ -334,7 +334,7 @@ export class GpuSimulation {
           columns: this.scenario.initialLayout.columns,
           centerX: this.config.spawnX,
           centerY: this.config.spawnY,
-          spacing: this.config.sampleSpacing,
+          spacing: initialSpacing,
         })
       : seedBlob({
           count: this.scenario?.initialLayout.kind === "blob"
@@ -342,7 +342,7 @@ export class GpuSimulation {
             : initialCount,
           centerX: this.config.spawnX,
           centerY: this.config.spawnY,
-          spacing: this.config.sampleSpacing,
+          spacing: initialSpacing,
           seed: this.config.seed,
         });
     if (scene.count > this.particleCap) {
@@ -352,7 +352,7 @@ export class GpuSimulation {
     if (preset === "internal-state" && cellMemoryFromConfig(this.config) !== "recurrent") {
       throw new Error("Internal-state initial condition requires recurrent cell memory");
     }
-    const radius = Math.sqrt((scene.count/2)*(this.config.sampleSpacing*seedDensityModel.INITIAL_PACKING_SPACING_SCALE)**2*Math.sqrt(3)/(2*Math.PI));
+    const radius = Math.sqrt((scene.count/2)*(initialSpacing*seedDensityModel.INITIAL_PACKING_SPACING_SCALE)**2*Math.sqrt(3)/(2*Math.PI));
     const perturbation = new InitialCondition(preset,
       this.config.initialConditionStrength,
       this.config.initialConditionChannel,
@@ -451,7 +451,6 @@ export class GpuSimulation {
     this.agents.setChemicalValueInputMultiplier(physics.chemicalValueInputMultiplier);
     this.agents.setChemicalGradientInputScale(physics.chemicalGradientInputScale);
 
-    this.agents.setBoundaryTangentMinGradient(physics.boundaryTangentMinGradient);
 
     this.agents.setMaterialAreaBudget(physics.materialAreaBudget);
     this.agents.setPhysics({
@@ -546,7 +545,7 @@ export class GpuSimulation {
       : -1;
     this.agents.setForcedGrowthControl(
       forcedGrowth?.particleIndex ?? null,
-      forcedGrowth?.direction ?? null,
+      forcedGrowth?.direction ?? [1, 0],
       nextStep === growthStartStep,
       forcedGrowth?.particleCount ?? 1,
     );

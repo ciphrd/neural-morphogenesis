@@ -434,6 +434,11 @@ body {
   margin-top: 12px;
 }
 
+.channel-window-control.is-inactive,
+.slider-row.is-inactive {
+  opacity: 0.45;
+}
+
 .channel-window-label {
   display: flex;
   justify-content: space-between;

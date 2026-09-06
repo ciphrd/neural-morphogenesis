@@ -2,7 +2,14 @@ import config from "../../../core/config.json";
 /** Material-area stopping metrics. Keep in parity with trainer/domain_fitness.py.
  * Exact triangle/cell intersections precede bilinear rotation alignment.
  */
-export interface ShapeTarget { points: number[][]; texelSize: number }
+/** Resolved PNG occupancy mask. Optional point fields read legacy runs. */
+export interface ShapeTarget {
+  mask?: number[];
+  resolution?: number;
+  center?: number[];
+  points?: number[][];
+  texelSize?: number;
+}
 export interface MatchMetrics { missing: number; spill: number; overlap: number }
 export interface ShapeStopSettings {
   stableStop?: boolean;
@@ -22,6 +29,13 @@ const area = (p: Point[]) => Math.abs(p.reduce((s, a, i) => {
 }, 0)) / 2;
 
 export function targetMask(target: ShapeTarget, n: number): Float64Array {
+  if (target.mask) {
+    if (target.resolution !== n || target.mask.length !== n*n) {
+      throw new Error(`Target mask resolution ${target.resolution} does not match fitness resolution ${n}`);
+    }
+    return Float64Array.from(target.mask);
+  }
+  if (!target.points || target.texelSize === undefined) throw new Error("Invalid shape target");
   const mask = new Float64Array(n * n), half = target.texelSize / 2;
   const seen = new Set<string>();
   for (const [x, y] of target.points) {
@@ -126,7 +140,8 @@ function rotated(density: Float64Array, n: number, angle: number, center: Point)
 export function matchDomains(vertices: ArrayLike<number>, target: ShapeTarget, mask: Float64Array): MatchMetrics {
   const failure = { missing: Infinity, spill: Infinity, overlap: Infinity };
   const n = Math.sqrt(mask.length);
-  const center = [0, 1].map(axis => target.points.reduce((s,p) => s+p[axis], 0)/target.points.length) as Point;
+  const center = (target.center ?? [0, 1].map(axis =>
+    target.points!.reduce((s,p) => s+p[axis], 0)/target.points!.length)) as Point;
   let source: ReturnType<typeof centeredTriangles>;
   try { source = centeredTriangles(vertices, center); } catch { return failure; }
   const density = rasterizeTriangles(source.triangles, n);

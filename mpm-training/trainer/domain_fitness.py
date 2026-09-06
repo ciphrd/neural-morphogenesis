@@ -13,20 +13,10 @@ from scipy.ndimage import affine_transform, distance_transform_edt
 from raster import RasterFitnessBreakdown, _average_pool, _boundary_loss
 from triangle_vertices import unwrap_vertices
 
-FITNESS_MODEL_VERSION = 2
+FITNESS_MODEL_VERSION = 3
 
 def target_mask(target, resolution):
-    result = np.zeros((resolution, resolution), dtype=float)
-    half = target.texel_size() / 2
-    # Original target texels do not overlap; integrate their square footprints.
-    for x, y in np.unique(np.asarray(target.points, dtype=float), axis=0):
-        lo = np.maximum(0, np.floor((np.array([x, y])-half)*resolution).astype(int))
-        hi = np.minimum(resolution, np.ceil((np.array([x, y])+half)*resolution).astype(int))
-        xs = np.arange(lo[0], hi[0]); ys = np.arange(lo[1], hi[1])
-        wx = np.maximum(0, np.minimum(xs+1, (x+half)*resolution)-np.maximum(xs, (x-half)*resolution))
-        wy = np.maximum(0, np.minimum(ys+1, (y+half)*resolution)-np.maximum(ys, (y-half)*resolution))
-        result[np.ix_(ys, xs)] += wy[:, None]*wx
-    return np.clip(result, 0, 1)
+    return target.mask(resolution)
 
 def centered_triangles(vertices, center):
     triangles = unwrap_vertices(vertices)
@@ -142,7 +132,7 @@ def evaluate_domains(vertices, target, mask, *, coverage_weight=_DEFAULTS["fitne
     vertices = np.asarray(vertices, float).reshape(-1, 3, 2)
     if not len(vertices) or not np.isfinite(vertices).all() or not mask.any():
         return fail
-    center = np.asarray(target.points, dtype=float).mean(axis=0)
+    center = target.center
     try:
         triangles, material_area = centered_triangles(vertices, center)
     except ValueError:
@@ -150,6 +140,8 @@ def evaluate_domains(vertices, target, mask, *, coverage_weight=_DEFAULTS["fitne
     density = rasterize_triangles(triangles, len(mask))
     mass = float(mask.sum())
     material_pixels = material_area*len(mask)**2
+    # All nonzero soft-edge support is part of the target for distance
+    # purposes; coverage/spill still use its fractional alpha value.
     distances = distance_transform_edt(mask <= 0)/len(mask)
     best = fail
     best_match = fail.match
