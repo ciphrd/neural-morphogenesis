@@ -6,12 +6,12 @@ from domain_fitness import DomainEvaluation, MatchMetrics, target_mask
 from targets import load_target
 
 def run_case(*, bad_steps=(), blocked=False, horizon=20, cutoff=None, enabled=True,
-             reach_capacity_at=None):
+             reach_capacity_at=None, samples_at_200=10, initial_count=10):
     args=evolve.build_arg_parser().parse_args(['--macro-steps',str(horizon),
         '--shape-check-interval','2','--shape-confirmations','2','--shape-settle-steps','5'])
     args.growth_steps=cutoff;args.stable_stop=enabled
     target=load_target(args.target)
-    core=MagicMock();core.active_count=10
+    core=MagicMock();core.active_count=initial_count
     agents=MagicMock();agents.particle_capacity=args.particles
     agents.max_active_particles=args.particles
     agents.capacity_blocked=blocked;agents.unresolved_samples=0
@@ -20,6 +20,7 @@ def run_case(*, bad_steps=(), blocked=False, horizon=20, cutoff=None, enabled=Tr
         def __init__(self,*a,**kw): pass
         def macro_step(self,*a,growth_enabled):
             flags.append(growth_enabled)
+            if len(flags) == 200: core.active_count=samples_at_200
             if reach_capacity_at == len(flags): core.active_count=agents.max_active_particles
         def positions(self): return np.zeros((10,2))
     def score(*a):
@@ -46,6 +47,14 @@ def main():
     assert not d['stableMatch'] and d['settling'] and len(flags)==7
     flags,d=run_case(cutoff=3,enabled=False)
     assert flags==[True]*3+[False]*17 and not d['stableMatch']
+    flags,d=run_case(horizon=220,enabled=False)
+    assert len(flags)==200 and d['stopReason']=='low-growth'
+    flags,d=run_case(horizon=220,enabled=False,samples_at_200=11)
+    assert len(flags)==220 and d['stopReason']=='horizon'
+    flags,d=run_case(horizon=220,enabled=False,reach_capacity_at=200)
+    assert len(flags)==200 and d['stopReason']=='capacity'
+    flags,d=run_case(initial_count=evolve.build_arg_parser().parse_args([]).particles)
+    assert not flags and d['stopReason']=='capacity'
     print('[PASS] Actual rollout control: stable match, immediate capacity stop, horizon, explicit growth cutoff')
 
 if __name__=='__main__':main()

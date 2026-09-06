@@ -76,4 +76,4 @@ def save_raster_image(raster: np.ndarray, path: Path) -> None:
     Flipping here keeps every image this module produces in the same
     visual orientation."""
     img = np.clip(raster[::-1], 0.0, 1.0)
-    Image.fromarray((img * 255.0).astype(np.uint8), mode="L").save(path)
+    Image.fromarray((img * 255.0).astype(np.uint8), mode="RGB" if img.ndim == 3 else "L").save(path)

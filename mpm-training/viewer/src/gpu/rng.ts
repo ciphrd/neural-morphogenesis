@@ -88,7 +88,7 @@ export function triangulateSeedCells(scene: Omit<SceneData, "domainGeometry"> & 
 }
 
 /** Exact, axis-aligned rows for deterministic lab scenarios. Unlike seedBlob,
- * this layout has no packing scale or seed-derived rotation: adjacent cells
+ * this layout has no packing scale: adjacent cells
  * are separated by the target spacing. Cells are emitted bottom-to-top and
  * left-to-right, with two consecutive triangle samples per cell. */
 export function seedRows(config: {
@@ -121,9 +121,10 @@ export function seedRows(config: {
 
 /** Concentric-ring disk with a regular circular boundary and exactly 2*count
  * triangles. Mirrors triangle_seed.py; weights track triangle area so material
- * density stays uniform. The two-triangle minimum is a square. */
+ * density stays uniform. Orientation is fixed regardless of seed.
+ * The two-triangle minimum is a square. */
 export function seedBlob(config: SeedBlobConfig): SceneData {
-  const { count: cells, centerX, centerY, spacing, seed } = config;
+  const { count: cells, centerX, centerY, spacing } = config;
   if (!Number.isInteger(cells) || cells < 1 || !Number.isFinite(spacing) || spacing <= 0)
     throw new Error("Disk seeds require a positive integer count and spacing");
   const count = 2*cells;
@@ -131,7 +132,6 @@ export function seedBlob(config: SeedBlobConfig): SceneData {
   const sizes: number[] = [];
   for (let k=1; k<rings; k++) sizes.push(Math.floor(count*k/(rings*rings)+.5));
   sizes.push(count-2*sizes.reduce((a,b)=>a+b,0));
-  const theta = (spawnUniform01(seed, 2)*2-1)*Math.PI;
   const points: number[][] = [[0,0]];
   const faces: number[][] = [];
   let previous = [0];
@@ -139,7 +139,7 @@ export function seedBlob(config: SeedBlobConfig): SceneData {
     const size = cells === 1 ? 4 : sizes[k-1];
     const current: number[] = [];
     for (let j=0; j<size; j++) {
-      const angle = theta+2*Math.PI*j/size;
+      const angle = 2*Math.PI*j/size;
       current.push(points.length);
       points.push([k/rings*Math.cos(angle),k/rings*Math.sin(angle)]);
     }

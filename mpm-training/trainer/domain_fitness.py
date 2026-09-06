@@ -13,7 +13,7 @@ from scipy.ndimage import affine_transform, distance_transform_edt
 from raster import RasterFitnessBreakdown, _average_pool, _boundary_loss
 from triangle_vertices import unwrap_vertices
 
-FITNESS_MODEL_VERSION = 3
+FITNESS_MODEL_VERSION = 4
 
 def target_mask(target, resolution):
     return target.mask(resolution)
@@ -55,10 +55,14 @@ def _raster_batches(triangles, resolution):
     if start < len(scaled):
         yield scaled[start:]
 
-def rasterize_triangles(triangles, resolution):
+def rasterize_triangles(triangles, resolution, colors=None):
     """Add exact triangle/pixel intersection areas using batched convex clipping."""
     out = np.zeros((resolution, resolution), dtype=float)
+    rgb = np.zeros((resolution, resolution, 3), dtype=float) if colors is not None else None
+    triangle_offset = 0
     for chunk in _raster_batches(triangles, resolution):
+        chunk_colors = None if colors is None else colors[triangle_offset:triangle_offset+len(chunk)]
+        triangle_offset += len(chunk)
         low = np.maximum(0, np.floor(chunk.min(axis=1)).astype(int))
         high = np.minimum(resolution, np.ceil(chunk.max(axis=1)).astype(int))
         sizes = np.maximum(0, high-low)
@@ -85,20 +89,22 @@ def rasterize_triangles(triangles, resolution):
             crossing = valid & (inside_a != inside_b)
             keep = valid & inside_b
             amount = crossing.astype(int)+keep.astype(int)
-            offset = np.cumsum(amount, axis=1)-amount
+            vertex_offsets = np.cumsum(amount, axis=1)-amount
             clipped = np.zeros_like(poly)
             r, s = np.nonzero(crossing)
             ratio = da[r, s]/(da[r, s]-db[r, s])
-            clipped[r, offset[r, s]] = a[r, s]+ratio[:, None]*(b[r, s]-a[r, s])
+            clipped[r, vertex_offsets[r, s]] = a[r, s]+ratio[:, None]*(b[r, s]-a[r, s])
             r, s = np.nonzero(keep)
-            clipped[r, offset[r, s]+crossing[r, s]] = b[r, s]
+            clipped[r, vertex_offsets[r, s]+crossing[r, s]] = b[r, s]
             n = amount.sum(axis=1)
             poly = clipped
         b = poly[rows, (slots+1) % np.maximum(n[:, None], 1)]
         cross = poly[:, :, 0]*b[:, :, 1]-poly[:, :, 1]*b[:, :, 0]
         area = np.abs(np.sum(np.where(slots < n[:, None], cross, 0), axis=1))/2
         np.add.at(out, (ys, xs), area)
-    return out
+        if rgb is not None:
+            np.add.at(rgb, (ys, xs), area[:, None]*chunk_colors[indices])
+    return out if rgb is None else (out, rgb)
 
 def rotate_density(density, angle, center):
     # Row-vector geometry uses raster.py's clockwise rotation convention.
@@ -124,10 +130,11 @@ class DomainEvaluation:
     raster: np.ndarray | None
     breakdown: RasterFitnessBreakdown | None
     match: MatchMetrics
+    color_raster: np.ndarray | None = None
 
 def evaluate_domains(vertices, target, mask, *, coverage_weight=_DEFAULTS["fitnessCoverageWeight"], spill_weight=_DEFAULTS["fitnessSpillWeight"],
                      boundary_weight=_DEFAULTS["fitnessBoundaryWeight"], crowding_weight=_DEFAULTS["fitnessCrowdingWeight"], outside_weight=_DEFAULTS["outsideWeight"],
-                     num_angles=16, refinement_steps=2):
+                     num_angles=16, refinement_steps=2, colors=None, color_weight=1.0):
     fail = DomainEvaluation(float('inf'), None, None, MatchMetrics(float('inf'), float('inf'), float('inf')))
     vertices = np.asarray(vertices, float).reshape(-1, 3, 2)
     if not len(vertices) or not np.isfinite(vertices).all() or not mask.any():
@@ -137,7 +144,15 @@ def evaluate_domains(vertices, target, mask, *, coverage_weight=_DEFAULTS["fitne
         triangles, material_area = centered_triangles(vertices, center)
     except ValueError:
         return fail
-    density = rasterize_triangles(triangles, len(mask))
+    target_rgb = target.color_raster(len(mask)) if colors is not None and color_weight > 0 else None
+    color_density = None
+    if target_rgb is not None:
+        colors = np.asarray(colors, float)
+        if colors.shape != (len(vertices), 3) or not np.isfinite(colors).all():
+            return fail
+        density, color_density = rasterize_triangles(triangles, len(mask), np.clip(colors, 0, 1))
+    else:
+        density = rasterize_triangles(triangles, len(mask))
     mass = float(mask.sum())
     material_pixels = material_area*len(mask)**2
     # All nonzero soft-edge support is part of the target for distance
@@ -166,8 +181,18 @@ def evaluate_domains(vertices, target, mask, *, coverage_weight=_DEFAULTS["fitne
         boundary = _boundary_loss(mask, occupancy)
         crowding = match.overlap
         score = coverage_weight*coverage+spill_weight*spill+boundary_weight*boundary+crowding_weight*crowding
+        color = 0.
+        candidate_rgb = None
+        if color_density is not None:
+            rotated_rgb = color_density if angle == 0 else np.stack([
+                rotate_density(color_density[..., channel], angle, center) for channel in range(3)
+            ], axis=-1)
+            # Average overlapping sample colors, then premultiply by occupancy.
+            candidate_rgb = rotated_rgb/np.maximum(d[..., None], 1.0)
+            color = float(np.square(candidate_rgb-target_rgb).sum()/(3*mass))
+            score += color_weight*color
         if score < best.total:
-            best = DomainEvaluation(score, occupancy, RasterFitnessBreakdown(score, coverage, spill, boundary, crowding, angle), match)
+            best = DomainEvaluation(score, occupancy, RasterFitnessBreakdown(score, coverage, spill, boundary, crowding, angle, color), match, candidate_rgb)
     for i in range(num_angles):
         evaluate(2*np.pi*i/num_angles)
     # Refine the physical match pose; this search is identical in browser playback.
@@ -220,7 +245,8 @@ def stopping_from_args(args):
                           args.shape_settle_steps, args.shape_missing_tolerance,
                           args.shape_spill_tolerance, args.shape_overlap_tolerance)
 
-def score_domains(vertices, target, mask, args):
+def score_domains(vertices, target, mask, args, colors=None):
     return evaluate_domains(vertices, target, mask, coverage_weight=args.fitness_coverage_weight,
         spill_weight=args.fitness_spill_weight, boundary_weight=args.fitness_boundary_weight,
-        crowding_weight=args.fitness_crowding_weight, outside_weight=args.outside_weight)
+        crowding_weight=args.fitness_crowding_weight, outside_weight=args.outside_weight,
+        colors=colors, color_weight=getattr(args, "fitness_color_weight", 1.0))

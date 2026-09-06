@@ -258,14 +258,19 @@ def _save_generation_images(
         return_positions=True,
         density_multiplier=winner_density,
     )
-    evaluation = score_domains(core.read_rest_state()[:, 8:14], target, target_raster, args)
+    colors = (agents.read_colors(core.active_count)
+              if target.has_color and args.fitness_color_weight > 0 else None)
+    evaluation = score_domains(core.read_rest_state()[:, 8:14], target, target_raster, args, colors)
     agent_raster, breakdown = evaluation.raster, evaluation.breakdown
 
     prefix = f"gen_{generation:05d}"
     save_grown_image(positions, target.overlay_points(args.raster_resolution), IMAGES_DIR / f"{prefix}_grown.png")
-    save_raster_image(target_raster, IMAGES_DIR / f"{prefix}_target.png")
+    target_rgb = target.color_raster(args.raster_resolution)
+    save_raster_image(target_rgb if target_rgb is not None else target_raster, IMAGES_DIR / f"{prefix}_target.png")
     if agent_raster is not None:
-        save_raster_image(agent_raster, IMAGES_DIR / f"{prefix}_agents.png")
+        save_raster_image(evaluation.color_raster if evaluation.color_raster is not None else agent_raster, IMAGES_DIR / f"{prefix}_agents.png")
+    if target_rgb is not None and evaluation.color_raster is not None:
+        save_raster_image(np.abs(evaluation.color_raster-target_rgb), IMAGES_DIR / f"{prefix}_diff.png")
     if breakdown is None:
         return None
     return {
@@ -274,6 +279,7 @@ def _save_generation_images(
         "spill": breakdown.spill,
         "boundary": breakdown.boundary,
         "crowding": breakdown.crowding,
+        "color": breakdown.color,
         "angle": breakdown.angle,
         "rollout": core.rollout_diagnostics,
     }
@@ -434,6 +440,7 @@ async def _training_loop_body() -> None:
         "mutationSigma": args.mutation_sigma,
         "rasterResolution": args.raster_resolution,
         "outsideWeight": args.outside_weight,
+        "fitnessColorWeight": args.fitness_color_weight,
         "fitnessCoverageWeight": args.fitness_coverage_weight,
         "fitnessSpillWeight": args.fitness_spill_weight,
         "fitnessBoundaryWeight": args.fitness_boundary_weight,

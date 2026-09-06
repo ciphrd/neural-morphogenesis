@@ -34,3 +34,7 @@ Run focused checks with `.venv/bin/python <name>_check.py`. See the root README 
 ```
 
 Run metadata and weights must match the current model schema; there is no checkpoint migration layer. Archived research snapshots retain their original meaning and are not acceptance baselines for the current layout.
+
+Training rollouts stop immediately when sample capacity is reached or refinement reports capacity blocked. At macro step 200, rollouts with fewer than 10% more samples than their actual initial seed stop with `low-growth`; the terminal state is scored normally. Exactly 10% growth passes this check.
+
+PNG targets train RGB as well as alpha coverage. Each sample colors its triangle with its NN RGB output; exact pixel intersections integrate these colors, and overlapping colors are area-averaged. The aligned premultiplied RGB mean squared error is normalized by target alpha area and added to the existing shape loss. `--fitness-color-weight` defaults to 1; set it to 0 for shape-only training. Legacy JSON targets remain shape-only. RGB is embedded in checkpoints and shown in target/agent generation PNGs, with an absolute RGB difference in `gen_XXXXX_diff.png`; fitness diagnostics include a separate `color` term. Fitness model version is now 4.

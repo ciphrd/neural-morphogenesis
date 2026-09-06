@@ -28,6 +28,7 @@ class RasterFitnessBreakdown:
     boundary: float
     crowding: float
     angle: float
+    color: float = 0.0
 
 def _rotation_matrix(theta: float) -> np.ndarray:
     c, s = np.cos(theta), np.sin(theta)

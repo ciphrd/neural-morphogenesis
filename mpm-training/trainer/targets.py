@@ -1,11 +1,10 @@
 """Load shape targets from PNG alpha masks (and legacy pixel-export JSON).
 
-PNG RGB values are ignored for now. Alpha is continuous occupancy: 0 is empty
-and 255 is filled. The loader remains the natural place to add colour later.
+PNG RGB supplies color supervision; alpha is continuous occupancy.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import json
 
@@ -26,6 +25,10 @@ class TargetShape:
     source_centroid: tuple[float, float] | None = None
     resolved_mask: np.ndarray | None = None
     target_center: tuple[float, float] | None = None
+
+    rgb: np.ndarray | None = None
+    resolved_rgb: np.ndarray | None = None
+    _color_cache: dict[int, np.ndarray] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.points = np.asarray(self.points, dtype=np.float32).reshape(-1, 2)
@@ -107,9 +110,33 @@ class TargetShape:
         result = (wx @ rows_by_source_x.T).T
         return np.clip(np.asarray(result) * resolution**2, 0, 1)
 
+    @property
+    def has_color(self) -> bool:
+        return self.rgb is not None or self.resolved_rgb is not None
+
+    def color_raster(self, resolution: int) -> np.ndarray | None:
+        """Cell-average premultiplied RGB, with the same mapping as alpha."""
+        if self.resolved_rgb is not None:
+            rgb = np.asarray(self.resolved_rgb, dtype=float)
+            if rgb.shape != (resolution, resolution, 3):
+                raise ValueError("embedded target RGB resolution mismatch")
+            return rgb.copy()
+        if self.rgb is None:
+            return None  # Legacy masks have no color supervision.
+        if resolution not in self._color_cache:
+            self._color_cache[resolution] = np.stack([
+                replace(self, occupancy=self.occupancy*self.rgb[..., channel]).mask(resolution)
+                for channel in range(3)
+            ], axis=-1)
+        return self._color_cache[resolution].copy()
+
     def wire(self, resolution: int) -> dict:
         mask = self.mask(resolution)
-        return {"mask": mask.ravel().tolist(), "resolution": resolution, "center": self.center.tolist()}
+        data = {"mask": mask.ravel().tolist(), "resolution": resolution, "center": self.center.tolist()}
+        rgb = self.color_raster(resolution)
+        if rgb is not None:
+            data["rgb"] = rgb.ravel().tolist()
+        return data
 
     def overlay_points(self, resolution: int = 128) -> np.ndarray:
         """Return a bounded point approximation used only for visualization."""
@@ -159,6 +186,7 @@ class TargetShape:
         # approximation when an older point-oriented renderer needs one.
         return cls(np.zeros((0, 2), dtype=np.float32), (width, height),
                    occupancy=occupancy, source_centroid=source_centroid,
+                   rgb=rgba[..., :3].astype(np.float32)/255.0,
                    target_center=(0.5, 0.5))
 
     @classmethod
@@ -169,7 +197,8 @@ class TargetShape:
         points = np.column_stack(((xs + 0.5) / resolution, (ys + 0.5) / resolution))
         center = tuple(float(v) for v in data.get("center", (0.5, 0.5)))
         return cls(points, (resolution, resolution), mask[ys, xs], resolved_mask=mask,
-                   target_center=center)
+                   target_center=center, resolved_rgb=(np.asarray(data["rgb"], dtype=float).reshape(resolution, resolution, 3)
+                       if "rgb" in data else None))
 
 
 def available_targets() -> list[str]:

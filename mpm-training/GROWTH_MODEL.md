@@ -229,11 +229,27 @@ of a conforming shared-edge operation. An ineligible pair stays intact; its mass
 chemistry and domains are unchanged. Weight-limited refinement does not report a
 capacity failure or disable growth. Genuine rest growth can restore eligibility.
 Density presets scale base mass separately, so this weight is in preset-relative
-material units. Existing samples already below the floor are not merged or removed.
+material units. Samples below this floor remain active, but cannot split until
+they have sufficient material weight.
 
-The current configured `MIN_CHILD_WEIGHT` is 0.3125. Without growth, a weight-1
-lineage can therefore split into two weight-0.5 children; a weight-0.5 lineage
-cannot split until its represented grown weight increases. Conformity can stop earlier. The initial threshold is an
+Samples are deleted if their three vertices form a disconnected grid-support
+graph. Two vertices are linked when their quadratic MPM interpolation kernels
+share a node with strictly positive weight. At least two of the three pairs must
+be linked; indirect coupling through the third vertex is allowed. The kernels
+extend 1.5 grid cells along each axis, with zero-weight endpoints excluded.
+Distances wrap periodically. Disconnected triangles cannot refine before deletion.
+This tests geometric kernel overlap, not whether shared nodes currently have mass.
+Unlike a one-cell edge cap, it preserves the valid production seed geometry.
+It runs at the macro-step refinement/pruning stage, before the next physics block.
+Remaining samples are compacted with their complete state to reclaim capacity.
+
+The current configured `MIN_CHILD_WEIGHT` is 0.078125. Without growth, a weight-1
+lineage can therefore undergo three bisection levels into eight weight-0.125
+children; those children cannot split until their represented grown weight
+increases. This floor is one quarter of the previous 0.3125 value: it permits
+two additional bisection levels and halves the equivalent linear cutoff at
+equal material area per unit weight and comparable triangle shape. Conformity
+can stop earlier. The threshold is an
 experimental sampling choice in `MIN_CHILD_WEIGHT`, not a physical fracture law.
 Run `cd trainer && .venv/bin/python split_weight_check.py` for boundary values,
 conservation, shared-edge eligibility, and sustained extreme-stretch checks.

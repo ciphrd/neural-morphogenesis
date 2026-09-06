@@ -5,7 +5,7 @@ import numpy as np
 
 from simulation_settings import DEFAULT_RUN_SETTINGS, COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, INITIAL_SPACING, NEURAL_UPDATES_PER_MACRO
 
-from agents_gpu import AgentsGPU, _spawn_uniform01
+from agents_gpu import AgentsGPU
 from density import INITIAL_PACKING_SPACING_SCALE
 from initial_conditions import InitialCondition, validate_initial_condition
 from policy_parameters import policy_has_recurrence
@@ -13,11 +13,13 @@ from environment_gpu import EnvironmentGPU
 from mpm_core import DT, MpmCore
 
 def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int) -> tuple:
-    """Seed an area-weighted circular triangle mesh; mirrored in rng.ts."""
+    """Seed a fixed-orientation circular triangle mesh; mirrored in rng.ts.
+
+    Keep the seed argument for callers; geometry is independent of it.
+    """
     from triangle_seed import triangulate_seed_disk
-    theta = (_spawn_uniform01(seed, 2) * 2.0 - 1.0) * np.pi
     positions, domain, weights = triangulate_seed_disk(
-        count, center, spacing * INITIAL_PACKING_SPACING_SCALE, theta)
+        count, center, spacing * INITIAL_PACKING_SPACING_SCALE, 0.0)
     samples = len(positions)
     return (positions, np.zeros((samples, 2), np.float32),
             np.tile(np.array([1, 0, 0, 1], np.float32), (samples, 1)),
@@ -33,11 +35,8 @@ class TrainingRollout:
     the configured initial particle count; --particles remains a growth cap) and
     resets `agents`/`environment`'s own persistent state back to a fresh
     (empty field and zero alignment cache — see AgentsGPU.reset_state()'s
-    own docstring) starting point for this rollout — every bit of that
-    starting condition (packed-disk rotation,
-    growth's own seed) is now a pure, bit-exact function of `seed` alone
-    (see seed_blob()'s/agents_gpu._spawn_uniform01()'s own docstrings),
-    no numpy Generator needed anywhere in this constructor anymore.
+    own docstring) starting point for this rollout. The base mesh has a fixed
+    orientation; `seed` only affects optional initial-condition perturbations.
     `mpm_enabled` (default True) is simulation_settings.py's own
     MPM_ENABLED, threaded through — see macro_step()'s own comment for
     exactly what setting it False skips."""

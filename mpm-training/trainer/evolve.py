@@ -250,11 +250,16 @@ def rollout(
     stopping = stopping_from_args(args)
     last_evaluation = None
     step = 0
+    train_color = target.has_color and args.fitness_color_weight > 0
+    initial_sample_count = core.active_count
+    stopped_for_low_growth = False
     stopped_at_capacity = core.active_count >= agents.max_active_particles
     if stopped_at_capacity:
         # An exactly-full initial seed is already terminal. This geometry read
         # is the one required final fitness sample, not a per-step poll.
-        last_evaluation = score_domains(core.read_rest_state()[:, 8:14], target, target_raster, args)
+        last_evaluation = score_domains(
+            core.read_rest_state()[:, 8:14], target, target_raster, args,
+            agents.read_colors(core.active_count) if train_color else None)
         scores.append(last_evaluation.total)
     else:
         for step in range(1, args.macro_steps + 1):
@@ -265,12 +270,15 @@ def rollout(
             stopped_at_capacity = (
                 core.active_count >= agents.max_active_particles or agents.capacity_blocked
             )
-            if stopped_at_capacity or step in checkpoint_steps or stopping.due(step):
+            stopped_for_low_growth = step == 200 and core.active_count*10 < initial_sample_count*11
+            if stopped_at_capacity or stopped_for_low_growth or step in checkpoint_steps or stopping.due(step):
                 vertices = core.read_rest_state()[:, 8:14]
-                last_evaluation = score_domains(vertices, target, target_raster, args)
-                if stopped_at_capacity or step in checkpoint_steps:
+                last_evaluation = score_domains(
+                    vertices, target, target_raster, args,
+                    agents.read_colors(core.active_count) if train_color else None)
+                if stopped_at_capacity or stopped_for_low_growth or step in checkpoint_steps:
                     scores.append(last_evaluation.total)
-                if stopped_at_capacity:
+                if stopped_at_capacity or stopped_for_low_growth:
                     break
                 if stopping.due(step) and stopping.observe(step, last_evaluation.match, last_evaluation.total,
                         sampling_blocked=core.active_count >= agents.max_active_particles or agents.capacity_blocked or agents.unresolved_samples > 0):
@@ -284,7 +292,9 @@ def rollout(
         "settling": stopping.settling_since is not None and not stopping.complete,
         "capacityBlocked": bool(agents.capacity_blocked),
         "atCapacity": core.active_count >= agents.max_active_particles,
-        "stopReason": "capacity" if stopped_at_capacity else ("stable-match" if stopping.complete else "horizon"),
+        "stopReason": "capacity" if stopped_at_capacity else ("low-growth" if stopped_for_low_growth else ("stable-match" if stopping.complete else "horizon")),
+        "initialSamples": initial_sample_count,
+        "finalSamples": core.active_count,
         "unresolvedSamples": int(agents.unresolved_samples),
         "missing": last_evaluation.match.missing,
         "spill": last_evaluation.match.spill,
@@ -512,6 +522,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "inside the spill term (0 keeps occupancy spill but disables distance growth)"
         ),
     )
+    parser.add_argument("--fitness-color-weight", type=float, default=1.0,
+        help="weight of triangle RGB error against PNG targets; zero disables color")
     parser.add_argument(
         "--fitness-coverage-weight", type=float,
         default=DEFAULT_RUN_SETTINGS["fitnessCoverageWeight"],
@@ -596,6 +608,7 @@ def validate_fitness_configuration(args: argparse.Namespace) -> None:
         raise SystemExit("--raster-resolution must be at least 8")
     for name in (
         "outside_weight",
+        "fitness_color_weight",
         "fitness_coverage_weight",
         "fitness_spill_weight",
         "fitness_boundary_weight",
@@ -674,6 +687,7 @@ def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed
         'mutation_scales': mutation_scales(args.policy_architecture),
         'raster_resolution': args.raster_resolution,
         'outside_weight': args.outside_weight,
+        'fitness_color_weight': args.fitness_color_weight,
         'fitness_coverage_weight': args.fitness_coverage_weight,
         'fitness_spill_weight': args.fitness_spill_weight,
         'fitness_boundary_weight': args.fitness_boundary_weight,

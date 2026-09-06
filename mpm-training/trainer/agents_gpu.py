@@ -341,6 +341,7 @@ class AgentsGPU:
             ("requestRefinement", (1, 2, 3, 7, 9), None),
             ("reserveRefinement", (1, 2, 3, 7, 9), None),
             ("commitResample", (0, 1, 2, 3, 4, 5, 6, 7), None),
+            ("pruneMaterial", (0, 2, 3, 4, 5, 6), 1),
             ("stopGrowthAtCapacity", (3, 7, 8, 9), ceil_div(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)),
         ]
         pipelines = {entry: device.create_compute_pipeline(
@@ -515,6 +516,14 @@ class AgentsGPU:
         self._refinement_rounds = max(0, active_count - 1).bit_length()
         self._dispatch = ceil_div(active_count, WORKGROUP)
         self.device.queue.write_buffer(self._agent_state_buffer, 0, np.array([active_count], dtype=np.uint32))
+
+    def read_colors(self, active_count: int) -> np.ndarray:
+        """Read NN RGB outputs only at fitness snapshots."""
+        if active_count == 0:
+            return np.empty((0, 3), dtype=np.float32)
+        raw = self.device.queue.read_buffer(self._agent_state_buffer,
+            PARTICLE_META_BUFFER_OFFSET, active_count*self._particle_meta_dtype.itemsize)
+        return np.frombuffer(raw, dtype=self._particle_meta_dtype)["color"][:, :3].copy()
 
     def read_sample_count(self) -> int:
         """Reads back growth's own atomic counter (core/agents.wgsl's own

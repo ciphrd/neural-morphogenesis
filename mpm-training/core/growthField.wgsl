@@ -133,10 +133,29 @@ fn refinementDemand(pi: u32) -> f32 {
   for (var ei=0u; ei<3u; ei++) { sum += edgeLengthSquared(edgeKey(pi,ei)); }
   return sum / (4.0*sqrt(3.0)*max(physics.sampleSpacing*physics.sampleSpacing,1e-12));
 }
+fn sharesGridSupport(a: vec2<f32>, b: vec2<f32>) -> bool {
+  let ya = fract(a) * INV_DX;
+  let yb = ya + edgeBetween(a, b) * INV_DX;
+  // Quadratic B-splines are strictly positive within 1.5 cells of a
+  // node. Integer bounds exclude the zero-weight support endpoints.
+  let low = max(floor(ya - vec2<f32>(1.5)), floor(yb - vec2<f32>(1.5))) + vec2<f32>(1.0);
+  let high = min(ceil(ya + vec2<f32>(1.5)), ceil(yb + vec2<f32>(1.5))) - vec2<f32>(1.0);
+  return all(low <= high);
+}
+fn disconnectedFromGrid(pi: u32) -> bool {
+  var links = 0u;
+  for (var ei = 0u; ei < 3u; ei++) {
+    if (sharesGridSupport(vertex(pi, ei), vertex(pi, (ei + 1u) % 3u))) { links++; }
+  }
+  // Three vertices form a connected graph exactly when at least two
+  // vertex pairs share support; indirect coupling through a vertex is valid.
+  return links < 2u;
+}
 fn hasSplitWeight(pi: u32) -> bool {
   let rest=particleRest[pi];
   let childWeight=0.5*max(rest.quadratureWeight,0.0)*max(matDet(rest.growthF),1e-6);
-  return childWeight>=MIN_CHILD_WEIGHT;
+  // Do not turn an invalid footprint into surviving daughters before pruning.
+  return childWeight>=MIN_CHILD_WEIGHT && !disconnectedFromGrid(pi);
 }
 fn hashKey(key: vec4<f32>) -> u32 {
 
@@ -472,4 +491,27 @@ fn stopGrowthAtCapacity(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (atomicLoad(&agentState.sampleCount) < physics.maxActiveParticles && atomicLoad(&refinement[BLOCKED]) == 0u) { return; }
 
   atomicStore(&growthField[i], 0);
+}
+
+// Run after all indexed refinement passes: moving a sample earlier would
+// invalidate edge references. A single invocation compacts in place without
+// racing reads from the tail. The host propagates sampleCount before physics.
+@compute @workgroup_size(1)
+fn pruneMaterial() {
+  var count = atomicLoad(&agentState.sampleCount);
+  var pi = 0u;
+  loop {
+    if (pi >= count) { break; }
+    if (!disconnectedFromGrid(pi)) { pi++; continue; }
+    count--;
+    if (pi != count) {
+      positions[pi] = positions[count];
+      velocities[pi] = velocities[count];
+      particleC[pi] = particleC[count];
+      particleF[pi] = particleF[count];
+      particleRest[pi] = particleRest[count];
+      agentState.particleMeta[pi] = agentState.particleMeta[count];
+    }
+  }
+  atomicStore(&agentState.sampleCount, count);
 }

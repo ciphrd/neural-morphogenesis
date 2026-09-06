@@ -353,7 +353,8 @@ export class Agents {
       ...Array.from({ length: Math.ceil(Math.log2(MAX_PARTICLES)) },
         (): [string, null] => ["propagateRefinement", null]),
       ["requestRefinement", null], ["reserveRefinement", null],
-      ["commitResample", null], ["stopGrowthAtCapacity", ceilDiv(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)],
+      ["commitResample", null], ["pruneMaterial", 1],
+      ["stopGrowthAtCapacity", ceilDiv(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)],
     ];
     // Keep one stable ABI for every growth pass. With `layout: "auto"`, WebGPU
     // infers a different layout per entry point and removes bindings that an
