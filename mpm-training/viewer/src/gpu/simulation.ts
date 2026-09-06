@@ -1,3 +1,7 @@
+import { InitialCondition } from "./initialConditions";
+import initialConditionDefaults from "../../../core/initial_conditions.json";
+import seedDensityModel from "../../../core/density.json";
+import { cellMemoryFromConfig } from "./types";
 import { StableMatchStop, targetMask, matchDomains } from "./shapeMatch";
 // Ties MpmCore + Environment + Agents + Renderer into one autonomous
 // macro step — the browser analogue of trainer/training_sim.py's own
@@ -418,6 +422,16 @@ export class GpuSimulation {
     if (scene.count > this.particleCap) {
       throw new Error(`Triangle seed needs ${scene.count} sample slots; capacity is ${this.particleCap}`);
     }
+    const preset = this.config.initialCondition ?? "none";
+    if (preset === "internal-state" && cellMemoryFromConfig(this.config) !== "recurrent") {
+      throw new Error("Internal-state initial condition requires recurrent cell memory");
+    }
+    const radius = Math.sqrt((scene.count/2)*(this.config.splitDisplacement*seedDensityModel.INITIAL_PACKING_SPACING_SCALE)**2*Math.sqrt(3)/(2*Math.PI));
+    const perturbation = new InitialCondition(preset,
+      this.config.initialConditionStrength ?? initialConditionDefaults.defaultStrength,
+      this.config.initialConditionChannel ?? initialConditionDefaults.defaultChannel,
+      this.config.seed, [this.config.spawnX, this.config.spawnY], radius);
+    perturbation.deform(scene);
     this.mpmCore.resetGrowthBuffers(this.particleCap);
     this.mpmCore.loadScene(scene);
     // Every slot beyond the genuinely seeded particles is destined to become
@@ -437,7 +451,10 @@ export class GpuSimulation {
     this.agents.setActiveCount(scene.count);
     // Clear rollout-scoped policy state. The first agent evaluation derives
     // alignment from chemical channel index 3's freshly sensed gradient.
-    this.agents.resetState(this.config.seed);
+    this.agents.resetState(this.config.seed, perturbation.states(scene.positions, this.config.channels));
+    if (this.environment.chemicalCommunicationArchitecture === "persistent-environment") {
+      perturbation.seedEnvironment(this.device, this.environment);
+    }
     this._currentStep = 0;
     this.shapeStop = new StableMatchStop(this.scenario ? {} : this.config);
     this.shapeMask = this.shapeStop.enabled && this.config.shapeTarget

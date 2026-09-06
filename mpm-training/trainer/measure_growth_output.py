@@ -1,8 +1,6 @@
-"""Render checkpoint rollouts, honoring saved material budgets and stable stopping.
-
-The pictures use legacy point-cloud alignment for a diagnostic overlay; live
-training fitness and stopping use transported material domains. Usage:
-    python render_rollout.py [out_dir]
+"""Measure current checkpoint NN growth proposals in a headless replay.
+Run from the repository root: trainer/.venv/bin/python trainer/measure_growth_output.py
+Samples all active material points every 10 macro steps, before physics.
 """
 from __future__ import annotations
 
@@ -67,10 +65,10 @@ from domain_fitness import StableMatchStop, target_mask, evaluate_domains
 from policy_parameters import STATELESS_ARCHITECTURE, policy_hidden_dim, resolve_chemical_communication_architecture
 
 
-def main() -> int:
-    out_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parent / "render_out"
-    out_dir.mkdir(exist_ok=True)
 
+from agents_gpu import PARTICLE_META_BUFFER_OFFSET
+
+def main():
     meta = json.loads((CHECKPOINTS_DIR / "best_meta.json").read_text())
     weights = np.load(CHECKPOINTS_DIR / "best.npy")
 
@@ -118,15 +116,15 @@ def main() -> int:
         )
         material_kwargs["substeps_per_macro"] = meta["substeps_per_macro"]
     core.set_material(
-        MATERIAL_E,
-        MATERIAL_NU,
-        MATERIAL_HARDENING,
+        meta.get("material_e", MATERIAL_E),
+        meta.get("material_nu", MATERIAL_NU),
+        meta.get("material_hardening", MATERIAL_HARDENING),
         elasticity=meta.get("material_elasticity", MATERIAL_ELASTICITY),
         particle_mass=density.particle_mass,
         particle_volume=density.particle_volume,
         **material_kwargs,
     )
-    core.set_damping(DAMPING_LOSS_FRACTION, meta["substeps_per_macro"])
+    core.set_damping(meta.get("damping", DAMPING_LOSS_FRACTION), meta["substeps_per_macro"])
     core.set_splat_radius(density.splat_radius)
     core.set_repulsion_strength(density.repulsion_strength, density.repulsion_max_delta)
 
@@ -136,28 +134,28 @@ def main() -> int:
     )
     hidden_dim = int(meta.get("hidden_dim", policy_hidden_dim(architecture)))
     environment = EnvironmentGPU(
-        wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, meta.get("decay", DECAY),
+        wgpu_device, int(meta["channels"]), int(meta["field_n"]), int(meta["field_n"]), meta.get("decay", DECAY),
         meta.get("deposit_rate", DEPOSIT_RATE), chemical_architecture,
         meta.get("normalize_deposits_by_local_density", NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY),
         meta.get("deposit_density_reference", DEPOSIT_DENSITY_REFERENCE),
         grid_velocity=core.grid_vel,
         channel_profiles=resolve_channel_profiles(
-            CHEM_CHANNELS,
-            meta.get("chemical_channel_profiles", homogeneous_channel_profiles(CHEM_CHANNELS)),
+            int(meta["channels"]),
+            meta.get("chemical_channel_profiles", homogeneous_channel_profiles(int(meta["channels"]))),
         ),
     )
     agents = AgentsGPU(
         wgpu_device,
         core,
         environment,
-        CHEM_CHANNELS,
+        int(meta["channels"]),
         hidden_dim,
-        MAX_ACCEL,
-        MAX_STRAFE,
-        MAX_ENV_WRITE,
-        MAX_ANGULAR_ACCEL,
-        ANGULAR_DAMPING,
-        MAX_ANGULAR_VELOCITY,
+        meta.get("max_accel", MAX_ACCEL),
+        meta.get("max_strafe", MAX_STRAFE),
+        meta.get("max_env_write", MAX_ENV_WRITE),
+        meta.get("max_angular_accel", MAX_ANGULAR_ACCEL),
+        meta.get("angular_damping", ANGULAR_DAMPING),
+        meta.get("max_angular_velocity", MAX_ANGULAR_VELOCITY),
         # Falls back to the current constant/value for older checkpoints
         # saved before "chirality"/"deposit_distance"/"split_displacement"/
         # "division_cooldown"/"friction"/"mass_ramp_macro_steps" rode along in
@@ -215,36 +213,53 @@ def main() -> int:
         material_area_budget=meta.get("material_area_budget", 0.0),
     )
 
-    shape = meta.get("shape_settings", {})
-    stopping = StableMatchStop(shape.get("stableStop", False), shape.get("shapeCheckInterval", 10),
-        shape.get("shapeConfirmations", 3), shape.get("shapeSettleSteps", 20),
-        shape.get("shapeMissingTolerance", .02), shape.get("shapeSpillTolerance", .02),
-        shape.get("shapeOverlapTolerance", .02))
-    mask = target_mask(target, meta.get("raster_resolution", 256))
-    growth_steps = meta.get("growth_steps")
-    for i in range(meta["macro_steps"]):
-        sim.macro_step(
-            meta["substeps_per_macro"],
-            growth_enabled=stopping.growth_enabled and (growth_steps is None or i < growth_steps),
-        )
-        if stopping.due(i+1):
-            evaluation = evaluate_domains(core.read_rest_state()[:, 12:18], target, mask)
-            stopping.observe(i+1, evaluation.match, evaluation.total,
-                sampling_blocked=core.active_count >= agents.max_active_particles or agents.capacity_blocked or agents.unresolved_samples > 0)
-        if i % 4 == 0 or i == meta["macro_steps"] - 1 or stopping.complete:
-            pos = sim.positions()
-            _, aligned = best_alignment(pos, target.points)
-            img = rasterize(aligned, target.points)
-            path = out_dir / f"rollout_{i:03d}.png"
-            img.save(path)
-            print(f"wrote {path}")
-        if stopping.complete:
-            print(f"Stable match after settling at step {i+1}")
-            break
+    rows = []
+    step_index = 0
+    original_step = core.step
+    def measured_step(substeps):
+        if step_index == 1 or step_index % 10 == 0:
+            rest = core.read_rest_state().astype(float)
+            n = len(rest)
+            raw = wgpu_device.queue.read_buffer(agents._agent_state_buffer,
+                PARTICLE_META_BUFFER_OFFSET, n * agents._particle_meta_dtype.itemsize)
+            state = np.frombuffer(raw, dtype=agents._particle_meta_dtype)
+            vector = rest[:, 5:7]
+            magnitude = np.linalg.norm(vector, axis=1)
+            heading = state['alignment'].astype(float)
+            angle = np.where(np.linalg.norm(heading, axis=1)>1e-10, np.arctan2(heading[:,1], heading[:,0]), 0.0)
+            local = np.column_stack((vector[:,0]*np.cos(angle)+vector[:,1]*np.sin(angle),
+                                     -vector[:,0]*np.sin(angle)+vector[:,1]*np.cos(angle)))
+            area = rest[:, 8] * np.linalg.det(rest[:, :4].reshape(-1,2,2))
+            # divisionBias/original world area is index 8 in RestState.
+            weight = area / area.sum()
+            f = core.read_deformation().astype(float) if hasattr(core, 'read_deformation') else np.frombuffer(wgpu_device.queue.read_buffer(core.F, 0, n*16), np.float32).reshape(n,4).astype(float)
+            je = np.linalg.det(f.reshape(-1,2,2))/np.linalg.det(rest[:,:4].reshape(-1,2,2))
+            compression = np.maximum(0, -np.log(np.maximum(je, 1e-6)))
+            row = dict(step=step_index, count=n, mean=float(magnitude.mean()),
+                p05=float(np.percentile(magnitude,5)), median=float(np.median(magnitude)),
+                p95=float(np.percentile(magnitude,95)), max=float(magnitude.max()),
+                fraction_norm_ge_1=float(np.mean(magnitude>=1)),
+                area_weighted_norm=float(weight@magnitude),
+                area_weighted_clamped_rate=float(weight@np.minimum(magnitude,1)),
+                fraction_component_abs_ge_095=float(np.mean(np.abs(local)>=.95)),
+                fraction_component_abs_ge_099=float(np.mean(np.abs(local)>=.99)),
+                component_mean=local.mean(axis=0).tolist(),
+                area=float(area.sum()),
+                fraction_compressed_ge_stop=float(np.mean(compression>=meta['growth_compression_stop'])),
+                magnitude_metadata_max_error=float(np.max(np.abs(magnitude-state['mitosisPropensity']))))
+            rows.append(row)
+            if step_index == 1 or step_index % 100 == 0:
+                print(json.dumps(row), flush=True)
+        original_step(substeps)
+    core.step = measured_step
+    for step_index in range(1, int(meta['macro_steps'])+1):
+        sim.macro_step(meta['substeps_per_macro'], growth_enabled=step_index<=meta.get('growth_steps',meta['macro_steps']))
+    out = Path(__file__).parent / 'experiments' / 'growth_output'
+    out.mkdir(parents=True, exist_ok=True)
+    report = dict(checkpoint_generation=meta['generation'], seed=meta.get('winner_seed',meta['seed']),
+        metadata=meta, note='All points after final neural round and resampling, before physics; component statistics undo alignment rotation; temporal snapshots equally spaced.', rows=rows)
+    (out/'report.json').write_text(json.dumps(report, indent=2))
+    print('Report: '+str(out/'report.json'), flush=True)
 
-    print(f"\nDone (target={meta['target']!r}, checkpoint fitness={meta['fitness']:.4f}) — gray=target, white=grown")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+if __name__ == '__main__':
+    main()

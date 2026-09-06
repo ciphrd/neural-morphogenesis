@@ -630,3 +630,52 @@ has a hard-coded growth role.
 New policy-input reports store both `raw_inputs` and normalized `inputs`; the
 HTML dashboard's **Input space** selector switches every trace, heatmap, and
 distribution table between them.
+
+## Initial asymmetry
+
+The **Initial condition** selector in the Training and Lab controls restarts
+playback with a one-time perturbation. **Asymmetry strength** ranges from 0 to 1;
+zero reproduces the unperturbed seed. Chemical presets also expose a channel
+selector, with channel 3 marked as the orientation channel. Playback changes
+are exploratory; they do not alter the running trainer or recorded checkpoint.
+
+| Preset | Initial perturbation |
+| --- | --- |
+| `none` | Original seed, with zero chemistry and private state |
+| `chemical-pole` | Smooth off-center chemical patch |
+| `chemical-gradient` | Directed chemical gradient with a smooth spatial envelope |
+| `chemical-noise` | Seeded, smooth signed chemical variations |
+| `geometric-bias` | Area-preserving elongation of the seed geometry |
+| `internal-state` | Off-center patch in private state component 0; requires recurrent memory |
+| `mechanical-bias` | Off-center, area-preserving elastic strain patch |
+| `handed-chemistry` | Two distinguishable patches on the selected and next channel, arranged with a fixed handedness |
+
+Train with the same initial conditions using either `evolve.py` or `train_server.py`:
+
+```bash
+cd trainer
+.venv/bin/python train_server.py --initial-condition chemical-pole \
+  --initial-condition-strength 0.3 --initial-condition-channel 3
+```
+
+Add `--cell-memory recurrent` for `internal-state`. The chosen preset, strength,
+and channel are saved in run settings and checkpoints and restored in playback
+and `render_rollout.py`. Older runs default to `none`.
+
+Cue orientation and noise phases derive from the rollout seed. Patch dimensions
+scale with the physical seed radius, not numerical particle indices. Geometry
+and strain preserve initial area; chemical amplitude and private-state amplitude
+are controlled directly by strength. Maximum geometric log-stretch is 0.5 times
+strength; maximum elastic log-strain is 0.15 times strength. Handed chemistry
+uses the next channel cyclically and requires at least two channels.
+
+Cell-owned chemistry is initialized on material samples and projected before
+sensing. Persistent-environment chemistry is initialized directly at field texel
+centers, then undergoes the usual transport, diffusion and decay. The cue is
+never reapplied during a rollout. These two architectures therefore need not
+produce identical initial sensed concentrations. Very small seed meshes or coarse
+chemical grids can underresolve patches and noise; increase initial sampling or
+field resolution when inspecting their spatial structure.
+
+Run `trainer/.venv/bin/python trainer/initial_conditions_check.py` to check
+Python/browser parity, material invariants, and GPU initialization/reset behavior.

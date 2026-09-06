@@ -88,6 +88,8 @@ from simulation_settings import MATERIAL_AREA_BUDGET, COMMUNICATION_SPEED, INITI
 
 from agents_gpu import AgentsGPU, _spawn_uniform01
 from density import INITIAL_PACKING_SPACING_SCALE
+from initial_conditions import InitialCondition, validate_initial_condition
+from policy_parameters import policy_has_recurrence
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, MpmCore
 
@@ -137,6 +139,9 @@ class TrainingRollout:
         communication_speed: float = COMMUNICATION_SPEED,
         initial_particle_count: int = INITIAL_PARTICLE_COUNT,
         material_area_budget: float = MATERIAL_AREA_BUDGET,
+        initial_condition: str = "none",
+        initial_condition_strength: float = 0.3,
+        initial_condition_channel: int = 0,
     ) -> None:
         self.core = core
         self.agents = agents
@@ -172,6 +177,13 @@ class TrainingRollout:
         scene = seed_blob(
             initial_cells, spawn_center, agents.split_displacement, seed
         )
+        validate_initial_condition(initial_condition, initial_condition_strength,
+                                   initial_condition_channel, agents.channels,
+                                   policy_has_recurrence(agents.policy_architecture))
+        radius = np.sqrt(initial_cells*(agents.split_displacement*INITIAL_PACKING_SPACING_SCALE)**2*np.sqrt(3)/(2*np.pi))
+        perturbation = InitialCondition(initial_condition, initial_condition_strength,
+                                        initial_condition_channel, seed, spawn_center, radius)
+        perturbation.deform(scene)
         initial_count = len(scene[0])
         core.reset_growth_buffers(agents.max_active_particles)
         core.load_scene(*scene)
@@ -186,7 +198,10 @@ class TrainingRollout:
 
         environment.reset()
         agents.set_active_count(initial_count)
-        agents.reset_state(seed)
+        chemistry, private = perturbation.states(scene[0], agents.channels)
+        agents.reset_state(seed, chemistry, private)
+        if environment.chemical_communication_architecture == "persistent-environment":
+            perturbation.seed_environment(environment)
 
     def macro_step(self, substeps_per_macro: int, *, growth_enabled: bool = True) -> None:
         core = self.core

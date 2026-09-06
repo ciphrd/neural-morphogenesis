@@ -56,7 +56,7 @@ def cell_memory_for_architecture(architecture: str) -> str:
 
 
 def architecture_for_cell_memory(cell_memory: str | None) -> str:
-    cell_memory = cell_memory or RECURRENT_CELL_MEMORY
+    cell_memory = cell_memory or NO_CELL_MEMORY
     if cell_memory not in CELL_MEMORY_OPTIONS:
         raise ValueError(f"unknown cell memory {cell_memory!r}; expected one of {CELL_MEMORY_OPTIONS}")
     return STATEFUL_128_ARCHITECTURE if cell_memory == RECURRENT_CELL_MEMORY else STATELESS_ARCHITECTURE

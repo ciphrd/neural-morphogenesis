@@ -1,4 +1,4 @@
-# Point-transfer material growth (model version 8)
+# Point-transfer material growth (model version 12)
 
 The material grows continuously; numerical samples are added by subdividing
 transported material domains. `GROWTH_REDESIGN.md` records the pre-implementation
@@ -145,6 +145,23 @@ Non-manifold edges with more than two incident triangles are ambiguous and
 reported as unresolved rather than partially split. Matching coincident edges
 uses geometric identity, not persistent material/vertex IDs; arbitrary overlapping
 scene domains are not a supported manifold mesh.
+
+## Minimum split weight
+
+Every proposed daughter must have effective material weight
+`0.5 * quadratureWeight * max(det(growthF), 1e-6) >= 1/32`.
+This local condition applies to area and length splits, including both members
+of a conforming shared-edge operation. An ineligible pair stays intact; its mass,
+chemistry and domains are unchanged. Weight-limited refinement does not report a
+capacity failure or disable growth. Genuine rest growth can restore eligibility.
+Density presets scale base mass separately, so this weight is in preset-relative
+material units. Existing samples already below the floor are not merged or removed.
+
+Without growth, a weight-1 lineage can produce at most 32 descendants; a weight-0.5
+lineage at most 16. Conformity can stop earlier. The initial threshold is an
+experimental sampling choice in `MIN_CHILD_WEIGHT`, not a physical fracture law.
+Run `cd trainer && .venv/bin/python split_weight_check.py` for boundary values,
+conservation, shared-edge eligibility, and sustained extreme-stretch checks.
 
 ## Transfers
 
@@ -306,6 +323,6 @@ The density smoke test checks its existing static/zero-command scenarios;
 learned-policy morphology convergence across densities is not established.
 
 This changes physical discretization and sample trajectories. New runs record
-`growthModelVersion=8` and `domainGeometry=triangle`; previous policy weights
+`growthModelVersion=12` and `domainGeometry=triangle`; previous policy weights
 remain loadable, but old trajectory
 snapshots are historical evidence rather than expected exact replay results.

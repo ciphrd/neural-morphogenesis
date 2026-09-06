@@ -326,6 +326,9 @@ def rollout(
         seed=seed,
         mpm_enabled=MPM_ENABLED,
         initial_particle_count=density.initial_particles,
+        initial_condition=getattr(args, "initial_condition", "none"),
+        initial_condition_strength=getattr(args, "initial_condition_strength", 0.3),
+        initial_condition_channel=getattr(args, "initial_condition_channel", 0),
         material_area_budget=resolved_material_budget(args, target),
     )
 
@@ -476,6 +479,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         choices=POLICY_ARCHITECTURES,
         help=argparse.SUPPRESS,
     )
+    from initial_conditions import PRESETS
+    parser.add_argument("--initial-condition", choices=PRESETS, default="none",
+                        help="One-time asymmetry applied at every rollout reset")
+    parser.add_argument("--initial-condition-strength", type=float, default=0.3)
+    parser.add_argument("--initial-condition-channel", type=int, default=0)
     parser.add_argument(
         "--chemical-communication-architecture",
         choices=CHEMICAL_COMMUNICATION_ARCHITECTURES,
@@ -669,6 +677,15 @@ def finalize_density_configuration(args: argparse.Namespace) -> None:
 
 
 def validate_fitness_configuration(args: argparse.Namespace) -> None:
+    from initial_conditions import validate_initial_condition
+    from policy_parameters import policy_has_recurrence
+    try:
+        validate_initial_condition(getattr(args, "initial_condition", "none"),
+                                   getattr(args, "initial_condition_strength", .3),
+                                   getattr(args, "initial_condition_channel", 0),
+                                   CHEM_CHANNELS, policy_has_recurrence(args.policy_architecture))
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     for name in ("macro_steps", "shape_check_interval", "shape_confirmations", "shape_settle_steps"):
         if getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
@@ -780,6 +797,9 @@ def main() -> None:
                         "target": args.target,
                         "particles": args.particles,
                         "initial_particle_count": args.initial_particles,
+                        "initial_condition": args.initial_condition,
+                        "initial_condition_strength": args.initial_condition_strength,
+                        "initial_condition_channel": args.initial_condition_channel,
                         "density_model_version": DENSITY_MODEL_VERSION,
                         "particle_density_multipliers": args.particle_densities,
                         "density_aggregation": args.density_aggregation,

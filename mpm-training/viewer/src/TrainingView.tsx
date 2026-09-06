@@ -1,3 +1,4 @@
+import { InitialConditionControls, type InitialConditionSettings } from "./controls/InitialConditionControls"
 import { useEffect, useMemo, useRef, useState } from "react"
 import coreConstants from "../../core/constants.json"
 import { FitnessChart } from "./charts/FitnessChart"
@@ -247,6 +248,12 @@ export function TrainingView() {
     selectedGeneration !== null
       ? (configByGeneration.get(selectedGeneration) ?? latest)
       : latest
+  const [policyExploration, setPolicyExploration] = useState<{
+    cellMemory: CellMemory
+    hiddenWidth: number
+    seed: number
+  } | null>(null)
+  const [initialConditionOverride, setInitialConditionOverride] = useState<InitialConditionSettings | null>(null)
   const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
     useState<ChemicalCommunicationArchitecture | null>(null)
   const [chiralityOverride, setChiralityOverride] = useState<boolean | null>(
@@ -258,6 +265,7 @@ export function TrainingView() {
   const [substrateResolutionOverride, setSubstrateResolutionOverride] =
     useState<number | null>(null)
   useEffect(() => {
+    setInitialConditionOverride(null)
     setChemicalArchitectureOverride(null)
     setChiralityOverride(null)
     setParticleDensityOverride(null)
@@ -291,11 +299,16 @@ export function TrainingView() {
     substrateResolutionOverride ?? defaultSubstrateResolution
   const effectiveChirality =
     chiralityOverride ?? activeConfig?.chirality ?? true
+  const initialMemory = policyExploration?.cellMemory ?? (activeConfig ? cellMemoryFromConfig(activeConfig) : "none")
+  const selectedInitialCondition = initialConditionOverride?.initialCondition ?? activeConfig?.initialCondition ?? "none"
+  const effectiveInitialCondition = selectedInitialCondition === "internal-state" && initialMemory !== "recurrent" ? "none" : selectedInitialCondition
   const playbackConfig = useMemo(() => {
     if (!activeConfig) return null
     const densityResolved = configAtDensity(
       {
         ...activeConfig,
+        ...initialConditionOverride,
+        initialCondition: effectiveInitialCondition,
         fieldN: effectiveSubstrateResolution,
         chemicalCommunicationArchitecture:
           chemicalArchitectureOverride ??
@@ -308,6 +321,8 @@ export function TrainingView() {
   }, [
     activeConfig,
     chemicalArchitectureOverride,
+    initialConditionOverride,
+    effectiveInitialCondition,
     effectiveChirality,
     effectiveParticleDensity,
     effectiveSubstrateResolution,
@@ -318,11 +333,6 @@ export function TrainingView() {
   }, [activeConfig?.channels])
   // Shape-changing exploration never reinterprets checkpoint weights. It
   // creates a fresh random policy and retains its seed across re-renders.
-  const [policyExploration, setPolicyExploration] = useState<{
-    cellMemory: CellMemory
-    hiddenWidth: number
-    seed: number
-  } | null>(null)
   useEffect(() => {
     setPolicyExploration(null)
   }, [viewingRunId, activeConfig?.generation])
@@ -396,7 +406,7 @@ export function TrainingView() {
   }
   const displayedCellMemory =
     policyExploration?.cellMemory ??
-    (activeConfig ? cellMemoryFromConfig(activeConfig) : "recurrent")
+    (activeConfig ? cellMemoryFromConfig(activeConfig) : "none")
   const displayedHiddenWidth =
     policyExploration?.hiddenWidth ??
     (activeConfig ? hiddenLayersFromConfig(activeConfig)[0] : 128)
@@ -744,6 +754,7 @@ export function TrainingView() {
                   : "Trained"}
               </button>
             </div>
+            <InitialConditionControls config={playbackConfig} recurrent={initialMemory === "recurrent"} onChange={setInitialConditionOverride} />
             <div className="stat-row">
               <span>Chemical architecture</span>
               <select

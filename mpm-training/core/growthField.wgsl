@@ -24,6 +24,9 @@ const FIELD_SCALE: f32 = 8192.0;
 // Equilateral-equivalent area: sum(edge length squared)/(4 sqrt(3)).
 // Unlike determinant area, this detects unresolved isochoric stretching too.
 const REFINEMENT_THRESHOLD: f32 = 1.75;
+// Minimum represented weight of each proposed daughter, in density-preset
+// material units. Rest growth can replenish weight; stretching alone cannot.
+const MIN_CHILD_WEIGHT: f32 = 0.03125;
 const REFINE_CAPACITY: u32 = __REFINE_CAPACITY__u;
 const REFINE_HASH_SIZE: u32 = __REFINE_HASH_SIZE__u;
 // Scratch: half-edge hash, then edge choice, neighbor, root, request count,
@@ -158,6 +161,11 @@ fn refinementDemand(pi: u32) -> f32 {
   for (var ei=0u; ei<3u; ei++) { sum += edgeLengthSquared(edgeKey(pi,ei)); }
   return sum / (4.0*sqrt(3.0)*max(physics.splitDisplacement*physics.splitDisplacement,1e-12));
 }
+fn hasSplitWeight(pi: u32) -> bool {
+  let rest=particleRest[pi];
+  let childWeight=0.5*max(rest.quadratureWeight,0.0)*max(matDet(rest.growthF),1e-6);
+  return childWeight>=MIN_CHILD_WEIGHT;
+}
 fn hashKey(key: vec4<f32>) -> u32 {
   // Float equality handles signed zero; hash must do so as well.
   let k = bitcast<vec4<u32>>(select(key,vec4<f32>(0.0),key == vec4<f32>(0.0)));
@@ -239,6 +247,7 @@ fn propagateRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn requestRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi=gid.x;
   if (pi >= activeCount || refinementDemand(pi) < REFINEMENT_THRESHOLD) { return; }
+  if (!hasSplitWeight(pi)) { return; }
   let root=atomicLoad(&refinement[ROOT+pi]);
   if (root == INVALID) { atomicAdd(&agentState.unresolvedSamples,1u); return; }
   atomicAdd(&refinement[REQUESTS+root],1u);
@@ -251,6 +260,9 @@ fn reserveRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
   let requests=atomicLoad(&refinement[REQUESTS+pi]);
   if (requests == 0u) { return; }
   let neighbor=atomicLoad(&refinement[NEIGHBOR+pi]);
+  // Both members of a conforming split must produce sufficiently weighted children.
+  if (!hasSplitWeight(pi)) { return; }
+  if (neighbor != INVALID) { if (!hasSplitWeight(neighbor)) { return; } }
   let slots=select(2u,1u,neighbor == INVALID);
   var observed=atomicLoad(&agentState.growthCount);
   loop {

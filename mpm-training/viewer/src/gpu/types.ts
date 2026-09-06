@@ -1,3 +1,4 @@
+import type { InitialConditionPreset } from "./initialConditions";
 import type { ShapeStopSettings } from "./shapeMatch";
 export interface UpdateRuleWeights {
   fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6 [+ 8 private state])
@@ -36,6 +37,9 @@ export interface RunSettings extends ShapeStopSettings {
   // cap through AgentPhysics.maxActiveParticles without changing it.
   particles: number;
   initialParticleCount?: number;
+  initialCondition?: InitialConditionPreset;
+  initialConditionStrength?: number;
+  initialConditionChannel?: number;
   densityModelVersion?: number;
   trainingDensityMultipliers?: number[];
   densityAggregation?: "worst" | "mean";

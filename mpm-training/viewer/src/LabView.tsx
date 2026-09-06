@@ -1,3 +1,4 @@
+import { InitialConditionControls, type InitialConditionSettings } from "./controls/InitialConditionControls"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { randomPolicySeed, randomWeights } from "./gpu/agents"
 import { configAtDensity } from "./gpu/density"
@@ -103,6 +104,7 @@ export function LabView() {
     initialParticleCount: scenarioInitialCount,
     macroSteps: Math.max(scenarioMinimumSteps, latest.macroSteps),
   } : null, [latest, scenarioInitialCount, scenarioParticleCap, scenarioMinimumSteps])
+  const [initialConditionOverride, setInitialConditionOverride] = useState<InitialConditionSettings | null>(null)
   const [chemicalArchitectureOverride, setChemicalArchitectureOverride] =
     useState<ChemicalCommunicationArchitecture | null>(null)
   const [chiralityOverride, setChiralityOverride] = useState<boolean | null>(null)
@@ -115,6 +117,7 @@ export function LabView() {
   } | null>(null)
   const [physicsOverride, setPhysicsOverride] = useState<PhysicsSettings | null>(null)
   useEffect(() => {
+    setInitialConditionOverride(null)
     setChemicalArchitectureOverride(null)
     setChiralityOverride(null)
     setParticleDensityOverride(null)
@@ -133,17 +136,22 @@ export function LabView() {
   const effectiveSubstrateResolution =
     substrateResolutionOverride ?? defaultSubstrateResolution
   const effectiveChirality = chiralityOverride ?? baseConfig?.chirality ?? true
+  const initialMemory = policyExploration?.cellMemory ?? (baseConfig ? cellMemoryFromConfig(baseConfig) : "none")
+  const selectedInitialCondition = initialConditionOverride?.initialCondition ?? baseConfig?.initialCondition ?? "none"
+  const effectiveInitialCondition = selectedInitialCondition === "internal-state" && initialMemory !== "recurrent" ? "none" : selectedInitialCondition
   const playbackConfig = useMemo(() => {
     if (!baseConfig) return null
     const densityResolved = configAtDensity({
       ...baseConfig,
+      ...initialConditionOverride,
+      initialCondition: effectiveInitialCondition,
       fieldN: effectiveSubstrateResolution,
       chemicalCommunicationArchitecture:
         chemicalArchitectureOverride ?? chemicalCommunicationArchitectureFromConfig(baseConfig),
       chirality: effectiveChirality,
     }, effectiveParticleDensity)
     return { ...densityResolved, particles: scenarioParticleCap, initialParticleCount: scenarioInitialCount }
-  }, [baseConfig, chemicalArchitectureOverride, effectiveChirality, effectiveParticleDensity, effectiveSubstrateResolution, scenarioInitialCount, scenarioParticleCap])
+  }, [baseConfig, initialConditionOverride, effectiveInitialCondition, chemicalArchitectureOverride, effectiveChirality, effectiveParticleDensity, effectiveSubstrateResolution, scenarioInitialCount, scenarioParticleCap])
   const config = useMemo(() => {
     if (!playbackConfig || !policyExploration) return playbackConfig
     const policyArchitecture = policyArchitectureForCellMemory(policyExploration.cellMemory)
@@ -162,7 +170,7 @@ export function LabView() {
     }
   }, [playbackConfig, policyExploration])
   const displayedCellMemory = policyExploration?.cellMemory
-    ?? (baseConfig ? cellMemoryFromConfig(baseConfig) : "recurrent")
+    ?? (baseConfig ? cellMemoryFromConfig(baseConfig) : "none")
   const displayedHiddenWidth = policyExploration?.hiddenWidth
     ?? (baseConfig ? hiddenLayersFromConfig(baseConfig)[0] : 128)
   const trainedPhysics = useMemo(
@@ -306,6 +314,7 @@ export function LabView() {
                 : "Trained"}
             </button>
           </div>
+          <InitialConditionControls config={playbackConfig} recurrent={initialMemory === "recurrent"} onChange={setInitialConditionOverride} />
           <div className="stat-row">
             <span>Chemical architecture</span>
             <select

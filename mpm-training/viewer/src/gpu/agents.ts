@@ -757,7 +757,7 @@ export class Agents {
 
   /** Clears all rollout-scoped agent state. Alignment is deliberately zero
    * here and is reconstructed from channel index 3's gradient by agentStep. */
-  resetState(seed: number): void {
+  resetState(seed: number, initial?: { chemistry: Float32Array; privateState: Float32Array }): void {
     this.unresolvedSamples = 0;
     this.capacityBlocked = false;
     this.device.queue.writeBuffer(this.agentStateBuffer, 4, new Uint32Array(2));
@@ -774,6 +774,10 @@ export class Agents {
       const base = i * this.particleMetaStride;
       // Density model v3 uses this u32 as a lineage-generation counter.
       view.setUint32(base + PARTICLE_META_OFFSET_RNG, 0, true);
+      if (initial && i < initial.privateState.length / 8) {
+        for (let k = 0; k < 8; k++) view.setFloat32(base + 44 + 4*k, initial.privateState[i*8+k], true);
+        for (let k = 0; k < this.channels; k++) view.setFloat32(base + 76 + 4*k, initial.chemistry[i*this.channels+k], true);
+      }
     }
     this.device.queue.writeBuffer(this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET, buf);
     this.device.queue.writeBuffer(this.growthField, 0, new Uint32Array(this.growthField.size / 4));

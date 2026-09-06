@@ -1,0 +1,14 @@
+{
+  "defaultStrength": 0.3,
+  "defaultChannel": 0,
+  "presets": [
+    {"id": "none", "label": "None"},
+    {"id": "chemical-pole", "label": "Chemical pole"},
+    {"id": "chemical-gradient", "label": "Chemical gradient"},
+    {"id": "chemical-noise", "label": "Smooth chemical noise"},
+    {"id": "geometric-bias", "label": "Geometric elongation"},
+    {"id": "internal-state", "label": "Internal-state patch"},
+    {"id": "mechanical-bias", "label": "Mechanical strain patch"},
+    {"id": "handed-chemistry", "label": "Handed chemical patches"}
+  ]
+}

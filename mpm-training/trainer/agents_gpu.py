@@ -503,7 +503,7 @@ class AgentsGPU:
             ("linkRefinementEdges", (1, 2, 7), None),
             *[("propagateRefinement", (1, 7), None)] * (refine_capacity - 1).bit_length(),
             ("requestRefinement", (1, 2, 3, 7, 9), None),
-            ("reserveRefinement", (1, 3, 7, 9), None),
+            ("reserveRefinement", (1, 2, 3, 7, 9), None),
             ("commitResample", (0, 1, 2, 3, 4, 5, 6, 7), None),
             ("stopGrowthAtCapacity", (3, 7, 8, 9), ceil_div(10 * NODE_COUNT, 256)),
         ]
@@ -792,7 +792,7 @@ class AgentsGPU:
         self.capacity_blocked = bool(status[2])
         return int(status[0])
 
-    def reset_state(self, seed: int) -> None:
+    def reset_state(self, seed: int, chemical_state=None, private_state=None) -> None:
         """Clear rollout-scoped neural/lifecycle state.
 
         Alignment starts at zero and is reconstructed from chemical channel
@@ -811,6 +811,10 @@ class AgentsGPU:
         # Threshold and fallback-angle randomness comes from a common spatial
         # field in WGSL, so numerical particle slot identity never enters it.
         particle_meta["rng"] = 0
+        if chemical_state is not None:
+            particle_meta["chemicalState"][:len(chemical_state)] = chemical_state
+        if private_state is not None:
+            particle_meta["privateState"][:len(private_state)] = private_state
         self.device.queue.write_buffer(self._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, particle_meta.tobytes())
         self.device.queue.write_buffer(
             self._growth_field, 0, np.zeros(self._growth_field.size // 4, dtype=np.int32)

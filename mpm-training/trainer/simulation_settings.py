@@ -157,7 +157,8 @@ MASS_RAMP_MACRO_STEPS = float(DEFAULT_RUN_SETTINGS["massRampMacroSteps"])
 GROWTH_DURATION_MACRO_STEPS = float(DEFAULT_RUN_SETTINGS["growthDuration"])
 # Version 6 stores and advects explicit vertices (80-byte rest records).
 # Centroids are derived; momentum/stress remain point-based.
-GROWTH_MODEL_VERSION = 8
+# Minimum daughter material weight gates refinement; no tear detector.
+GROWTH_MODEL_VERSION = 12
 # Physical grown rest area in world units; zero disables the physical budget.
 MATERIAL_AREA_BUDGET = float(DEFAULT_RUN_SETTINGS.get("materialAreaBudget", 0.0))
 # Legacy checkpoint slot; subdivision no longer consumes growth.
