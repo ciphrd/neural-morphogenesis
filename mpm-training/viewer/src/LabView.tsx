@@ -35,36 +35,36 @@ function explorationBrainSeed(seed: number, variant: number): number {
 
 const BOUNDARY_TANGENT_SCENARIO: SimulationScenario = {
   initialLayout: { kind: "rows", rows: 2, columns: 9 },
-  // seedRows is bottom-to-top, left-to-right: index 13 is top-middle.
-  // Slot 13 remains the original particle's daughter after the first split,
+  // seedRows emits pairs: slots 26/27 belong to the top-middle seed cell.
+  // Slot 26 remains the original particle's daughter after the first split,
   // so targeting it again exercises the exact same lineage cell at step 200.
   events: [
-    { step: 50, type: "split", particleIndex: 13 },
-    { step: 200, type: "split", particleIndex: 13 },
+    { step: 50, type: "split", particleIndex: 26 },
+    { step: 200, type: "split", particleIndex: 26 },
   ],
   suppressNaturalGrowth: true,
 }
 
 const VERTICAL_SPLIT_SCENARIO: SimulationScenario = {
   initialLayout: { kind: "rows", rows: 2, columns: 9 },
-  // Fixed world-up division axis. Slot 13 is retained as one daughter,
+  // Fixed world-up growth axis. Slot 26 is retained as one daughter,
   // allowing the second event to target the same lineage cell again.
   events: [
-    { step: 50, type: "split", particleIndex: 13, direction: [0, 1] },
-    { step: 200, type: "split", particleIndex: 13, direction: [0, 1] },
+    { step: 50, type: "split", particleIndex: 26, direction: [0, 1] },
+    { step: 200, type: "split", particleIndex: 26, direction: [0, 1] },
   ],
   suppressNaturalGrowth: true,
 }
 
 const REPEATED_TOP_ROW_SPLIT_SCENARIO: SimulationScenario = {
   initialLayout: { kind: "rows", rows: 2, columns: 9 },
-  // Each synchronized split creates nine children in the next contiguous
-  // range. Those upward daughters become the top row targeted next time.
+  // Apply repeated growth to both triangles of each original top-row cell.
+  // New-slot order is atomic and refinement groups need not occur in sync.
   events: Array.from({ length: 7 }, (_, cycle) => ({
     step: (cycle + 1) * 100,
     type: "split" as const,
-    particleIndex: 9 + cycle * 9,
-    particleCount: 9,
+    particleIndex: 18,
+    particleCount: 18,
     direction: [0, 1] as const,
   })),
   suppressNaturalGrowth: true,
@@ -96,7 +96,7 @@ export function LabView() {
     : scenario.initialLayout.rows * scenario.initialLayout.columns
   const scenarioParticleCap = scenarioId === "radial-inward-circle"
     ? 1024
-    : scenarioId === "repeated-top-row" ? 81 : 20
+    : scenarioId === "repeated-top-row" ? 162 : 40
   const scenarioMinimumSteps = scenarioId === "radial-inward-circle"
     ? 600
     : scenarioId === "repeated-top-row" ? 750 : 240
@@ -197,6 +197,7 @@ export function LabView() {
   const [particleColorMode, setParticleColorMode] = useState<ParticleColorMode>(VIEWER_DEFAULTS.rendering.particleColorMode)
   const [particleAlpha, setParticleAlpha] = useState(VIEWER_DEFAULTS.rendering.particleAlpha)
   const [directionalLineVisible, setDirectionalLineVisible] = useState(VIEWER_DEFAULTS.rendering.directionalLineVisible)
+  const [domainVisible, setDomainVisible] = useState(false)
   const [growthLineVisible, setGrowthLineVisible] = useState(VIEWER_DEFAULTS.rendering.growthLineVisible)
   const [mitosisSignalBoost, setMitosisSignalBoost] = useState(VIEWER_DEFAULTS.rendering.mitosisSignalBoost)
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(VIEWER_DEFAULTS.rendering.internalStateChannelStart)
@@ -251,15 +252,16 @@ export function LabView() {
           >
             <option value="boundary-tangent">2 × 9 — boundary-tangent splits</option>
             <option value="vertical">2 × 9 — vertical splits</option>
-            <option value="repeated-top-row">2 × 9 — grow seven vertical rows</option>
+            <option value="repeated-top-row">2 × 9 — repeated top-row growth</option>
             <option value="radial-inward-circle">Circle — enforced inward growth grid</option>
           </select>
         </section>
         <section>
           <h2>Initial state</h2>
-          <div className="stat-row"><span>Cells</span><span>{scenarioInitialCount}</span></div>
+          <div className="stat-row"><span>Seed cells</span><span>{scenarioInitialCount}</span></div>
+          <div className="stat-row"><span>Triangle samples</span><span>{2 * scenarioInitialCount}</span></div>
           <div className="stat-row"><span>Layout</span><span>{scenario.initialLayout.kind === "blob" ? "Circular hex lattice" : `${scenario.initialLayout.rows} rows × ${scenario.initialLayout.columns}`}</span></div>
-          <div className="stat-row"><span>Spacing</span><span>Split distance</span></div>
+          <div className="stat-row"><span>Spacing</span><span>Target area scale</span></div>
         </section>
         <section>
           <details className="settings-category">
@@ -435,6 +437,10 @@ export function LabView() {
           <label className="slider-row"><span>Color</span><select className="select" value={particleColorMode} onChange={(event) => setParticleColorMode(event.target.value as ParticleColorMode)}><option value="white">White</option><option value="neural-color">Neural RGB</option><option value="mitosis-drive">Growth magnitude</option><option value="neural-memory">Neural memory</option><option value="chemical-memory">Chemical memory</option><option value="boundary-value">Boundary value</option><option value="neurons">Neurons</option></select></label>
           <label className="slider-row"><span>Alpha</span><Slider min={0} max={1} step={0.01} value={particleAlpha} onChange={setParticleAlpha} /><span className="slider-value">{particleAlpha.toFixed(2)}</span></label>
           <label className="checkbox-row"><input type="checkbox" checked={directionalLineVisible} onChange={(event) => setDirectionalLineVisible(event.target.checked)} />Heading direction (red)</label>
+          <label className="checkbox-row" title="Actual transported triangle boundaries; independent of marker size and opacity">
+            <input type="checkbox" checked={domainVisible} onChange={(event) => setDomainVisible(event.target.checked)} />
+            Show particle domains (triangles)
+          </label>
           <label className="checkbox-row"><input type="checkbox" checked={growthLineVisible} onChange={(event) => setGrowthLineVisible(event.target.checked)} />Growth direction (green)</label>
           {particleColorMode === "mitosis-drive" && (
             <label className="slider-row"><span>Magnitude boost</span><Slider min={1} max={10} step={0.1} value={mitosisSignalBoost} onChange={setMitosisSignalBoost} /><span className="slider-value">{mitosisSignalBoost.toFixed(1)}×</span></label>
@@ -516,6 +522,7 @@ export function LabView() {
             particleAlpha={particleAlpha}
             directionalLineVisible={directionalLineVisible}
             growthLineVisible={growthLineVisible}
+            domainVisible={domainVisible}
             mitosisSignalBoost={mitosisSignalBoost}
             internalStateChannelStart={internalStateChannelStart}
             chemicalMemoryOpponentSubtraction={chemicalMemoryOpponentSubtraction}

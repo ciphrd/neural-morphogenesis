@@ -156,9 +156,9 @@ MASS_RAMP_MACRO_STEPS = float(DEFAULT_RUN_SETTINGS["massRampMacroSteps"])
 # increasing substeps for numerical stability no longer accelerates growth
 # relative to communication and control. 0 disables growth.
 GROWTH_DURATION_MACRO_STEPS = float(DEFAULT_RUN_SETTINGS["growthDuration"])
-# Version 3 keeps transported domains for refinement geometry while restoring
-# ordinary point-based MLS-MPM and field transfers.
-GROWTH_MODEL_VERSION = 3
+# Version 6 stores and advects explicit vertices (80-byte rest records).
+# Centroids are derived; momentum/stress remain point-based.
+GROWTH_MODEL_VERSION = 8
 # Physical grown rest area in world units; zero disables the physical budget.
 MATERIAL_AREA_BUDGET = float(DEFAULT_RUN_SETTINGS.get("materialAreaBudget", 0.0))
 # Legacy checkpoint slot; subdivision no longer consumes growth.

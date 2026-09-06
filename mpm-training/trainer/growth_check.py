@@ -27,7 +27,7 @@ def _rest_state(
     appearance_scale: np.ndarray | None = None,
 ) -> np.ndarray:
     count = len(jp)
-    out = np.zeros((count, 16), dtype=np.float32)
+    out = np.zeros((count, 20), dtype=np.float32)
     if growth_f is None:
         root = np.sqrt(np.asarray(growth, dtype=np.float32))
         out[:, 0] = root
@@ -52,7 +52,7 @@ def _probe(core: MpmCore, count: int) -> np.ndarray:
     """Returns [Je, g, cycleActive] without adding COPY_SRC to hot buffers."""
     shader = core.device.create_shader_module(
         code="""
-        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, quadratureWeight: f32, domain: vec4<f32>, }
+        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, quadratureWeight: f32, domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>, }
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> rest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
@@ -145,9 +145,18 @@ def check_single_cell_rollout_seed(device: wgpu.GPUDevice) -> None:
         spawn_center=(0.5, 0.5), spawn_half_width=0.0,
         gravity=0.0, seed=17, initial_particle_count=1,
     )
-    assert core.read_positions().shape == (1, 2)
-    assert agents.read_grown_count() == 1
-    print("[PASS] rollout starts with exactly one seeded particle")
+    assert core.read_positions().shape == (2, 2)
+    assert agents.read_grown_count() == 2
+    np.testing.assert_allclose(core.read_rest_state()[:,11], .5)
+    # A capacity-limited restart must keep complete seed pairs and must clear
+    # the previous rollout's domains before writing the new geometry.
+    agents.set_max_active_particles(3)
+    TrainingRollout(core, agents, environment, spawn_center=(.4,.4),
+                    spawn_half_width=0, gravity=0, seed=23, initial_particle_count=5)
+    assert core.active_count == agents.read_grown_count() == 2
+    np.testing.assert_allclose(core.read_rest_state()[:,11].sum(),1)
+    np.testing.assert_allclose(core.read_positions().mean(axis=0),[.4,.4],atol=1e-7)
+    print("[PASS] one seed cell starts as two half-weight triangle samples")
 
 
 def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
@@ -1288,7 +1297,7 @@ def check_persistent_growth_targets_drive_state_not_motion(device: wgpu.GPUDevic
     print("[PASS] local growth direction and spread freeze an event's directional-to-isotropic rest growth")
 
 
-def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
+def check_p2g_accumulator_headroom(device: wgpu.GPUDevice) -> None:
     """A deliberately crowded, fast transfer must retain momentum in i32."""
     core = MpmCore(device)
     count = 4096
@@ -1304,15 +1313,13 @@ def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
         np.ones(count, dtype=np.float32),
     )
     core.step(1)
-    accum = np.frombuffer(device.queue.read_buffer(core.grid_accum), np.int32).reshape(-1, 3)
-    scale = 4096.0
-    mass = float(accum[:, 2].astype(np.int64).sum() / scale)
-    momentum_x = float(accum[:, 0].astype(np.int64).sum() / scale)
-    max_raw = int(np.abs(accum.astype(np.int64)).max())
+    accum = np.frombuffer(device.queue.read_buffer(core.grid_accum), np.float32).reshape(-1, 3)
+    mass = float(accum[:, 2].astype(float).sum())
+    momentum_x = float(accum[:, 0].astype(float).sum())
+    assert np.isfinite(accum).all()
     assert np.isclose(mass, count * core.particle_mass, rtol=2e-3), mass
     assert np.isclose(momentum_x, count * core.particle_mass * speed, rtol=2e-3), momentum_x
-    assert max_raw < np.iinfo(np.int32).max * 0.75, max_raw
-    print(f"[PASS] p2g_headroom mass={mass:.1f} momentum={momentum_x:.1f} max_raw={max_raw}")
+    print(f"[PASS] p2g_headroom mass={mass:.1f} momentum={momentum_x:.1f}")
 
 
 def check_high_strain_elastic_stability(device: wgpu.GPUDevice) -> None:

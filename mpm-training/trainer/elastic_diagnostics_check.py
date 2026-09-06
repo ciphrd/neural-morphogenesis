@@ -142,7 +142,7 @@ def _gpu_constitutive_probe(
         const MU0: f32 = {mu0};
         const LAMBDA0: f32 = {lambda0};
         const HARDENING: f32 = {HARDENING};
-        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, quadratureWeight: f32, domain: vec4<f32>, }}
+        struct Rest {{ growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameAngle: f32, appearanceScale: f32, quadratureWeight: f32, domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>, }}
         @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
         @group(0) @binding(1) var<storage, read> particleRest: array<Rest>;
         @group(0) @binding(2) var<storage, read_write> output: array<vec4<f32>>;
@@ -225,7 +225,7 @@ def check_gpu_consistency(device: wgpu.GPUDevice) -> None:
         fe = left @ np.diag(stretches[i]) @ right
         deformation[i] = fe * np.sqrt(growth[i])
     deformation32 = deformation.astype(np.float32).reshape(-1, 4)
-    rest32 = np.zeros((count, 16), dtype=np.float32)
+    rest32 = np.zeros((count, 20), dtype=np.float32)
     rest32[:, 11] = 1.0
     root_growth = np.sqrt(growth).astype(np.float32)
     rest32[:, 0] = root_growth
@@ -263,7 +263,7 @@ def check_core_readback(device: wgpu.GPUDevice) -> None:
         np.zeros((3, 4), dtype=np.float32),
         np.ones(3, dtype=np.float32),
     )
-    rest = np.zeros((3, 16), dtype=np.float32)
+    rest = np.zeros((3, 20), dtype=np.float32)
     root_growth = np.sqrt(growth)
     rest[:, 0] = root_growth
     rest[:, 3] = root_growth
@@ -323,7 +323,7 @@ def check_viewer_render_shader(device: wgpu.GPUDevice) -> None:
             {"binding": 0, "resource": {"buffer": device.create_buffer(size=8, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 1, "resource": {"buffer": device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM)}},
             {"binding": 3, "resource": {"buffer": device.create_buffer(size=112, usage=wgpu.BufferUsage.STORAGE)}},
-            {"binding": 4, "resource": {"buffer": device.create_buffer(size=64, usage=wgpu.BufferUsage.STORAGE)}},
+            {"binding": 4, "resource": {"buffer": device.create_buffer(size=80, usage=wgpu.BufferUsage.STORAGE)}},
             {"binding": 8, "resource": {"buffer": device.create_buffer(size=32, usage=wgpu.BufferUsage.UNIFORM)}},
         ],
     )

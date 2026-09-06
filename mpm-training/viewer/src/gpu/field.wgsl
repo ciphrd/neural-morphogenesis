@@ -38,7 +38,7 @@ const GRID_N: u32 = __GRID_N__u;
 const NODES: u32 = GRID_N + 1u;
 
 const CH_MASS: u32 = 2u; // must match core/p2g.wgsl's own channel layout
-const SCALE: f32 = 4096.0; // must match core/p2g.wgsl's own fixed-point SCALE
+const SCALE: f32 = 4096.0; // diagnostic accumulator scale; physics mass is f32 bits
 
 const MODE_NONE: u32 = 0u;
 const MODE_DENSITY: u32 = 1u;
@@ -221,7 +221,7 @@ fn colorizeField(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   var color = BG;
   if (mode == MODE_DENSITY) {
-    let mass = f32(atomicLoad(&gridAccum[idx * 3u + CH_MASS])) / SCALE;
+    let mass = bitcast<f32>(atomicLoad(&gridAccum[idx * 3u + CH_MASS]));
     color = scalarColor(mass / DENSITY_MAX);
   } else if (mode == MODE_SPEED) {
     let speed = length(gridVel[idx]);

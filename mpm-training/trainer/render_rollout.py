@@ -76,6 +76,7 @@ from simulation_settings import (
 from targets import load_target
 from chemical_channels import homogeneous_channel_profiles, resolve_channel_profiles
 from training_sim import TrainingRollout
+from domain_fitness import StableMatchStop, target_mask, evaluate_domains
 from policy_parameters import STATELESS_ARCHITECTURE, policy_hidden_dim, resolve_chemical_communication_architecture
 
 
@@ -221,21 +222,35 @@ def main() -> int:
         neural_updates_per_macro=meta.get("neural_updates_per_macro", 1),
         communication_speed=meta.get("communication_speed", 1.0),
         initial_particle_count=density.initial_particles,
+        material_area_budget=meta.get("material_area_budget", 0.0),
     )
 
+    shape = meta.get("shape_settings", {})
+    stopping = StableMatchStop(shape.get("stableStop", False), shape.get("shapeCheckInterval", 10),
+        shape.get("shapeConfirmations", 3), shape.get("shapeSettleSteps", 20),
+        shape.get("shapeMissingTolerance", .02), shape.get("shapeSpillTolerance", .02),
+        shape.get("shapeOverlapTolerance", .02))
+    mask = target_mask(target, meta.get("raster_resolution", 256))
     growth_steps = meta.get("growth_steps")
     for i in range(meta["macro_steps"]):
         sim.macro_step(
             meta["substeps_per_macro"],
-            growth_enabled=growth_steps is None or i < growth_steps,
+            growth_enabled=stopping.growth_enabled and (growth_steps is None or i < growth_steps),
         )
-        if i % 4 == 0 or i == meta["macro_steps"] - 1:
+        if stopping.due(i+1):
+            evaluation = evaluate_domains(core.read_rest_state()[:, 12:18], target, mask)
+            stopping.observe(i+1, evaluation.match, evaluation.total,
+                sampling_blocked=core.active_count >= agents.max_active_particles or agents.capacity_blocked or agents.unresolved_samples > 0)
+        if i % 4 == 0 or i == meta["macro_steps"] - 1 or stopping.complete:
             pos = sim.positions()
             _, aligned = best_alignment(pos, target.points)
             img = rasterize(aligned, target.points)
             path = out_dir / f"rollout_{i:03d}.png"
             img.save(path)
             print(f"wrote {path}")
+        if stopping.complete:
+            print(f"Stable match after settling at step {i+1}")
+            break
 
     print(f"\nDone (target={meta['target']!r}, checkpoint fitness={meta['fitness']:.4f}) — gray=target, white=grown")
     return 0

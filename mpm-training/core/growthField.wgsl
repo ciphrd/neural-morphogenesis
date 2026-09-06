@@ -1,9 +1,9 @@
 // Continuous field-driven material growth and geometric domain subdivision.
-// Domains carry transported half edges used only for refinement geometry;
+// Domains carry explicit triangle vertices used only for refinement geometry;
 // physics and field coupling remain ordinary point-sample operations. Bisection
-// partitions a parent exactly. No morphology search or insertion arbitration is
-// needed. See GROWTH_MODEL.md for conservation,
-// physical area budgets, and the distinct numerical capacity safety stop.
+// partitions a parent exactly. Shared longest edges are committed atomically
+// as a pair; longest-edge dependencies advance in conforming stages.
+// See GROWTH_MODEL.md for conservation, physical area budgets, and capacity.
 
 const CHANNELS: u32 = __CHANNELS__u;
 const PRIVATE_STATE_DIM: u32 = 8u;
@@ -21,17 +21,26 @@ const CH_WEIGHT: u32 = 5u;
 // Fixed-point growth projection; headroom depends on local represented mass.
 // Channels 6/7 of node zero hold total world rest area / budget ratio.
 const FIELD_SCALE: f32 = 8192.0;
-// Refine when a transported parallelogram covers 1.75 target point-sample
-// areas. This is the paper's volumetric-strain idea expressed against the
-// fixed target resolution. Area avoids the repeated folded-domain splits caused
-// by the earlier longest-edge criterion; bisection halves it immediately.
+// Equilateral-equivalent area: sum(edge length squared)/(4 sqrt(3)).
+// Unlike determinant area, this detects unresolved isochoric stretching too.
 const REFINEMENT_THRESHOLD: f32 = 1.75;
+const REFINE_CAPACITY: u32 = __REFINE_CAPACITY__u;
+const REFINE_HASH_SIZE: u32 = __REFINE_HASH_SIZE__u;
+// Scratch: half-edge hash, then edge choice, neighbor, root, request count,
+// allocation, and one capacity-blocked flag. All rebuilt each macro interval.
+const CHOICE: u32 = REFINE_HASH_SIZE;
+const NEIGHBOR: u32 = CHOICE + REFINE_CAPACITY;
+const ROOT: u32 = NEIGHBOR + REFINE_CAPACITY;
+const REQUESTS: u32 = ROOT + REFINE_CAPACITY;
+const ALLOCATION: u32 = REQUESTS + REFINE_CAPACITY;
+const BLOCKED: u32 = ALLOCATION + REFINE_CAPACITY;
+const INVALID: u32 = 0xffffffffu;
 
 struct ParticleRest {
   growthF: vec4<f32>,
   jp: f32,
   // Packed world-space NN growth vector. Legacy scalar field names preserve
-  // the 64-byte ParticleRest ABI shared by the physics and renderer shaders.
+  // original scalar offsets in the shared 80-byte ParticleRest ABI.
   cycleActive: f32,
   growthAngle: f32,
   growthAnisotropy: f32,
@@ -39,8 +48,8 @@ struct ParticleRest {
   growthFrameAngle: f32,
   appearanceScale: f32,
   quadratureWeight: f32,
-  // Transported world-space half edges, row major. Independent of plastic F.
-  domain: vec4<f32>,
+  // Explicit wrapped vertices: domain.xy=A, domain.zw=B, vertexC=C.
+  domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>,
 }
 
 struct ParticleMeta {
@@ -58,7 +67,8 @@ struct ParticleMeta {
 struct AgentState {
   growthCount: atomic<u32>,
   unresolvedSamples: atomic<u32>,
-  _padding: array<u32, 62>,
+  capacityBlocked: u32, // Header word 2; written once after reservation.
+  _padding: array<u32, 61>,
   particleMeta: array<ParticleMeta>,
 }
 
@@ -105,18 +115,156 @@ struct AgentPhysics {
 @group(0) @binding(4) var<storage, read_write> particleC: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> velocities: array<vec2<f32>>;
 @group(0) @binding(6) var<storage, read_write> particleF: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> refinement: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read_write> growthField: array<atomic<i32>>;
 @group(0) @binding(9) var<uniform> physics: AgentPhysics;
 fn matDet(m: vec4<f32>) -> f32 { return m.x * m.w - m.y * m.z; }
-
-fn refinementDemand(pi: u32) -> f32 {
-  let worldArea = 4.0 * abs(matDet(particleRest[pi].domain));
-  let targetArea = physics.splitDisplacement * physics.splitDisplacement;
-  return worldArea / max(targetArea, 1e-12);
+fn edgeBetween(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+  let d = b-a;
+  return d-floor(d+vec2<f32>(0.5));
+}
+fn triangleArea(rest: ParticleRest) -> f32 {
+  let u = edgeBetween(rest.domain.xy,rest.domain.zw);
+  let v = edgeBetween(rest.domain.xy,rest.vertexC);
+  return 0.5*abs(u.x*v.y-u.y*v.x);
+}
+fn triangleCenter(a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> vec2<f32> {
+  return fract(a+(edgeBetween(a,b)+edgeBetween(a,c))/3.0);
 }
 
-fn splitFirstAxis(h: vec4<f32>) -> bool {
-  return h.x*h.x+h.z*h.z >= h.y*h.y+h.w*h.w;
+fn vertex(pi: u32, vi: u32) -> vec2<f32> {
+  if (vi == 0u) { return particleRest[pi].domain.xy; }
+  if (vi == 1u) { return particleRest[pi].domain.zw; }
+  return particleRest[pi].vertexC;
+}
+fn vertexLess(a: vec2<f32>, b: vec2<f32>) -> bool {
+  return a.x < b.x || (a.x == b.x && a.y < b.y);
+}
+fn edgeKey(pi: u32, ei: u32) -> vec4<f32> {
+  let a = vertex(pi,ei); let b = vertex(pi,(ei+1u)%3u);
+  if (vertexLess(b,a)) { return vec4<f32>(b,a); }
+  return vec4<f32>(a,b);
+}
+fn keyLess(a: vec4<f32>, b: vec4<f32>) -> bool {
+  if (any(a.xy != b.xy)) { return vertexLess(a.xy,b.xy); }
+  return vertexLess(a.zw,b.zw);
+}
+fn edgeLengthSquared(key: vec4<f32>) -> f32 {
+  let e = edgeBetween(key.xy,key.zw);
+  return dot(e,e);
+}
+fn refinementDemand(pi: u32) -> f32 {
+  var sum = 0.0;
+  for (var ei=0u; ei<3u; ei++) { sum += edgeLengthSquared(edgeKey(pi,ei)); }
+  return sum / (4.0*sqrt(3.0)*max(physics.splitDisplacement*physics.splitDisplacement,1e-12));
+}
+fn hashKey(key: vec4<f32>) -> u32 {
+  // Float equality handles signed zero; hash must do so as well.
+  let k = bitcast<vec4<u32>>(select(key,vec4<f32>(0.0),key == vec4<f32>(0.0)));
+  var h = 2166136261u;
+  for (var i=0u; i<4u; i++) { h = (h ^ k[i])*16777619u; }
+  h ^= h >> 16u; h *= 0x7feb352du; h ^= h >> 15u;
+  return h & (REFINE_HASH_SIZE-1u);
+}
+
+@compute @workgroup_size(256)
+fn clearRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x <= BLOCKED) { atomicStore(&refinement[gid.x],0u); }
+}
+
+@compute @workgroup_size(64)
+fn indexRefinementEdges(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pi = gid.x;
+  if (pi >= activeCount) { return; }
+  var best = 0u; var bestKey = edgeKey(pi,0u);
+  var bestLength = edgeLengthSquared(bestKey);
+  for (var ei=0u; ei<3u; ei++) {
+    let key = edgeKey(pi,ei); let len = edgeLengthSquared(key);
+    // A global edge order breaks equal-length cycles in the propagation graph.
+    if (len > bestLength || (len == bestLength && keyLess(bestKey,key))) {
+      best=ei; bestKey=key; bestLength=len;
+    }
+    var slot = hashKey(key);
+    loop {
+      let result = atomicCompareExchangeWeak(&refinement[slot],0u,3u*pi+ei+1u);
+      if (result.exchanged) { break; }
+      // Weak CAS may fail spuriously on an empty slot; retry it before probing.
+      if (result.old_value != 0u) { slot=(slot+1u)&(REFINE_HASH_SIZE-1u); }
+    }
+  }
+  atomicStore(&refinement[CHOICE+pi],best);
+}
+
+@compute @workgroup_size(64)
+fn linkRefinementEdges(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pi=gid.x;
+  if (pi >= activeCount) { return; }
+  let ei=atomicLoad(&refinement[CHOICE+pi]);
+  let key=edgeKey(pi,ei);
+  var slot=hashKey(key); var neighbor=INVALID; var neighborEdge=0u; var matches=0u;
+  loop {
+    let entry=atomicLoad(&refinement[slot]);
+    if (entry == 0u) { break; }
+    let other=(entry-1u)/3u; let otherEdge=(entry-1u)%3u;
+    if (other != pi && all(edgeKey(other,otherEdge) == key)) {
+      neighbor=other; neighborEdge=otherEdge; matches++;
+    }
+    slot=(slot+1u)&(REFINE_HASH_SIZE-1u);
+  }
+  var root=pi;
+  if (matches > 1u) {
+    // Non-manifold/overlapping input is ambiguous: never split only one copy.
+    root=INVALID;
+  } else if (matches == 1u) {
+    root=neighbor;
+    if (atomicLoad(&refinement[CHOICE+neighbor]) == neighborEdge) { root=min(pi,neighbor); }
+  }
+  atomicStore(&refinement[NEIGHBOR+pi],neighbor);
+  atomicStore(&refinement[ROOT+pi],root);
+}
+
+@compute @workgroup_size(64)
+fn propagateRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pi=gid.x;
+  if (pi >= activeCount) { return; }
+  let parent=atomicLoad(&refinement[ROOT+pi]);
+  if (parent != INVALID) {
+    // Atomic pointer jumping: roots only move forward along increasing edges.
+    // Host dispatch barriers bound a path of N triangles in ceil(log2(N)) steps.
+    atomicStore(&refinement[ROOT+pi],atomicLoad(&refinement[ROOT+parent]));
+  }
+}
+
+@compute @workgroup_size(64)
+fn requestRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pi=gid.x;
+  if (pi >= activeCount || refinementDemand(pi) < REFINEMENT_THRESHOLD) { return; }
+  let root=atomicLoad(&refinement[ROOT+pi]);
+  if (root == INVALID) { atomicAdd(&agentState.unresolvedSamples,1u); return; }
+  atomicAdd(&refinement[REQUESTS+root],1u);
+}
+
+@compute @workgroup_size(64)
+fn reserveRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let pi=gid.x;
+  if (pi >= activeCount) { return; }
+  let requests=atomicLoad(&refinement[REQUESTS+pi]);
+  if (requests == 0u) { return; }
+  let neighbor=atomicLoad(&refinement[NEIGHBOR+pi]);
+  let slots=select(2u,1u,neighbor == INVALID);
+  var observed=atomicLoad(&agentState.growthCount);
+  loop {
+    if (observed+slots > physics.maxActiveParticles) {
+      atomicAdd(&agentState.unresolvedSamples,requests);
+      atomicStore(&refinement[BLOCKED],1u);
+      return;
+    }
+    let result=atomicCompareExchangeWeak(&agentState.growthCount,observed,observed+slots);
+    if (result.exchanged) { break; }
+    observed=result.old_value;
+  }
+  atomicStore(&refinement[ALLOCATION+pi],observed+1u);
+  if (neighbor != INVALID) { atomicStore(&refinement[ALLOCATION+neighbor],observed+2u); }
 }
 
 fn wrapIndex(i: i32) -> u32 {
@@ -155,11 +303,17 @@ fn scatterGrowthIntent(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (pi >= activeCount) { return; }
   // Legacy externally loaded scenes have no domain. Initialize once from
   // their deformation and target spacing; production seeders supply a tiling.
-  if (dot(particleRest[pi].domain, particleRest[pi].domain) == 0.0) {
-    particleRest[pi].domain = particleF[pi] * (0.5 * physics.splitDisplacement);
+  if (dot(particleRest[pi].domain, particleRest[pi].domain) == 0.0 && dot(particleRest[pi].vertexC,particleRest[pi].vertexC) == 0.0) {
+    // Right triangle with undeformed area spacing², transported by F.
+    let e = particleF[pi] * (sqrt(2.0) * physics.splitDisplacement);
+    let u = vec2<f32>(e.x,e.z);
+    let v = vec2<f32>(e.y,e.w);
+    let a = positions[pi]-(u+v)/3.0;
+    particleRest[pi].domain = vec4<f32>(fract(a),fract(a+u));
+    particleRest[pi].vertexC = fract(a+v);
   }
   if (particleRest[pi].divisionBias <= 0.0) {
-    particleRest[pi].divisionBias = 4.0 * abs(matDet(particleRest[pi].domain))
+    particleRest[pi].divisionBias = triangleArea(particleRest[pi])
       / max(abs(matDet(particleF[pi])), 1e-8);
   }
   // Snapshot each lineage's current growth for proportional physical-budget
@@ -223,38 +377,29 @@ fn enforceGrowthField(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicStore(&growthField[fieldIndex(node, CH_WEIGHT)], i32(FIELD_SCALE));
 }
 
-fn claimGrowthSlot() -> u32 {
-  var observed = atomicLoad(&agentState.growthCount);
-  while (observed < physics.maxActiveParticles) {
-    let exchanged = atomicCompareExchangeWeak(&agentState.growthCount, observed, observed + 1u);
-    if (exchanged.exchanged) { return observed; }
-    observed = exchanged.old_value;
-  }
-  return physics.maxActiveParticles;
-}
-
 @compute @workgroup_size(64)
 fn commitResample(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
   if (pi >= activeCount) { return; }
-  if (refinementDemand(pi) < REFINEMENT_THRESHOLD) { return; }
+  let allocation=atomicLoad(&refinement[ALLOCATION+pi]);
+  if (allocation == 0u) { return; }
+  let newIndex=allocation-1u;
   let sourceRest = particleRest[pi];
-  let h = sourceRest.domain;
-  let first = splitFirstAxis(h);
-  let offset = 0.5 * select(vec2<f32>(h.y, h.w), vec2<f32>(h.x, h.z), first);
-  let childDomain = select(vec4<f32>(h.x, 0.5*h.y, h.z, 0.5*h.w),
-                           vec4<f32>(0.5*h.x, h.y, 0.5*h.z, h.w), first);
-  let spawnPos = fract(positions[pi] + offset);
-  let newIndex = claimGrowthSlot();
-  if (newIndex >= physics.maxActiveParticles) {
-    atomicAdd(&agentState.unresolvedSamples, 1u);
-    return;
-  }
+  let ei=atomicLoad(&refinement[CHOICE+pi]);
+  let a=vertex(pi,ei); let b=vertex(pi,(ei+1u)%3u); let c=vertex(pi,(ei+2u)%3u);
+  // Canonical endpoint ordering makes independently split copies of the same
+  // edge generate a bit-identical midpoint even with opposite edge winding.
+  var first = a; var second = b;
+  if (b.x < a.x || (b.x == a.x && b.y < a.y)) { first = b; second = a; }
+  let midpoint = fract(first+0.5*edgeBetween(first,second));
+  let minusDomain = vec4<f32>(a,midpoint);
+  let plusDomain = vec4<f32>(midpoint,b);
+  let spawnPos = triangleCenter(midpoint,b,c);
 
   // Center the replacement pair around the old material point. Leaving the
   // parent fixed and placing every child on the weak-coverage side introduces
   // a first moment at every resample and compounds into radial spokes.
-  positions[pi] = fract(positions[pi] - offset);
+  positions[pi] = triangleCenter(a,midpoint,c);
   positions[newIndex] = spawnPos;
   // Standard point MPM: copy the parent's particle velocity to both children,
   // as in Ruggirello and Schumacher's adaptation algorithm. Sampling the
@@ -264,9 +409,11 @@ fn commitResample(@builtin(global_invocation_id) gid: vec3<u32>) {
   particleC[newIndex] = particleC[pi];
   particleF[newIndex] = particleF[pi];
   particleRest[newIndex] = sourceRest;
-  let childWeight = 0.5 * max(sourceRest.quadratureWeight, 1e-6);
-  particleRest[newIndex].domain = childDomain;
-  particleRest[pi].domain = childDomain;
+  let childWeight = 0.5 * sourceRest.quadratureWeight;
+  particleRest[newIndex].domain = plusDomain;
+  particleRest[pi].domain = minusDomain;
+  particleRest[newIndex].vertexC = c;
+  particleRest[pi].vertexC = c;
   particleRest[pi].divisionBias = 0.5 * sourceRest.divisionBias;
   particleRest[newIndex].divisionBias = 0.5 * sourceRest.divisionBias;
   particleRest[newIndex].quadratureWeight = childWeight;
@@ -284,7 +431,8 @@ fn commitResample(@builtin(global_invocation_id) gid: vec3<u32>) {
 fn stopGrowthAtCapacity(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= FIELD_CHANNELS * NODE_COUNT) { return; }
-  if (atomicLoad(&agentState.growthCount) < physics.maxActiveParticles) {
+  if (i == 0u) { agentState.capacityBlocked = atomicLoad(&refinement[BLOCKED]); }
+  if (atomicLoad(&agentState.growthCount) < physics.maxActiveParticles && atomicLoad(&refinement[BLOCKED]) == 0u) {
     if (i == 7u) {
       let totalArea = f32(atomicLoad(&growthField[6])) / 100000000.0;
       let ratio = select(0.0, max(1.0, physics.materialAreaBudget / max(totalArea, 1e-12)),

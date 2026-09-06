@@ -6,7 +6,7 @@
 // per compute stage, and p2g.wgsl's 5 read-only particle buffers already
 // leave room for only a few more — a combined buffer keeps this at 1
 // binding regardless of how many per-node scalars it carries). Runs once
-// per substep, before p2g.
+// per substep, before p2g. Integer zero is also the f32 +0 bit pattern.
 //
 // Independent copy of mls-mpm/src/gpu/clearGrid.wgsl (this project's own
 // sandbox), stripped of that file's field-visualize diagnostic channels

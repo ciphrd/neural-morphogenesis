@@ -1,5 +1,11 @@
 # Material-domain implementation
 
+The stages below record the original parallelogram implementation. Model
+version 7 uses explicit, directly advected triangle vertices, second-moment
+refinement with staged conforming longest-edge bisection, and paired half-weight
+seed triangles. See `GROWTH_MODEL.md` for the current model
+and `TRIANGLE_DOMAIN_INVESTIGATION.md` for its design rationale.
+
 The implementation follows `GROWTH_REDESIGN.md` in four ordered stages:
 
 1. Establish a CPU reference for domain geometry and subdivision; test

@@ -32,10 +32,11 @@
 // entirely, at the cost of spelling out matMul/matTranspose/matDet by
 // hand below.
 //
-// No native float atomics on storage buffers in core WebGPU, so the P2G
-// scatter-add (momentum-x, momentum-y, mass — accumulated from however
-// many particles land near a given grid node) goes through a fixed-point
-// i32 buffer, decoded back to float by gridUpdate.wgsl next.
+// Portable floating-point atomic addition uses an integer compare/exchange
+// loop over f32 bits. Fixed-point mass/momentum rounding produced spurious
+// velocity gradients and energy at small quadrature weights (especially after
+// shear refinement). Keeping floating precision also removes i32 overflow of
+// accumulated momentum under compression, without optional WebGPU features.
 
 const GRID_N: u32 = __GRID_N__u;
 const NODE_COUNT: u32 = (GRID_N + 1u) * (GRID_N + 1u);
@@ -43,13 +44,6 @@ const NODE_COUNT: u32 = (GRID_N + 1u) * (GRID_N + 1u);
 const DX: f32 = __DX__;
 const INV_DX: f32 = __INV_DX__;
 const DT: f32 = __DT__;
-
-// Matches g2p's shared SCALE — headroom: total mass/momentum landing on
-// 4096 retains sub-per-mille transfer precision while providing 16x the
-// momentum headroom of the old 65536 scale. The old value was measured
-// reaching 2.13e9 raw units during an ordinary growing rollout, close
-// enough to i32 overflow that atomic ordering made collapse intermittent.
-const SCALE: f32 = 4096.0;
 
 // gridAccum's per-node channel layout — must match clearGrid.wgsl/
 // gridUpdate.wgsl's own copies of these exact same constants (WGSL has
@@ -78,8 +72,8 @@ struct ParticleRest {
   growthFrameAngle: f32,
   appearanceScale: f32,
   quadratureWeight: f32,
-  // Transported world-space half edges, row major. Independent of plastic F.
-  domain: vec4<f32>,
+  // Explicit wrapped vertices: domain.xy=A, domain.zw=B, vertexC=C.
+  domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>,
 }
 @group(0) @binding(4) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read_write> gridAccum: array<atomic<i32>>;
@@ -210,6 +204,17 @@ fn quadraticWeights(fx: vec2<f32>) -> array<vec2<f32>, 3> {
   return w;
 }
 
+fn addGridFloat(index: u32, value: f32) {
+  if (value == 0.0) { return; }
+  var previous = atomicLoad(&gridAccum[index]);
+  loop {
+    let next = bitcast<i32>(bitcast<f32>(previous) + value);
+    let result = atomicCompareExchangeWeak(&gridAccum[index], previous, next);
+    if (result.exchanged) { return; }
+    previous = result.old_value;
+  }
+}
+
 @compute @workgroup_size(64)
 fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
@@ -249,7 +254,7 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
   // comment for the full rationale.
   let Fg = rest.growthF;
   let g = max(matDet(Fg), 1e-6); // det(Fg): grown rest-area ratio
-  let q = max(rest.quadratureWeight, 1e-6);
+  let q = max(rest.quadratureWeight, 0.0);
   let Fe = matMul(F, matInverse(Fg));
   let Je = matDet(Fe);
   let polar = polarDecompose(Fe);
@@ -274,9 +279,9 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
       );
       let momentum = wgt * (massEff * vel + affineDpos);
       let nodeIndex = (ni * (GRID_N+1u) + nj) * CHANNELS;
-      atomicAdd(&gridAccum[nodeIndex + CH_MOM_X], i32(round(momentum.x * SCALE)));
-      atomicAdd(&gridAccum[nodeIndex + CH_MOM_Y], i32(round(momentum.y * SCALE)));
-      atomicAdd(&gridAccum[nodeIndex + CH_MASS], i32(round(massEff * wgt * SCALE)));
+      addGridFloat(nodeIndex + CH_MOM_X, momentum.x);
+      addGridFloat(nodeIndex + CH_MOM_Y, momentum.y);
+      addGridFloat(nodeIndex + CH_MASS, massEff * wgt);
     }
   }
 }

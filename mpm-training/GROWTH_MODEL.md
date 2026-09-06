@@ -1,4 +1,4 @@
-# Point-transfer material growth (model version 3)
+# Point-transfer material growth (model version 8)
 
 The material grows continuously; numerical samples are added by subdividing
 transported material domains. `GROWTH_REDESIGN.md` records the pre-implementation
@@ -8,28 +8,50 @@ and validation scope.
 ## Material and numerical state
 
 Each sample carries `F`, growth tensor `G`, affine velocity `C`, numerical weight
-`q`, original world area `A0`, and current half edges `H=[h1 h2]`. Its current
-material domain is `x + H[-1,1]^2`. `F` is the constitutive deformation used with
-`Fe=F inverse(G)`; plasticity/fluidity can modify it. `H` follows the actual grid
-velocity gradient and is never changed by a constitutive clamp.
+`q`, original world area `A0`, and three explicit world-space vertices A/B/C.
+Vertices are stored canonically in [0,1)² and advected directly. Position x is
+derived from their centroid; vertices are never reconstructed from x or edges.
+For geometry calculations only, E=[B-A, C-A] uses shortest periodic differences,
+and current area is abs(det(E))/2. F is constitutive deformation, with
+Fe=F inverse(G); plasticity/fluidity can modify it without changing vertices.
 
-The shared ParticleRest record has 16 floats (64 bytes). Existing offsets are
-retained: 0–3 are `G`, 4 is plastic `jp`, 5–6 are the policy growth vector,
-7 caches the macro interval's initial `det(G)`, 8 stores `A0`, 9 is reserved,
-10 is marker appearance, 11 is `q`, and 12–15 are row-major `H`. Several scalar
-WGSL field names remain historical ABI names. Diagnostic readers accept old
-12-float stored snapshots; live GPU records use 16 floats everywhere.
+The shared ParticleRest record now has 20 floats (80 bytes). Offsets 0–11 retain
+their previous meaning: G(4), jp, growth vector(2), initial det(G), A0, reserved,
+appearance, q. Floats 12–13 hold A, 14–15 B, 16–17 C, and 18–19 are alignment
+padding. WGSL packs A/B in the historical vec4 field `domain`, followed by
+`vertexC` and `domainPadding`. All live shaders and buffers use the new stride;
+diagnostic readers still accept historical 12/16-float snapshots as well.
 
 Grown rest area is `A0 det(G)` in world units. Mechanical mass and stress volume
 remain `particleMass q det(G)` and `particleVolume q det(G)` in the existing
 simulation normalization. Density presets scale mass and volume together.
 
-Seed blobs retain their rotated hexagonal lattice centers. The corresponding
-rotated lattice parallelograms tile without overlap. Rows use square domains.
-Reset buffers **before** loading seed geometry. External legacy scenes with no
-provided domains gain refinement geometry when the first growth-field pass
-initializes a domain from `F` and target spacing; arbitrary input point clouds
-are not thereby guaranteed to tile.
+Seed blobs partition each cell of the original rotated hexagonal lattice into
+two triangles along its shorter diagonal, producing equilateral triangles.
+Row layouts divide squares into right triangles. The two samples are placed at
+triangle centroids, with q=0.5 each; their total area and mechanical material
+equal the original cell within float32 endpoint quantization. A lattice-corner
+cache creates each shared corner once; all incident triangles copy those exact
+coordinate bits. Geometry and positions use the same rotation.
+
+The legacy `initialParticleCount` / `--initial-particles` setting now denotes
+seed cells: N cells emit 2N triangle samples, ordered as pairs (2i,2i+1).
+Capacity remains an actual sample limit. Startup clamps seed cells to
+floor(capacity/2), retaining complete pairs; capacity below two is invalid for
+rollout seeding. CLI validation requires the requested cells to fit. Fixed lab
+layouts require sufficient capacity and report an error if they do not fit.
+Density scaling still acts on seed cells, target spacing and mass/volume; the
+extra factor of two in initial sampling is offset by half weights.
+
+Reset buffers **before** loading seed geometry and weights. Explicit scene
+domains must carry `domain_geometry='triangle-vertices'` (Python) or
+`domainGeometry:'triangle-vertices'` (TypeScript); untagged/legacy domain arrays are
+rejected. Scene domain arrays contain six floats per triangle, [Ax,Ay,Bx,By,Cx,Cy],
+all canonical finite positions. Loaders accept positive per-sample quadrature weights and initialize
+A0 as `0.5*det(E)/det(F)`, rejecting nonfinite or nonpositive determinants.
+Legacy point-only scenes gain a right triangle with undeformed area spacing²,
+transformed by F, at the first growth-field pass. Arbitrary point clouds and
+interactive additions are not thereby guaranteed to tile.
 
 ## Growth law
 
@@ -48,17 +70,39 @@ constitutive behavior, independently of domain geometry.
 
 ## Subdivision
 
-Refine when `4 |det(H)| / splitDisplacement² >= 1.75`. This measures the
-transported parallelogram's current world area against the target point-sample
-area, analogous to the adaptation paper's volumetric-strain criterion. An
-area-preserving shear or folded long-thin domain does not multiply samples.
-`splitDisplacement` remains the legacy settings name for the target spacing.
-Select the longest transported material edge when partitioning.
-Splitting edge 1 gives:
+The refinement demand is
 
 ```
-x_minus = x - h1/2       x_plus = x + h1/2
-H_minus = H_plus = [h1/2, h2]
+S = |AB|² + |BC|² + |CA|²
+A_effective = S / (4 sqrt(3))
+demand = A_effective / splitDisplacement²
+```
+
+Request refinement when `demand >= 1.75`. For an equilateral triangle,
+`A_effective` equals its area. More generally `S/36` is the mean squared distance
+from the centroid over the uniform triangle. The trigger therefore measures
+spatial extent, including isochoric stretch, without reacting to rigid rotation.
+It scales quadratically with size; `splitDisplacement` remains target sample
+spacing in world units. This is a spatial-resolution criterion, not a rigorous
+velocity interpolation error estimator or a constitutive strain limit.
+
+Select the longest edge, using canonical endpoint ordering for identical edge
+length calculations on both sides. Exact length ties use a global lexicographic
+endpoint order, preventing cycles among three or more equally long edges.
+For either child, longest-edge bisection reduces S to at most 3/4 of its parent's
+value. Repeated refinement resolves a fixed stretched triangle; sustained shear
+can continue to consume samples even without material growth.
+
+Cyclically relabel its endpoints A,B and the opposite vertex C. With M=(A+B)/2, the two children
+are (A,M,C) and (M,B,C), with preserved winding. A/B/C are copied unchanged;
+midpoints use lexicographically ordered endpoints so both orientations of a
+shared edge compute identical bits. Centroids are derived from the children:
+
+
+```
+x_minus = x - (B-A)/6       x_plus = x + (B-A)/6
+vertices_minus = [A, M, C]
+vertices_plus  = [M, B, C]
 q_minus = q_plus = q/2
 A0_minus = A0_plus = A0/2
 v_minus = v               v_plus = v
@@ -66,35 +110,118 @@ v_minus = v               v_plus = v
 
 Copy `F`, `G`, `C`, chemistry, appearance and private policy state. Child domains
 exactly partition the parent. Since each child's `q` is half the parent's, every
-bisection restores the represented material per sample without a spatial hash
-or morphology search. The transported domain controls daughter placement, but
+bisection conserves the represented material. Edge matching uses a hash of
+exact endpoint coordinates; morphology does not participate in refinement. The transported domain controls daughter placement, but
 does not widen or otherwise modify particle-grid coupling.
 
-One bisection per existing sample is allowed per macro interval. New slots do
-not execute the same commit pass. Atomic allocation enforces the hard capacity;
-there is no region-ownership texture or candidate-placement arbitration.
+Refinement is **conforming and staged**. Each macro interval:
+
+1. Rebuild a GPU half-edge hash from the exact canonical endpoint coordinates.
+   Match an edge only by exact endpoint equality; hash collisions are resolved
+   by probing, never by treating nearby points as identical.
+2. For each triangle, follow its longest edge to its neighbor. If that neighbor
+   prefers another edge, follow the dependency. A path ends at a boundary edge
+   or an edge longest for both incident triangles. Atomic pointer jumping takes
+   at most ceil(log2(active samples)) dispatches to find these terminal groups.
+3. Route all refinement requests to their terminal group. Reserve one slot for
+   a boundary bisection or two slots for a matched interior pair, in one atomic
+   capacity transaction. If the whole operation cannot fit, leave both sources
+   unchanged. Independent groups can still succeed in that interval.
+4. Commit all reserved groups. Both sides of an interior edge receive the same
+   midpoint before any transport resumes. No T-junction is introduced.
+
+Only terminal operations run in an interval; upstream requests are reevaluated
+on the next interval. This advances longest-edge propagation in bounded stages,
+with a conforming mesh after **every** stage, rather than allowing temporary
+hanging edges while finishing a full recursive closure. A request can take
+several macro intervals to resolve. Every original sample splits at most once
+per interval; newborns start participating in the next interval.
+
+The scratch buffer has a power-of-two edge hash with at least six slots per
+allocated sample, five per-sample words, and one blocked flag (about 12.4 MB at
+200,000 capacity). No CPU topology readback or quadratic neighbor search is
+needed. Multiple requests sharing a terminal operation are coalesced.
+Non-manifold edges with more than two incident triangles are ambiguous and
+reported as unresolved rather than partially split. Matching coincident edges
+uses geometric identity, not persistent material/vertex IDs; arbitrary overlapping
+scene domains are not a supported manifold mesh.
 
 ## Transfers
+
+P2G mass and momentum now accumulate as f32 values using integer atomic
+compare/exchange on their bit patterns. The buffer remains three 32-bit words
+per node; grid update and the density renderer decode those words as floats.
+No optional floating-point atomic feature is required. Diagnostic and growth
+field accumulators retain their own independent fixed-point encodings.
+
+The previous 1/4096 mass/momentum quantization produced artificial velocity
+gradients at small quadrature weights: a force-free particle with q=0.001 at
+4x density accelerated from speed 1 to about 9 over 256 substeps. The floating
+transfer retains unit speed within 6e-6 in that reproduction. P2G also uses the
+actual positive q, without manufacturing a minimum mass at q<1e-6. The dedicated
+transfer regression covers 1x/4x sampling down to q=1e-7 and concentrated
+momentum beyond the previous signed-i32 range. Float summation still has ordinary
+order-dependent roundoff; compare/exchange contention can cost more than integer
+addition under concentration. The existing velocity CFL guard remains a final
+safety bound, not a guarantee of elastic stability or valid triangle geometry.
+
 
 Physics uses the ordinary quadratic point-based MLS-MPM transfer. Each particle
 evaluates one 3×3 grid stencil at its center. Effective mass and stress volume
 remain weighted by `q det(G)`, so subdivision preserves their totals. G2P
 reconstructs the standard APIC affine matrix with `D inverse = 4/dx² I` and
-uses it to transport both constitutive state and refinement geometry:
+uses it to transport constitutive state:
 
 ```
 v = sum_i Ni(xp) vi
 C = 4/dx² sum_i Ni(xp) vi (xi-xp)^T
 F <- (I + dt C) F
-H <- (I + dt C) H
 ```
 
-The domain `H` is not integrated into P2G, G2P, growth projection, chemical
-deposition, morphology/repulsion density, or viewer diagnostics. Those paths
-use one weighted sample at `xp`. Children copy the parent velocity and affine
+Geometry uses three additional quadratic 3×3 velocity gathers, one at each
+stored vertex, from the same grid velocity buffer:
+
+```
+va = sum_i Ni(A) vi     vb = sum_i Ni(B) vi     vc = sum_i Ni(C) vi
+A' = fract(A + dt va)  B' = fract(B + dt vb)  C' = fract(C + dt vc)
+x' = periodic_centroid(A', B', C')
+```
+
+Each stored coordinate undergoes the same independent arithmetic regardless of
+its local vertex index. The GPU tests require bit-identical shared corners over
+128 nonlinear-flow steps and across all incident seed triangles over 256 steps,
+including periodic crossings. Split tests require unchanged endpoint bits and
+identical midpoints when the same edge is bisected in opposite directions.
+
+This removes centroid/edge reconstruction drift; it does not remove float32
+quantization of world positions themselves. Extremely small displacements can
+round away. The periodic centroid, area and renderer assume local triangles:
+each coordinate span is less than half the world period. Larger domains would
+need explicit winding information to disambiguate their edges on the torus.
+
+Particle velocity still uses the centroid-based point gather, not the average
+corner velocity. This retains its gathered linear momentum, but means centroid
+displacement is not generally dt times stored velocity in non-affine flow.
+Relative to point advection, the position correction is
+`delta = dt*(mean(va,vb,vc)-particleVelocity)` and changes orbital angular
+momentum by `mass * cross(delta, particleVelocity)` with unchanged APIC C.
+Exact angular-momentum conservation of the complete transport is therefore
+not claimed; a full domain-aware transfer is separate work. Constitutive F
+likewise remains based on the centroid gradient, not reconstructed from E.
+
+The domain `E` is not integrated into P2G, the momentum/constitutive part of
+G2P, growth projection, chemical deposition, morphology/repulsion density, or
+viewer field diagnostics. Those paths use one weighted sample at `xp`.
+Children copy the parent velocity and affine
 matrix. Symmetric placement and halved weights preserve global mass, linear
 momentum, and APIC angular momentum, although the nodal field can change at the
 instant of refinement. Rendered markers remain user-sized sample glyphs.
+
+In both Training and Lab, Rendering → “Show particle domains (triangles)”
+overlays the actual transported triangle boundaries in cyan. The outlines are
+independent of marker size/opacity, follow zoom and periodic boundaries, and
+are drawn after bloom to remain crisp. Lower particle opacity to inspect the
+domains alone. The overlay adds no render pass while disabled.
 
 ## Physical and numerical limits
 
@@ -113,9 +240,14 @@ signed-i32 headroom of approximately 21 world-area units. Budget tests allow
 for that quantization; this is not arbitrary-precision enforcement.
 
 Numerical capacity remains a **safety pause**, independent of the optional
-physical budget. At capacity, the growth field is cleared before integration;
-elastic motion continues. Failed bisections preserve the source and increment
-`unresolvedSamples` in the counter buffer. The viewer reports that growth is
+physical budget. At capacity, or when a complete requested pair cannot fit in
+the remaining slots, the growth field is cleared before integration; elastic
+motion continues. A spare slot may therefore remain unused. Failed operations
+preserve their sources and increment
+`unresolvedSamples` by the number of requests blocked at that terminal group.
+Header word 2 reports `capacityBlocked`, independently of the sample count.
+Deferred requests whose terminal dependency made progress are not counted as
+capacity failures. The viewer reports that growth is
 paused at the sampling limit. `AgentsGPU.unresolved_samples` and
 `GpuSimulation.samplingStatus` expose it programmatically. A capacity-limited
 rollout must not be interpreted as a resolution-converged physical endpoint.
@@ -125,10 +257,15 @@ rollout must not be interpreted as a resolution-converged physical endpoint.
 Run from `trainer/`:
 
 ```
-.venv/bin/python material_domain.py
+.venv/bin/python transfer_stability_check.py
+.venv/bin/python triangle_domain_check.py
+.venv/bin/python vertex_transport_check.py
+.venv/bin/python conforming_refinement_check.py
+.venv/bin/python seed_blob_check.py
 .venv/bin/python growth_resampling_math_check.py
 .venv/bin/python growth_check.py
 .venv/bin/python elastic_diagnostics_check.py
+.venv/bin/python domain_render_check.py
 .venv/bin/python density_gpu_check.py
 ```
 
@@ -140,15 +277,28 @@ material/policy-state inheritance, seed/reset behavior, and a free-growth run.
 The diagnostic suite also compiles the viewer's rendering and field shaders.
 Build playback with `npm run build` in `viewer/`.
 
-On the implementation run (Apple M2 Max), the GPU split changed projected
-chemistry by 0.00448% and morphology by 0.984% in its smooth-field test. A
+On the earlier model-6 implementation run (Apple M2 Max), the GPU split changed
+projected chemistry by 0.00458% and morphology by 1.29% in its elongated-triangle
+smooth-field test. Halving triangle dimensions and target spacing reduced the
+morphology change to 0.466%. A
 60×32-substep isotropic rollout reached rest area 11.0205 from 1, with 8 samples
-and positive finite domains. Each particle now performs one 3×3 physics stencil
-instead of nine such stencils; wall-clock GPU probes varied substantially with
-concurrent system load and are not recorded as a stable benchmark.
+and positive finite domains. P2G remains one 3×3 stencil. G2P now evaluates four
+3×3 stencils (one centroid and three vertices). Paired startup seeds also double
+initial sample count compared with the original parallelogram model. No stable
+wall-clock performance benchmark is claimed for the new model.
 
-Independent affine domains may still develop gaps/overlaps under nonuniform
-motion. Severe shear, coarse sampling, fast motion relative to the macro
+Shared vertices retain duplicate bit-identical coordinates, and neighbor splits
+are coordinated using a temporary edge graph. This preserves an initially
+conforming mesh; it does not repair cracks in historical scenes. Curved material
+boundaries remain approximated by straight triangle edges. Direct velocity
+sampling also uses the existing grid as-is, including zero velocity at empty
+nodes; no velocity extrapolation or additional material support is introduced.
+A sustained anisotropic-growth pressure probe still produces inverted thin
+triangles after exhausting refinement capacity. Floating-point grid transfer
+fixes an independent artificial-energy mechanism; it does not make this
+capacity-limited geometry stress test pass or establish that every reported
+explosion has the same cause.
+Severe shear, coarse sampling, fast motion relative to the macro
 interval, and very small represented-material weights need further convergence studies.
 Geometry uses the existing explicit time-step family and requires a suitable
 CFL limit. There is no new fracture model, global remapping or coarsening.
@@ -156,5 +306,6 @@ The density smoke test checks its existing static/zero-command scenarios;
 learned-policy morphology convergence across densities is not established.
 
 This changes physical discretization and sample trajectories. New runs record
-`growthModelVersion=3`; previous weights remain loadable, but old trajectory
+`growthModelVersion=8` and `domainGeometry=triangle`; previous policy weights
+remain loadable, but old trajectory
 snapshots are historical evidence rather than expected exact replay results.

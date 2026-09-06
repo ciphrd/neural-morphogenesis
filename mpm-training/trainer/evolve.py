@@ -82,7 +82,8 @@ from density import DENSITY_MODEL_VERSION, DensityReference, ResolvedDensity, pa
 from environment_gpu import EnvironmentGPU
 from mpm_core import MAX_PARTICLES, PARTICLE_MASS, VOL, MpmCore
 from parallel_workers import build_pool, worker_rollout
-from raster import FITNESS_MODEL_VERSION, build_target_distance_field, build_target_raster, training_raster_distance
+from raster import build_target_distance_field
+from domain_fitness import FITNESS_MODEL_VERSION, target_mask, score_domains, stopping_from_args
 from simulation_settings import (
     CHEM_CHANNELS,
     CHEMICAL_CHANNEL_PROFILES,
@@ -227,43 +228,51 @@ def mutate(
     return (weights.astype(np.float32, copy=False) + noise * np.float32(sigma) * scales).astype(np.float32)
 
 
-def _score_fitness(
-    snapshots: list[np.ndarray],
-    target: TargetShape,
-    target_raster: np.ndarray,
-    target_distance_field: np.ndarray,
-    args: argparse.Namespace,
-    density_multiplier: float,
-) -> float:
-    """Bounded multiscale raster fitness over the rollout's late snapshots.
+def resolved_material_budget(args, target):
+    if args.material_budget_mode == "target":
+        return target.filled_area() * args.material_budget_scale
+    return args.material_area_budget
 
-    The mean preserves distinctions across the whole late window while a
-    configurable worst-snapshot contribution still penalizes transient poses.
-    A diverged or empty snapshot fails softly with positive infinity.
-    """
-    scores: list[float] = []
-    for positions in snapshots:
-        if positions.shape[0] == 0 or not np.isfinite(positions).all():
-            return float("inf")
-        scores.append(float(training_raster_distance(
-            positions,
-            target.points,
-            target_raster,
-            target_distance_field,
-            args.raster_resolution,
-            RASTER_EXTENT,
-            args.raster_sigma,
-            outside_weight=args.outside_weight,
-            particle_weight=1.0 / density_multiplier,
-            expected_weighted_particles=float(args.particles),
-            target_occupancy=args.fitness_target_occupancy,
-            coverage_weight=args.fitness_coverage_weight,
-            spill_weight=args.fitness_spill_weight,
-            boundary_weight=args.fitness_boundary_weight,
-            crowding_weight=args.fitness_crowding_weight,
-        )))
-    worst_weight = args.fitness_temporal_worst_weight
-    return (1.0 - worst_weight) * float(np.mean(scores)) + worst_weight * max(scores)
+
+def estimated_sample_capacity(args, target):
+    # Two samples per spacing-squared is an allocation estimate, not a
+    # physical material limit. Anisotropy and conforming refinement need slack.
+    spacing = resolve_run_density(args, 1.0).spacing
+    return max(2 * args.initial_particles, int(np.ceil(2 * target.filled_area() / spacing**2)))
+
+
+def report_shape_budget(args, target):
+    if target.filled_area() <= 0:
+        raise SystemExit("training target must contain at least one filled texel")
+    estimate = estimated_sample_capacity(args, target)
+    print(f"Material budget: {resolved_material_budget(args, target):.6g} world area; "
+          f"sample capacity: {args.particles}; estimated target sampling capacity: ~{estimate} at 1x density")
+    if args.particles < estimate:
+        print(f"The current sampling cap may pause growth before the target is filled. "
+              f"Consider --particles {estimate}; adding --particle-densities 0.5 reduces its sampling cost.")
+
+
+def shape_settings(args, target):
+    """Wire settings also embed target geometry for autonomous offline playback."""
+    return {
+        "estimatedSampleCapacity": estimated_sample_capacity(args, target),
+        "materialBudgetMode": args.material_budget_mode,
+        "materialBudgetScale": args.material_budget_scale,
+        "materialAreaBudget": resolved_material_budget(args, target),
+        "stableStop": args.stable_stop,
+        "shapeCheckInterval": args.shape_check_interval,
+        "shapeConfirmations": args.shape_confirmations,
+        "shapeSettleSteps": args.shape_settle_steps,
+        "shapeMissingTolerance": args.shape_missing_tolerance,
+        "shapeSpillTolerance": args.shape_spill_tolerance,
+        "shapeOverlapTolerance": args.shape_overlap_tolerance,
+        "shapeTarget": {"points": target.points.tolist(), "texelSize": target.texel_size()},
+    }
+
+
+def _aggregate_scores(scores, args):
+    return ((1-args.fitness_temporal_worst_weight)*float(np.mean(scores))
+            + args.fitness_temporal_worst_weight*max(scores))
 
 
 def rollout(
@@ -279,27 +288,12 @@ def rollout(
     return_positions: bool = False,
     density_multiplier: float = 1.0,
 ) -> float | tuple[float, np.ndarray]:
-    """Runs one seed-to-`args.macro_steps` rollout with `weights` loaded
-    into the (reused, GPU-resident) `agents` and `core`, and returns a
-    fitness score — lower is better. Rather than reading positions once
-    at the very end, a snapshot is captured at each of CAPTURE_OFFSETS
-    (the last 10% of `args.macro_steps`, five evenly-spaced points), each
-    snapshot is scored by raster.training_raster_distance's bounded multiscale
-    occupancy metric. The arithmetic mean across captures is blended with their
-    worst score, retaining granular temporal information while punishing an
-    unstable one-instant pose. `target_raster` and `target_distance_field` are
-    the run-level precomputations used directly by that metric.
-    See CAPTURE_OFFSETS's own comment for the full "don't let a
-    candidate learn to pose for one known instant" reasoning. A diverged
-    (non-finite, or fully emptied-out) snapshot scores +inf rather than
-    crashing the generation, same "fail soft" backstop every other
-    evolve.py in this repo has.
+    """Evaluate material domains over the late window, or a confirmed settling window.
 
-    `return_positions`, off by default, additionally returns the
-    rollout's final (last-captured) positions — for callers that need
-    them for something other than scoring (e.g. train_server.py's
-    end-of-generation debug images), not the hot per-candidate training
-    path, which only ever wants the scalar fitness."""
+    Periodic successful matches stop growth. Failed settling resumes growth;
+    reaching the rollout horizon alone never declares success. Capacity-blocked
+    sampling cannot qualify for a successful early stop.
+    """
     agents.load_weights(weights)
     density = resolve_run_density(args, density_multiplier)
     if density.particle_cap > agents.particle_capacity:
@@ -335,31 +329,40 @@ def rollout(
         seed=seed,
         mpm_enabled=MPM_ENABLED,
         initial_particle_count=density.initial_particles,
+        material_area_budget=resolved_material_budget(args, target),
     )
 
-    # Deduplicated and sorted ascending — offsets can collide onto the
-    # same integer macro step for a short enough rollout, and scoring the
-    # same step twice would just waste work, not change the result (max
-    # of a value with itself is itself). offset=0.0 always maps to
-    # args.macro_steps itself, guaranteeing this set is never empty and
-    # its last (chronological) member is always the final step.
     checkpoint_steps = {max(1, round(args.macro_steps * (1.0 - offset))) for offset in CAPTURE_OFFSETS}
-    snapshots: list[np.ndarray] = []
-
+    scores = []
+    stopping = stopping_from_args(args)
+    last_evaluation = None
     for step in range(1, args.macro_steps + 1):
-        sim.macro_step(
-            args.substeps_per_macro,
-            growth_enabled=args.growth_steps is None or step <= args.growth_steps,
-        )
-        if step in checkpoint_steps:
-            snapshots.append(sim.positions())
-
-    final_positions = snapshots[-1]
-    fitness = _score_fitness(
-        snapshots, target, target_raster, target_distance_field, args, density_multiplier
-    )
-
-    return (fitness, final_positions) if return_positions else fitness
+        sim.macro_step(args.substeps_per_macro, growth_enabled=stopping.growth_enabled and
+                       (args.growth_steps is None or step <= args.growth_steps))
+        if step in checkpoint_steps or stopping.due(step):
+            vertices = core.read_rest_state()[:, 12:18]
+            last_evaluation = score_domains(vertices, target, target_raster, args)
+            if step in checkpoint_steps:
+                scores.append(last_evaluation.total)
+            if stopping.due(step) and stopping.observe(step, last_evaluation.match, last_evaluation.total,
+                    sampling_blocked=core.active_count >= agents.max_active_particles or agents.capacity_blocked or agents.unresolved_samples > 0):
+                scores = stopping.settling_scores
+                break
+    fitness = _aggregate_scores(scores, args)
+    # Exposed to deterministic winner replay/debug callers without changing
+    # the scalar worker protocol or existing return_positions callers.
+    core.rollout_diagnostics = {
+        "steps": step, "stableMatch": stopping.complete,
+        "settling": stopping.settling_since is not None and not stopping.complete,
+        "capacityBlocked": bool(agents.capacity_blocked),
+        "atCapacity": core.active_count >= agents.max_active_particles,
+        "unresolvedSamples": int(agents.unresolved_samples),
+        "materialAreaBudget": resolved_material_budget(args, target),
+        "missing": last_evaluation.match.missing,
+        "spill": last_evaluation.match.spill,
+        "overlap": last_evaluation.match.overlap,
+    }
+    return (fitness, sim.positions()) if return_positions else fitness
 
 
 def run_generation(
@@ -534,7 +537,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--initial-particles",
         type=int,
         default=INITIAL_PARTICLE_COUNT,
-        help="number of agents seeded at the beginning of each rollout (must not exceed --particles)",
+        help="number of material seed cells; each emits two half-weight triangles (2*count must fit --particles)",
     )
     parser.add_argument(
         "--macro-steps",
@@ -548,6 +551,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional last macro step in which agents may start new cell cycles; omitted means no time cutoff",
     )
+    parser.add_argument("--material-budget-mode", choices=("target", "manual"),
+                        default=DEFAULT_RUN_SETTINGS["materialBudgetMode"])
+    parser.add_argument("--material-budget-scale", type=float, default=DEFAULT_RUN_SETTINGS["materialBudgetScale"],
+                        help="multiply the target's physical filled area for the growth budget")
+    parser.add_argument("--material-area-budget", type=float, default=MATERIAL_AREA_BUDGET,
+                        help="world rest-area limit in manual mode; zero means unlimited")
+    parser.add_argument("--stable-stop", action=argparse.BooleanOptionalAction, default=DEFAULT_RUN_SETTINGS["stableStop"],
+                        help="stop after repeated good shape matches and growth-free settling")
+    parser.add_argument("--shape-check-interval", type=int, default=DEFAULT_RUN_SETTINGS["shapeCheckInterval"])
+    parser.add_argument("--shape-confirmations", type=int, default=DEFAULT_RUN_SETTINGS["shapeConfirmations"])
+    parser.add_argument("--shape-settle-steps", type=int, default=DEFAULT_RUN_SETTINGS["shapeSettleSteps"])
+    parser.add_argument("--shape-missing-tolerance", type=float, default=DEFAULT_RUN_SETTINGS["shapeMissingTolerance"])
+    parser.add_argument("--shape-spill-tolerance", type=float, default=DEFAULT_RUN_SETTINGS["shapeSpillTolerance"])
+    parser.add_argument("--shape-overlap-tolerance", type=float, default=DEFAULT_RUN_SETTINGS["shapeOverlapTolerance"])
     parser.add_argument(
         "--substeps-per-macro",
         type=int,
@@ -655,6 +672,16 @@ def finalize_density_configuration(args: argparse.Namespace) -> None:
 
 
 def validate_fitness_configuration(args: argparse.Namespace) -> None:
+    for name in ("macro_steps", "shape_check_interval", "shape_confirmations", "shape_settle_steps"):
+        if getattr(args, name) < 1:
+            raise SystemExit(f"--{name.replace('_', '-')} must be positive")
+    for name in ("shape_missing_tolerance", "shape_spill_tolerance", "shape_overlap_tolerance"):
+        if not 0 <= getattr(args, name) < 1:
+            raise SystemExit(f"--{name.replace('_', '-')} must be in [0,1)")
+    if not np.isfinite(args.material_budget_scale) or args.material_budget_scale <= 0:
+        raise SystemExit("--material-budget-scale must be finite and positive")
+    if not np.isfinite(args.material_area_budget) or args.material_area_budget < 0:
+        raise SystemExit("--material-area-budget must be finite and nonnegative")
     if args.raster_resolution < 8:
         raise SystemExit("--raster-resolution must be at least 8")
     if not np.isfinite(args.raster_sigma) or args.raster_sigma <= 0.0:
@@ -683,8 +710,8 @@ def main() -> None:
         raise SystemExit("--elites must be between 1 and --population")
     if args.seeds_per_candidate < 1:
         raise SystemExit("--seeds-per-candidate must be at least 1")
-    if not 1 <= args.initial_particles <= args.particles:
-        raise SystemExit("--initial-particles must be between 1 and --particles")
+    if not 1 <= args.initial_particles <= args.particles // 2:
+        raise SystemExit("--initial-particles seed cells must be between 1 and floor(--particles/2)")
     validate_fitness_configuration(args)
     finalize_density_configuration(args)
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
@@ -694,14 +721,13 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     target = load_target(args.target)
+    report_shape_budget(args, target)
     # Fixed for the whole run — precomputed once rather than on every
     # rollout's training_raster_distance() call (population x generations
     # x rotation-search angles x snapshots otherwise recomputing the
     # exact same thing). See raster.build_target_raster()'s own
     # docstring.
-    target_raster = build_target_raster(
-        target.points, args.raster_resolution, RASTER_EXTENT, args.raster_sigma, half_size=target.texel_size() / 2.0
-    )
+    target_raster = target_mask(target, args.raster_resolution)
     target_distance_field = build_target_distance_field(target_raster)
 
     # A persistent pool of worker processes (see parallel_workers.py's
@@ -778,7 +804,9 @@ def main() -> None:
                         "growth_steps": args.growth_steps,
                         "substeps_per_macro": args.substeps_per_macro,
                         "growth_model_version": GROWTH_MODEL_VERSION,
-                        "material_area_budget": MATERIAL_AREA_BUDGET,
+                        "domain_geometry": "triangle",
+                        "material_area_budget": resolved_material_budget(args, target),
+                        "shape_settings": shape_settings(args, target),
                         "growth_duration_macro_steps": GROWTH_DURATION_MACRO_STEPS,
                         "growth_compression_start": GROWTH_COMPRESSION_START,
                         "growth_compression_stop": GROWTH_COMPRESSION_STOP,

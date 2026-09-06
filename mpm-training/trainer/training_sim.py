@@ -92,61 +92,17 @@ from environment_gpu import EnvironmentGPU
 from mpm_core import DT, MpmCore
 
 
-def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int) -> tuple[np.ndarray, ...]:
-    """Clip a perfect hexagonal lattice to the most circular ``count`` sites.
-
-    Sites fill by exact Euclidean-radius shells. In axial coordinates their
-    squared radius is the integer ``q² + q*r + r²``; this produces a circular
-    disk rather than the visibly hexagonal contour produced by axial rings.
-    Sites on a partial final shell are selected evenly around its circumference.
-    ``spacing`` remains the later daughter split distance; initial nearest
-    neighbors are ``spacing * INITIAL_PACKING_SPACING_SCALE`` apart so the seed
-    disk starts compact without changing subsequent growth geometry.
-    viewer/src/gpu/rng.ts mirrors this construction.
-    """
-    packed_spacing = spacing * INITIAL_PACKING_SPACING_SCALE
-    limit = int(np.ceil(np.sqrt(count))) + 2
-    shells: dict[int, list[tuple[float, float]]] = {}
-    for q in range(-limit, limit + 1):
-        for r in range(-limit, limit + 1):
-            radius_squared = q * q + q * r + r * r
-            shells.setdefault(radius_squared, []).append(
-                (packed_spacing * (q + 0.5 * r), packed_spacing * (np.sqrt(3.0) * 0.5 * r))
-            )
-
-    offsets: list[tuple[float, float]] = []
-    for radius_squared in sorted(shells):
-        if len(offsets) >= count:
-            break
-        shell = shells[radius_squared]
-        shell.sort(key=lambda p: np.arctan2(p[1], p[0]))
-        take = min(count - len(offsets), len(shell))
-        if take == len(shell):
-            offsets.extend(shell)
-        else:
-            indices = [int(np.floor((j + 0.5) * len(shell) / take)) for j in range(take)]
-            offsets.extend(shell[i] for i in indices)
-
-    mean_x = sum(p[0] for p in offsets) / count
-    mean_y = sum(p[1] for p in offsets) / count
-    offsets = [(x - mean_x, y - mean_y) for x, y in offsets]
-    # Rotation is a property of the rollout seed, not of its numerical
-    # sampling density.  Using ``2 * count`` made the same seed start from a
-    # different world orientation whenever density changed its initial count.
+def seed_blob(count: int, center: tuple[float, float], spacing: float, seed: int) -> tuple:
+    """Seed an area-weighted circular triangle mesh; mirrored in rng.ts."""
+    from triangle_seed import triangulate_seed_disk
     theta = (_spawn_uniform01(seed, 2) * 2.0 - 1.0) * np.pi
-    cos_t, sin_t = np.cos(theta), np.sin(theta)
-    positions = np.empty((count, 2), dtype=np.float32)
-    for i, (x, y) in enumerate(offsets):
-        positions[i, 0] = (center[0] + x * cos_t - y * sin_t) % 1.0
-        positions[i, 1] = (center[1] + x * sin_t + y * cos_t) % 1.0
-    velocities = np.zeros((count, 2), dtype=np.float32)
-    F = np.tile(np.array([1, 0, 0, 1], dtype=np.float32), (count, 1))
-    C = np.zeros((count, 4), dtype=np.float32)
-    Jp = np.ones((count,), dtype=np.float32)
-    rotation = np.array([[cos_t, -sin_t], [sin_t, cos_t]])
-    half_edges = rotation @ (packed_spacing * np.array([[0.5, 0.25], [0.0, np.sqrt(3.0) / 4]]))
-    domain = np.tile(half_edges.reshape(1, 4), (count, 1)).astype(np.float32)
-    return positions, velocities, F, C, Jp, domain
+    positions, domain, weights = triangulate_seed_disk(
+        count, center, spacing * INITIAL_PACKING_SPACING_SCALE, theta)
+    samples = len(positions)
+    return (positions, np.zeros((samples, 2), np.float32),
+            np.tile(np.array([1, 0, 0, 1], np.float32), (samples, 1)),
+            np.zeros((samples, 4), np.float32), np.ones(samples, np.float32),
+            domain, weights, 'triangle-vertices')
 
 
 class TrainingRollout:
@@ -180,6 +136,7 @@ class TrainingRollout:
         neural_updates_per_macro: int = NEURAL_UPDATES_PER_MACRO,
         communication_speed: float = COMMUNICATION_SPEED,
         initial_particle_count: int = INITIAL_PARTICLE_COUNT,
+        material_area_budget: float = MATERIAL_AREA_BUDGET,
     ) -> None:
         self.core = core
         self.agents = agents
@@ -197,7 +154,7 @@ class TrainingRollout:
         )
         agents.set_communication_timestep(communication_dt)
 
-        agents.set_material_area_budget(MATERIAL_AREA_BUDGET)
+        agents.set_material_area_budget(material_area_budget)
         core.set_gravity(gravity)
         # Every rollout — same "run-constant in practice today, but a
         # rollout-scoped setter regardless" reasoning set_gravity() above
@@ -207,12 +164,17 @@ class TrainingRollout:
         # Retained in the constructor/checkpoint schema for compatibility;
         # compact multi-cell seeding is now governed by split_displacement.
         _ = spawn_half_width
-        initial_count = min(agents.max_active_particles, max(1, int(initial_particle_count)))
-        positions, velocities, F, C, Jp, domain = seed_blob(
-            initial_count, spawn_center, agents.split_displacement, seed
+        if agents.max_active_particles < 2:
+            raise ValueError('A tiled triangle seed requires capacity for at least two samples')
+        # The legacy initial count denotes material units; the disk mesh
+        # uses two triangles per unit, including when capacity limits startup.
+        initial_cells = min(agents.max_active_particles // 2, max(1, int(initial_particle_count)))
+        scene = seed_blob(
+            initial_cells, spawn_center, agents.split_displacement, seed
         )
+        initial_count = len(scene[0])
         core.reset_growth_buffers(agents.max_active_particles)
-        core.load_scene(positions, velocities, F, C, Jp, domain)
+        core.load_scene(*scene)
         # Every slot beyond the genuinely seeded particles is destined to
         # become a real particle via growth, at some unknown point in
         # this rollout — see reset_growth_buffers()'s own docstring for

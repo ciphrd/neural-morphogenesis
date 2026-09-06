@@ -183,6 +183,7 @@ export function TrainingView() {
   const [directionalLineVisible, setDirectionalLineVisible] = useState(
     VIEWER_DEFAULTS.rendering.directionalLineVisible
   )
+  const [domainVisible, setDomainVisible] = useState(false)
   const [growthLineVisible, setGrowthLineVisible] = useState(
     VIEWER_DEFAULTS.rendering.growthLineVisible
   )
@@ -435,7 +436,7 @@ export function TrainingView() {
     )
     setFrontendParticleCap(particleCap)
     const initialCount = Math.min(
-      particleCap,
+      Math.floor(particleCap / 2),
       Math.max(
         1,
         Math.floor(
@@ -484,6 +485,7 @@ export function TrainingView() {
   // changes rather than once on mount. Points already arrive in
   // MpmCore's own [0,1]^2 domain (targets.py's own TargetShape) — no
   // grid_size/rescaling step needed, unlike envnca's pixel-space targets.
+  const [shapeStatus, setShapeStatus] = useState<{ complete: boolean; settling: boolean; capacityBlocked: boolean; unresolvedSamples: number; match: { missing: number; spill: number; overlap: number } | null } | null>(null)
   const [targetPoints, setTargetPoints] = useState<Float32Array | null>(null)
   useEffect(() => {
     if (!activeConfig) return
@@ -864,9 +866,10 @@ export function TrainingView() {
                 onChange={(value) => {
                   const cap = Math.floor(value)
                   setFrontendParticleCap(cap)
-                  if (frontendInitialParticleCount > cap) {
-                    setFrontendInitialParticleCount(cap)
-                    setFrontendInitialParticleCountInput(String(cap))
+                  const maxSeedCells = Math.floor(cap / 2)
+                  if (frontendInitialParticleCount > maxSeedCells) {
+                    setFrontendInitialParticleCount(maxSeedCells)
+                    setFrontendInitialParticleCountInput(String(maxSeedCells))
                   }
                 }}
               />
@@ -877,12 +880,12 @@ export function TrainingView() {
               </span>
             </label>
             <label className="slider-row">
-              <span>Initial samples (at 1×)</span>
+              <span title="Each seed cell starts as two half-weight triangle samples">Initial seed cells (at 1×)</span>
               <input
                 className="number-input"
                 type="number"
                 min={1}
-                max={frontendParticleCap}
+                max={Math.floor(frontendParticleCap / 2)}
                 step={1}
                 value={frontendInitialParticleCountInput}
                 onChange={(e) => {
@@ -891,7 +894,7 @@ export function TrainingView() {
                   if (
                     Number.isFinite(value) &&
                     value >= 1 &&
-                    value <= frontendParticleCap
+                    value <= Math.floor(frontendParticleCap / 2)
                   ) {
                     setFrontendInitialParticleCount(Math.floor(value))
                   }
@@ -899,7 +902,7 @@ export function TrainingView() {
                 onBlur={(e) => {
                   const value = e.currentTarget.valueAsNumber
                   const count = Math.min(
-                    frontendParticleCap,
+                    Math.floor(frontendParticleCap / 2),
                     Math.max(
                       1,
                       Number.isFinite(value)
@@ -911,11 +914,9 @@ export function TrainingView() {
                   setFrontendInitialParticleCount(count)
                 }}
               />
-              {effectiveParticleDensity !== 1 && (
-                <span className="slider-value">
-                  → {densityScaledInitialParticleCount.toLocaleString()}
-                </span>
-              )}
+              <span className="slider-value">
+                → {(2 * Math.min(densityScaledInitialParticleCount, Math.floor(densityScaledParticleCap / 2))).toLocaleString()} samples
+              </span>
             </label>
           </details>
         </section>
@@ -1100,6 +1101,10 @@ export function TrainingView() {
               onChange={(e) => setDirectionalLineVisible(e.target.checked)}
             />
             Heading direction (red)
+          </label>
+          <label className="checkbox-row" title="Actual transported triangle boundaries; independent of marker size and opacity">
+            <input type="checkbox" checked={domainVisible} onChange={(event) => setDomainVisible(event.target.checked)} />
+            Show particle domains (triangles)
           </label>
           <label className="checkbox-row">
             <input
@@ -1381,6 +1386,7 @@ export function TrainingView() {
             particleAlpha={particleAlpha}
             directionalLineVisible={directionalLineVisible}
             growthLineVisible={growthLineVisible}
+            domainVisible={domainVisible}
             zoom={zoom}
             autoZoom={autoZoomSettings}
             onEffectiveZoomChange={setEffectiveZoom}
@@ -1394,7 +1400,8 @@ export function TrainingView() {
             }
             tool={tool}
             deformSettings={deformSettings}
-            onStep={(step, particles) => {
+            onStep={(step, particles, shape) => {
+              setShapeStatus(shape)
               setReplayStep(step)
               setCellCount(particles)
             }}
@@ -1407,12 +1414,23 @@ export function TrainingView() {
                 ? `${replayStep} / ${activeConfig.macroSteps} steps`
                 : "— steps"}
             </span>
+            {activeConfig?.estimatedSampleCapacity && <span title="Allocation estimate at reference density; stretching can require more samples">
+              {`Target sampling estimate: ~${Math.ceil(activeConfig.estimatedSampleCapacity * effectiveParticleDensity).toLocaleString()}`}
+            </span>}
             {/* Live count, not the cap — grows as growth splits. */}
             <span>
               {activeConfig
                 ? `${cellCount} / ${densityScaledParticleCap} samples`
                 : "— cells"}
             </span>
+            <span>
+              {shapeStatus?.complete ? "Stable match" : shapeStatus?.capacityBlocked
+                ? "Sampling capacity reached" : shapeStatus?.settling ? "Settling · growth paused"
+                : shapeStatus?.unresolvedSamples ? "Refining material samples" : ""}
+            </span>
+            {shapeStatus?.match && <span>
+              {`Missing ${(100*shapeStatus.match.missing).toFixed(1)}% · Outside ${(100*shapeStatus.match.spill).toFixed(1)}% · Overlap ${(100*shapeStatus.match.overlap).toFixed(1)}%`}
+            </span>}
           </div>
         </div>
         <div className="toolbar">

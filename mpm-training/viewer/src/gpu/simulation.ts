@@ -1,3 +1,4 @@
+import { StableMatchStop, targetMask, matchDomains } from "./shapeMatch";
 // Ties MpmCore + Environment + Agents + Renderer into one autonomous
 // macro step — the browser analogue of trainer/training_sim.py's own
 // TrainingRollout.macro_step(). GPU-resident for every data-related
@@ -106,6 +107,7 @@ export class GpuSimulation {
   private pendingParticleAlpha = 1.0;
   private pendingDirectionalLineVisible = false;
   private pendingGrowthLineVisible = false;
+  private pendingDomainVisible = false;
   private pendingMitosisSignalBoost = 1.0;
   private pendingInternalStateChannelStart = 0;
   private pendingChemicalMemoryOpponentSubtraction = 0;
@@ -190,6 +192,12 @@ export class GpuSimulation {
   private mpmEnabled = true;
 
   private _currentStep = 0;
+  private shapeStop = new StableMatchStop({});
+  private shapeMask: Float64Array | null = null;
+  get shapeStatus() {
+    return { complete: this.shapeStop.complete, settling: this.shapeStop.settlingSince !== null && !this.shapeStop.complete,
+      match: this.shapeStop.match, ...this.samplingStatus };
+  }
   get currentStep(): number {
     return this._currentStep;
   }
@@ -200,8 +208,9 @@ export class GpuSimulation {
    * (core/agents.wgsl's own agentStep()), so this changes every macro
    * step, unlike config.particles which is only the CAP. 0 before the
    * first rebuild(). */
-  get samplingStatus(): { atCapacity: boolean; unresolvedSamples: number } {
+  get samplingStatus(): { atCapacity: boolean; capacityBlocked: boolean; unresolvedSamples: number } {
     return { atCapacity: this.particleCount >= this.particleCap,
+      capacityBlocked: this.agents?.capacityBlocked ?? false,
       unresolvedSamples: this.agents?.unresolvedSamples ?? 0 };
   }
 
@@ -222,7 +231,7 @@ export class GpuSimulation {
     // field and population cap are the only controls. A finite cutoff is
     // an explicit per-run choice supplied by --growth-steps.
     const cutoff = this.config.growthSteps;
-    return cutoff == null || this._currentStep < cutoff;
+    return this.shapeStop.growthEnabled && (cutoff == null || this._currentStep < cutoff);
   }
   get ready(): boolean {
     return this.mpmCore !== null;
@@ -347,6 +356,7 @@ export class GpuSimulation {
     renderer.setParticleAlpha(this.pendingParticleAlpha);
     renderer.setDirectionalLineVisible(this.pendingDirectionalLineVisible);
     renderer.setGrowthLineVisible(this.pendingGrowthLineVisible);
+    renderer.setDomainVisible(this.pendingDomainVisible);
     renderer.setMitosisSignalBoost(this.pendingMitosisSignalBoost);
     renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart);
     renderer.setChemicalMemoryOpponentSubtraction(this.pendingChemicalMemoryOpponentSubtraction);
@@ -381,7 +391,7 @@ export class GpuSimulation {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     this.epoch++;
     const initialCount = Math.min(
-      this.particleCap,
+      Math.floor(this.particleCap / 2),
       Math.max(1, Math.floor(
         this.pendingInitialParticleCount
         ?? this.config.initialParticleCount
@@ -405,6 +415,9 @@ export class GpuSimulation {
           spacing: this.config.splitDisplacement,
           seed: this.config.seed,
         });
+    if (scene.count > this.particleCap) {
+      throw new Error(`Triangle seed needs ${scene.count} sample slots; capacity is ${this.particleCap}`);
+    }
     this.mpmCore.resetGrowthBuffers(this.particleCap);
     this.mpmCore.loadScene(scene);
     // Every slot beyond the genuinely seeded particles is destined to become
@@ -426,6 +439,9 @@ export class GpuSimulation {
     // alignment from chemical channel 7's freshly sensed gradient.
     this.agents.resetState(this.config.seed);
     this._currentStep = 0;
+    this.shapeStop = new StableMatchStop(this.scenario ? {} : this.config);
+    this.shapeMask = this.shapeStop.enabled && this.config.shapeTarget
+      ? targetMask(this.config.shapeTarget, this.config.rasterResolution ?? 256) : null;
   }
 
   /** Installs an isolated, deterministic lab scenario and restarts it. */
@@ -610,6 +626,7 @@ export class GpuSimulation {
    * for the exact restart-vs-in-flight-step race this prevents. */
   async step(): Promise<void> {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
+    if (this.shapeStop.complete) return;
     const stepEpoch = this.epoch;
     const nextStep = this._currentStep + 1;
     const forcedLifecycle = this.scenario?.events.find((event) => {
@@ -697,6 +714,13 @@ export class GpuSimulation {
       this.device.queue.submit([physicsEncoder.finish()]);
     }
     this._currentStep += 1;
+    if (this.shapeMask && this.config.shapeTarget && this.shapeStop.due(this._currentStep)) {
+      const triangles = await this.mpmCore.readTriangles();
+      if (this.epoch !== stepEpoch || !this.config?.shapeTarget) return;
+      const match = matchDomains(triangles, this.config.shapeTarget, this.shapeMask);
+      this.shapeStop.observe(this._currentStep, match,
+        this.samplingStatus.atCapacity || this.agents.capacityBlocked || this.agents.unresolvedSamples > 0);
+    }
   }
 
   render(context: GPUCanvasContext): void {
@@ -751,6 +775,11 @@ export class GpuSimulation {
   setDirectionalLineVisible(visible: boolean): void {
     this.pendingDirectionalLineVisible = visible;
     this.renderer?.setDirectionalLineVisible(visible);
+  }
+
+  setDomainVisible(visible: boolean): void {
+    this.pendingDomainVisible = visible;
+    this.renderer?.setDomainVisible(visible);
   }
 
   setGrowthLineVisible(visible: boolean): void {

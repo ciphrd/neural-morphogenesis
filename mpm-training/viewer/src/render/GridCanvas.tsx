@@ -75,6 +75,7 @@ interface GridCanvasProps {
   particleAlpha?: number;
   directionalLineVisible?: boolean;
   growthLineVisible?: boolean;
+  domainVisible?: boolean;
   particleRadiusPx?: number;
   /** Visualization-only multiplier for growth-vector magnitude. */
   mitosisSignalBoost?: number;
@@ -120,7 +121,7 @@ interface GridCanvasProps {
    * see GpuSimulation's own particleCount getter). Both ride the same
    * callback rather than getting their own, since they're read from the
    * same sim at the same instant and always displayed together. */
-  onStep?: (step: number, particleCount: number) => void;
+  onStep?: (step: number, particleCount: number, shapeStatus: GpuSimulation["shapeStatus"]) => void;
   // Default (true): restart with a fresh rollout (same seed) once
   // currentStep reaches config.macroSteps — the rollout was only ever
   // *trained* for that many macro steps, so this keeps a long-idle
@@ -304,6 +305,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     particleAlpha = 1,
     directionalLineVisible = false,
     growthLineVisible = false,
+    domainVisible = false,
     particleRadiusPx,
     mitosisSignalBoost = 1,
     boundaryGradientScale = 0.01,
@@ -345,6 +347,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const particleAlphaRef = useRef(particleAlpha);
   const directionalLineVisibleRef = useRef(directionalLineVisible);
   const growthLineVisibleRef = useRef(growthLineVisible);
+  const domainVisibleRef = useRef(domainVisible);
   const particleRadiusPxRef = useRef(particleRadiusPx);
   const mitosisSignalBoostRef = useRef(mitosisSignalBoost);
   const boundaryGradientScaleRef = useRef(boundaryGradientScale);
@@ -492,6 +495,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   particleAlphaRef.current = particleAlpha;
   directionalLineVisibleRef.current = directionalLineVisible;
   growthLineVisibleRef.current = growthLineVisible;
+  domainVisibleRef.current = domainVisible;
   particleRadiusPxRef.current = particleRadiusPx;
   mitosisSignalBoostRef.current = mitosisSignalBoost;
   boundaryGradientScaleRef.current = boundaryGradientScale;
@@ -678,6 +682,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setParticleAlpha(particleAlphaRef.current);
       simulation.setDirectionalLineVisible(directionalLineVisibleRef.current);
       simulation.setGrowthLineVisible(growthLineVisibleRef.current);
+      simulation.setDomainVisible(domainVisibleRef.current);
       simulation.setMitosisSignalBoost(mitosisSignalBoostRef.current);
       simulation.setBoundaryGradientScale(boundaryGradientScaleRef.current);
       simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
@@ -1014,6 +1019,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [growthLineVisible]);
 
   useEffect(() => {
+    simulationRef.current?.setDomainVisible(domainVisible);
+  }, [domainVisible]);
+
+  useEffect(() => {
     simulationRef.current?.setMitosisSignalBoost(mitosisSignalBoost);
   }, [mitosisSignalBoost]);
 
@@ -1133,7 +1142,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
             return;
           }
           if (cancelled) return;
-          if (loopAtTrainedStepsRef.current && sim.currentStep >= sim.steps) {
+          if (loopAtTrainedStepsRef.current && sim.currentStep >= sim.steps && !sim.shapeStatus.complete) {
             sim.restartRollout();
             autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
             autoZoomTargetRef.current = effectiveZoomRef.current;
@@ -1242,10 +1251,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         }
         sim.render(context);
         const sampling = sim.samplingStatus;
-        setSamplingMessage(sampling.atCapacity
+        setSamplingMessage(sampling.atCapacity || sampling.capacityBlocked
           ? `Sampling limit reached; growth paused${sampling.unresolvedSamples ? ` (${sampling.unresolvedSamples} unresolved patches)` : ""}.`
           : "");
-        onStepRef.current?.(sim.currentStep, sim.particleCount);
+        onStepRef.current?.(sim.currentStep, sim.particleCount, sim.shapeStatus);
       }
       if (!cancelled) raf = requestAnimationFrame(frame);
     };

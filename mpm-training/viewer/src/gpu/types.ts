@@ -1,3 +1,4 @@
+import type { ShapeStopSettings } from "./shapeMatch";
 export interface UpdateRuleWeights {
   fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6 [+ 8 private state])
   fc1b: number[]; // (HIDDEN_DIM,)
@@ -23,9 +24,13 @@ export type ChemicalCommunicationArchitecture = "persistent-environment" | "cell
 // that might still be minutes away — see gpu/agents.ts's own
 // randomWeights() for how that gap gets filled with a placeholder
 // rollout in the meantime).
-export interface RunSettings {
+export interface RunSettings extends ShapeStopSettings {
+  rasterResolution?: number;
+  estimatedSampleCapacity?: number;
+  materialBudgetMode?: "target" | "manual";
+  materialBudgetScale?: number;
   // The growth CAP, not the starting count — rollouts start with
-  // initialParticleCount agents (see gpu/simulation.ts's own
+  // two half-weight triangles per initialParticleCount seed cell (see
   // restartRollout()) and grow via splitting from there. This is the
   // trained/default ceiling; the viewer may apply a different playback-only
   // cap through AgentPhysics.maxActiveParticles without changing it.
@@ -108,6 +113,7 @@ export interface RunSettings {
   /** Legacy run field, converted to a duration when growthDuration is absent. */
   growthRate?: number;
   growthModelVersion?: number;
+  domainGeometry?: "triangle" | "parallelogram";
   materialAreaBudget?: number;
   growthMax: number;
   /** Blend integrated tensor growth from isotropic (0) to directional (1). */
@@ -391,7 +397,9 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
 // One scene's worth of particle state to seed MpmCore with — mirrors
 // trainer/training_sim.py's own seed_blob() output shape.
 export interface SceneData {
+  domainGeometry?: "triangle-vertices";
   domain?: Float32Array;
+  quadratureWeights?: Float32Array;
   count: number;
   positions: Float32Array; // (count,2)
   velocities: Float32Array; // (count,2), zero

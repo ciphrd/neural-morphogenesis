@@ -113,9 +113,11 @@ def main() -> None:
             initial_particle_count=case.initial_particles,
         )
         initial = sim.positions()
-        assert initial.shape == (case.initial_particles, 2)
-        if len(initial) > 1:
-            distances = np.linalg.norm(initial[:, None, :] - initial[None, :, :], axis=2)
+        assert initial.shape == (2*case.initial_particles, 2)
+        np.testing.assert_allclose(core.read_rest_state()[:,11].sum(),case.initial_particles)
+        centers = initial.reshape(-1,2,2).mean(axis=1)
+        if len(centers) > 1:
+            distances = np.linalg.norm(centers[:, None, :] - centers[None, :, :], axis=2)
             nearest = np.min(np.where(distances > 0, distances, np.inf), axis=1)
             assert np.isclose(
                 nearest.min(),
@@ -124,7 +126,7 @@ def main() -> None:
                 atol=1e-7,
             )
         if CHEMICAL_COMMUNICATION_ARCHITECTURE == "cell-owned-projection":
-            _set_uniform_chemical_state(agents, case.initial_particles, 1.0)
+            _set_uniform_chemical_state(agents, len(initial), 1.0)
             plane = _projected_plane(environment, agents, CHEM_CHANNELS - 1)
             projected_mass.append(float(plane.sum()))
             sampled_signal.append(float(_sample_plane(plane, initial).mean()))
@@ -169,7 +171,7 @@ def main() -> None:
                 spawn_half_width=0.0, gravity=0.0, seed=seed,
                 initial_particle_count=case.initial_particles,
             )
-            _set_uniform_chemical_state(agents, case.initial_particles, 0.1)
+            _set_uniform_chemical_state(agents, core.active_count, 0.1)
             represented: list[float] = []
             radii: list[float] = []
             for step in range(1, checkpoints[-1] + 1):

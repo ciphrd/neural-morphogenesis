@@ -109,7 +109,7 @@ def particle_elastic_state(
         f = f.reshape(-1, 2, 2)
     if f.ndim != 3 or f.shape[1:] != (2, 2):
         raise ValueError(f"deformation must have shape (n,4) or (n,2,2), got {f.shape}")
-    if rest.ndim != 2 or (rest.shape[0] != f.shape[0] or rest.shape[1] not in (12, 16)):
+    if rest.ndim != 2 or (rest.shape[0] != f.shape[0] or rest.shape[1] not in (12, 16, 20)):
         raise ValueError(f"rest_state must have shape ({f.shape[0]},12), got {rest.shape}")
     if not np.isfinite(f).all() or not np.isfinite(rest).all():
         raise ValueError("deformation and rest_state must be finite")

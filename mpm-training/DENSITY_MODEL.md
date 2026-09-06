@@ -1,5 +1,12 @@
 # Particle-density model
 
+Model version 4 note: initial lattice cells are now divided into two triangle
+samples, each with material weight 0.5. The initial-count setting and lattice
+area formulas below refer to seed cells; actual initial sample count is twice
+that count, while total material is unchanged. The compact packing scale also
+applies to startup spacing. Area-based subdivision retains the target spacing
+defined here. See `GROWTH_MODEL.md` for current initialization and capacity rules.
+
 ## Goal
 
 Make one policy and one semantic simulation preset produce comparable

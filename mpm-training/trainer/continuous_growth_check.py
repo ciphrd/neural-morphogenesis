@@ -10,8 +10,11 @@ from agents_gpu import AgentsGPU
 from device import pick_device
 from environment_gpu import EnvironmentGPU
 from mpm_core import DT, GRID_N, MpmCore, REST_FIELDS
+from triangle_domain_check import Triangle
+from triangle_vertices import domain_edges, vertices_from_edges, unwrap_vertices
 
 SPACING = 0.0027
+LEG = np.sqrt(2)*SPACING  # Right triangle of area SPACING².
 DX = 1/GRID_N
 
 
@@ -31,9 +34,10 @@ def load_samples(core, agents, positions, vectors, growth_f=None, domains=None):
     n = len(positions)
     identity = np.tile([1, 0, 0, 1], (n, 1)).astype(np.float32)
     f = identity if growth_f is None else np.asarray(growth_f, np.float32)
-    h = f*(SPACING/2) if domains is None else np.asarray(domains, np.float32)
+    h = f*LEG if domains is None else np.asarray(domains, np.float32)
     core.load_scene(np.asarray(positions, np.float32), np.zeros((n, 2), np.float32),
-                    f, np.zeros((n, 4), np.float32), np.ones(n, np.float32), h)
+                    f, np.zeros((n, 4), np.float32), np.ones(n, np.float32), vertices_from_edges(positions,h),
+                    domain_geometry='triangle-vertices')
     rest = core.read_rest_state()
     rest[:, :4] = f
     rest[:, 5:7] = vectors
@@ -70,7 +74,7 @@ def p2g_grid(core):
         p.dispatch_workgroups(dispatch)
         p.end()
     core.device.queue.submit([encoder.finish()])
-    return np.frombuffer(core.device.queue.read_buffer(core.grid_accum), np.int32).reshape(-1, 3).astype(float)/4096
+    return np.frombuffer(core.device.queue.read_buffer(core.grid_accum), np.float32).reshape(-1, 3).astype(float)
 
 
 def point_p2g(position, velocity, affine, mass):
@@ -114,23 +118,31 @@ def check_opposed_field(device):
 
 def check_subdivision(device):
     core,agents=make_system(device)
-    h=np.array([[SPACING,0],[0,SPACING]],np.float32)
-    # q*det(G)=4 produces two successive conservative bisections.
+    h=np.array([[2*LEG,0],[0,2*LEG]],np.float32)
+    # Transported area 4*SPACING² produces two successive bisections.
     load_samples(core,agents,[[.5,.5]],[[0,0]],growth_f=[[2,0,0,2]],
                  domains=h.reshape(1,4))
     original=read_rest(core,1)[0]
+    expected = [Triangle(np.array([.5,.5]), h)]
     for count in (2,4):
         run_growth_field(device,agents)
         assert synchronize_count(core,agents)==count
+        pairs = [t.split() for t in expected]
+        expected = [pair[0] for pair in pairs]+[pair[1] for pair in pairs]
     rest=read_rest(core,4)
     np.testing.assert_allclose(rest[:,11],.25)
-    np.testing.assert_allclose(rest[:,12:16],np.tile((h/2).reshape(4),(4,1)))
+    # GPU slot allocation order is not guaranteed; match by centroid.
+    for position, row in zip(core.read_positions(), rest):
+        target = min(expected, key=lambda t: np.linalg.norm(t.x-position))
+        np.testing.assert_allclose(position,target.x,atol=1e-7)
+        np.testing.assert_allclose(domain_edges(row),target.edges,atol=1e-7)
+        np.testing.assert_allclose(row[8],original[8]/4,rtol=2e-6)
     np.testing.assert_allclose(rest[:,:4],np.tile(original[:4],(4,1)))
     offsets=core.read_positions()-.5
     np.testing.assert_allclose(offsets.mean(axis=0),0,atol=1e-7)
-    cov=sum(.25*(np.outer(d,d)+r[12:16].reshape(2,2)@r[12:16].reshape(2,2).T/3)
+    cov=sum(.25*(np.outer(d,d)+Triangle(np.zeros(2), domain_edges(r)).covariance())
             for d,r in zip(offsets,rest))
-    np.testing.assert_allclose(cov,h@h.T/3,rtol=5e-5,atol=1e-10)
+    np.testing.assert_allclose(cov,Triangle(np.zeros(2),h).covariance(),rtol=5e-5,atol=1e-10)
     print('[PASS] repeated bisection tiles the parent and preserves second moments')
 
 
@@ -139,30 +151,68 @@ def check_geometric_refinement_criterion(device):
     # Rest growth alone does not create a numerical sample until mechanics has
     # actually expanded the transported material domain.
     load_samples(core,agents,[[.5,.5]],[[0,0]],growth_f=[[3,0,0,3]],
-                 domains=[[SPACING/2,0,0,SPACING/2]])
+                 domains=[[LEG,0,0,LEG]])
     run_growth_field(device,agents)
     assert synchronize_count(core,agents)==1
-    # Doubling one transported half edge doubles world area and crosses the
-    # threshold; the bisection returns each child below it.
-    load_samples(core,agents,[[.5,.5]],[[0,0]],domains=[[SPACING,0,0,SPACING/2]])
+    # A stretched triangle can need several rounds before every child is
+    # spatially resolved; each longest-edge split reduces the squared-edge sum.
+    load_samples(core,agents,[[.5,.5]],[[0,0]],domains=[[2*LEG,0,0,LEG]])
     run_growth_field(device,agents)
     assert synchronize_count(core,agents)==2
-    for _ in range(6):
+    for _ in range(12):
         run_growth_field(device,agents)
-        assert synchronize_count(core,agents)==2
-    # Nearly parallel, very long edges model the folded-domain failure that
-    # used to double the population repeatedly in one small world region.
-    folded=np.array([[20*SPACING,19*SPACING],[0,.01*SPACING]],np.float32)
-    load_samples(core,agents,[[.5,.5]],[[0,0]],domains=folded.reshape(1,4))
-    for _ in range(6):
-        run_growth_field(device,agents)
-        assert synchronize_count(core,agents)==1
-    print('[PASS] transported area refines; rest growth and folded edges cannot amplify samples')
+        synchronize_count(core,agents)
+    from conforming_refinement_check import demands
+    assert np.max(demands(read_rest(core,core.active_count))) < 1.75
+    # Isochoric stretch must refine even though current area is unchanged.
+    load_samples(core,agents,[[.5,.5]],[[0,0]],domains=[[4*LEG,0,0,LEG/4]])
+    before=read_rest(core,1)
+    np.testing.assert_allclose(.5*np.linalg.det(domain_edges(before))[0],SPACING**2,rtol=2e-4)
+    run_growth_field(device,agents)
+    assert synchronize_count(core,agents)==2
+    print('[PASS] spatial second-moment criterion resolves expansion and isochoric stretch; rest growth alone does not split')
+
+
+def check_triangle_edges_and_seams(device):
+    core,agents=make_system(device)
+    base=np.array([[0.,0.],[2.,0.],[.3,.7]])
+    for turn in range(3):
+        triangle=Triangle.from_vertices(np.roll(base,turn,axis=0))
+        edges=triangle.edges*np.sqrt(2*SPACING**2/triangle.signed_area())
+        for center in ([.5,.5],[.0001,.9999]):
+            parent=Triangle(np.array(center),edges)
+            load_samples(core,agents,[center],[[0,0]],domains=edges.reshape(1,4))
+            run_growth_field(device,agents)
+            assert synchronize_count(core,agents)==2
+            for position,row,child in zip(core.read_positions(),read_rest(core,2),parent.split()):
+                np.testing.assert_allclose(position,child.x%1,atol=1e-7)
+                np.testing.assert_allclose(domain_edges(row),child.edges,atol=1e-7)
+                assert np.linalg.det(domain_edges(row)) > 0
+    # Untagged old domain arrays must fail before touching live buffers.
+    before=core.read_positions().copy()
+    scene=(np.array([[.2,.2]],np.float32),np.zeros((1,2),np.float32),
+           np.array([[1,0,0,1]],np.float32),np.zeros((1,4),np.float32),np.ones(1,np.float32))
+    try:
+        core.load_scene(*scene,domain=np.array([[LEG,0,0,LEG]],np.float32))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('Untagged legacy geometry was accepted')
+    np.testing.assert_array_equal(core.read_positions(),before)
+    # A legacy point-only scene receives a canonical triangle of target area.
+    core.load_scene(*scene)
+    agents.set_active_count(1)
+    run_growth_field(device,agents)
+    row=read_rest(core,1)[0]
+    np.testing.assert_allclose(.5*np.linalg.det(domain_edges(row)),SPACING**2,rtol=5e-5)
+    np.testing.assert_allclose(row[8],SPACING**2,rtol=5e-5)
+    assert agents.read_grown_count()==1
+    print('[PASS] all three edge choices, periodic triangle splitting, legacy rejection and fallback area')
 
 
 def check_point_p2g_and_split_conservation(device):
     core,agents=make_system(device)
-    h=np.array([[SPACING,0],[0,SPACING]])
+    h=np.array([[2*LEG,0],[0,2*LEG]])
     x=np.array([.5031,.5027])
     c=np.array([[2,-70],[70,-1]],np.float32)
     v=np.array([.2,-.1],np.float32)
@@ -175,7 +225,7 @@ def check_point_p2g_and_split_conservation(device):
     represented_mass=200  # particleMass * q * det(G)
     expected=point_p2g(x,v,c,represented_mass)
     np.testing.assert_allclose(before,expected,atol=.0025,rtol=1e-3)
-    # The transported parallelogram is refinement geometry only. Changing it
+    # The transported triangle is refinement geometry only. Changing it
     # must not change an otherwise identical point transfer.
     load_samples(core,agents,[x],[[0,0]],growth_f=growth,
                  domains=(h@np.array([[4.,1.],[0.,.25]])).reshape(1,4))
@@ -207,7 +257,7 @@ def check_affine_transport(device):
     encoder=device.create_command_encoder(); p=encoder.begin_compute_pass()
     p.set_pipeline(core.g2p_pipeline);p.set_bind_group(0,core.g2p_bind_group);p.dispatch_workgroups(1);p.end()
     device.queue.submit([encoder.finish()])
-    actual=read_rest(core,1)[0,12:16].reshape(2,2)
+    actual=domain_edges(read_rest(core,1)[0])
     np.testing.assert_allclose(actual,(np.eye(2)+DT*l)@h,rtol=3e-5,atol=2e-8)
     c=np.frombuffer(device.queue.read_buffer(core.C,0,16),np.float32).reshape(2,2)
     np.testing.assert_allclose(c,l,rtol=2e-4,atol=.03)
@@ -228,17 +278,19 @@ def check_courant_guard(device):
     assert np.isfinite(velocity).all()
     assert np.max(np.abs(velocity)) <= max_grid_speed * 1.001, velocity
     assert np.isfinite(core.read_positions()).all()
-    print(f'[PASS] grid CFL guard bounds extreme fixed-point momentum at {max_grid_speed:g}')
+    print(f'[PASS] grid CFL guard bounds extreme momentum at {max_grid_speed:g}')
 
 
 def check_capacity(device):
     core,agents=make_system(device,capacity=1)
     load_samples(core,agents,[[.5,.5]],[[1,0]],growth_f=[[2,0,0,1]],
-                 domains=[[SPACING,0,0,SPACING]])
+                 domains=[[2*LEG,0,0,2*LEG]])
     before=read_rest(core,1)
+    before_positions=core.read_positions().copy()
     run_growth_field(device,agents)
     assert agents.read_grown_count()==1 and agents.unresolved_samples==1
-    np.testing.assert_allclose(read_rest(core,1)[:,[0,1,2,3,8,11,12,13,14,15]],before[:,[0,1,2,3,8,11,12,13,14,15]])
+    np.testing.assert_allclose(read_rest(core,1)[:,[0,1,2,3,8,11,12,13,14,15,16,17]],before[:,[0,1,2,3,8,11,12,13,14,15,16,17]])
+    np.testing.assert_array_equal(core.read_positions(),before_positions)
     assert not np.any(np.frombuffer(device.queue.read_buffer(core.growth_field),np.int32))
     print('[PASS] failed capacity allocation preserves state and reports unresolved sampling')
 
@@ -258,33 +310,31 @@ def check_uniform_rollout(device):
     np.testing.assert_allclose(area,np.exp(80*60*32*DT),rtol=3e-3)
     assert core.active_count>1
     assert np.isfinite(core.read_positions()).all() and np.isfinite(rest).all()
-    assert np.all(np.linalg.det(rest[:,12:16].reshape(-1,2,2))>0)
+    assert np.all(np.linalg.det(domain_edges(rest))>0)
     print(f'[PASS] free uniform growth: area={area:.4f}, samples={core.active_count}, {time.perf_counter()-start:.2f}s')
 
 
 def check_capacity_rollout(device):
-    # An odd cap forces a partially successful split pass. Continue physics
-    # after that transition: checking allocation alone misses NaN propagation.
+    # An odd cap may leave a spare slot when the next operation needs two.
+    # Exercise physics after both full-cap and group-capacity safety pauses.
     core, agents = make_system(device, capacity=9)
     load_samples(core, agents, [[.5, .5]], [[1, 0]])
     agents.set_forced_growth_field_override(True)
     core.set_material(10000, .2, 3, .5, growth_rate=80,
                       growth_anisotropy=0, growth_compression_feedback=0)
-    capped_growth = None
     capped_steps = 0
     for _ in range(160):
         run_growth_field(device, agents)
         count = synchronize_count(core, agents)
+        before_step = read_rest(core, count)
         core.step(32)
         rest = read_rest(core, count)
         assert np.isfinite(core.read_positions()).all()
         assert np.isfinite(rest).all()
-        assert np.all(np.linalg.det(rest[:, 12:16].reshape(-1, 2, 2)) > 0)
-        if count == 9:
+        assert np.all(np.linalg.det(domain_edges(rest)) > 0)
+        if count == 9 or agents.capacity_blocked:
             capped_steps += 1
-            if capped_growth is None:
-                capped_growth = rest[:, :4].copy()
-            np.testing.assert_array_equal(rest[:, :4], capped_growth)
+            np.testing.assert_array_equal(rest[:, :4], before_step[:, :4])
     assert capped_steps >= 80, 'must exercise sustained physics after reaching capacity'
     print(f'[PASS] partial final allocation and {capped_steps * 32} post-cap physics steps stay finite; growth stops')
 
@@ -309,12 +359,14 @@ def check_physical_budget(device):
     print('[PASS] world-area growth budget stops independently of numerical sample capacity')
 
 
-def check_projected_fields_and_state(device):
+def check_projected_fields_and_state(device, scale=1.0):
     from agents_gpu import PARTICLE_META_BUFFER_OFFSET
     from density_gpu_check import _projected_plane
     core,agents,environment=make_system(device,include_environment=True)
     load_samples(core,agents,[[.5025,.5033]],[[0,0]],growth_f=[[2,0,0,1]],
-                 domains=[[SPACING,0,0,SPACING/2]])
+                 domains=[[2*LEG*scale,0,0,LEG*scale]])
+    # Keep the area-to-target ratio fixed while refining the sample geometry.
+    agents.set_density_geometry(SPACING*scale, .4)
     meta=np.zeros(1,dtype=agents._particle_meta_dtype)
     meta["chemicalState"][:]=.5
     meta["privateState"][0]=np.linspace(-.3,.4,8)
@@ -337,8 +389,14 @@ def check_projected_fields_and_state(device):
     chemical_error=np.abs(chemical_after-chemical_before).sum()/max(np.abs(chemical_before).sum(),1e-8)
     morphology_error=np.abs(morphology_after-morphology_before).sum()/max(np.abs(morphology_before).sum(),1e-8)
     assert chemical_error < .01, chemical_error
-    assert morphology_error < .01, morphology_error
+    # The elongated triangular fixture displaces centroids farther than the
+    # previous rectangular fixture (1.29% versus 0.98% at this resolution).
+    assert morphology_error < .02, morphology_error
+    if scale == 1.0:
+        fine_error = check_projected_fields_and_state(device, .5)
+        assert fine_error < .5*morphology_error, (fine_error,morphology_error)
     print(f'[PASS] subdivision inherits chemistry/private state; projection L1 changes chemical={chemical_error:.3g}, morphology={morphology_error:.3g}')
+    return morphology_error
 
 
 def check_seed_reset(device):
@@ -347,17 +405,22 @@ def check_seed_reset(device):
     scene=seed_blob(7,(.5,.5),SPACING,17)
     core.reset_growth_buffers(32);core.load_scene(*scene)
     rest=core.read_rest_state()
-    np.testing.assert_allclose(rest[:,12:16],scene[-1])
-    np.testing.assert_allclose(rest[:,8],4*np.linalg.det(scene[-1].reshape(-1,2,2)))
-    # Centers differ by integer translations in the common full-edge basis:
-    # these parallelograms form a genuine nonoverlapping lattice partition.
-    h=scene[-1][0].reshape(2,2)
-    lattice=(scene[0]-scene[0][0])@np.linalg.inv(2*h).T
-    np.testing.assert_allclose(lattice,np.round(lattice),atol=3e-5)
+    assert len(rest)==14
+    np.testing.assert_allclose(rest[:,12:18],scene[5])
+    np.testing.assert_allclose(rest[:,8],.5*np.linalg.det(domain_edges(rest)))
+    # Validate the scene's physical weights rather than assuming all seed
+    # triangles have equal area (circular disk seeds are area-weighted).
+    np.testing.assert_allclose(rest[:,11],scene[6])
+    np.testing.assert_allclose(rest[:,11].sum(),7,rtol=2e-6)
+    assert np.all(rest[:,11]>0)
+    area=.5*np.linalg.det(domain_edges(rest))
+    np.testing.assert_allclose(rest[:,11],7*area/area.sum(),rtol=2e-4)
     next_scene=seed_blob(1,(.4,.4),SPACING,21)
     core.reset_growth_buffers(32);core.load_scene(*next_scene)
-    np.testing.assert_allclose(core.read_rest_state()[:,12:16],next_scene[-1])
-    print('[PASS] seed domains tile their lattice and survive rollout reset/load order')
+    assert core.active_count==2
+    np.testing.assert_allclose(core.read_rest_state()[:,12:18],next_scene[5])
+    np.testing.assert_allclose(core.read_rest_state()[:,11],.5)
+    print('[PASS] seed geometry and represented weights survive rollout reset/load order')
 
 
 def check_periodic_transfer(device):
@@ -377,7 +440,7 @@ def check_periodic_transfer(device):
 def main():
     device=pick_device()
     for check in (check_continuous_growth,check_opposed_field,check_subdivision,
-                  check_geometric_refinement_criterion,check_point_p2g_and_split_conservation,
+                  check_geometric_refinement_criterion,check_triangle_edges_and_seams,check_point_p2g_and_split_conservation,
                   check_affine_transport,check_courant_guard,check_capacity,
                   check_capacity_rollout,check_physical_budget,
                   check_projected_fields_and_state,check_seed_reset,check_periodic_transfer,check_uniform_rollout):

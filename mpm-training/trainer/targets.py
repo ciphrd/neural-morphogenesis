@@ -42,6 +42,10 @@ class TargetShape:
     points: np.ndarray  # (N, 2), MpmCore domain coords
     resolution: tuple[int, int]
 
+    def filled_area(self) -> float:
+        """Physical area of occupied export texels, excluding holes."""
+        return len(np.unique(self.points, axis=0)) * self.texel_size() ** 2
+
     def texel_size(self) -> float:
         """Width, in MpmCore [0,1]^2 domain units, of one texel of the
         *original* pixel-art export at this target's own resolution —

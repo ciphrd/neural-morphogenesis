@@ -89,8 +89,8 @@ WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass
 # growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-# growthFrameAngle, appearanceScale, quadratureWeight, domain(4) — 64 bytes.
-REST_FIELDS = 16
+# growthFrameAngle, appearanceScale, quadratureWeight, vertices(6), padding(2) — 80 bytes.
+REST_FIELDS = 20
 REST_GROWTH_F = slice(0, 4)
 REST_JP = 4
 REST_CYCLE_ACTIVE = 5
@@ -100,15 +100,13 @@ REST_QUADRATURE_WEIGHT = 11
 
 def _pack_rest(jp: np.ndarray) -> np.ndarray:
     """Expands a flat (count,) Jp array into ParticleRest's own
-    (count, 16) tensor-rest layout, defaulting growthF=I (baseline rest
+    (count, 20) tensor-rest layout, defaulting growthF=I (baseline rest
     configuration), cycleActive=0, direction/controls=0, appearanceScale=1,
     and quadratureWeight=1.
 
-    Exists so load_scene()/reset_growth_buffers() can keep their original
-    scalar-Jp signatures — every scene seeder in this project
-    (training_sim.py's seed_blob(), feasibility_check.py, render_check.py,
-    and the viewer's own rng.ts) still hands over a plain (count,) ones
-    array, unaware that the underlying buffer grew two siblings."""
+    load_scene overlays explicit triangle domains and material weights;
+    reset_growth_buffers uses these generic defaults before scene loading.
+    """
     count = jp.shape[0]
     packed = np.zeros((count, REST_FIELDS), dtype=np.float32)
     packed[:, 0] = 1.0
@@ -493,25 +491,41 @@ class MpmCore:
         C: np.ndarray,
         Jp: np.ndarray,
         domain: np.ndarray | None = None,
+        quadrature_weights: np.ndarray | None = None,
+        domain_geometry: str | None = None,
     ) -> None:
         """Writes a scene into the head of every particle buffer and
         updates activeCount — mirrors mpm.ts's own loadScene()."""
         count = positions.shape[0]
         assert count <= MAX_PARTICLES
+        if domain is not None and domain_geometry != 'triangle-vertices':
+            raise ValueError('Explicit domains require domain_geometry="triangle-vertices"; convert legacy geometry first')
+        packed = _pack_rest(np.asarray(Jp, dtype=np.float32))
+        if quadrature_weights is not None:
+            weights = np.asarray(quadrature_weights, dtype=np.float32).reshape(count)
+            if not np.all(np.isfinite(weights)) or np.any(weights <= 0):
+                raise ValueError('Scene quadrature weights must be finite and positive')
+            packed[:, REST_QUADRATURE_WEIGHT] = weights
+        if domain is not None:
+            vertices = np.asarray(domain,dtype=np.float32).reshape(count,3,2)
+            if not np.all(np.isfinite(vertices)) or np.any(vertices < 0) or np.any(vertices >= 1):
+                raise ValueError('Explicit vertices must be finite canonical positions in [0,1)')
+            offsets = (vertices.astype(float)-vertices[:,0:1]+.5)%1-.5
+            edges = offsets[:,1:].transpose(0,2,1)
+            determinant = np.linalg.det(edges)
+            f_det = np.linalg.det(np.asarray(F).reshape(count, 2, 2))
+            if (not np.all(np.isfinite(edges)) or not np.all(np.isfinite(f_det))
+                    or not np.all(np.isfinite(determinant))
+                    or np.any(determinant <= 0) or np.any(f_det <= 0)):
+                raise ValueError('Scene triangles and deformation must have finite positive determinants')
+            packed[:, 12:18] = vertices.reshape(count, 6)
+            packed[:, 8] = .5 * determinant / f_det
+            if not np.all(np.isfinite(packed[:, 8])) or np.any(packed[:, 8] <= 0):
+                raise ValueError('Scene rest areas must be finite and positive')
         self.device.queue.write_buffer(self.positions, 0, positions.astype(np.float32))
         self.device.queue.write_buffer(self.velocities, 0, velocities.astype(np.float32))
         self.device.queue.write_buffer(self.F, 0, F.astype(np.float32))
         self.device.queue.write_buffer(self.C, 0, C.astype(np.float32))
-        # Scene API deliberately unchanged: callers still hand over a
-        # flat (count,) Jp array. Expanded here into ParticleRest's own
-        # tensor layout — growthF=I and cycleActive=0 for
-        # genuinely-seeded particles, which unlike growth-spawned
-        # children have no ramp to serve.
-        packed = _pack_rest(np.asarray(Jp, dtype=np.float32))
-        if domain is not None:
-            packed[:, 12:16] = np.asarray(domain, dtype=np.float32).reshape(count, 4)
-            packed[:, 8] = (4.0 * np.linalg.det(packed[:, 12:16].reshape(-1, 2, 2))
-                            / np.linalg.det(np.asarray(F).reshape(-1, 2, 2)))
         self.device.queue.write_buffer(self.rest, 0, packed)
         self.set_active_count(count)
 
@@ -532,28 +546,12 @@ class MpmCore:
         self.device.queue.write_buffer(self.active_count_uniform, 0, np.array([count], dtype=np.uint32))
 
     def reset_growth_buffers(self, max_active: int) -> None:
-        """Zero/identity-fills velocities/F/C/ParticleRest for [0, max_active) —
-        call once per rollout, before load_scene(). Every rollout starts
-        with its configured number of real particles (see training_sim.py's own module
-        docstring for why --particles is a growth CAP now, not a fixed
-        starting count) — every slot beyond those particles is destined to
-        become a real particle via growth (core/agents.wgsl's own
-        agentStep() may claim any slot, so every per-particle physics/rest
-        buffer must be initialized before that happens; division then
-        overwrites the claimed slot with its inherited live state), and needs
-        to start from the
-        exact same fresh MPM state seed_blob() already gives that one
-        genuinely-seeded particle — WITHOUT this, a slot THIS rollout's
-        own growth later claims could inherit a PREVIOUS rollout's stale,
-        possibly heavily-deformed state instead (MpmCore/AgentsGPU/
-        EnvironmentGPU are reused across rollouts within a worker process
-        — see evolve.py's own module docstring — load_scene() only ever
-        writes the HEAD of each buffer, never the tail a previous
-        rollout's growth may have touched). Safe (idempotent) to run over
-        the one index load_scene() ALSO just wrote — seed_blob()'s own
-        velocity/F/C/ParticleRest defaults are identical to these — so this can
-        unconditionally cover the whole [0, max_active) range rather than
-        needing to carefully skip the one already-real particle."""
+        """Reset all claimable slots before loading a new scene.
+
+        This clears stale state from previous rollouts. Always call BEFORE
+        load_scene: seeded triangles have explicit domains and half weights
+        that these generic defaults would erase.
+        """
         zeros2 = np.zeros((max_active, 2), dtype=np.float32)
         identity_f = np.tile(np.array([1, 0, 0, 1], dtype=np.float32), (max_active, 1))
         zeros4 = np.zeros((max_active, 4), dtype=np.float32)

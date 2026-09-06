@@ -77,8 +77,8 @@ struct ParticleRest {
   growthFrameAngle: f32,
   appearanceScale: f32,
   quadratureWeight: f32,
-  // Transported world-space half edges, row major. Independent of plastic F.
-  domain: vec4<f32>,
+  // Explicit wrapped vertices: domain.xy=A, domain.zw=B, vertexC=C.
+  domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>,
 }
 @group(0) @binding(2) var<storage, read> particleRest: array<ParticleRest>;
 @group(0) @binding(3) var<storage, read_write> diagnostics: array<atomic<i32>>;
@@ -199,7 +199,7 @@ fn scatterDiagnostics(@builtin(global_invocation_id) gid: vec3<u32>) {
   // contains stress-free growth and would falsely display grown tissue as
   // strained/pressurized.
   let g = max(matDet(rest.growthF), 1e-6);
-  let q = max(rest.quadratureWeight, 1e-6);
+  let q = max(rest.quadratureWeight, 0.0);
   let Fe = matMul(F, matInverse(rest.growthF));
   let J = matDet(Fe);
   let polar = polarDecompose(Fe);

@@ -188,6 +188,8 @@ export function randomWeights(
 
 export class Agents {
   unresolvedSamples = 0;
+  capacityBlocked = false;
+  private refinementRounds = 0;
   private readonly device: GPUDevice;
   private readonly channels: number;
   private readonly hiddenDim: number;
@@ -205,6 +207,7 @@ export class Agents {
   private readonly commitBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly stepModeUniforms: [GPUBuffer, GPUBuffer];
   private readonly growthField: GPUBuffer;
+  private readonly refinement: GPUBuffer;
   private readonly growthPipelines: readonly GPUComputePipeline[];
   private readonly growthBindGroup: GPUBindGroup;
   private readonly growthDispatches: readonly (number | null)[];
@@ -300,7 +303,7 @@ export class Agents {
     // be (STORAGE and MAP_READ are mutually exclusive usages in WebGPU)
     // — encodeReadGrownCount() copies into this every macro step,
     // readGrownCount() maps/reads/unmaps it asynchronously afterward.
-    this.grownCountStaging = device.createBuffer({ size: 8, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    this.grownCountStaging = device.createBuffer({ size: 12, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     // Rollouts start with their configured initial particle count and grow
     // via splitting from there (simulation.ts's own restartRollout()
     // sets that count every rollout — this is just
@@ -408,18 +411,28 @@ export class Agents {
     this.commitBindGroups = bindGroups(1);
 
     this.growthField = mpmCore.growthField;
+    const refineHashSize = 2 ** Math.ceil(Math.log2(6 * MAX_PARTICLES));
+    const refineWords = refineHashSize + 5 * MAX_PARTICLES + 1;
+    this.refinement = device.createBuffer({
+      label: "conforming refinement scratch", size: 4 * refineWords, usage: GPUBufferUsage.STORAGE,
+    });
     const growthModule = device.createShaderModule({
       code: templateShader(growthFieldSrc, {
-        CHANNELS: config.channels,
-        GRID_N,
-        INV_DX,
+        CHANNELS: config.channels, GRID_N, INV_DX,
         MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
+        REFINE_CAPACITY: MAX_PARTICLES, REFINE_HASH_SIZE: refineHashSize,
       }),
     });
-    const growthEntries = [
-      "clearGrowthField", "scatterGrowthIntent", "enforceGrowthField",
-      "commitResample", "stopGrowthAtCapacity",
-    ] as const;
+    const stages: [string, number | null][] = [
+      ["clearGrowthField", ceilDiv(10 * NODE_COUNT, 256)],
+      ["scatterGrowthIntent", null], ["enforceGrowthField", ceilDiv(NODE_COUNT, 256)],
+      ["clearRefinement", ceilDiv(refineWords, 256)],
+      ["indexRefinementEdges", null], ["linkRefinementEdges", null],
+      ...Array.from({ length: Math.ceil(Math.log2(MAX_PARTICLES)) },
+        (): [string, null] => ["propagateRefinement", null]),
+      ["requestRefinement", null], ["reserveRefinement", null],
+      ["commitResample", null], ["stopGrowthAtCapacity", ceilDiv(10 * NODE_COUNT, 256)],
+    ];
     // Keep one stable ABI for every growth pass. With `layout: "auto"`, WebGPU
     // infers a different layout per entry point and removes bindings that an
     // entry point does not reach. That made this host-side resource table
@@ -433,6 +446,7 @@ export class Agents {
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ],
@@ -440,9 +454,13 @@ export class Agents {
     const growthPipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [growthBindGroupLayout],
     });
-    this.growthPipelines = growthEntries.map((entryPoint) =>
-      device.createComputePipeline({ layout: growthPipelineLayout, compute: { module: growthModule, entryPoint } })
-    );
+    const pipelines = new Map(stages.map(([entry]) => [entry, null as GPUComputePipeline | null]));
+    for (const entryPoint of pipelines.keys()) {
+      pipelines.set(entryPoint, device.createComputePipeline({
+        layout: growthPipelineLayout, compute: { module: growthModule, entryPoint },
+      }));
+    }
+    this.growthPipelines = stages.map(([entry]) => pipelines.get(entry)!);
     const resources = new Map<number, GPUBindingResource>([
       [0, { buffer: mpmCore.positions }],
       [1, { buffer: mpmCore.activeCountUniform }],
@@ -451,6 +469,7 @@ export class Agents {
       [4, { buffer: mpmCore.C }],
       [5, { buffer: mpmCore.velocities }],
       [6, { buffer: mpmCore.F }],
+      [7, { buffer: this.refinement }],
       [8, { buffer: this.growthField }],
       [9, { buffer: this.physicsUniform }],
     ]);
@@ -458,11 +477,7 @@ export class Agents {
       layout: growthBindGroupLayout,
       entries: Array.from(resources, ([binding, resource]) => ({ binding, resource })),
     });
-    this.growthDispatches = [
-      ceilDiv(10 * NODE_COUNT, 256),
-      null, ceilDiv(NODE_COUNT, 256), null,
-      ceilDiv(10 * NODE_COUNT, 256),
-    ];
+    this.growthDispatches = stages.map(([, dispatch]) => dispatch);
   }
 
   /** Exposed so Renderer's own triangle-shape pipeline can point each
@@ -692,6 +707,7 @@ export class Agents {
    * with p2g/gridUpdate-adjacent/g2p/repulsion too, not just this
    * class's own dispatch. */
   setActiveCount(activeCount: number): void {
+    this.refinementRounds = Math.ceil(Math.log2(Math.max(1, activeCount)));
     this.dispatch = ceilDiv(activeCount, WORKGROUP);
     writeFloat32(this.device, this.agentStateBuffer, 0, new Uint32Array([activeCount]));
   }
@@ -702,7 +718,7 @@ export class Agents {
    * reflects whatever this macro step's own agentStep() pass just
    * claimed. Does not submit. */
   encodeReadGrownCount(encoder: GPUCommandEncoder): void {
-    encoder.copyBufferToBuffer(this.agentStateBuffer, 0, this.grownCountStaging, 0, 8);
+    encoder.copyBufferToBuffer(this.agentStateBuffer, 0, this.grownCountStaging, 0, 12);
   }
 
   /** Reads back growth's own atomic counter, via encodeReadGrownCount()'s
@@ -721,6 +737,7 @@ export class Agents {
     const status = new Uint32Array(this.grownCountStaging.getMappedRange());
     const value = status[0];
     this.unresolvedSamples = status[1];
+    this.capacityBlocked = status[2] !== 0;
     this.grownCountStaging.unmap();
     return value;
   }
@@ -728,6 +745,9 @@ export class Agents {
   /** Clears all rollout-scoped agent state. Alignment is deliberately zero
    * here and is reconstructed from channel 7's gradient by agentStep. */
   resetState(seed: number): void {
+    this.unresolvedSamples = 0;
+    this.capacityBlocked = false;
+    this.device.queue.writeBuffer(this.agentStateBuffer, 4, new Uint32Array(2));
     const count = (this.agentStateBuffer.size - PARTICLE_META_BUFFER_OFFSET) / this.particleMetaStride;
     // One combined DataView write, matching core/agents.wgsl's own
     // ParticleMeta struct exactly (rng/cooldown/alignment, vec4 color, then the
@@ -768,6 +788,7 @@ export class Agents {
       // Entry 2 analytically touches every grid node; skip its dispatch for
       // ordinary training playback rather than paying a dormant full-grid pass.
       if (i === 2 && !this.forcedGrowthFieldOverride) continue;
+      if (i >= 6 + this.refinementRounds && i < 6 + Math.ceil(Math.log2(MAX_PARTICLES))) continue;
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.growthPipelines[i]);
       pass.setBindGroup(0, this.growthBindGroup);
@@ -787,6 +808,7 @@ export class Agents {
   }
 
   destroy(): void {
+    this.refinement.destroy();
     this.weightsBuffer.destroy();
     this.physicsUniform.destroy();
     this.agentStateBuffer.destroy();

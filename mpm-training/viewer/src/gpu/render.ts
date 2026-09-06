@@ -86,6 +86,9 @@ export class Renderer {
   private readonly viewBindGroup: GPUBindGroup;
   private readonly circlePipeline: GPURenderPipeline;
   private readonly particleCirclePipeline: GPURenderPipeline;
+  private readonly domainPipeline: GPURenderPipeline;
+  private readonly domainBindGroup: GPUBindGroup;
+  private domainVisible = false;
 
   private readonly particleRadiusUniform: GPUBuffer;
   private readonly particleColorUniform: GPUBuffer;
@@ -244,6 +247,20 @@ export class Renderer {
       layout: viewLayout,
       entries: [{ binding: 0, resource: { buffer: this.viewUniform } }],
     });
+    const domainLayout = device.createBindGroupLayout({ entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+      { binding: 4, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+    ] });
+    this.domainPipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [domainLayout, viewLayout] }),
+      vertex: { module: renderModule, entryPoint: "domainVertex" },
+      fragment: { module: renderModule, entryPoint: "domainFragment", targets: [{ format, blend: alphaBlend() }] },
+      primitive: { topology: "line-list" },
+    });
+    this.domainBindGroup = device.createBindGroup({ layout: domainLayout, entries: [
+      { binding: 0, resource: { buffer: mpmCore.positions } },
+      { binding: 4, resource: { buffer: mpmCore.rest } },
+    ] });
     this.pointLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
@@ -863,6 +880,10 @@ export class Renderer {
     this.growthLineVisible = visible;
   }
 
+  setDomainVisible(visible: boolean): void {
+    this.domainVisible = visible;
+  }
+
   /** Camera zoom applied by every particle/target vertex shader. */
   setZoom(zoom: number): void {
     writeFloat32(this.device, this.viewUniform, 0, new Float32Array([
@@ -1115,6 +1136,17 @@ export class Renderer {
 
     pass.end();
     this.bloom.encode(encoder, destinationView);
+    // Draw after bloom so domain boundaries stay crisp, one-device-pixel lines.
+    if (this.domainVisible && activeCount > 0) {
+      const overlay = encoder.beginRenderPass({ colorAttachments: [{
+        view: destinationView, loadOp: "load", storeOp: "store",
+      }] });
+      overlay.setPipeline(this.domainPipeline);
+      overlay.setBindGroup(0, this.domainBindGroup);
+      overlay.setBindGroup(1, this.viewBindGroup);
+      overlay.draw(54, activeCount); // Three edges in each of nine periodic images.
+      overlay.end();
+    }
     this.device.queue.submit([encoder.finish()]);
   }
 

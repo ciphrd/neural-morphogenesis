@@ -52,6 +52,9 @@ from evolve import (
     finalize_policy_configuration,
     get_weights,
     rollout,
+    shape_settings,
+    resolved_material_budget,
+    report_shape_budget,
     run_generation,
     set_weights,
     validate_fitness_configuration,
@@ -59,7 +62,8 @@ from evolve import (
 from mpm_core import PARTICLE_MASS, VOL, MpmCore
 from parallel_workers import build_pool
 from policy_parameters import mutation_scales, policy_hidden_dim
-from raster import FITNESS_MODEL_VERSION, build_target_distance_field, build_target_raster, training_raster_distance
+from raster import build_target_distance_field
+from domain_fitness import FITNESS_MODEL_VERSION, target_mask, score_domains
 from simulation_settings import (
     ANGULAR_DAMPING,
     BOUNDARY_TANGENT_MIN_GRADIENT,
@@ -158,8 +162,8 @@ def _setup() -> None:
         raise SystemExit("--elites must be between 1 and --population")
     if args.seeds_per_candidate < 1:
         raise SystemExit("--seeds-per-candidate must be at least 1")
-    if not 1 <= args.initial_particles <= args.particles:
-        raise SystemExit("--initial-particles must be between 1 and --particles")
+    if not 1 <= args.initial_particles <= args.particles // 2:
+        raise SystemExit("--initial-particles seed cells must fit floor(--particles/2)")
     validate_fitness_configuration(args)
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
         raise SystemExit("--growth-steps must be between 0 and --macro-steps")
@@ -169,6 +173,7 @@ def _setup() -> None:
 
     # Fixed for this server's lifetime (no target-switching endpoint).
     target = load_target(args.target)
+    report_shape_budget(args, target)
     # Fixed for this server's lifetime too — precomputed once rather than
     # recomputing the same thing on every rollout's own fitness-scoring
     # call AND on every _save_generation_images() debug-raster build (see
@@ -176,9 +181,7 @@ def _setup() -> None:
     # into every worker's own globals — see parallel_workers.py) for the
     # first use, and used directly, here in the main process, for the
     # second.
-    target_raster = build_target_raster(
-        target.points, args.raster_resolution, RASTER_EXTENT, args.raster_sigma, half_size=target.texel_size() / 2.0
-    )
+    target_raster = target_mask(target, args.raster_resolution)
     target_distance_field = build_target_distance_field(target_raster)
 
 
@@ -296,24 +299,8 @@ def _save_generation_images(
         return_positions=True,
         density_multiplier=winner_density,
     )
-    _, agent_raster, breakdown = training_raster_distance(
-        positions,
-        target.points,
-        target_raster,
-        target_distance_field,
-        args.raster_resolution,
-        RASTER_EXTENT,
-        args.raster_sigma,
-        outside_weight=args.outside_weight,
-        return_breakdown=True,
-        particle_weight=1.0 / winner_density,
-        expected_weighted_particles=float(args.particles),
-        target_occupancy=args.fitness_target_occupancy,
-        coverage_weight=args.fitness_coverage_weight,
-        spill_weight=args.fitness_spill_weight,
-        boundary_weight=args.fitness_boundary_weight,
-        crowding_weight=args.fitness_crowding_weight,
-    )
+    evaluation = score_domains(core.read_rest_state()[:, 12:18], target, target_raster, args)
+    agent_raster, breakdown = evaluation.raster, evaluation.breakdown
 
     prefix = f"gen_{generation:05d}"
     save_grown_image(positions, target.points, IMAGES_DIR / f"{prefix}_grown.png")
@@ -329,6 +316,7 @@ def _save_generation_images(
         "boundary": breakdown.boundary,
         "crowding": breakdown.crowding,
         "angle": breakdown.angle,
+        "rollout": core.rollout_diagnostics,
     }
 
 
@@ -510,7 +498,8 @@ async def _training_loop_body() -> None:
         "growthCompressionStop": GROWTH_COMPRESSION_STOP,
         "growthCompressionFeedback": GROWTH_COMPRESSION_FEEDBACK,
         "growthModelVersion": GROWTH_MODEL_VERSION,
-        "materialAreaBudget": MATERIAL_AREA_BUDGET,
+        "domainGeometry": "triangle",
+        **shape_settings(args, target),
         "growthMax": GROWTH_MAX,
         "growthAnisotropy": GROWTH_ANISOTROPY_AUTHORITY,
         # simulation_settings.py's own MPM_ENABLED (that constant's own
@@ -657,6 +646,9 @@ async def _training_loop_body() -> None:
                         "generation": generation,
                         "fitness": best_fitness,
                         "fitness_model_version": FITNESS_MODEL_VERSION,
+                        "material_area_budget": resolved_material_budget(args, target),
+                        "shape_settings": shape_settings(args, target),
+                        "raster_resolution": args.raster_resolution,
                         "target": args.target,
                         "particles": args.particles,
                         "initial_particle_count": args.initial_particles,

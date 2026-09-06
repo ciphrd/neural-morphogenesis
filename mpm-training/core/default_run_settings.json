@@ -3,7 +3,9 @@
   "particles": 400,
   "initialParticleCount": 5,
   "densityModelVersion": 3,
-  "trainingDensityMultipliers": [1.0],
+  "trainingDensityMultipliers": [
+    1.0
+  ],
   "densityAggregation": "worst",
   "particleCapacity": 400,
   "particleMass": 10.0,
@@ -31,7 +33,9 @@
   "elasticStrainScale": 0.15,
   "elasticStrainInputsEnabled": true,
   "hiddenDim": 128,
-  "hiddenLayers": [128],
+  "hiddenLayers": [
+    128
+  ],
   "cellMemory": "recurrent",
   "policyArchitecture": "stateful-128",
   "chemicalCommunicationArchitecture": "persistent-environment",
@@ -85,5 +89,14 @@
   "fitnessTemporalWorstWeight": 0.3,
   "runSeed": 0,
   "totalGenerations": 50,
-  "checkpointEvery": 5
+  "checkpointEvery": 5,
+  "materialBudgetMode": "target",
+  "materialBudgetScale": 1.0,
+  "stableStop": true,
+  "shapeCheckInterval": 10,
+  "shapeConfirmations": 3,
+  "shapeSettleSteps": 20,
+  "shapeMissingTolerance": 0.02,
+  "shapeSpillTolerance": 0.02,
+  "shapeOverlapTolerance": 0.02
 }

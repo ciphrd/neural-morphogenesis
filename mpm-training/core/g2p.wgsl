@@ -51,8 +51,8 @@ struct ParticleRest {
   growthFrameAngle: f32,
   appearanceScale: f32,
   quadratureWeight: f32,
-  // Transported world-space half edges, row major. Independent of plastic F.
-  domain: vec4<f32>,
+  // Explicit wrapped vertices: domain.xy=A, domain.zw=B, vertexC=C.
+  domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>,
 }
 @group(0) @binding(4) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(5) var<storage, read> gridVel: array<vec2<f32>>;
@@ -257,6 +257,24 @@ fn quadraticWeights(fx: vec2<f32>) -> array<vec2<f32>, 3> {
   return w;
 }
 
+// Passive material vertices follow the same quadratic grid velocity field,
+// evaluated at their own positions rather than extrapolated from a centroid.
+fn velocityAtVertex(position: vec2<f32>) -> vec2<f32> {
+  // Only wrap the sampling coordinate. Edge vectors stay unwrapped so a
+  // seam-crossing triangle keeps its local shape and centroid.
+  let y = fract(position) * INV_DX;
+  let base = vec2<i32>(floor(y - vec2<f32>(0.5)));
+  let w = quadraticWeights(y - vec2<f32>(base));
+  var velocity = vec2<f32>(0.0);
+  for (var i = 0u; i < 3u; i++) {
+    for (var j = 0u; j < 3u; j++) {
+      let node = wrapIndex(base.x+i32(i)) * (GRID_N+1u) + wrapIndex(base.y+i32(j));
+      velocity += w[i].x * w[j].y * gridVel[node];
+    }
+  }
+  return velocity;
+}
+
 @compute @workgroup_size(64)
 fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
   let pi = gid.x;
@@ -299,17 +317,28 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
     }
   }
-  let domainNew = matMul(identityPlusScaled(C, DT), rest0.domain);
-
-  // Toroidal: wrap into [0,1) rather than clamp against a wall — fract()
-  // is WGSL's own always-non-negative x-floor(x), so this is correct
-  // wraparound even for a newPos that undershot below 0.0, not just one
-  // that overshot past 1.0. No velocity zeroing either (there was one
-  // here, in this project's own earlier walled version, matching a
-  // sticky-wall's own "stop dead at the boundary" semantics) — nothing
-  // here is a boundary to stop at anymore, a particle keeps whatever
-  // velocity it arrived with straight through the wrap.
-  let newPos = fract(pos + DT * v);
+  var domainNew = rest0.domain;
+  var vertexCNew = rest0.vertexC;
+  var newPos = fract(pos + DT*v);
+  // Uninitialized point-only scenes retain point advection until the growth
+  // pass supplies geometry. Live triangle records always have positive A0.
+  if (rest0.divisionBias > 0.0) {
+    let a = fract(rest0.domain.xy + DT*velocityAtVertex(rest0.domain.xy));
+    let b = fract(rest0.domain.zw + DT*velocityAtVertex(rest0.domain.zw));
+    let c = fract(rest0.vertexC + DT*velocityAtVertex(rest0.vertexC));
+    domainNew = vec4<f32>(a,b);
+    vertexCNew = c;
+    // Short periodic edge displacements are used only to derive the center;
+    // NEVER reconstruct or recenter the authoritative vertices from it.
+    let ab = b-a;
+    let ac = c-a;
+    let u = ab-floor(ab+vec2<f32>(0.5));
+    let w = ac-floor(ac+vec2<f32>(0.5));
+    newPos = fract(a+(u+w)/3.0);
+  }
+  // Retain the point-based momentum gather and constitutive gradient. The
+  // geometric centroid transport is now distinct from this sampled velocity
+  // in non-affine flow; vertices carry no independent mass or momentum.
   let newVel = v;
 
   var F = matMul(identityPlusScaled(C, DT), F0);
@@ -428,6 +457,6 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     FgNew, JpNew, rest0.cycleActive, rest0.growthAngle,
     rest0.growthAnisotropy, rest0.divisionBias, rest0.growthFrameAngle,
     appearanceScaleNew,
-    rest0.quadratureWeight, domainNew
+    rest0.quadratureWeight, domainNew, vertexCNew, rest0.domainPadding
   );
 }

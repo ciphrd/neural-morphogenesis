@@ -214,6 +214,7 @@ class AgentsGPU:
         division_drive_boost: float = DIVISION_DRIVE_BOOST,
     ) -> None:
         self.unresolved_samples = 0
+        self.capacity_blocked = False
         self.device = device
         self.channels = channels
         self.hidden_dim = hidden_dim
@@ -474,6 +475,13 @@ class AgentsGPU:
         # Growth lives on the MPM grid. MpmCore owns this shared buffer because
         # g2p consumes it directly; Agents only populates it from NN vectors.
         self._growth_field = core.growth_field
+        refine_capacity = self._particle_capacity
+        refine_hash_size = 1 << (6 * refine_capacity - 1).bit_length()
+        refine_words = refine_hash_size + 5 * refine_capacity + 1
+        self._refinement = device.create_buffer(
+            label="conforming refinement scratch", size=4 * refine_words,
+            usage=wgpu.BufferUsage.STORAGE,
+        )
         growth_module = device.create_shader_module(code=load_core_shader(
             "growthField.wgsl",
             {
@@ -481,19 +489,29 @@ class AgentsGPU:
                 "GRID_N": GRID_N,
                 "INV_DX": INV_DX,
                 "MORPHOLOGY_FIELD_N": REPULSION_FIELD_N,
+                "REFINE_CAPACITY": refine_capacity,
+                "REFINE_HASH_SIZE": refine_hash_size,
             },
         ))
-        entry_points = (
-            "clearGrowthField", "scatterGrowthIntent", "enforceGrowthField",
-            "commitResample", "stopGrowthAtCapacity",
-        )
-        self._growth_pipelines = [
-            device.create_compute_pipeline(
-                layout=wgpu.AutoLayoutMode.auto,
-                compute={"module": growth_module, "entry_point": entry},
-            )
-            for entry in entry_points
+        # Every stage ends a compute pass, providing a device-wide barrier.
+        stages = [
+            ("clearGrowthField", (3, 8), ceil_div(10 * NODE_COUNT, 256)),
+            ("scatterGrowthIntent", (0, 1, 2, 6, 8, 9), None),
+            ("enforceGrowthField", (8, 9), ceil_div(NODE_COUNT, 256)),
+            ("clearRefinement", (7,), ceil_div(refine_words, 256)),
+            ("indexRefinementEdges", (1, 2, 7), None),
+            ("linkRefinementEdges", (1, 2, 7), None),
+            *[("propagateRefinement", (1, 7), None)] * (refine_capacity - 1).bit_length(),
+            ("requestRefinement", (1, 2, 3, 7, 9), None),
+            ("reserveRefinement", (1, 3, 7, 9), None),
+            ("commitResample", (0, 1, 2, 3, 4, 5, 6, 7), None),
+            ("stopGrowthAtCapacity", (3, 7, 8, 9), ceil_div(10 * NODE_COUNT, 256)),
         ]
+        pipelines = {entry: device.create_compute_pipeline(
+            layout=wgpu.AutoLayoutMode.auto,
+            compute={"module": growth_module, "entry_point": entry},
+        ) for entry in dict.fromkeys(stage[0] for stage in stages)}
+        self._growth_pipelines = [pipelines[entry] for entry, _, _ in stages]
         resources = {
             0: {"buffer": core.positions, "offset": 0, "size": core.positions.size},
             1: {"buffer": core.active_count_uniform, "offset": 0, "size": core.active_count_uniform.size},
@@ -502,25 +520,16 @@ class AgentsGPU:
             4: {"buffer": core.C, "offset": 0, "size": core.C.size},
             5: {"buffer": core.velocities, "offset": 0, "size": core.velocities.size},
             6: {"buffer": core.F, "offset": 0, "size": core.F.size},
+            7: {"buffer": self._refinement, "offset": 0, "size": self._refinement.size},
             8: {"buffer": self._growth_field, "offset": 0, "size": self._growth_field.size},
             9: {"buffer": self._physics_uniform, "offset": 0, "size": self._physics_uniform.size},
         }
-        binding_sets = (
-            (3, 8), (0, 1, 2, 6, 8, 9), (8, 9),
-            (0, 1, 2, 3, 4, 5, 6, 9), (3, 8, 9),
-        )
-        self._growth_bind_groups = [
-            device.create_bind_group(
-                layout=pipeline.get_bind_group_layout(0),
-                entries=[{"binding": binding, "resource": resources[binding]} for binding in bindings],
-            )
-            for pipeline, bindings in zip(self._growth_pipelines, binding_sets)
-        ]
-        self._growth_dispatches = (
-            ceil_div(10 * NODE_COUNT, 256),
-            None, ceil_div(NODE_COUNT, 256), None,
-            ceil_div(10 * NODE_COUNT, 256),
-        )
+        groups = {entry: device.create_bind_group(
+            layout=pipelines[entry].get_bind_group_layout(0),
+            entries=[{"binding": binding, "resource": resources[binding]} for binding in bindings],
+        ) for entry, bindings, _ in dict.fromkeys(stages)}
+        self._growth_bind_groups = [groups[entry] for entry, _, _ in stages]
+        self._growth_dispatches = [dispatch for _, _, dispatch in stages]
 
     @property
     def max_active_particles(self) -> int:
@@ -760,12 +769,13 @@ class AgentsGPU:
         distinct method, on a distinct object) owns that, since it's
         shared with p2g/gridUpdate-adjacent/g2p/repulsion too, not just
         this class's own dispatch."""
+        self._refinement_rounds = max(0, active_count - 1).bit_length()
         self._dispatch = ceil_div(active_count, WORKGROUP)
         self.device.queue.write_buffer(self._agent_state_buffer, 0, np.array([active_count], dtype=np.uint32))
 
     def read_grown_count(self) -> int:
         """Reads back growth's own atomic counter (core/agents.wgsl's own
-        module docstring) — a real, deliberate 4-byte host round-trip,
+        module docstring) — a real, deliberate 12-byte status readback,
         once per macro step (training_sim.py's own macro_step() is the
         only caller), needed because dispatch sizing for EVERY pass
         (P2G/gridUpdate/G2P/repulsion, and this class's own next
@@ -776,9 +786,10 @@ class AgentsGPU:
         run — same "reading anything back necessarily waits for the
         queue's own timeline to catch up" property mpm_core.py's own
         step() already relies on for its per-chunk sync."""
-        raw = self.device.queue.read_buffer(self._agent_state_buffer, 0, 8)
+        raw = self.device.queue.read_buffer(self._agent_state_buffer, 0, 12)
         status = np.frombuffer(raw, dtype=np.uint32)
         self.unresolved_samples = int(status[1])
+        self.capacity_blocked = bool(status[2])
         return int(status[0])
 
     def reset_state(self, seed: int) -> None:
@@ -788,6 +799,9 @@ class AgentsGPU:
         3's gradient by every agentStep; it is never randomized or
         persisted as an independently controlled cell property.
         """
+        self.unresolved_samples = 0
+        self.capacity_blocked = False
+        self.device.queue.write_buffer(self._agent_state_buffer, 4, np.zeros(2, dtype=np.uint32))
         count = (self._agent_state_buffer.size - PARTICLE_META_BUFFER_OFFSET) // self._particle_meta_dtype.itemsize
         # One combined structured array, matching core/agents.wgsl's own
         # ParticleMeta struct exactly (see this class's own __init__
@@ -824,6 +838,8 @@ class AgentsGPU:
             self._growth_pipelines, self._growth_bind_groups, self._growth_dispatches
         )):
             if index == 2 and not self._forced_growth_field_override:
+                continue
+            if 6 + self._refinement_rounds <= index < 6 + (self._particle_capacity - 1).bit_length():
                 continue
             p = encoder.begin_compute_pass()
             p.set_pipeline(pipeline)

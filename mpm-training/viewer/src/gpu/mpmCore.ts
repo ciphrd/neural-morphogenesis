@@ -72,15 +72,13 @@ const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
 // growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-// growthFrameAngle, appearanceScale, quadratureWeight, domain(4) — 64 bytes.
-export const REST_FIELDS = 16;
+// growthFrameAngle, appearanceScale, quadratureWeight, vertices(6), padding(2) — 80 bytes.
+export const REST_FIELDS = 20;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own
  * tensor-rest layout, defaulting growthF=I and cycleActive=0.
- * Mirrors trainer/mpm_core.py's own
- * _pack_rest() exactly — exists so loadScene()/resetGrowthBuffers() keep
- * their original scalar-Jp signatures and rng.ts's own seedBlob() never
- * has to know the underlying buffer grew two siblings. */
+ * Mirrors trainer/mpm_core.py's _pack_rest. Scene loading overlays explicit
+ * triangle domains and material weights after generic reset defaults. */
 function packRest(jp: Float32Array): Float32Array {
   const packed = new Float32Array(jp.length * REST_FIELDS);
   for (let i = 0; i < jp.length; i++) {
@@ -209,7 +207,7 @@ export class MpmCore {
     this.velocities = device.createBuffer({ size: MAX_PARTICLES * 2 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.F = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.C = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.rest = device.createBuffer({ size: MAX_PARTICLES * REST_FIELDS * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.rest = device.createBuffer({ size: MAX_PARTICLES * REST_FIELDS * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.chemicalStateFallback = device.createBuffer({
       size: 256 + MAX_PARTICLES * 112,
       usage: GPUBufferUsage.STORAGE,
@@ -385,24 +383,43 @@ export class MpmCore {
 
   loadScene(scene: SceneData): void {
     if (scene.count > MAX_PARTICLES) throw new Error(`scene.count (${scene.count}) exceeds MAX_PARTICLES (${MAX_PARTICLES})`);
+    if (scene.domain && scene.domainGeometry !== "triangle-vertices") {
+      throw new Error('Explicit domains require domainGeometry="triangle-vertices"; convert legacy geometry first');
+    }
+    const rest = packRest(scene.Jp);
+    if (scene.quadratureWeights) {
+      if (scene.quadratureWeights.length !== scene.count) throw new Error("Scene weight count mismatch");
+      for (let i = 0; i < scene.count; i++) {
+        const weight = scene.quadratureWeights[i];
+        if (!Number.isFinite(weight) || weight <= 0) throw new Error("Scene weights must be finite and positive");
+        rest[i*REST_FIELDS+11] = weight;
+      }
+    }
+    if (scene.domain) {
+      if (scene.domain.length !== scene.count*6) throw new Error("Scene domain count mismatch");
+      for (let i = 0; i < scene.count; i++) {
+        const vertices = scene.domain.subarray(i*6,i*6+6);
+        if (vertices.some(v => !Number.isFinite(v) || v < 0 || v >= 1)) throw new Error("Vertices must be canonical positions in [0,1)");
+        const delta = (v: number) => v-Math.floor(v+.5);
+        const h = [delta(vertices[2]-vertices[0]),delta(vertices[4]-vertices[0]),
+                   delta(vertices[3]-vertices[1]),delta(vertices[5]-vertices[1])];
+        const f = scene.F.subarray(i*4, i*4+4);
+        const det = h[0]*h[3]-h[1]*h[2];
+        const detF = f[0]*f[3]-f[1]*f[2];
+        if (!Number.isFinite(det) || !Number.isFinite(detF) || det <= 0 || detF <= 0) {
+          throw new Error("Scene triangles and deformation must have finite positive determinants");
+        }
+        rest.set(vertices, i*REST_FIELDS+12);
+        rest[i*REST_FIELDS+8] = .5*det/detF;
+        if (!Number.isFinite(rest[i*REST_FIELDS+8]) || rest[i*REST_FIELDS+8] <= 0) {
+          throw new Error("Scene rest areas must be finite and positive");
+        }
+      }
+    }
     writeFloat32(this.device, this.positions, 0, scene.positions);
     writeFloat32(this.device, this.velocities, 0, scene.velocities);
     writeFloat32(this.device, this.F, 0, scene.F);
     writeFloat32(this.device, this.C, 0, scene.C);
-    // Scene API deliberately unchanged: callers still hand over a flat
-    // (count,) Jp array (rng.ts's own seedBlob()). Expanded here into
-    // ParticleRest's tensor layout — growthF=I and cycleActive=0 are
-    // exactly right for
-    // genuinely-seeded particles, which have no ramp to serve.
-    const rest = packRest(scene.Jp);
-    if (scene.domain) {
-      for (let i = 0; i < scene.count; i++) {
-        const h = scene.domain.subarray(i*4, i*4+4);
-        const f = scene.F.subarray(i*4, i*4+4);
-        rest.set(h, i*REST_FIELDS+12);
-        rest[i*REST_FIELDS+8] = 4*(h[0]*h[3]-h[1]*h[2])/(f[0]*f[3]-f[1]*f[2]);
-      }
-    }
     writeFloat32(this.device, this.rest, 0, rest);
     this.setActiveCount(scene.count);
   }
@@ -440,6 +457,23 @@ export class MpmCore {
     return result;
   }
 
+  async readTriangles(): Promise<Float32Array> {
+    const count = this._activeCount;
+    if (!count) return new Float32Array();
+    const size = count * REST_FIELDS * 4;
+    const staging = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.rest, 0, staging, 0, size);
+      this.device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const rest = new Float32Array(staging.getMappedRange());
+      const triangles = new Float32Array(count * 6);
+      for (let i = 0; i < count; i++) triangles.set(rest.subarray(i*REST_FIELDS+12, i*REST_FIELDS+18), i*6);
+      return triangles;
+    } finally { staging.destroy(); }
+  }
+
   /** Read an evenly distributed subset of active positions for inexpensive
    * viewer diagnostics such as auto-framing. */
   async readPositionSamples(maxSamples: number): Promise<Float32Array> {
@@ -473,24 +507,9 @@ export class MpmCore {
     return result;
   }
 
-  /** Zero/identity-fills velocities/F/C/ParticleRest for [0, maxActive) — call once
-   * per rollout, before loadScene(). Slots beyond this rollout's own
-   * particle count are destined to become real particles via growth
-   * (core/agents.wgsl's own agentStep() — see that file's own module
-   * docstring for why every claimable slot must be initialized before
-   * division overwrites it with inherited live state), and need to
-   * start from the exact same fresh MPM state seedBlob() already gives
-   * every genuinely-seeded particle — WITHOUT this, a slot THIS
-   * rollout's own growth later claims could inherit a PREVIOUS rollout's
-   * stale, possibly heavily-deformed state instead (loadScene() only
-   * ever writes the HEAD of each buffer, up to that rollout's own
-   * particle count, never the tail a previous rollout's growth may have
-   * touched — and unlike the Python trainer, this object is reused
-   * across every rollout a session ever plays, not rebuilt). Safe
-   * (idempotent) to run over indices loadScene() ALSO just wrote —
-   * seedBlob()'s own velocity/F/C/ParticleRest defaults are identical —
-   * so this can unconditionally cover the whole [0, maxActive) range
-   * rather than needing to carefully skip the already-real particles. */
+  /** Clear stale state in all claimable slots before loading a new scene.
+   * Always call BEFORE loadScene: generic defaults erase seeded triangle
+   * domains and half weights if applied afterward. */
   resetGrowthBuffers(maxActive: number): void {
     writeFloat32(this.device, this.velocities, 0, new Float32Array(maxActive * 2));
     const identityF = new Float32Array(maxActive * 4);
@@ -522,7 +541,7 @@ export class MpmCore {
     writeFloat32(this.device, this.velocities, i * 2 * 4, new Float32Array([0, 0]));
     writeFloat32(this.device, this.F, i * 4 * 4, new Float32Array([1, 0, 0, 1]));
     writeFloat32(this.device, this.C, i * 4 * 4, new Float32Array([0, 0, 0, 0]));
-    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0]));
+    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, packRest(new Float32Array([1])));
     this.setActiveCount(this._activeCount + 1);
     return true;
   }

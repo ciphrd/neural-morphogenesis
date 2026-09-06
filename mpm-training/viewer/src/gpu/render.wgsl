@@ -48,8 +48,41 @@ struct ParticleRest {
   growthFrameAngle: f32,
   appearanceScale: f32,
   quadratureWeight: f32,
-  // Transported world-space half edges, row major. Independent of plastic F.
-  domain: vec4<f32>,
+  // Explicit wrapped vertices: domain.xy=A, domain.zw=B, vertexC=C.
+  domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>,
+}
+
+struct DomainOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) world: vec2<f32>,
+}
+
+// True transported triangle, independent of marker size, heading or opacity.
+// Draw neighboring periodic images without wrapping the individual vertices:
+// wrapping endpoints would create false edges across the entire canvas.
+@vertex
+fn domainVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> DomainOut {
+  let rest = particleRest[instanceIndex];
+  let a = rest.domain.xy;
+  // Lift stored endpoints by integer periods only. Rebuilding B/C as A+edge
+  // would reintroduce triangle-dependent rounding in the visible corners.
+  let b = rest.domain.zw-floor(rest.domain.zw-a+vec2<f32>(0.5));
+  let c = rest.vertexC-floor(rest.vertexC-a+vec2<f32>(0.5));
+  let corners = array<vec2<f32>, 3>(a,b,c);
+  let ends = array<u32, 6>(0u, 1u, 1u, 2u, 2u, 0u);
+  let tile = vertexIndex / 6u;
+  let shift = vec2<f32>(f32(i32(tile % 3u)-1), f32(i32(tile / 3u)-1));
+  let world = corners[ends[vertexIndex % 6u]] + shift;
+  var out: DomainOut;
+  out.position = vec4<f32>(viewCenter(world*2.0-vec2<f32>(1.0)), 0.0, 1.0);
+  out.world = world;
+  return out;
+}
+
+@fragment
+fn domainFragment(in: DomainOut) -> @location(0) vec4<f32> {
+  if (any(in.world < vec2<f32>(0.0)) || any(in.world >= vec2<f32>(1.0))) { discard; }
+  return vec4<f32>(0.15, 0.85, 1.0, 0.9);
 }
 
 struct ParticleMeta {

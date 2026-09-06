@@ -393,8 +393,8 @@ struct ParticleRest {
   // Numerical represented-material weight. Refinement divides it between samples;
   // material growth never changes it. q * det(growthF) is represented area.
   quadratureWeight: f32,
-  // Transported world-space half edges, row major. Independent of plastic F.
-  domain: vec4<f32>,
+  // Explicit wrapped vertices: domain.xy=A, domain.zw=B, vertexC=C.
+  domain: vec4<f32>, vertexC: vec2<f32>, domainPadding: vec2<f32>,
 }
 @group(0) @binding(11) var<storage, read_write> particleRest: array<ParticleRest>;
 @group(0) @binding(12) var morphologyTexture: texture_2d<f32>;
