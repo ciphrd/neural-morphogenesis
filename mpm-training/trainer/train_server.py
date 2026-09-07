@@ -8,7 +8,9 @@ import json
 import os
 import shutil
 import traceback
+from time import perf_counter
 from contextlib import asynccontextmanager
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator, Optional
@@ -19,12 +21,10 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from agents_gpu import AgentsGPU
 from chemical_channels import profiles_to_wire
 from debug_images import save_grown_image, save_raster_image
 from density import DENSITY_MODEL_VERSION
 from device import pick_device
-from environment_gpu import EnvironmentGPU
 from evolve import (
     CHECKPOINTS_DIR,
     RASTER_EXTENT,
@@ -32,18 +32,19 @@ from evolve import (
     finalize_density_configuration,
     finalize_policy_configuration,
     get_weights,
-    rollout,
+    initial_population,
     shape_settings,
     report_shape_capacity,
     run_generation,
     set_weights,
     validate_fitness_configuration,
 )
-from mpm_core import PARTICLE_MASS, VOL, MpmCore
+from mpm_core import PARTICLE_MASS, VOL
 from parallel_workers import build_pool
+from rollout_snapshot import RolloutSnapshot
 from policy_parameters import mutation_scales, policy_hidden_dim
 from raster import build_target_distance_field
-from domain_fitness import FITNESS_MODEL_VERSION, target_mask, score_domains
+from domain_fitness import FITNESS_MODEL_VERSION, target_mask
 from simulation_settings import (
     CHEM_CHANNELS,
     CHEMICAL_CHANNEL_PROFILES,
@@ -84,6 +85,11 @@ from update_rule import UpdateRule
 
 parser = build_arg_parser()
 parser.add_argument("--port", type=int, default=CONFIG["server"]["port"])
+parser.add_argument(
+    "--serve-only",
+    action="store_true",
+    help="serve the saved current run and archives without starting training or initializing a GPU",
+)
 
 # `args`/`wgpu_device`/`target`/`target_raster`/`target_distance_field`
 # are set by _setup() below, called only under `if __name__ ==
@@ -118,6 +124,11 @@ target_distance_field = None
 def _setup() -> None:
     global args, wgpu_device, target, target_raster, target_distance_field
     args = parser.parse_args()
+
+    if args.serve_only:
+        _restore_current_run()
+        return
+
     finalize_policy_configuration(args)
 
     if not 1 <= args.elites <= args.population:
@@ -136,13 +147,7 @@ def _setup() -> None:
     # Fixed for this server's lifetime (no target-switching endpoint).
     target = load_target(args.target)
     report_shape_capacity(args, target)
-    # Fixed for this server's lifetime too — precomputed once rather than
-    # recomputing the same thing on every rollout's own fitness-scoring
-    # call AND on every _save_generation_images() debug-raster build (see
-    # that function's own docstring). Passed to build_pool() below (baked
-    # into every worker's own globals — see parallel_workers.py) for the
-    # first use, and used directly, here in the main process, for the
-    # second.
+    # Fixed target fields are shared with workers and preview rendering.
     target_raster = target_mask(target, args.raster_resolution)
     target_distance_field = build_target_distance_field(target_raster)
 
@@ -227,40 +232,11 @@ def _archive_previous_run() -> None:
 
     print(f"[train_server] archived previous run to {archive_dir}")
 
-def _save_generation_images(
-    generation: int, winner_weights: np.ndarray, winner_seed: int, winner_density: float,
-    core: MpmCore, agents: AgentsGPU, environment: EnvironmentGPU
-) -> dict[str, object] | None:
-    """Three PNGs per generation — see debug_images.py's own module
-    docstring for what each one is and why: `..._grown.png` (raw,
-    un-aligned positions), `..._target.png` (the target's own raster,
-    fixed all run), and `..._agents.png` (this winner's own positions,
-    rotated to whichever pose raster.py's own rotation search actually
-    scored it under — literally the same raster training picked this
-    candidate on, meant to sit next to `..._target.png` for a direct
-    visual check). Re-runs the winner's rollout (same weights + seed
-    run_generation already scored it with, so this reproduces the
-    identical final snapshot — see rollout()'s own docstring on
-    reproducibility) since fitnesses from the population loop don't
-    carry final positions along with them."""
+def _save_generation_images(generation: int, snapshot: RolloutSnapshot) -> dict[str, object] | None:
+    """Save the worker's final scoring rasters without replay or rescoring."""
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-
-    _, positions = rollout(
-        winner_weights,
-        target,
-        target_raster,
-        target_distance_field,
-        args,
-        winner_seed,
-        core,
-        agents,
-        environment,
-        return_positions=True,
-        density_multiplier=winner_density,
-    )
-    colors = (agents.read_colors(core.active_count)
-              if target.has_color and args.fitness_color_weight > 0 else None)
-    evaluation = score_domains(core.read_rest_state()[:, 8:14], target, target_raster, args, colors)
+    evaluation = snapshot.evaluation
+    positions = snapshot.positions
     agent_raster, breakdown = evaluation.raster, evaluation.breakdown
 
     prefix = f"gen_{generation:05d}"
@@ -281,12 +257,13 @@ def _save_generation_images(
         "crowding": breakdown.crowding,
         "color": breakdown.color,
         "angle": breakdown.angle,
-        "rollout": core.rollout_diagnostics,
+        "rollout": snapshot.diagnostics,
     }
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    asyncio.create_task(training_loop())
+    if not args.serve_only:
+        asyncio.create_task(training_loop())
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -304,6 +281,29 @@ latest_generation_message: Optional[dict] = None
 # has finished (unlike latest_generation_message above, which stays None
 # until it has). GET /settings below serves this directly.
 settings: Optional[dict] = None
+
+def _restore_current_run() -> None:
+    """Restore read-only API state without mutating checkpoints or touching the GPU."""
+    global settings, latest_generation_message, target
+
+    if not SETTINGS_PATH.is_file():
+        print("[train_server] serve-only mode: no saved current run; serving archives")
+        return
+
+    try:
+        settings = json.loads(SETTINGS_PATH.read_text())
+    except (json.JSONDecodeError, OSError) as error:
+        raise SystemExit(f"cannot read saved run settings from {SETTINGS_PATH}: {error}") from error
+
+    target_name = settings.get("target")
+    if target_name not in available_targets():
+        raise SystemExit(f"saved run refers to unavailable target {target_name!r}")
+    target = load_target(target_name)
+
+    generations = _history_payload(HISTORY_PATH)["generations"]
+    latest_generation_message = generations[-1] if generations else None
+    generation = latest_generation_message["generation"] if latest_generation_message else "none"
+    print(f"[train_server] serve-only mode: restored current run (latest generation: {generation})")
 
 async def broadcast(message: dict) -> None:
     dead = set()
@@ -332,27 +332,14 @@ async def _training_loop_body() -> None:
     torch.manual_seed(args.seed)
     policy_hidden = policy_hidden_dim(args.policy_architecture)
 
-    # One MpmCore/AgentsGPU/EnvironmentGPU (wgpu pipeline compilation is
-    # real, avoidable overhead — see evolve.py's own module docstring),
-    # used ONLY for _save_generation_images()'s own single-candidate
-    # winner replay below — the hot per-generation path runs on `pool`
-    # instead (see parallel_workers.py's own module docstring for why a
-    # persistent multi-process pool replaced a single reused triple
-    # there). `update_rule` is a CPU-only scratch nn.Module used ONLY for
-    # random weight initialization (below) and checkpoint JSON export
-    # (below) — never a live forward pass, see training_sim.py's own
-    # module docstring.
-    core = MpmCore(wgpu_device)
-    environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE, args.chemical_communication_architecture, NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY, grid_velocity=core.grid_vel, channel_profiles=CHEMICAL_CHANNEL_PROFILES)
-    agents = AgentsGPU(wgpu_device, core, environment, CHEM_CHANNELS, policy_hidden, MAX_ENV_WRITE, args.particle_capacity, SAMPLE_SPACING, FRICTION, 1.0, args.spawn_x, args.spawn_y, policy_architecture=args.policy_architecture, chemical_communication_architecture=args.chemical_communication_architecture)
     num_workers = args.workers if args.workers is not None else min(os.cpu_count() or 4, args.population)
     # log_device=False — _setup() already logged the "[device] adapter:
     # ..." confirmation once, above, for this process's own wgpu_device;
     # see build_pool()'s own docstring for why it would otherwise repeat
     # that exact line a second time.
+    population = initial_population(args, rng)
     pool = build_pool(num_workers, args.particle_capacity, target, target_raster, target_distance_field, args, log_device=False)
     update_rule = UpdateRule(CHEM_CHANNELS, args.policy_architecture)
-    population = [get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture)) for _ in range(args.population)]
 
     CHECKPOINTS_DIR.mkdir(exist_ok=True)
     _archive_previous_run()
@@ -438,6 +425,10 @@ async def _training_loop_body() -> None:
         "seedsPerCandidate": args.seeds_per_candidate,
         "elites": args.elites,
         "mutationSigma": args.mutation_sigma,
+        "mutationFactors": list(getattr(args, "mutation_factors", [1.])),
+        "initialWeights": str(args.initial_weights) if getattr(args, "initial_weights", None) else None,
+        "fitnessAlignment": getattr(args, "fitness_alignment", "raster"),
+        "deterministicReference": getattr(args, "deterministic_reference", False),
         "rasterResolution": args.raster_resolution,
         "outsideWeight": args.outside_weight,
         "fitnessColorWeight": args.fitness_color_weight,
@@ -461,13 +452,14 @@ async def _training_loop_body() -> None:
     best_evaluation_seeds: list[int] = []
 
     for generation in range(args.generations):
+        generation_started = perf_counter()
         # Off the event loop thread — run_generation blocks for the whole
         # generation (waiting on pool.map() across every worker process,
         # see parallel_workers.py's own module docstring), and doing that
         # directly on the event loop thread would stall websocket message
         # flushing for as long as it takes.
-        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses = await asyncio.to_thread(
-            run_generation, population, args, rng, pool
+        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses, snapshot = await asyncio.to_thread(
+            run_generation, population, args, rng, pool, return_snapshot=True
         )
 
         winner_weights = population[0]
@@ -479,15 +471,13 @@ async def _training_loop_body() -> None:
             best_density_fitnesses = dict(density_fitnesses)
             best_evaluation_seeds = list(evaluation_seeds)
 
-        # Also off the event loop thread — re-runs the winner's rollout
-        # once more (see _save_generation_images()'s own docstring) plus
-        # PNG encoding/disk I/O, neither of which should stall websocket
-        # message flushing either.
+        # Only PNG encoding and disk I/O remain; reuse the worker's scored state.
+        preview_started = perf_counter()
         final_snapshot_fitness = await asyncio.to_thread(
-            _save_generation_images, generation, winner_weights, winner_seed, winner_density,
-            core, agents, environment,
+            _save_generation_images, generation, snapshot,
         )
 
+        preview_seconds = perf_counter()-preview_started
         finite = [f for f in fitnesses if np.isfinite(f)]
         print(
             f"gen {generation:4d}  best {fitnesses[0]:.4f}  mean {np.mean(finite) if finite else float('inf'):.4f}  "
@@ -545,10 +535,7 @@ async def _training_loop_body() -> None:
             # currently viewing (net/images.ts's generationImageUrl()),
             # same as envnca/frontend's own net/images.ts already does.
         }
-        with HISTORY_PATH.open("a") as f:
-            f.write(json.dumps(latest_generation_message) + "\n")
-        await broadcast(latest_generation_message)
-
+        checkpoint_started = perf_counter()
         if (generation + 1) % args.checkpoint_every == 0 or generation == args.generations - 1:
             np.save(CHECKPOINTS_DIR / "best.npy", best_weights)
             set_weights(update_rule, best_weights)
@@ -560,20 +547,43 @@ async def _training_loop_body() -> None:
                 )
             )
 
+        checkpoint_seconds = perf_counter()-checkpoint_started
+        elapsed = perf_counter()-generation_started
+        timing = dict(snapshot.generation_timings)
+        timing.update({"seconds": elapsed, "previewSeconds": preview_seconds,
+                       "checkpointSeconds": checkpoint_seconds,
+                       "otherSeconds": max(0., elapsed-timing["poolSeconds"]-timing["selectionSeconds"]-preview_seconds-checkpoint_seconds)})
+        latest_generation_message["timing"] = timing
+        print(f"[timing] generation {generation}: {elapsed:.2f}s; pool {timing['poolSeconds']:.2f}s; "
+              f"preview {preview_seconds:.3f}s; longest rollout {timing['rollouts']['maxSeconds']:.2f}s")
+        with HISTORY_PATH.open("a") as f:
+            f.write(json.dumps(latest_generation_message) + "\n")
+        await broadcast(latest_generation_message)
+
     pool.shutdown()
     print(f"done. best fitness: {best_fitness:.4f}. weights saved to {CHECKPOINTS_DIR / 'best.npy'}")
 
+def _history_payload(path: Path) -> dict:
+    """Keep all compact timing records, but cap expensive weight snapshots."""
+    generations = deque(maxlen=MAX_HISTORY)
+    timings = {}
+    if path.is_file():
+        with path.open() as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # A concurrent append can leave an incomplete last line.
+                generations.append(record)
+                if record.get("timing") is not None:
+                    timings[record["generation"]] = {"generation": record["generation"], "timing": record["timing"]}
+    return {"generations": list(generations), "timings": [timings[key] for key in sorted(timings)]}
+
 @app.get("/history")
 def history() -> dict:
-    """Every generation persisted so far — the frontend fetches this once
-    on mount to backfill its chart/gallery state before the live
-    websocket picks up from wherever the run currently is. Capped to
-    MAX_HISTORY so the response stays bounded regardless of how long the
-    on-disk log has grown."""
-    if not HISTORY_PATH.is_file():
-        return {"generations": []}
-    lines = [line for line in HISTORY_PATH.read_text().splitlines() if line]
-    return {"generations": [json.loads(line) for line in lines[-MAX_HISTORY:]]}
+    return _history_payload(HISTORY_PATH)
 
 @app.get("/settings")
 def get_settings() -> dict:
@@ -606,7 +616,10 @@ def run_settings(run_id: str) -> dict:
 @app.get("/target/points")
 def target_points() -> dict:
     """This server only ever has the one target it was launched with."""
-    return {"points": target.overlay_points(args.raster_resolution).tolist()}
+    if target is None:
+        raise HTTPException(503, "no saved current run is available")
+    resolution = settings.get("rasterResolution", args.raster_resolution) if settings else args.raster_resolution
+    return {"points": target.overlay_points(resolution).tolist()}
 
 @app.get("/targets/{name}/points")
 def named_target_points(name: str) -> dict:
@@ -732,10 +745,7 @@ def run_history(run_id: str) -> dict:
     if run_dir is None:
         raise HTTPException(404, f"unknown run '{run_id}'")
     history_path = run_dir / "history.jsonl"
-    if not history_path.is_file():
-        return {"generations": []}
-    lines = [line for line in history_path.read_text().splitlines() if line]
-    return {"generations": [json.loads(line) for line in lines[-MAX_HISTORY:]]}
+    return _history_payload(history_path)
 
 def _images_dir_for_run(run_id: str) -> Path:
     """Shared by run_preview() and run_image() below — "current" is the

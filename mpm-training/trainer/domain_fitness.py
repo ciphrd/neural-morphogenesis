@@ -246,7 +246,14 @@ def stopping_from_args(args):
                           args.shape_spill_tolerance, args.shape_overlap_tolerance)
 
 def score_domains(vertices, target, mask, args, colors=None):
-    return evaluate_domains(vertices, target, mask, coverage_weight=args.fitness_coverage_weight,
+    alignment = getattr(args, "fitness_alignment", "raster")
+    evaluator = evaluate_domains
+    if alignment == "geometry":
+        from detail_alignment import evaluate_precise
+        evaluator = evaluate_precise
+    elif alignment != "raster":
+        raise ValueError(f"unknown fitness alignment: {alignment}")
+    return evaluator(vertices, target, mask, coverage_weight=args.fitness_coverage_weight,
         spill_weight=args.fitness_spill_weight, boundary_weight=args.fitness_boundary_weight,
         crowding_weight=args.fitness_crowding_weight, outside_weight=args.outside_weight,
         colors=colors, color_weight=getattr(args, "fitness_color_weight", 1.0))

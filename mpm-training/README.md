@@ -11,6 +11,13 @@ python3 -m venv .venv
 .venv/bin/python train_server.py --target circle
 ```
 
+To serve the saved current run and archived runs without starting training or
+initializing a GPU, use:
+
+```sh
+.venv/bin/python train_server.py --serve-only
+```
+
 In another terminal:
 
 ```sh

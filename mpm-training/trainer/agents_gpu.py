@@ -312,7 +312,7 @@ class AgentsGPU:
         self._growth_field = core.growth_field
         refine_capacity = self._particle_capacity
         refine_hash_size = 1 << (6 * refine_capacity - 1).bit_length()
-        refine_words = refine_hash_size + 5 * refine_capacity + 1
+        refine_words = refine_hash_size + 5 * refine_capacity + 2
         self._refinement = device.create_buffer(
             label="conforming refinement scratch", size=4 * refine_words,
             usage=wgpu.BufferUsage.STORAGE,
@@ -341,7 +341,8 @@ class AgentsGPU:
             ("requestRefinement", (1, 2, 3, 7, 9), None),
             ("reserveRefinement", (1, 2, 3, 7, 9), None),
             ("commitResample", (0, 1, 2, 3, 4, 5, 6, 7), None),
-            ("pruneMaterial", (0, 2, 3, 4, 5, 6), 1),
+            ("classifyPruning", (2, 3, 7), None),
+            ("pruneMaterial", (0, 2, 3, 4, 5, 6, 7), 1),
             ("stopGrowthAtCapacity", (3, 7, 8, 9), ceil_div(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)),
         ]
         pipelines = {entry: device.create_compute_pipeline(
@@ -568,17 +569,17 @@ class AgentsGPU:
             self._growth_field, 0, np.zeros(self._growth_field.size // 4, dtype=np.int32)
         )
 
-    def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int, *, commit_growth: bool = True) -> None:
-        p = encoder.begin_compute_pass()
+    def encode_step(self, encoder: wgpu.GPUCommandEncoder, parity: int, *, commit_growth: bool = True, gpu_timings=None) -> None:
+        p = gpu_timings.begin_compute_pass(encoder, "gpuNeural") if gpu_timings is not None else encoder.begin_compute_pass()
         p.set_pipeline(self._pipeline)
         groups = self._commit_bind_groups if commit_growth else self._communication_bind_groups
         p.set_bind_group(0, groups[parity])
         p.dispatch_workgroups(self._dispatch)
         p.end()
         if commit_growth:
-            self.encode_growth_field(encoder)
+            self.encode_growth_field(encoder, gpu_timings=gpu_timings)
 
-    def encode_growth_field(self, encoder: wgpu.GPUCommandEncoder) -> None:
+    def encode_growth_field(self, encoder: wgpu.GPUCommandEncoder, *, gpu_timings=None) -> None:
         """Splat growth intent and conservatively refine under-resolved footprints."""
         propagation_round = 0
         for entry, pipeline, bind_group, fixed_dispatch in zip(
@@ -588,7 +589,7 @@ class AgentsGPU:
                 propagation_round += 1
                 if propagation_round > self._refinement_rounds:
                     continue
-            p = encoder.begin_compute_pass()
+            p = gpu_timings.begin_compute_pass(encoder, "gpuGrowth:" + entry) if gpu_timings is not None else encoder.begin_compute_pass()
             p.set_pipeline(pipeline)
             p.set_bind_group(0, bind_group)
             p.dispatch_workgroups(self._dispatch if fixed_dispatch is None else fixed_dispatch)

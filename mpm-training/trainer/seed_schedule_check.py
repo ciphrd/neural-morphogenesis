@@ -15,8 +15,8 @@ class RecordingPool:
     def __init__(self) -> None:
         self.calls: list[tuple[int, int]] = []
 
-    def map(self, function, weights, seeds, densities):
-        return [function(weight, seed, density) for weight, seed, density in zip(weights, seeds, densities)]
+    def map(self, function, *iterables):
+        return [function(*values) for values in zip(*iterables)]
 
 def check_shared_rotating_seed_batch() -> None:
     args = SimpleNamespace(

@@ -1,3 +1,4 @@
+import { TrainingTimingPanel, TimingHistoryChart } from "./ui/TrainingTimingPanel"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import canonicalConfig from "../../core/config.json"
@@ -104,9 +105,11 @@ export function TrainingView() {
       cancelled = true
     }
   }, [viewingRunId])
-  const { history, latest, configByGeneration } =
+  const { history, timingHistory, latest, configByGeneration } =
     viewingRunId === null ? liveState : archivedState
 
+  const [chartTab, setChartTab] = useState<"fitness" | "timing">("fitness")
+  const [timingScope, setTimingScope] = useState("gpu-all")
   const [selectedGeneration, setSelectedGeneration] = useState<number | null>(
     null
   )
@@ -1709,6 +1712,25 @@ export function TrainingView() {
           </div>
         </div>
         <div className="training-timeline">
+          <div className="training-chart-tabs" role="tablist" aria-label="Training charts">
+            {(["fitness", "timing"] as const).map(tab => <button key={tab}
+              id={`chart-tab-${tab}`} role="tab" aria-selected={chartTab === tab}
+              aria-controls={`chart-panel-${tab}`} tabIndex={chartTab === tab ? 0 : -1}
+              onClick={() => setChartTab(tab)}
+              onKeyDown={event => {
+                if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+                  event.preventDefault()
+                  const next = event.key === "Home" ? "fitness" : event.key === "End" ? "timing" : tab === "fitness" ? "timing" : "fitness"
+                  setChartTab(next)
+                  document.getElementById(`chart-tab-${next}`)?.focus()
+                }
+              }}>{tab === "fitness" ? "Fitness" : "Timing"}</button>)}
+            {chartTab === "timing" && <select aria-label="Timing chart scope" value={timingScope} onChange={e => setTimingScope(e.target.value)}>
+              <option value="all">CPU time + waits · all workers</option><option value="winner">CPU time + waits · winner</option>
+              <option value="gpu-all">GPU pass details · all workers</option><option value="gpu-winner">GPU pass details · winner</option>
+            </select>}
+          </div>
+          <div id="chart-panel-fitness" role="tabpanel" aria-labelledby="chart-tab-fitness" hidden={chartTab !== "fitness"}>
           <FitnessChart
             history={history}
             selectedGeneration={selectedGeneration}
@@ -1722,6 +1744,10 @@ export function TrainingView() {
               )
             }
           />
+          </div>
+          <div id="chart-panel-timing" role="tabpanel" aria-labelledby="chart-tab-timing" hidden={chartTab !== "timing"}>
+            <TimingHistoryChart history={timingHistory} scope={timingScope} />
+          </div>
         </div>
       </div>
       <div className="controls-right">
@@ -1749,6 +1775,8 @@ export function TrainingView() {
             <span>{activeStat ? activeStat.worst.toFixed(3) : "—"}</span>
           </div>
         </section>
+
+        <TrainingTimingPanel history={timingHistory} scope={timingScope} onScopeChange={setTimingScope} />
 
         <section>
           <h2>Snapshot</h2>

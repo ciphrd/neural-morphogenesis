@@ -16,10 +16,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { randomWeights } from "../gpu/agents";
-import type { GenerationRecord, RunSettings, SimulationConfig } from "../gpu/types";
+import type { TimingEntry, GenerationTiming, GenerationRecord, RunSettings, SimulationConfig } from "../gpu/types";
 import { DEFAULT_RUN_SETTINGS, loadInitialRunSettings } from "./settingsStorage";
 
 export interface GenerationStat {
+  timing?: GenerationTiming;
   generation: number;
   best: number;
   mean: number;
@@ -29,6 +30,7 @@ export interface GenerationStat {
 
 export interface TrainingSocketState {
   history: GenerationStat[];
+  timingHistory: TimingEntry[];
   latest: SimulationConfig | null;
   configByGeneration: Map<number, SimulationConfig>;
 }
@@ -38,7 +40,7 @@ export interface LiveTrainingSocketState extends TrainingSocketState {
   serverConnected: boolean;
 }
 
-export const EMPTY_STATE: TrainingSocketState = { history: [], latest: null, configByGeneration: new Map() };
+export const EMPTY_STATE: TrainingSocketState = { history: [], timingHistory: [], latest: null, configByGeneration: new Map() };
 const MAX_HISTORY = 500;
 
 // Never a real generation number (train_server.py's own counter starts
@@ -67,6 +69,7 @@ function placeholderRecord(settings: RunSettings): GenerationRecord {
 export interface Accumulator {
   settings: RunSettings | null;
   records: Map<number, GenerationRecord>;
+  timings?: Map<number, GenerationTiming>;
 }
 export const EMPTY_ACCUMULATOR: Accumulator = { settings: null, records: new Map() };
 
@@ -92,7 +95,17 @@ export function applyGeneration(prev: Accumulator, message: GenerationRecord): A
     // multi-drop slice dance.
     records.delete(Math.min(...records.keys()));
   }
-  return { ...prev, records };
+  const timings = new Map(prev.timings);
+  if (message.timing) timings.set(message.generation, message.timing);
+  return { ...prev, records, timings };
+}
+
+export function applyHistory(prev: Accumulator, data: { generations: GenerationRecord[]; timings?: TimingEntry[] }): Accumulator {
+  const timings = new Map(prev.timings);
+  for (const entry of data.timings ?? []) {
+    if (!timings.has(entry.generation)) timings.set(entry.generation, entry.timing);
+  }
+  return data.generations.reduce<Accumulator>((acc, message) => applyGeneration(acc, message), { ...prev, timings });
 }
 
 /** The one place settings + every known generation record get merged
@@ -102,10 +115,11 @@ export function applyGeneration(prev: Accumulator, message: GenerationRecord): A
  * applyGeneration() above can stay plain, mechanical reducers. */
 export function deriveState(acc: Accumulator): TrainingSocketState {
   const history: GenerationStat[] = Array.from(acc.records.values())
-    .map((r) => ({ generation: r.generation, best: r.best, mean: r.mean, worst: r.worst, allTimeBest: r.allTimeBest }))
+    .map((r) => ({ generation: r.generation, best: r.best, mean: r.mean, worst: r.worst, allTimeBest: r.allTimeBest, timing: r.timing }))
     .sort((a, b) => a.generation - b.generation);
 
-  if (!acc.settings) return { history, latest: null, configByGeneration: new Map() };
+  const timingHistory = Array.from(acc.timings ?? []).map(([generation, timing]) => ({ generation, timing })).sort((a, b) => a.generation - b.generation);
+  if (!acc.settings) return { history, timingHistory, latest: null, configByGeneration: new Map() };
 
   const configByGeneration = new Map<number, SimulationConfig>();
   for (const record of acc.records.values()) {
@@ -126,7 +140,7 @@ export function deriveState(acc: Accumulator): TrainingSocketState {
         // point for it.
         { ...acc.settings, ...placeholderRecord(acc.settings) };
 
-  return { history, latest, configByGeneration };
+  return { history, timingHistory, latest, configByGeneration };
 }
 
 export function useTrainingSocket(wsUrl: string, apiUrl: string): LiveTrainingSocketState {
@@ -174,9 +188,9 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): LiveTrainingSo
     let cancelled = false;
     fetch(`${apiUrl}/history`)
       .then((res) => res.json())
-      .then((data: { generations: GenerationRecord[] }) => {
+      .then((data: { generations: GenerationRecord[]; timings?: TimingEntry[] }) => {
         if (cancelled) return;
-        setAcc((prev) => data.generations.reduce((a, message) => applyGeneration(a, message), prev));
+        setAcc((prev) => applyHistory(prev, data));
       })
       .catch((err) => console.error("[trainingSocket] history backfill failed:", err));
     return () => {
@@ -188,11 +202,20 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): LiveTrainingSo
     let cancelled = false;
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let hadConnection = false;
 
     const connect = () => {
       ws = new WebSocket(wsUrl);
       ws.onopen = () => {
-        if (!cancelled) setServerConnected(true);
+        if (!cancelled) {
+          setServerConnected(true);
+          if (hadConnection) {
+            fetch(`${apiUrl}/history`).then(res => res.json()).then(data => {
+              if (!cancelled) setAcc(prev => applyHistory(prev, data));
+            }).catch(err => console.error("[trainingSocket] timing/history reconnect failed:", err));
+          }
+          hadConnection = true;
+        }
       };
       ws.onmessage = (event: MessageEvent<string>) => {
         let message: GenerationRecord & { type?: string };

@@ -15,8 +15,12 @@ from density import DENSITY_MODEL_VERSION, INITIAL_SPACING_IN_SAMPLE_SPACINGS, D
 from environment_gpu import EnvironmentGPU
 from mpm_core import MAX_PARTICLES, PARTICLE_MASS, VOL, MpmCore
 from parallel_workers import build_pool, worker_rollout
+from rollout_snapshot import RolloutSnapshot
+from timing import Timings, aggregate_rollouts
+from gpu_timing import GpuTimings
+from time import perf_counter
 from raster import build_target_distance_field
-from domain_fitness import FITNESS_MODEL_VERSION, target_mask, score_domains, stopping_from_args
+from domain_fitness import FITNESS_MODEL_VERSION, target_mask, score_domains
 from simulation_settings import (
     CHEM_CHANNELS,
     CHEMICAL_CHANNEL_PROFILES,
@@ -155,6 +159,25 @@ def estimated_sample_capacity(args, target):
     spacing = resolve_run_density(args, 1.0).spacing
     return max(2 * args.initial_particles, int(np.ceil(2 * target.filled_area() / spacing**2)))
 
+def offspring_sigma(args, index):
+    factors = getattr(args, "mutation_factors", (1.,))
+    return args.mutation_sigma * factors[index % len(factors)]
+
+def initial_population(args, rng):
+    """Start a new objective from random policies or an explicitly supplied parent."""
+    path = getattr(args, "initial_weights", None)
+    if path is None:
+        return [get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture)) for _ in range(args.population)]
+    weights = np.load(path, allow_pickle=False)
+    expected = mutation_scale_vector(CHEM_CHANNELS, policy_hidden_dim(args.policy_architecture), args.policy_architecture)
+    if weights.shape != expected.shape or not np.isfinite(weights).all():
+        raise ValueError(f"initial weights must be {expected.size} finite parameters for {args.policy_architecture}")
+    weights = weights.astype(np.float32)
+    if not np.isfinite(weights).all():
+        raise ValueError("initial weights overflow float32")
+    return [weights.copy()] + [mutate(weights, offspring_sigma(args, i), rng, args.policy_architecture)
+                               for i in range(args.population-1)]
+
 def report_shape_capacity(args, target):
     if target.filled_area() <= 0:
         raise SystemExit("training target must contain at least one filled texel")
@@ -168,7 +191,7 @@ def shape_settings(args, target):
     """Wire settings also embed target geometry for autonomous offline playback."""
     return {
         "estimatedSampleCapacity": estimated_sample_capacity(args, target),
-        "stableStop": args.stable_stop,
+        "stableStop": False,
         "shapeCheckInterval": args.shape_check_interval,
         "shapeConfirmations": args.shape_confirmations,
         "shapeSettleSteps": args.shape_settle_steps,
@@ -196,15 +219,18 @@ def rollout(
     environment: EnvironmentGPU,
     return_positions: bool = False,
     density_multiplier: float = 1.0,
-) -> float | tuple[float, np.ndarray]:
-    """Evaluate material domains over the late window, or a confirmed settling window.
+    return_snapshot: bool = False,
+) -> float | tuple[float, np.ndarray] | RolloutSnapshot:
+    """Score late-window and terminal states; stop at capacity or low growth.
 
-    Periodic successful matches stop growth. Failed settling resumes growth;
-    reaching the rollout horizon alone never declares success. Reaching the
-    sample cap terminates immediately after the current macro step and scores
-    that terminal state; the already-required growth-count readback supplies
-    the stop signal without an additional host/device synchronization.
+    Optional snapshots retain the final scoring rasters for server previews.
     """
+    timings = Timings()
+    if "gpu_timings" not in core.__dict__:
+        core.gpu_timings = GpuTimings(core.device)
+    gpu_timings = core.gpu_timings
+    gpu_timings.interval = getattr(args, "gpu_timing_interval", 20)
+    gpu_timings.reset()
     agents.load_weights(weights)
     density = resolve_run_density(args, density_multiplier)
     if density.particle_cap > agents.particle_capacity:
@@ -245,9 +271,22 @@ def rollout(
         initial_spacing=density.initial_spacing,
     )
 
+    timings.add("setup", perf_counter()-timings.started)
+    sim.timings = timings
+    sim.gpu_timings = gpu_timings
+
+    def score_snapshot():
+        with timings.measure("geometryReadback"):
+            vertices = core.read_rest_state()[:, 8:14]
+        colors = None
+        if train_color:
+            with timings.measure("colorReadback"):
+                colors = agents.read_colors(core.active_count)
+        with timings.measure("fitness"):
+            return score_domains(vertices, target, target_raster, args, colors)
+
     checkpoint_steps = {max(1, round(args.macro_steps * (1.0 - offset))) for offset in CAPTURE_OFFSETS}
     scores = []
-    stopping = stopping_from_args(args)
     last_evaluation = None
     step = 0
     train_color = target.has_color and args.fitness_color_weight > 0
@@ -257,42 +296,30 @@ def rollout(
     if stopped_at_capacity:
         # An exactly-full initial seed is already terminal. This geometry read
         # is the one required final fitness sample, not a per-step poll.
-        last_evaluation = score_domains(
-            core.read_rest_state()[:, 8:14], target, target_raster, args,
-            agents.read_colors(core.active_count) if train_color else None)
+        last_evaluation = score_snapshot()
         scores.append(last_evaluation.total)
     else:
         for step in range(1, args.macro_steps + 1):
-            sim.macro_step(args.substeps_per_macro, growth_enabled=stopping.growth_enabled and
-                           (args.growth_steps is None or step <= args.growth_steps))
+            sim.macro_step(args.substeps_per_macro, growth_enabled=(args.growth_steps is None or step <= args.growth_steps))
             # macro_step() already read and cached these values to size the next
             # GPU dispatch. Capacity termination therefore adds no bridge read.
             stopped_at_capacity = (
                 core.active_count >= agents.max_active_particles or agents.capacity_blocked
             )
             stopped_for_low_growth = step == 200 and core.active_count*10 < initial_sample_count*11
-            if stopped_at_capacity or stopped_for_low_growth or step in checkpoint_steps or stopping.due(step):
-                vertices = core.read_rest_state()[:, 8:14]
-                last_evaluation = score_domains(
-                    vertices, target, target_raster, args,
-                    agents.read_colors(core.active_count) if train_color else None)
-                if stopped_at_capacity or stopped_for_low_growth or step in checkpoint_steps:
-                    scores.append(last_evaluation.total)
+            if stopped_at_capacity or stopped_for_low_growth or step in checkpoint_steps:
+                last_evaluation = score_snapshot()
+                scores.append(last_evaluation.total)
                 if stopped_at_capacity or stopped_for_low_growth:
                     break
-                if stopping.due(step) and stopping.observe(step, last_evaluation.match, last_evaluation.total,
-                        sampling_blocked=core.active_count >= agents.max_active_particles or agents.capacity_blocked or agents.unresolved_samples > 0):
-                    scores = stopping.settling_scores
-                    break
     fitness = _aggregate_scores(scores, args)
-    # Exposed to deterministic winner replay/debug callers without changing
-    # the scalar worker protocol or existing return_positions callers.
+    # Preserve replay diagnostics and existing scalar/position callers.
     core.rollout_diagnostics = {
-        "steps": step, "stableMatch": stopping.complete,
-        "settling": stopping.settling_since is not None and not stopping.complete,
+        "steps": step, "stableMatch": False,
+        "settling": False,
         "capacityBlocked": bool(agents.capacity_blocked),
         "atCapacity": core.active_count >= agents.max_active_particles,
-        "stopReason": "capacity" if stopped_at_capacity else ("low-growth" if stopped_for_low_growth else ("stable-match" if stopping.complete else "horizon")),
+        "stopReason": "capacity" if stopped_at_capacity else ("low-growth" if stopped_for_low_growth else "horizon"),
         "initialSamples": initial_sample_count,
         "finalSamples": core.active_count,
         "unresolvedSamples": int(agents.unresolved_samples),
@@ -300,14 +327,23 @@ def rollout(
         "spill": last_evaluation.match.spill,
         "overlap": last_evaluation.match.overlap,
     }
-    return (fitness, sim.positions()) if return_positions else fitness
+    positions = None
+    if return_snapshot or return_positions:
+        with timings.measure("positionsReadback"):
+            positions = sim.positions()
+    core.rollout_timings = timings.report()
+    core.rollout_timings["gpu"] = gpu_timings.report()
+    if return_snapshot:
+        return RolloutSnapshot(fitness, last_evaluation, positions, dict(core.rollout_diagnostics), core.rollout_timings)
+    return (fitness, positions) if return_positions else fitness
 
 def run_generation(
     population: list[np.ndarray],
     args: argparse.Namespace,
     rng: np.random.Generator,
     pool: ProcessPoolExecutor,
-) -> tuple[list[np.ndarray], list[float], int, float, list[int], dict[str, float]]:
+    return_snapshot: bool = False,
+) -> tuple:
     """Evaluates every candidate on the same rotating seed batch.
 
     A fresh batch is drawn from the run RNG once per generation, then every
@@ -326,20 +362,16 @@ def run_generation(
     own module docstring) — then sorts best-first and refills back up to
     `args.population` via elitism + Gaussian mutation of a randomly-
     chosen elite — plain (mu, lambda) ES, no memetic refinement. Returns
-    (next_population, fitnesses, winner_seed, evaluation_seeds) — `fitnesses` are for the
-    population just evaluated, sorted ascending (lower raster distance is
-    better — see raster.py); `next_population[0]` is this generation's
-    winning weights, carried over unmutated; `winner_seed` is the winning
-    candidate's worst-scoring seed from the shared batch — needed by callers
-    (train_server.py)
-    that want to reproduce this generation's *actual* winning rollout,
-    not just its weights, for a debug render (via rollout(), a single,
-    non-pooled replay — see that function's own docstring).
+    the next population, sorted fitnesses, representative seed/density, seed
+    batch, and per-density scores. With return_snapshot, also return the
+    winning candidate's worst-scoring seed/density terminal snapshot, already
+    rasterized by its worker. Ties preserve the original task order.
 
     `target` is NOT passed here — it's baked into each worker's own
     globals once, at pool creation (parallel_workers.build_pool()'s own
     initializer), since it never changes generation to generation and
     re-sending it with every task would be pure waste."""
+    generation_started = perf_counter()
     seeds_per_candidate = max(1, int(getattr(args, "seeds_per_candidate", 1)))
     evaluation_seeds = [
         int(seed) for seed in rng.integers(0, 2**31 - 1, size=seeds_per_candidate)
@@ -354,9 +386,16 @@ def run_generation(
     task_seeds = [
         seed for _weights in population for _q in densities for seed in evaluation_seeds
     ]
-    rollout_fitnesses = np.asarray(
-        list(pool.map(worker_rollout, task_weights, task_seeds, task_densities)), dtype=np.float64
-    ).reshape(len(population), len(densities), seeds_per_candidate)
+    pool_started = perf_counter()
+    if return_snapshot:
+        results = list(pool.map(worker_rollout, task_weights, task_seeds, task_densities,
+                                [True] * len(task_weights)))
+        values = [result.fitness for result in results]
+    else:
+        values = list(pool.map(worker_rollout, task_weights, task_seeds, task_densities))
+    pool_seconds = perf_counter()-pool_started
+    rollout_fitnesses = np.asarray(values, dtype=np.float64).reshape(
+        len(population), len(densities), seeds_per_candidate)
     per_density_fitnesses = np.mean(rollout_fitnesses, axis=2)
     fitnesses = (
         np.max(per_density_fitnesses, axis=1)
@@ -376,6 +415,11 @@ def run_generation(
         f"{q:g}": float(per_density_fitnesses[int(order[0]), density_index])
         for density_index, q in enumerate(densities)
     }
+    winner_snapshot = None
+    if return_snapshot:
+        candidate_index = int(order[0])
+        case_index = int(np.argmax(rollout_fitnesses[candidate_index]))
+        winner_snapshot = results[candidate_index * len(densities) * seeds_per_candidate + case_index]
     population = [population[i] for i in order]
     fitnesses = [float(fitnesses[i]) for i in order]
     representative_cases = [representative_cases[i] for i in order]
@@ -384,13 +428,21 @@ def run_generation(
     next_population = list(elites)
     while len(next_population) < args.population:
         parent = elites[rng.integers(len(elites))]
-        next_population.append(mutate(parent, args.mutation_sigma, rng, args.policy_architecture))
+        next_population.append(mutate(parent, offspring_sigma(args, len(next_population)-len(elites)), rng, args.policy_architecture))
 
     winner_seed, winner_density = representative_cases[0]
-    return (
+    result = (
         next_population, fitnesses, winner_seed, winner_density,
         evaluation_seeds, winner_density_fitnesses,
     )
+    if return_snapshot:
+        winner_snapshot.generation_timings = {
+            "poolSeconds": pool_seconds,
+            "selectionSeconds": perf_counter()-generation_started-pool_seconds,
+            "rollouts": aggregate_rollouts([item.timings for item in results]),
+            "winner": winner_snapshot.timings,
+        }
+    return (*result, winner_snapshot) if return_snapshot else result
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -487,8 +539,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="optional last macro step in which agents may start new cell cycles; omitted means no time cutoff",
     )
-    parser.add_argument("--stable-stop", action=argparse.BooleanOptionalAction, default=DEFAULT_RUN_SETTINGS["stableStop"],
-                        help="stop after repeated good shape matches and growth-free settling")
+    parser.add_argument("--stable-stop", action=argparse.BooleanOptionalAction, default=False,
+                        help="deprecated compatibility option; training no longer checks stable matches")
     parser.add_argument("--shape-check-interval", type=int, default=DEFAULT_RUN_SETTINGS["shapeCheckInterval"])
     parser.add_argument("--shape-confirmations", type=int, default=DEFAULT_RUN_SETTINGS["shapeConfirmations"])
     parser.add_argument("--shape-settle-steps", type=int, default=DEFAULT_RUN_SETTINGS["shapeSettleSteps"])
@@ -507,6 +559,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--spawn-x", type=float, default=DEFAULT_RUN_SETTINGS["spawnX"])
     parser.add_argument("--spawn-y", type=float, default=DEFAULT_RUN_SETTINGS["spawnY"])
     parser.add_argument("--mutation-sigma", type=float, default=DEFAULT_RUN_SETTINGS["mutationSigma"])
+    parser.add_argument("--mutation-factors", type=float, nargs="+", default=[1.],
+        help="cycle offspring through these sigma multipliers, e.g. 1 .1 .01 .001; elites are preserved")
+    parser.add_argument("--initial-weights", type=Path,
+        help="start a new run from this flat .npy policy; select its matching architecture; scores are reevaluated")
+    parser.add_argument("--fitness-alignment", choices=("raster", "geometry"), default="raster",
+        help="raster uses fast image rotation; geometry refines pose with exact triangle integration (slower)")
     parser.add_argument(
         "--raster-resolution",
         type=int,
@@ -522,6 +580,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "inside the spill term (0 keeps occupancy spill but disables distance growth)"
         ),
     )
+    parser.add_argument("--gpu-timing-interval", type=int, default=20,
+        help="sample GPU stage intervals every N macro steps; 0 disables GPU timestamps")
+    parser.add_argument("--deterministic-reference", action="store_true",
+        help="slow native-GPU reference: order physics/chemical float reductions by sample index; not cross-device bit parity")
     parser.add_argument("--fitness-color-weight", type=float, default=1.0,
         help="weight of triangle RGB error against PNG targets; zero disables color")
     parser.add_argument(
@@ -589,6 +651,13 @@ def finalize_density_configuration(args: argparse.Namespace) -> None:
         )
 
 def validate_fitness_configuration(args: argparse.Namespace) -> None:
+    if not np.isfinite(args.mutation_sigma) or args.mutation_sigma < 0:
+        raise SystemExit("--mutation-sigma must be finite and non-negative")
+    factors = getattr(args, "mutation_factors", [1.])
+    if not factors or any(not np.isfinite(f) or f <= 0 for f in factors):
+        raise SystemExit("--mutation-factors must be finite and positive")
+    if args.gpu_timing_interval < 0:
+        raise SystemExit("--gpu-timing-interval must be non-negative")
     from initial_conditions import validate_initial_condition
     from policy_parameters import policy_has_recurrence
     try:
@@ -674,6 +743,10 @@ def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed
         'evaluation_seeds': best_evaluation_seeds,
         'elites': args.elites,
         'mutation_sigma': args.mutation_sigma,
+        'mutation_factors': list(getattr(args, 'mutation_factors', [1.])),
+        'initial_weights': str(args.initial_weights) if getattr(args, 'initial_weights', None) else None,
+        'fitness_alignment': getattr(args, 'fitness_alignment', 'raster'),
+        'deterministic_reference': getattr(args, 'deterministic_reference', False),
         'policy_architecture': args.policy_architecture,
         'cell_memory': args.cell_memory,
         'hidden_layers': args.hidden_layers,
@@ -739,10 +812,9 @@ def main() -> None:
     # the checkpoint block below) — it never runs a live forward pass,
     # see training_sim.py's own module docstring for why.
     num_workers = args.workers if args.workers is not None else min(os.cpu_count() or 4, args.population)
+    population = initial_population(args, rng)
     pool = build_pool(num_workers, args.particle_capacity, target, target_raster, target_distance_field, args)
     update_rule = UpdateRule(CHEM_CHANNELS, args.policy_architecture)
-
-    population = [get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture)) for _ in range(args.population)]
 
     checkpoint_dir = args.checkpoint_dir
     checkpoint_dir.mkdir(parents=True, exist_ok=True)

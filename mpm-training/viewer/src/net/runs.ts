@@ -1,9 +1,9 @@
 // REST calls against train_server.py's own /runs endpoints — mirrors
 // envnca/frontend/src/net/runs.ts.
 
-import type { GenerationRecord, RunSettings } from "../gpu/types";
+import type { TimingEntry, GenerationRecord, RunSettings } from "../gpu/types";
 import {
-  applyGeneration,
+  applyHistory,
   applySettings,
   deriveState,
   EMPTY_ACCUMULATOR,
@@ -40,8 +40,8 @@ export async function fetchRunState(apiUrl: string, runId: string): Promise<Trai
   ]);
   if (!settingsRes.ok || !historyRes.ok) throw new Error("Run settings or history could not be loaded");
   const settings: RunSettings = await settingsRes.json();
-  const data: { generations: GenerationRecord[] } = await historyRes.json();
+  const data: { generations: GenerationRecord[]; timings?: TimingEntry[] } = await historyRes.json();
   let acc: Accumulator = applySettings(EMPTY_ACCUMULATOR, settings);
-  acc = data.generations.reduce((a, message) => applyGeneration(a, message), acc);
+  acc = applyHistory(acc, data);
   return deriveState(acc);
 }

@@ -253,45 +253,45 @@ class EnvironmentGPU:
         self.device.queue.write_buffer(self.buffers[1], 0, zeros)
         self._parity = 0
 
-    def encode_clear(self, encoder: wgpu.GPUCommandEncoder) -> None:
+    def encode_clear(self, encoder: wgpu.GPUCommandEncoder, *, gpu_timings=None) -> None:
         """Remove every splat from the previous communication round."""
-        p = encoder.begin_compute_pass()
+        p = gpu_timings.begin_compute_pass(encoder, "gpuChemistryClear") if gpu_timings is not None else encoder.begin_compute_pass()
         p.set_pipeline(self._clear_scratch_pipeline)
         p.set_bind_group(0, self._clear_scratch_bind_group)
         p.dispatch_workgroups(*self._clear_dispatch)
         p.end()
 
-    def encode_sense(self, encoder: wgpu.GPUCommandEncoder) -> None:
+    def encode_sense(self, encoder: wgpu.GPUCommandEncoder, *, gpu_timings=None) -> None:
         """Materialize current cell splats and compute their shared gradient."""
         if self.chemical_communication_architecture == CELL_OWNED_PROJECTION_ARCHITECTURE:
-            p = encoder.begin_compute_pass()
+            p = gpu_timings.begin_compute_pass(encoder, "gpuChemistryMaterialize") if gpu_timings is not None else encoder.begin_compute_pass()
             p.set_pipeline(self._materialize_splat_pipeline)
             p.set_bind_group(0, self._materialize_splat_bind_group)
             p.dispatch_workgroups(*self._clear_dispatch)
             p.end()
 
-        p = encoder.begin_compute_pass()
+        p = gpu_timings.begin_compute_pass(encoder, "gpuChemistryGradient") if gpu_timings is not None else encoder.begin_compute_pass()
         p.set_pipeline(self._compute_gradient_pipeline)
         p.set_bind_group(0, self._compute_gradient_bind_groups[self._parity])
         p.dispatch_workgroups(*self._grid_dispatch)
         p.end()
 
-    def encode_prepare_persistent(self, encoder: wgpu.GPUCommandEncoder, *, transport: bool = True) -> None:
+    def encode_prepare_persistent(self, encoder: wgpu.GPUCommandEncoder, *, transport: bool = True, gpu_timings=None) -> None:
         """Diffuse/decay each round; transport preceding motion only on the first."""
         if self.chemical_communication_architecture != PERSISTENT_ENVIRONMENT_ARCHITECTURE:
             return
-        p = encoder.begin_compute_pass()
+        p = gpu_timings.begin_compute_pass(encoder, "gpuChemistryTransport" if transport else "gpuChemistryDiffuse") if gpu_timings is not None else encoder.begin_compute_pass()
         p.set_pipeline(self._diffuse_decay_pipeline if transport else self._stationary_diffuse_decay_pipeline)
         p.set_bind_group(0, (self._diffuse_decay_bind_groups if transport else self._stationary_diffuse_decay_bind_groups)[self._parity])
         p.dispatch_workgroups(*self._grid_dispatch)
         p.end()
         self._parity = 1 - self._parity
 
-    def encode_merge_persistent(self, encoder: wgpu.GPUCommandEncoder) -> None:
+    def encode_merge_persistent(self, encoder: wgpu.GPUCommandEncoder, *, gpu_timings=None) -> None:
         """Add this round's signed policy deltas to the prepared field."""
         if self.chemical_communication_architecture != PERSISTENT_ENVIRONMENT_ARCHITECTURE:
             return
-        p = encoder.begin_compute_pass()
+        p = gpu_timings.begin_compute_pass(encoder, "gpuChemistryMerge") if gpu_timings is not None else encoder.begin_compute_pass()
         p.set_pipeline(self._merge_deposit_pipeline)
         p.set_bind_group(0, self._merge_deposit_bind_groups[self._parity])
         p.dispatch_workgroups(*self._clear_dispatch)

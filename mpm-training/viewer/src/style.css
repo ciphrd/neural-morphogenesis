@@ -1571,3 +1571,41 @@ body {
   font-size: 12px;
   pointer-events: none;
 }
+
+.training-timing .timing-note { font-size: 11px; opacity: 0.7; line-height: 1.5; margin: 6px 0; }
+.timing-scope { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0; }
+.timing-stage { margin-top: 12px; }
+.timing-stage progress { display: block; width: 100%; height: 5px; accent-color: #88baff; }
+.training-timing .stat-row { gap: 12px; }
+.training-timing .stat-row > :last-child { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.timing-scope select { background: #171717; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 4px; font: inherit; font-size: 11px; }
+
+.timing-pie svg { display: block; width: 200px; max-width: 100%; margin: 12px auto; }
+.timing-pie-total { fill: #eee; text-anchor: middle; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.timing-pie-caption { fill: #aaa; text-anchor: middle; font-size: 10px; }
+.timing-pie-legend { list-style: none; padding: 0; margin: 0; }
+.timing-pie-legend li { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; margin: 10px 0; font-size: 11px; }
+.timing-pie-dot { width: 8px; height: 8px; border-radius: 50%; }
+.timing-pie-value { grid-column: 2 / 4; color: #aaa; font-variant-numeric: tabular-nums; }
+.timing-call-details { margin-top: 16px; }
+.timing-call-details summary { cursor: pointer; font-size: 12px; color: #bbb; }
+
+.timing-chart-scroll { overflow-x: auto; max-width: 100%; margin-top: 8px; }
+.timing-chart-scroll svg { display: block; }
+.timing-chart-scroll g:focus { outline: none; }
+.timing-chart-scroll g:focus rect { stroke: white; stroke-width: 1px; }
+.timing-chart-inspect { background: #171717; padding: 8px; margin: 8px 0; border-radius: 4px; font-size: 11px; }
+.timing-chart-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; }
+.timing-average-heading { font-size: 13px; margin: 18px 0 8px; }
+
+.timing-chart-legend { display: flex; flex-wrap: wrap; gap: 5px 12px; font-size: 10px; color: #bbb; margin-top: 6px; }
+
+.training-chart-tabs { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.training-chart-tabs button { background: transparent; color: #999; border: 1px solid transparent; border-radius: 4px; padding: 5px 12px; cursor: pointer; }
+.training-chart-tabs button[aria-selected="true"] { background: #252525; color: #eee; border-color: #444; }
+.training-chart-tabs button:focus-visible { outline: 2px solid #78a9ff; }
+.training-chart-tabs select { margin-left: auto; background: #171717; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 4px; font-size: 11px; }
+.training-timeline .timing-note { font-size: 11px; color: #999; margin: 6px 0; }
+.training-timeline .timing-chart-inspect { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.training-timeline .timing-chart-inspect .stat-row { gap: 8px; margin: 0; }

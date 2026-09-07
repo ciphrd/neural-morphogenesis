@@ -123,6 +123,12 @@ export interface RunSettings extends ShapeStopSettings {
   seedsPerCandidate: number;
   elites: number;
   mutationSigma: number;
+  mutationFactors?: number[];
+  initialWeights?: string | null;
+  /** Training pose scorer; omitted archived runs use raster alignment. */
+  fitnessAlignment?: "raster" | "geometry";
+  /** Native training diagnostic; browser kernels retain parallel reductions. */
+  deterministicReference?: boolean;
   runSeed: number;
   totalGenerations: number;
   checkpointEvery: number;
@@ -161,7 +167,42 @@ export function hiddenLayersFromConfig(
 // that manufactures a GenerationRecord without a server message at all
 // is useTrainingSocket()'s own placeholder (see that hook's own
 // comment): random init, before generation 0 exists.
+export interface TimingStage {
+  seconds: number;
+  count: number;
+  maxSeconds: number;
+}
+export interface GpuTiming {
+  supported: boolean;
+  samples: number;
+  seconds: number;
+  stages: Record<string, TimingStage>;
+  droppedIntervals?: number;
+  interval?: number;
+}
+export interface RolloutTiming {
+  gpu?: GpuTiming;
+  seconds: number;
+  stages: Record<string, TimingStage>;
+}
+export interface GenerationTiming {
+  seconds: number;
+  poolSeconds: number;
+  selectionSeconds: number;
+  previewSeconds: number;
+  checkpointSeconds: number;
+  otherSeconds: number;
+  rollouts: RolloutTiming & { count: number; meanSeconds: number; maxSeconds: number };
+  winner?: RolloutTiming;
+}
+
+export interface TimingEntry {
+  generation: number;
+  timing: GenerationTiming;
+}
+
 export interface GenerationRecord {
+  timing?: GenerationTiming;
   generation: number;
   best: number;
   mean: number;

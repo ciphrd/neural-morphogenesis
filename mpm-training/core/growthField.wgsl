@@ -34,6 +34,7 @@ const ROOT: u32 = NEIGHBOR + REFINE_CAPACITY;
 const REQUESTS: u32 = ROOT + REFINE_CAPACITY;
 const ALLOCATION: u32 = REQUESTS + REFINE_CAPACITY;
 const BLOCKED: u32 = ALLOCATION + REFINE_CAPACITY;
+const PRUNE_INVALID_COUNT: u32 = BLOCKED + 1u;
 const INVALID: u32 = 0xffffffffu;
 
 struct ParticleRest {
@@ -168,7 +169,7 @@ fn hashKey(key: vec4<f32>) -> u32 {
 
 @compute @workgroup_size(256)
 fn clearRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
-  if (gid.x <= BLOCKED) { atomicStore(&refinement[gid.x],0u); }
+  if (gid.x <= PRUNE_INVALID_COUNT) { atomicStore(&refinement[gid.x],0u); }
 }
 
 @compute @workgroup_size(64)
@@ -243,9 +244,7 @@ fn requestRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicAdd(&refinement[REQUESTS+root],1u);
 }
 
-@compute @workgroup_size(64)
-fn reserveRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let pi=gid.x;
+fn reserveRefinementSample(pi: u32) {
   if (pi >= activeCount) { return; }
   let requests=atomicLoad(&refinement[REQUESTS+pi]);
   if (requests == 0u) { return; }
@@ -267,6 +266,17 @@ fn reserveRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
   atomicStore(&refinement[ALLOCATION+pi],observed+1u);
   if (neighbor != INVALID) { atomicStore(&refinement[ALLOCATION+neighbor],observed+2u); }
+}
+
+// Stable sample IDs and capacity arbitration. Scheduling-dependent allocation
+// permutes children, changing subsequent float reductions even before the cap.
+// Only this small allocation pass is ordered; neural inference and splitting
+// remain parallel. A parallel exclusive scan can replace this reference order
+// later, provided it preserves the same ascending-root decisions at capacity.
+@compute @workgroup_size(64)
+fn reserveRefinement(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x != 0u) { return; }
+  for (var pi=0u; pi<activeCount; pi++) { reserveRefinementSample(pi); }
 }
 
 fn wrapIndex(i: i32) -> u32 {
@@ -493,16 +503,33 @@ fn stopGrowthAtCapacity(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicStore(&growthField[i], 0);
 }
 
-// Run after all indexed refinement passes: moving a sample earlier would
-// invalidate edge references. A single invocation compacts in place without
-// racing reads from the tail. The host propagates sampleCount before physics.
+// commitResample is finished, so CHOICE can now hold pruning flags. Stride
+// over the GPU count: the host-sized dispatch still reflects the pre-split
+// population and must also classify any newly appended daughters.
+@compute @workgroup_size(64)
+fn classifyPruning(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(num_workgroups) groups: vec3<u32>,
+) {
+  let count = atomicLoad(&agentState.sampleCount);
+  for (var pi = gid.x; pi < count; pi += groups.x * 64u) {
+    let invalid = select(0u, 1u, disconnectedFromGrid(pi));
+    atomicStore(&refinement[CHOICE + pi], invalid);
+    if (invalid != 0u) { atomicAdd(&refinement[PRUNE_INVALID_COUNT], 1u); }
+  }
+}
+
+// Run after classification and all indexed refinement passes. Keep the
+// original tail-swap order, using cached flags instead of serial geometry
+// checks. The host propagates sampleCount before physics.
 @compute @workgroup_size(1)
 fn pruneMaterial() {
+  if (atomicLoad(&refinement[PRUNE_INVALID_COUNT]) == 0u) { return; }
   var count = atomicLoad(&agentState.sampleCount);
   var pi = 0u;
   loop {
     if (pi >= count) { break; }
-    if (!disconnectedFromGrid(pi)) { pi++; continue; }
+    if (atomicLoad(&refinement[CHOICE + pi]) == 0u) { pi++; continue; }
     count--;
     if (pi != count) {
       positions[pi] = positions[count];
@@ -511,6 +538,7 @@ fn pruneMaterial() {
       particleF[pi] = particleF[count];
       particleRest[pi] = particleRest[count];
       agentState.particleMeta[pi] = agentState.particleMeta[count];
+      atomicStore(&refinement[CHOICE + pi], atomicLoad(&refinement[CHOICE + count]));
     }
   }
   atomicStore(&agentState.sampleCount, count);

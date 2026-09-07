@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import numpy as np
+from time import perf_counter
+from contextlib import nullcontext
 
 from simulation_settings import DEFAULT_RUN_SETTINGS, COMMUNICATION_SPEED, INITIAL_PARTICLE_COUNT, INITIAL_SPACING, NEURAL_UPDATES_PER_MACRO
 
@@ -112,6 +114,13 @@ class TrainingRollout:
 
     def macro_step(self, substeps_per_macro: int, *, growth_enabled: bool = True) -> None:
         core = self.core
+        timings = getattr(self, "timings", None)
+        stage_started = perf_counter()
+        gpu = getattr(self, "gpu_timings", None)
+        if gpu is not None:
+            gpu.begin_sample()
+        def measure(encoder, name):
+            return gpu.measure(encoder, name) if gpu is not None else nullcontext()
 
         # Only gates entry into a new cell cycle. Cycles already underway
         # finish normally, leaving the remaining macro steps for elastic
@@ -138,17 +147,19 @@ class TrainingRollout:
         # motion before the first neural read of this tick.
         for communication_round in range(self.neural_updates_per_macro):
             final_round = communication_round == self.neural_updates_per_macro - 1
-            self.environment.encode_prepare_persistent(encoder, transport=communication_round == 0)
-            self.environment.encode_clear(encoder)
+            self.environment.encode_prepare_persistent(encoder, transport=communication_round == 0, gpu_timings=gpu)
+            self.environment.encode_clear(encoder, gpu_timings=gpu)
             if self.environment.chemical_communication_architecture == "cell-owned-projection":
-                self.agents.encode_splat_chemical_state(encoder)
-            self.environment.encode_sense(encoder)
+                with measure(encoder, "gpuChemistrySplat"):
+                    self.agents.encode_splat_chemical_state(encoder)
+            self.environment.encode_sense(encoder, gpu_timings=gpu)
             self.agents.encode_step(
                 encoder,
                 self.environment.parity,
                 commit_growth=final_round,
+                gpu_timings=gpu,
             )
-            self.environment.encode_merge_persistent(encoder)
+            self.environment.encode_merge_persistent(encoder, gpu_timings=gpu)
         core.device.queue.submit([encoder.finish()])
 
         # Growth's own readback — see this module's own module docstring
@@ -168,7 +179,13 @@ class TrainingRollout:
         # clamping the *reported* count here is what actually enforces
         # the cap, since core/agents.wgsl itself already refuses to WRITE
         # a claimed slot past max_active_particles either way.
+        if timings is not None:
+            timings.add("neuralCommands", perf_counter()-stage_started)
+        stage_started = perf_counter()
         grown = min(self.agents.read_sample_count(), self.agents.max_active_particles)
+        if timings is not None:
+            timings.add("growthSync", perf_counter()-stage_started)
+        stage_started = perf_counter()
         if grown != core.active_count:
             core.set_active_count(grown)
             self.agents.set_active_count(grown)
@@ -184,8 +201,22 @@ class TrainingRollout:
         # only; this one, driven by simulation_settings.py's own
         # MPM_ENABLED, is what the actual worker-pool population
         # evaluation runs under too).
+        if timings is not None:
+            timings.add("growthStatusUpdate", perf_counter()-stage_started)
         if self.mpm_enabled:
-            core.step(substeps_per_macro)
+            stage_started = perf_counter()
+            # The next macro's required growth-status readback (or a terminal
+            # fitness readback) retires this final chunk. Queue ordering keeps
+            # the following neural pass behind physics without a host stall.
+            core.step(substeps_per_macro, wait_for_completion=False)
+            if timings is not None:
+                timings.add("physics", perf_counter()-stage_started)
+
+        if gpu is not None and gpu.active:
+            stage_started = perf_counter()
+            gpu.finish_sample()
+            if timings is not None:
+                timings.add("gpuProfilingReadback", perf_counter()-stage_started)
 
     def positions(self) -> np.ndarray:
         return self.core.read_positions()

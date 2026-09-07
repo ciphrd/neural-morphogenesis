@@ -46,9 +46,11 @@ import p2gSrc from "../../../core/p2g.wgsl?raw";
 import gridUpdateSrc from "../../../core/gridUpdate.wgsl?raw";
 import g2pSrc from "../../../core/g2p.wgsl?raw";
 import repulsionSrc from "../../../core/repulsion.wgsl?raw";
+import densityQuadsSrc from "../../../core/densityQuads.wgsl?raw";
 import morphologySrc from "../../../core/morphology.wgsl?raw";
 import coreConstantsConfig from "../../../core/config.json";
 const coreConstants = coreConstantsConfig.simulation;
+const MORPHOLOGY_MAX_RADIUS = coreConstants.MORPHOLOGY_MAX_RADIUS;
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
 import type { SceneData } from "./types";
@@ -182,6 +184,8 @@ export class MpmCore {
   private readonly densityToTextureBindGroup: GPUBindGroup;
   private readonly applyRepulsionPipeline: GPUComputePipeline;
   private readonly applyRepulsionBindGroup: GPUBindGroup;
+  private readonly densityRenderPipeline?: GPURenderPipeline;
+  private readonly densityRenderBindGroup?: GPUBindGroup;
   private readonly morphologyHorizontalPipeline: GPUComputePipeline;
   private readonly morphologyVerticalPipeline: GPUComputePipeline;
   private readonly morphologyHorizontalBindGroup: GPUBindGroup;
@@ -209,7 +213,7 @@ export class MpmCore {
     this.rest = device.createBuffer({ size: MAX_PARTICLES * REST_FIELDS * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
 
     this.gridAccum = device.createBuffer({ size: NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage: GPUBufferUsage.STORAGE });
-    this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
+    this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.growthField = device.createBuffer({
       size: NODE_COUNT * GROWTH_FIELD_CHANNELS * f32,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
@@ -284,7 +288,7 @@ export class MpmCore {
     this.densityTexture = device.createTexture({
       size: [REPULSION_FIELD_N, REPULSION_FIELD_N, 1],
       format: "r32float",
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     });
     const densityTextureView = this.densityTexture.createView();
     this.morphologyTexture = device.createTexture({
@@ -297,7 +301,7 @@ export class MpmCore {
       format: "r32float",
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
-    this.morphologyParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.morphologyParamsUniform = device.createBuffer({ size: 16 + 16 * Math.ceil((2 * MORPHOLOGY_MAX_RADIUS + 1) / 4), usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.splatParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.repulsionParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -351,7 +355,7 @@ export class MpmCore {
     );
     this.densityTextureDispatch = [ceilDiv(REPULSION_FIELD_N, FIELD_WORKGROUP), ceilDiv(REPULSION_FIELD_N, FIELD_WORKGROUP)];
 
-    const morphologyModule = device.createShaderModule({ code: templateShader(morphologySrc, { FIELD_N: REPULSION_FIELD_N }) });
+    const morphologyModule = device.createShaderModule({ code: templateShader(morphologySrc, { FIELD_N: REPULSION_FIELD_N, MORPHOLOGY_WEIGHT_VECTORS: Math.ceil((2 * MORPHOLOGY_MAX_RADIUS + 1) / 4) }) });
     this.morphologyHorizontalPipeline = device.createComputePipeline({ layout: "auto", compute: { module: morphologyModule, entryPoint: "blurHorizontal" } });
     this.morphologyVerticalPipeline = device.createComputePipeline({ layout: "auto", compute: { module: morphologyModule, entryPoint: "blurVerticalAndNormalize" } });
     this.morphologyHorizontalBindGroup = device.createBindGroup({
@@ -370,6 +374,23 @@ export class MpmCore {
         { binding: 2, resource: { buffer: this.morphologyParamsUniform } },
       ],
     });
+
+    if (device.features.has("float32-blendable")) {
+      const module = device.createShaderModule({ code: templateShader(densityQuadsSrc, { FIELD_N: REPULSION_FIELD_N }) });
+      const blend: GPUBlendComponent = { srcFactor: "one", dstFactor: "one", operation: "add" };
+      this.densityRenderPipeline = device.createRenderPipeline({
+        layout: "auto", vertex: { module, entryPoint: "vertexMain" },
+        fragment: { module, entryPoint: "fragmentMain", targets: [{ format: "r32float", blend: { color: blend, alpha: blend }, writeMask: GPUColorWrite.RED }] },
+        primitive: { topology: "triangle-list" },
+      });
+      this.densityRenderBindGroup = device.createBindGroup({
+        layout: this.densityRenderPipeline.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: { buffer: this.positions } },
+          { binding: 1, resource: { buffer: this.rest } },
+          { binding: 2, resource: { buffer: this.splatParamsUniform } },
+        ],
+      });
+    }
 
   }
 
@@ -503,6 +524,8 @@ export class MpmCore {
    * Always call BEFORE loadScene: generic defaults erase seeded triangle
    * domains and half weights if applied afterward. */
   resetGrowthBuffers(maxActive: number): void {
+    // Chemistry transports before the first physics step after restart.
+    writeFloat32(this.device, this.gridVel, 0, new Float32Array(NODE_COUNT * 2));
     writeFloat32(this.device, this.velocities, 0, new Float32Array(maxActive * 2));
     const identityF = new Float32Array(maxActive * 4);
     for (let i = 0; i < maxActive; i++) {
@@ -607,19 +630,42 @@ export class MpmCore {
   }
 
   setMorphology(sigmaDomain: number, densityReference: number): void {
-    writeFloat32(this.device, this.morphologyParamsUniform, 0, new Float32Array([sigmaDomain, densityReference, 0, 0]));
+    const data = new Float32Array(this.morphologyParamsUniform.size / 4);
+    const sigma = Math.max(sigmaDomain * REPULSION_FIELD_N, 0);
+    const radius = Math.min(Math.ceil(3 * sigma), MORPHOLOGY_MAX_RADIUS);
+    data[0] = radius; data[1] = densityReference;
+    const weights = Array.from({length: 2 * radius + 1}, (_, i) => {
+      const offset = i - radius;
+      return sigma > 1e-5 ? Math.exp(-.5 * offset * offset / Math.max(sigma * sigma, 1e-8)) : Number(offset === 0);
+    });
+    const sum = weights.reduce((a, b) => a + b, 0);
+    weights.forEach((w, i) => { data[4 + MORPHOLOGY_MAX_RADIUS - radius + i] = w / sum; });
+    writeFloat32(this.device, this.morphologyParamsUniform, 0, data);
   }
 
   /** Rebuilds policy occupancy from current positions once per controller tick. */
   encodeMorphology(encoder: GPUCommandEncoder): void {
     const particleDispatch = ceilDiv(this._activeCount, WORKGROUP);
-    const passes: [GPUComputePipeline, GPUBindGroup, [number, number?]][] = [
-      [this.clearDensityPipeline, this.clearDensityBindGroup, this.densityClearDispatch],
-      [this.splatDensityPipeline, this.splatDensityBindGroup, [particleDispatch]],
-      [this.densityToTexturePipeline, this.densityToTextureBindGroup, this.densityTextureDispatch],
+    const passes: [GPUComputePipeline, GPUBindGroup, [number, number?]][] = [];
+    if (this.densityRenderPipeline && this.densityRenderBindGroup) {
+      const pass = encoder.beginRenderPass({ colorAttachments: [{
+        view: this.densityTexture.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0],
+      }] });
+      pass.setPipeline(this.densityRenderPipeline);
+      pass.setBindGroup(0, this.densityRenderBindGroup);
+      pass.draw(6, this._activeCount * 9);
+      pass.end();
+    } else {
+      passes.push(
+        [this.clearDensityPipeline, this.clearDensityBindGroup, this.densityClearDispatch],
+        [this.splatDensityPipeline, this.splatDensityBindGroup, [particleDispatch]],
+        [this.densityToTexturePipeline, this.densityToTextureBindGroup, this.densityTextureDispatch],
+      );
+    }
+    passes.push(
       [this.morphologyHorizontalPipeline, this.morphologyHorizontalBindGroup, this.densityTextureDispatch],
       [this.morphologyVerticalPipeline, this.morphologyVerticalBindGroup, this.densityTextureDispatch],
-    ];
+    );
     for (const [pipeline, bindGroup, dispatch] of passes) {
       const pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);

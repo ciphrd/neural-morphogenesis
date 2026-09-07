@@ -21,7 +21,7 @@
   },
   "run": {
     "target": "circle",
-    "particles": 3000,
+    "particles": 4000,
     "initialParticleCount": 20,
     "densityModelVersion": 4,
     "trainingDensityMultipliers": [1],
@@ -104,20 +104,20 @@
     "chemicalValueInputMultiplier": 1.0,
     "chemicalGradientInputScale": 0.045,
     "communicationSpeed": 4.0,
-    "neuralUpdatesPerMacro": 8,
+    "neuralUpdatesPerMacro": 1,
     "initialConditionChannel": 0,
     "version": 1,
     "preset": "developmental-3-3-3",
     "profiles": {
       "global": {
-        "resolutionScale": 1.0,
+        "resolutionScale": 0.25,
         "relaxationTime": 24.0,
         "fieldResponseTime": 24.0,
         "decayExponent": 0.1,
         "diffusionMultiplier": 0.001
       },
       "regional": {
-        "resolutionScale": 1.0,
+        "resolutionScale": 0.5,
         "relaxationTime": 10.0,
         "fieldResponseTime": 10.0,
         "decayExponent": 0.5,

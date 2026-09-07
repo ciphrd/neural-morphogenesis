@@ -82,6 +82,8 @@ def _worker_init(
     evolve.py's own module docstring already applies to a single
     process)."""
     global _core, _agents, _environment, _target, _target_raster, _target_distance_field, _args
+    from deterministic_reference import install_ordered_stages, REFERENCE_STAGES
+    install_ordered_stages(REFERENCE_STAGES if getattr(args, 'deterministic_reference', False) else ())
     # verbose=False — build_pool() already logged this once, in the main
     # process, before spawning any worker (see pick_device()'s own
     # docstring for why one line is enough on a single machine).
@@ -94,8 +96,10 @@ def _worker_init(
     _target_distance_field = target_distance_field
     _args = args
 
-def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1.0) -> float:
-    """The only thing actually sent to a worker per candidate — `weights`
+def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1.0, return_snapshot: bool = False):
+    """Optionally return the terminal scoring snapshot for preview reuse.
+
+    The only thing actually sent to a worker per candidate — `weights`
     and `seed`. Public (not `_`-prefixed, unlike this module's other
     worker-local state) because evolve.py's own run_generation() needs a
     module-level, picklable reference to hand to ProcessPoolExecutor.map()
@@ -109,6 +113,7 @@ def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1
     return rollout(
         weights, _target, _target_raster, _target_distance_field, _args, seed,
         _core, _agents, _environment, density_multiplier=density_multiplier,
+        return_snapshot=return_snapshot,
     )
 
 def build_pool(

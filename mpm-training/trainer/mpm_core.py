@@ -162,7 +162,7 @@ class MpmCore:
         )
         self.grid_vel = device.create_buffer(
             size=NODE_COUNT * 2 * f32,
-            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
         )
         self.growth_field = device.create_buffer(
             size=NODE_COUNT * GROWTH_FIELD_CHANNELS * f32,
@@ -270,7 +270,7 @@ class MpmCore:
         self.density_texture = device.create_texture(
             size=(REPULSION_FIELD_N, REPULSION_FIELD_N, 1),
             format=wgpu.TextureFormat.r32float,
-            usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC,
+            usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC | wgpu.TextureUsage.RENDER_ATTACHMENT,
         )
         density_texture_view = self.density_texture.create_view()
         self.morphology_texture = device.create_texture(
@@ -284,7 +284,7 @@ class MpmCore:
             usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING,
         )
         self.morphology_params_uniform = device.create_buffer(
-            size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+            size=16 + 16*((2*CONSTANTS["MORPHOLOGY_MAX_RADIUS"]+4)//4), usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
         )
         self.set_morphology(MORPHOLOGY_BLUR_SIGMA, MORPHOLOGY_DENSITY_REFERENCE)
         self.splat_params_uniform = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
@@ -349,7 +349,7 @@ class MpmCore:
         self.density_texture_dispatch = (ceil_div(REPULSION_FIELD_N, FIELD_WORKGROUP), ceil_div(REPULSION_FIELD_N, FIELD_WORKGROUP))
 
         morphology_module = device.create_shader_module(
-            code=load_core_shader("morphology.wgsl", {"FIELD_N": REPULSION_FIELD_N})
+            code=load_core_shader("morphology.wgsl", {"FIELD_N": REPULSION_FIELD_N, "MORPHOLOGY_WEIGHT_VECTORS": (2*CONSTANTS["MORPHOLOGY_MAX_RADIUS"]+4)//4})
         )
         self.morphology_horizontal_pipeline = device.create_compute_pipeline(
             layout=wgpu.AutoLayoutMode.auto,
@@ -364,7 +364,7 @@ class MpmCore:
             entries=[
                 {"binding": 0, "resource": density_texture_view},
                 {"binding": 1, "resource": self.morphology_blur_texture.create_view()},
-                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": 16}},
+                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": self.morphology_params_uniform.size}},
             ],
         )
         self.morphology_vertical_bind_group = device.create_bind_group(
@@ -372,36 +372,66 @@ class MpmCore:
             entries=[
                 {"binding": 0, "resource": self.morphology_blur_texture.create_view()},
                 {"binding": 1, "resource": self.morphology_texture.create_view()},
-                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": 16}},
+                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": self.morphology_params_uniform.size}},
             ],
         )
+
+        self.density_render_enabled = "float32-blendable" in device.features
+        if self.density_render_enabled:
+            module = device.create_shader_module(code=load_core_shader("densityQuads.wgsl", {"FIELD_N": REPULSION_FIELD_N}))
+            blend = {"src_factor": "one", "dst_factor": "one", "operation": "add"}
+            self.density_render_pipeline = device.create_render_pipeline(
+                layout=wgpu.AutoLayoutMode.auto,
+                vertex={"module": module, "entry_point": "vertexMain"},
+                fragment={"module": module, "entry_point": "fragmentMain", "targets": [
+                    {"format": "r32float", "blend": {"color": blend, "alpha": blend}, "write_mask": wgpu.ColorWrite.RED}]},
+                primitive={"topology": "triangle-list"},
+            )
+            self.density_render_bind_group = device.create_bind_group(
+                layout=self.density_render_pipeline.get_bind_group_layout(0), entries=[
+                    {"binding": 0, "resource": {"buffer": self.positions}},
+                    {"binding": 1, "resource": {"buffer": self.rest}},
+                    {"binding": 2, "resource": {"buffer": self.splat_params_uniform}},
+                ])
 
     @property
     def active_count(self) -> int:
         return self._active_count
 
     def set_morphology(self, sigma_domain: float, density_reference: float) -> None:
-        self.device.queue.write_buffer(
-            self.morphology_params_uniform,
-            0,
-            np.asarray([sigma_domain, density_reference, 0.0, 0.0], dtype=np.float32),
-        )
+        radius_max = CONSTANTS["MORPHOLOGY_MAX_RADIUS"]
+        data = np.zeros(self.morphology_params_uniform.size//4, dtype=np.float32)
+        sigma = max(sigma_domain * REPULSION_FIELD_N, 0.0)
+        radius = min(int(np.ceil(3*sigma)), radius_max)
+        data[:2] = [radius, density_reference]
+        offsets = np.arange(-radius, radius+1)
+        weights = np.exp(-.5*offsets**2/max(sigma*sigma, 1e-8)) if sigma > 1e-5 else (offsets == 0).astype(float)
+        data[4+radius_max-radius:4+radius_max+radius+1] = weights / weights.sum()
+        self.device.queue.write_buffer(self.morphology_params_uniform, 0, data)
 
     def encode_morphology(self, encoder: wgpu.GPUCommandEncoder) -> None:
-        """Rebuild the blurred occupancy field from current particle positions.
-
-        Called once per controller tick, immediately before policy sensing.
-        Physics may rebuild the raw density again per substep for repulsion.
-        """
-        particle_dispatch = ceil_div(self._active_count, WORKGROUP)
-        for pipeline, bind_group, dispatch in (
-            (self.clear_density_pipeline, self.clear_density_bind_group, self.density_clear_dispatch),
-            (self.splat_density_pipeline, self.splat_density_bind_group, (particle_dispatch,)),
-            (self.density_to_texture_pipeline, self.density_to_texture_bind_group, self.density_texture_dispatch),
-            (self.morphology_horizontal_pipeline, self.morphology_horizontal_bind_group, self.density_texture_dispatch),
-            (self.morphology_vertical_pipeline, self.morphology_vertical_bind_group, self.density_texture_dispatch),
+        """Build occupancy using additive quads when supported, otherwise compute."""
+        gpu = self.__dict__.get("gpu_timings")
+        if self.density_render_enabled:
+            descriptor = {"color_attachments": [{"view": self.density_texture.create_view(),
+                "resolve_target": None, "load_op": "clear", "store_op": "store", "clear_value": (0,0,0,0)}]}
+            p = gpu.begin_render_pass(encoder, "gpuMorphologyDepositQuads", **descriptor) if gpu is not None else encoder.begin_render_pass(**descriptor)
+            p.set_pipeline(self.density_render_pipeline)
+            p.set_bind_group(0, self.density_render_bind_group)
+            p.draw(6, self._active_count*9)
+            p.end()
+            density_passes = ()
+        else:
+            density_passes = (
+                ("gpuMorphologyClear", self.clear_density_pipeline, self.clear_density_bind_group, self.density_clear_dispatch),
+                ("gpuMorphologyDepositCompute", self.splat_density_pipeline, self.splat_density_bind_group, (ceil_div(self._active_count, WORKGROUP),)),
+                ("gpuMorphologyTexture", self.density_to_texture_pipeline, self.density_to_texture_bind_group, self.density_texture_dispatch),
+            )
+        for name, pipeline, bind_group, dispatch in (*density_passes,
+            ("gpuMorphologyBlurHorizontal", self.morphology_horizontal_pipeline, self.morphology_horizontal_bind_group, self.density_texture_dispatch),
+            ("gpuMorphologyBlurVertical", self.morphology_vertical_pipeline, self.morphology_vertical_bind_group, self.density_texture_dispatch),
         ):
-            p = encoder.begin_compute_pass()
+            p = gpu.begin_compute_pass(encoder, name) if gpu is not None else encoder.begin_compute_pass()
             p.set_pipeline(pipeline)
             p.set_bind_group(0, bind_group)
             p.dispatch_workgroups(*dispatch)
@@ -493,6 +523,10 @@ class MpmCore:
         load_scene: seeded triangles have explicit domains and half weights
         that these generic defaults would erase.
         """
+        # The first persistent-chemistry transport reads the preceding grid
+        # velocity before any physics pass. A new rollout has no preceding
+        # motion, including when worker buffers are reused.
+        self.device.queue.write_buffer(self.grid_vel, 0, np.zeros((NODE_COUNT, 2), dtype=np.float32))
         zeros2 = np.zeros((max_active, 2), dtype=np.float32)
         identity_f = np.tile(np.array([1, 0, 0, 1], dtype=np.float32), (max_active, 1))
         zeros4 = np.zeros((max_active, 4), dtype=np.float32)
@@ -591,9 +625,9 @@ class MpmCore:
     # the limit of 4096" and killed the device; chunking into smaller
     # encoders alone was NOT enough to fix it either — the count is
     # cumulative ACROSS submits too when nothing makes the host wait for
-    # the GPU to catch up, so step() also blocks on
-    # on_submitted_work_done_sync() after each chunk (see below) to force
-    # that catch-up. Both confirmed live, not hypothetical. This is a
+    # the GPU to catch up, so step() blocks between chunks to force
+    # that catch-up. Training defers only the final wait to its next
+    # required readback. Both confirmed live, not hypothetical. This is a
     # genuine difference from the browser sandbox's own Dawn/tint
     # backend, which doesn't hit this at the substep counts mls-mpm's own
     # step() calls per rendered frame. 128 substeps/chunk (1152 passes)
@@ -606,7 +640,7 @@ class MpmCore:
     # confirmed crash from under-counting this exact budget.)
     _MAX_SUBSTEPS_PER_SUBMIT = 128
 
-    def step(self, substeps: int) -> None:
+    def step(self, substeps: int, *, wait_for_completion: bool = True) -> None:
         """Runs `substeps` full advance() iterations — same pass ordering
         as mpm.ts's own step(): optional clearDensity -> splatDensity ->
         densityToTexture -> applyRepulsion, then clearGrid -> p2g ->
@@ -630,58 +664,65 @@ class MpmCore:
         fire-and-forget step()) — acceptable for this feasibility spike
         and for a future ES training loop's own per-episode cadence, but
         worth knowing about before assuming step() is as cheap here as it
-        is in the browser."""
+        is in the browser.
+
+        Training may set wait_for_completion=False: intermediate chunks still
+        synchronize, but the final chunk relies on the next required readback.
+        Such callers must read back before accumulating another long submission.
+        Other callers keep synchronous completion by default.
+        """
         particle_dispatch = ceil_div(self._active_count, WORKGROUP)
         remaining = substeps
         while remaining > 0:
             chunk = min(remaining, self._MAX_SUBSTEPS_PER_SUBMIT)
             remaining -= chunk
             encoder = self.device.create_command_encoder()
+            gpu = self.__dict__.get("gpu_timings")
             for _ in range(chunk):
                 if self._repulsion_enabled:
-                    p = encoder.begin_compute_pass()
+                    p = gpu.begin_compute_pass(encoder, "gpuPhysicsRepulsionClear") if gpu is not None else encoder.begin_compute_pass()
                     p.set_pipeline(self.clear_density_pipeline)
                     p.set_bind_group(0, self.clear_density_bind_group)
                     p.dispatch_workgroups(*self.density_clear_dispatch)
                     p.end()
 
-                    p = encoder.begin_compute_pass()
+                    p = gpu.begin_compute_pass(encoder, "gpuPhysicsRepulsionSplat") if gpu is not None else encoder.begin_compute_pass()
                     p.set_pipeline(self.splat_density_pipeline)
                     p.set_bind_group(0, self.splat_density_bind_group)
                     p.dispatch_workgroups(particle_dispatch)
                     p.end()
 
-                    p = encoder.begin_compute_pass()
+                    p = gpu.begin_compute_pass(encoder, "gpuPhysicsRepulsionTexture") if gpu is not None else encoder.begin_compute_pass()
                     p.set_pipeline(self.density_to_texture_pipeline)
                     p.set_bind_group(0, self.density_to_texture_bind_group)
                     p.dispatch_workgroups(*self.density_texture_dispatch)
                     p.end()
 
-                    p = encoder.begin_compute_pass()
+                    p = gpu.begin_compute_pass(encoder, "gpuPhysicsRepulsionApply") if gpu is not None else encoder.begin_compute_pass()
                     p.set_pipeline(self.apply_repulsion_pipeline)
                     p.set_bind_group(0, self.apply_repulsion_bind_group)
                     p.dispatch_workgroups(particle_dispatch)
                     p.end()
 
-                p = encoder.begin_compute_pass()
+                p = gpu.begin_compute_pass(encoder, "gpuPhysicsGridClear") if gpu is not None else encoder.begin_compute_pass()
                 p.set_pipeline(self.clear_grid_pipeline)
                 p.set_bind_group(0, self.clear_grid_bind_group)
                 p.dispatch_workgroups(self.grid_dispatch)
                 p.end()
 
-                p = encoder.begin_compute_pass()
+                p = gpu.begin_compute_pass(encoder, "gpuPhysicsP2G") if gpu is not None else encoder.begin_compute_pass()
                 p.set_pipeline(self.p2g_pipeline)
                 p.set_bind_group(0, self.p2g_bind_group)
                 p.dispatch_workgroups(particle_dispatch)
                 p.end()
 
-                p = encoder.begin_compute_pass()
+                p = gpu.begin_compute_pass(encoder, "gpuPhysicsGridUpdate") if gpu is not None else encoder.begin_compute_pass()
                 p.set_pipeline(self.grid_update_pipeline)
                 p.set_bind_group(0, self.grid_update_bind_group)
                 p.dispatch_workgroups(self.grid_dispatch)
                 p.end()
 
-                p = encoder.begin_compute_pass()
+                p = gpu.begin_compute_pass(encoder, "gpuPhysicsG2P") if gpu is not None else encoder.begin_compute_pass()
                 p.set_pipeline(self.g2p_pipeline)
                 p.set_bind_group(0, self.g2p_bind_group)
                 p.dispatch_workgroups(particle_dispatch)
@@ -701,7 +742,8 @@ class MpmCore:
             # single in-order timeline, so reading anything back
             # necessarily blocks until every submission issued before it
             # has been processed) as a working substitute.
-            self.device.queue.read_buffer(self._sync_buffer, 0, 4)
+            if remaining > 0 or wait_for_completion:
+                self.device.queue.read_buffer(self._sync_buffer, 0, 4)
 
     def read_positions(self) -> np.ndarray:
         raw = self.device.queue.read_buffer(self.positions, 0, self._active_count * 2 * 4)

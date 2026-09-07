@@ -332,7 +332,7 @@ export class Agents {
 
     this.growthField = mpmCore.growthField;
     const refineHashSize = 2 ** Math.ceil(Math.log2(6 * MAX_PARTICLES));
-    const refineWords = refineHashSize + 5 * MAX_PARTICLES + 1;
+    const refineWords = refineHashSize + 5 * MAX_PARTICLES + 2;
     this.refinement = device.createBuffer({
       label: "conforming refinement scratch", size: 4 * refineWords, usage: GPUBufferUsage.STORAGE,
     });
@@ -353,7 +353,7 @@ export class Agents {
       ...Array.from({ length: Math.ceil(Math.log2(MAX_PARTICLES)) },
         (): [string, null] => ["propagateRefinement", null]),
       ["requestRefinement", null], ["reserveRefinement", null],
-      ["commitResample", null], ["pruneMaterial", 1],
+      ["commitResample", null], ["classifyPruning", null], ["pruneMaterial", 1],
       ["stopGrowthAtCapacity", ceilDiv(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)],
     ];
     // Keep one stable ABI for every growth pass. With `layout: "auto"`, WebGPU

@@ -20,6 +20,7 @@ export async function acquireGpuDevice(): Promise<GpuAcquireResult> {
     const requiredFeatures: GPUFeatureName[] = adapter.features.has("float32-filterable")
       ? ["float32-filterable"]
       : [];
+    if (adapter.features.has("float32-blendable")) requiredFeatures.push("float32-blendable");
     device = await adapter.requestDevice({
       requiredFeatures,
       requiredLimits: { maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage },
