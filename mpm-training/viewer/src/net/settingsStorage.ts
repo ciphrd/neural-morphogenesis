@@ -1,7 +1,9 @@
 import type { RunSettings } from "../gpu/types"
 import { defaultChemicalChannelProfiles } from "../gpu/chemicalChannels"
 import sharedDefaultRunSettingsConfig from "../../../core/config.json";
-const sharedDefaultRunSettings = sharedDefaultRunSettingsConfig.run;
+// Retained in the shared config for the trainer's legacy CLI flag only;
+// current run exports use fitnessTemporalAggregation instead.
+const { fitnessTemporalWorstWeight: _legacyTemporalWorstWeight, ...sharedDefaultRunSettings } = sharedDefaultRunSettingsConfig.run;
 const chemistry = sharedDefaultRunSettingsConfig.chemistry;
 
 // Offline/first-visit configuration. This JSON is part of the trainer's
@@ -9,6 +11,7 @@ const chemistry = sharedDefaultRunSettingsConfig.chemistry;
 // does not require a second set of values maintained in TypeScript.
 export const DEFAULT_RUN_SETTINGS = {
   ...sharedDefaultRunSettings,
+  fitnessTemporalAggregation: "min",
   baseResolution: chemistry.baseResolution,
   chemicalCommunicationArchitecture: chemistry.chemicalCommunicationArchitecture,
   decay: chemistry.decay,

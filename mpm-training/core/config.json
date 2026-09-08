@@ -37,7 +37,7 @@
     "spawnY": 0.5,
     "morphologyBlurSigma": 0.01,
     "morphologyDensityReference": 1.0,
-    "internalStateSpeed": 4.0,
+    "internalStateSpeed": 1.0,
     "elasticStrainScale": 0.15,
     "elasticStrainInputsEnabled": true,
     "hiddenDim": 128,
@@ -105,21 +105,21 @@
     "maxEnvWrite": 1.0,
     "chemicalValueInputMultiplier": 1.0,
     "chemicalGradientInputScale": 0.045,
-    "communicationSpeed": 4.0,
+    "communicationSpeed": 1.0,
     "neuralUpdatesPerMacro": 1,
     "initialConditionChannel": 0,
     "version": 1,
     "preset": "developmental-3-3-3",
     "profiles": {
       "global": {
-        "resolutionScale": 0.25,
+        "resolutionScale": 1.0,
         "relaxationTime": 24.0,
         "fieldResponseTime": 24.0,
         "decayExponent": 0.1,
         "diffusionMultiplier": 0.001
       },
       "regional": {
-        "resolutionScale": 0.5,
+        "resolutionScale": 1.0,
         "relaxationTime": 10.0,
         "fieldResponseTime": 10.0,
         "decayExponent": 0.5,

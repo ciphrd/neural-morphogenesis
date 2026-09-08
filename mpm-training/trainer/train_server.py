@@ -26,6 +26,7 @@ from debug_images import save_grown_image, save_raster_image
 from density import DENSITY_MODEL_VERSION
 from device import pick_device
 from evolve import (
+    CAPTURE_OFFSETS,
     CHECKPOINTS_DIR,
     RASTER_EXTENT,
     build_arg_parser,
@@ -231,7 +232,7 @@ def _archive_previous_run() -> None:
     print(f"[train_server] archived previous run to {archive_dir}")
 
 def _save_generation_images(generation: int, snapshot: RolloutSnapshot) -> dict[str, object] | None:
-    """Save the worker's final scoring rasters without replay or rescoring."""
+    """Save the worker's selected scoring pose without replay or rescoring."""
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     evaluation = snapshot.evaluation
     positions = snapshot.positions
@@ -431,6 +432,7 @@ async def _training_loop_body() -> None:
         "cmaCovariance": args.cma_covariance if args.optimizer == "cma-es" else None,
         "seedsPerCandidate": args.seeds_per_candidate,
         "elites": args.elites if args.optimizer == "ga" else 0,
+        "referenceCandidates": 1 if args.optimizer == "cma-es" else 0,
         "mutationSigma": args.mutation_sigma,
         "mutationFactors": list(getattr(args, "mutation_factors", [1.])),
         "initialWeights": str(args.initial_weights) if getattr(args, "initial_weights", None) else None,
@@ -443,7 +445,8 @@ async def _training_loop_body() -> None:
         "fitnessSpillWeight": args.fitness_spill_weight,
         "fitnessBoundaryWeight": args.fitness_boundary_weight,
         "fitnessCrowdingWeight": args.fitness_crowding_weight,
-        "fitnessTemporalWorstWeight": args.fitness_temporal_worst_weight,
+        "fitnessTemporalAggregation": "min",
+        "fitnessCaptureFractions": [1-offset for offset in CAPTURE_OFFSETS],
         "fitnessModelVersion": FITNESS_MODEL_VERSION,
         "runSeed": args.seed,
         "totalGenerations": args.generations,
@@ -482,7 +485,7 @@ async def _training_loop_body() -> None:
 
         # Only PNG encoding and disk I/O remain; reuse the worker's scored state.
         preview_started = perf_counter()
-        final_snapshot_fitness = await asyncio.to_thread(
+        selected_snapshot_fitness = await asyncio.to_thread(
             _save_generation_images, generation, snapshot,
         )
 
@@ -512,10 +515,11 @@ async def _training_loop_body() -> None:
             "seed": winner_seed,
             "particleDensityMultiplier": winner_density,
             "densityFitnesses": density_fitnesses,
-            # Inspectable terms for the representative rollout's final
-            # snapshot. Selection fitness above also includes four earlier
-            # captures through the configured temporal mean/worst blend.
-            "finalSnapshotFitness": final_snapshot_fitness,
+            # Terms for the representative rollout's minimum-loss pose.
+            # Candidate selection also aggregates across seeds/densities.
+            "selectedSnapshotFitness": selected_snapshot_fitness,
+            # Legacy wire alias retained for older consumers.
+            "finalSnapshotFitness": selected_snapshot_fitness,
             # Shared by every candidate in this generation. The batch rotates
             # on the next generation; `seed` above is the winning candidate's
             # worst member, used for the single-rollout browser replay.

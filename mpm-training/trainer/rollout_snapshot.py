@@ -1,4 +1,4 @@
-"""Picklable terminal scoring output shared by workers and preview rendering."""
+"""Picklable selected-pose scoring output shared by workers and preview rendering."""
 from dataclasses import dataclass
 import numpy as np
 from domain_fitness import DomainEvaluation

@@ -72,6 +72,11 @@ def main():
         assert metadata["fitness"] == winner.fitnesses[0]
         assert metadata["optimizer"] == "cma-es"
         assert metadata["elites"] == 0
+        assert metadata["reference_candidates"] == 1
+        assert len(evaluated[0].fitnesses) == 4
+        assert len(evaluated[1].fitnesses) == 5
+        assert evaluated[1].fitnesses[0] <= evaluated[0].fitnesses[0]
+        np.testing.assert_array_equal(evaluated[0].population[0], evaluated[0].winner_weights)
         assert metadata["optimizer_state"]["libraryVersion"] == "4.4.4"
         assert json.loads((root / "settings.json").read_text())["cmaCovariance"] == "diagonal"
     print("[PASS] CMA server history, previews and checkpoints use evaluated winners; diagnostics persisted")

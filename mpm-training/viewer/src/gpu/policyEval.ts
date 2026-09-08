@@ -90,7 +90,7 @@ export function evalPolicy(
 
   const envWriteDim = channels;
   const envWrite = new Float32Array(envWriteDim);
-  for (let k = 0; k < envWriteDim; k++) envWrite[k] = safeTanh(outVec[k]) * maxEnvWrite;
+  for (let k = 0; k < envWriteDim; k++) envWrite[k] = outVec[k] * maxEnvWrite;
   const growthVector: [number, number] = [
     safeTanh(outVec[envWriteDim]),
     safeTanh(outVec[envWriteDim + 1]),

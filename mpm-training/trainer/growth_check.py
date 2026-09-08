@@ -124,13 +124,18 @@ def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
         )
         return float(np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)["chemicalState"].sum())
 
-    once = field_sum(1)
-    four = field_sum(4)
-    assert np.isclose(once, four, atol=2e-6), (once, four)
-    print(f"[PASS] supersampled_communication cell_state1={once:.3f} cell_state4={four:.3f}")
+    # Exercise both signs beyond the former output and state bounds. Constant
+    # residuals must accumulate once per communication tick.
+    for expected in (3.0, -3.0):
+        weights[layout["fc2b_offset"]] = expected * environment.channel_profiles[0].relaxation_time
+        agents.load_weights(weights)
+        once = field_sum(1)
+        four = field_sum(4)
+        np.testing.assert_allclose([once, four], [expected, 4 * expected], atol=2e-6)
+    print("[PASS] linear chemical residuals reach ±3 in one tick and ±12 in four")
 
 def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
-    """Communication rounds exchange chemistry at fixed total chemical time."""
+    """Every tick writes fully while decay retains its per-frame timing."""
     channels = 1
     width = height = 16
     decay = 0.81
@@ -191,16 +196,18 @@ def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
     deposited_once = macro_tick(1)
     assert deposited_once.max() > 0.0 and deposited_once.sum() > 0.0, deposited_once
 
-    # Constant secretion has the same integrated mass, but earlier rounds'
-    # deposits spread before the next neural evaluation.
+    # Every tick adds a full deposit; earlier deposits decay and spread
+    # before the next neural evaluation.
     environment.reset()
     reset_cellular_chemistry()
     deposited_four = macro_tick(4)
-    np.testing.assert_allclose(deposited_four.sum(), deposited_once.sum(), rtol=2e-5, atol=2e-5)
-    assert deposited_four.max() < deposited_once.max()
+    four_factor = sum(decay ** (k / 4) for k in range(4))
+    np.testing.assert_allclose(deposited_four.sum(), deposited_once.sum() * four_factor, rtol=2e-5, atol=2e-5)
+    assert deposited_four.max() < deposited_once.max() * four_factor
     environment.reset()
     deposited_three = macro_tick(3)
-    np.testing.assert_allclose(deposited_three.sum(), deposited_once.sum(), rtol=2e-5, atol=2e-5)
+    three_factor = sum(decay ** (k / 3) for k in range(3))
+    np.testing.assert_allclose(deposited_three.sum(), deposited_once.sum() * three_factor, rtol=2e-5, atol=2e-5)
     environment.reset()
     deposited_four = macro_tick(4)
 
@@ -223,7 +230,7 @@ def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
     environment.reset()
     feedback_four = macro_tick(4)
     assert feedback_four.sum() > feedback_once.sum() * 1.01, (feedback_once.sum(), feedback_four.sum())
-    print("[PASS] persistent rounds preserve source/decay time, diffuse deposits, and exchange neural feedback")
+    print("[PASS] persistent ticks each deposit fully, preserve frame decay, and exchange neural feedback")
 
 def check_persistent_substrate_advection(device: wgpu.GPUDevice) -> None:
     """A uniform MPM velocity translates persistent chemistry one texel."""

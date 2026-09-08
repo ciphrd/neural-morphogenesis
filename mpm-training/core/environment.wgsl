@@ -78,14 +78,6 @@ fn channelRetention(c: u32) -> f32 {
   return pow(clamp(physics.decay, 0.0, 1.0), FIELD_DECAY_EXPONENTS[c]);
 }
 
-fn decayIntegratedSourceFactor(c: u32) -> f32 {
-  let retention = channelRetention(c);
-  if (retention <= 0.0) { return 0.0; }
-  let loss = -log(retention);
-  if (loss < 1e-6) { return 1.0; }
-  return (1.0 - retention) / loss;
-}
-
 @compute @workgroup_size(256)
 fn materializeSplat(
   @builtin(global_invocation_id) gid: vec3<u32>,
@@ -106,7 +98,6 @@ fn mergeDeposit(
   let c = channelForIndex(i);
   gridCurrent[i] = gridCurrent[i]
     + resolvedDeposit(i) * max(physics.depositRate, 0.0)
-      * decayIntegratedSourceFactor(c)
       / max(FIELD_RESPONSE_TIMES[c], 1e-6);
 }
 

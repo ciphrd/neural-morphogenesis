@@ -102,23 +102,9 @@ def resolve_run_density(args: argparse.Namespace, multiplier: float) -> Resolved
 # of any CLI arg.
 RASTER_EXTENT = (0.0, 1.0, 0.0, 1.0)
 
-# Fractional offsets *before* the end of a rollout's own macro_steps at
-# which a fitness-scoring snapshot is taken — mirrors envnca/evolve.py's
-# own CAPTURE_OFFSETS (see that module's rollout() docstring for the
-# full reasoning): scoring only the very final step lets a candidate
-# "pose for one known instant" — converging into shape right on cue and
-# immediately drifting apart after, which would score perfectly under a
-# single-snapshot fitness while looking wrong at any other moment. Taking
-# several evenly-spaced snapshots across the last 10% of the rollout and
-# blending their mean with the worst (highest, since lower is better) keeps
-# distinctions across the whole window while strongly penalizing immediate
-# destabilization. Unlike
-# envnca, this project does NOT also jitter the rollout's own total
-# macro_steps count — not asked for, and this project's macro_steps is
-# already a small, fixed count (tens, not hundreds), so the marginal
-# "don't let it pose for one known instant" value of also randomizing
-# total length is much smaller here than the five-snapshot spread alone
-# already provides.
+# Sample five evenly spaced poses over the last 10% of the horizon. The
+# minimum rewards reaching the target anywhere in this window; it does not
+# require maintaining that pose. Short horizons deduplicate rounded steps.
 CAPTURE_OFFSETS = (0.10, 0.075, 0.05, 0.025, 0.0)
 
 def get_weights(model: UpdateRule) -> np.ndarray:
@@ -230,9 +216,11 @@ def shape_settings(args, target):
         "shapeTarget": target.wire(args.raster_resolution),
     }
 
-def _aggregate_scores(scores, args):
-    return ((1-args.fitness_temporal_worst_weight)*float(np.mean(scores))
-            + args.fitness_temporal_worst_weight*max(scores))
+def _aggregate_scores(scores, args=None):
+    """Best finite late-window loss; failed samples cannot win via NaN."""
+    return min((float(score) if np.isfinite(score) else float('inf')
+                for score in scores), default=float('inf'))
+
 
 def rollout(
     weights: np.ndarray,
@@ -250,7 +238,7 @@ def rollout(
 ) -> float | tuple[float, np.ndarray] | RolloutSnapshot:
     """Score late-window and terminal states; stop at capacity or low growth.
 
-    Optional snapshots retain the final scoring rasters for server previews.
+    Optional snapshots retain the lowest-loss scoring pose for server previews.
     """
     timings = Timings()
     if "gpu_timings" not in core.__dict__:
@@ -314,7 +302,23 @@ def rollout(
 
     checkpoint_steps = {max(1, round(args.macro_steps * (1.0 - offset))) for offset in CAPTURE_OFFSETS}
     scores = []
-    last_evaluation = None
+    best_evaluation = None
+    best_positions = None
+    best_step = 0
+    scored_steps = []
+
+    def capture(step):
+        nonlocal best_evaluation, best_positions, best_step
+        evaluation = score_snapshot()
+        score = float(evaluation.total) if np.isfinite(evaluation.total) else float("inf")
+        scores.append(score)
+        scored_steps.append(step)
+        if best_evaluation is None or score < _aggregate_scores([best_evaluation.total]):
+            best_evaluation, best_step = evaluation, step
+            if return_snapshot or return_positions:
+                with timings.measure("positionsReadback"):
+                    best_positions = sim.positions().copy()
+
     step = 0
     train_color = target.has_color and args.fitness_color_weight > 0
     initial_sample_count = core.active_count
@@ -323,8 +327,7 @@ def rollout(
     if stopped_at_capacity:
         # An exactly-full initial seed is already terminal. This geometry read
         # is the one required final fitness sample, not a per-step poll.
-        last_evaluation = score_snapshot()
-        scores.append(last_evaluation.total)
+        capture(0)
     else:
         for step in range(1, args.macro_steps + 1):
             sim.macro_step(args.substeps_per_macro, growth_enabled=(args.growth_steps is None or step <= args.growth_steps))
@@ -335,8 +338,7 @@ def rollout(
             )
             stopped_for_low_growth = step == 200 and core.active_count*10 < initial_sample_count*11
             if stopped_at_capacity or stopped_for_low_growth or step in checkpoint_steps:
-                last_evaluation = score_snapshot()
-                scores.append(last_evaluation.total)
+                capture(step)
                 if stopped_at_capacity or stopped_for_low_growth:
                     break
     fitness = _aggregate_scores(scores, args)
@@ -350,18 +352,18 @@ def rollout(
         "initialSamples": initial_sample_count,
         "finalSamples": core.active_count,
         "unresolvedSamples": int(agents.unresolved_samples),
-        "missing": last_evaluation.match.missing,
-        "spill": last_evaluation.match.spill,
-        "overlap": last_evaluation.match.overlap,
+        "missing": best_evaluation.match.missing,
+        "spill": best_evaluation.match.spill,
+        "overlap": best_evaluation.match.overlap,
+        "scoreStep": best_step,
+        "scoredSteps": scored_steps,
+        "scoredFitnesses": scores,
     }
-    positions = None
-    if return_snapshot or return_positions:
-        with timings.measure("positionsReadback"):
-            positions = sim.positions()
+    positions = best_positions
     core.rollout_timings = timings.report()
     core.rollout_timings["gpu"] = gpu_timings.report()
     if return_snapshot:
-        return RolloutSnapshot(fitness, last_evaluation, positions, dict(core.rollout_diagnostics), core.rollout_timings)
+        return RolloutSnapshot(fitness, best_evaluation, positions, dict(core.rollout_diagnostics), core.rollout_timings)
     return (fitness, positions) if return_positions else fitness
 
 def run_generation(
@@ -388,9 +390,10 @@ def run_generation(
     sequentially, or even several MpmCore instances batched within one
     process, both measured as CPU-bound on one core). CMA receives fitnesses
     in sampled order before sorting, then asks for a new batch. The legacy GA
-    preserves elites and mutates them. The evaluated winner is returned
-    explicitly: the next CMA batch contains entirely new, unscored policies.
-    Optional previews use the winner's worst seed/density terminal snapshot.
+    preserves elites and mutates them. CMA carries the evaluated winner as
+    an additional unchanged reference, ahead of its new sampled batch. The
+    reference competes on the current seeds but does not enter CMA tell().
+    Optional previews use the winner's worst seed/density best-pose snapshot.
     Ties preserve the original task order.
 
     `target` is NOT passed here — it's baked into each worker's own
@@ -400,6 +403,11 @@ def run_generation(
     generation_started = perf_counter()
     if optimizer is None and getattr(args, "optimizer", "ga") != "ga":
         raise ValueError("CMA generation requires the optimizer returned by initialize_search")
+    reference_count = 0
+    if optimizer is not None:
+        reference_count = len(population) - optimizer.population
+        if reference_count not in (0, 1):
+            raise ValueError("CMA population must contain its sampled batch and at most one reference")
     seeds_per_candidate = max(1, int(getattr(args, "seeds_per_candidate", 1)))
     evaluation_seeds = [
         int(seed) for seed in rng.integers(0, 2**31 - 1, size=seeds_per_candidate)
@@ -450,14 +458,17 @@ def run_generation(
         case_index = int(np.argmax(rollout_fitnesses[candidate_index]))
         winner_snapshot = results[candidate_index * len(densities) * seeds_per_candidate + case_index]
     if optimizer is not None:
-        optimizer.tell(fitnesses)
+        # Only the freshly sampled policies belong to the outstanding ask().
+        optimizer.tell(fitnesses[reference_count:])
     population = [population[i] for i in order]
     fitnesses = [float(fitnesses[i]) for i in order]
     representative_cases = [representative_cases[i] for i in order]
 
     winner_weights = population[0].copy()
     if optimizer is not None:
-        next_population = optimizer.ask()
+        # Put the incumbent first so stable ties keep it. The copy prevents
+        # future population changes from mutating the saved winner.
+        next_population = [winner_weights.copy(), *optimizer.ask()]
     else:
         elites = population[: args.elites]
         next_population = list(elites)
@@ -646,7 +657,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fitness-temporal-worst-weight", type=float,
         default=DEFAULT_RUN_SETTINGS["fitnessTemporalWorstWeight"],
-        help="blend between mean late-snapshot score (0) and worst late snapshot (1)",
+        help="deprecated compatibility option; temporal fitness now uses the minimum late-snapshot loss",
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_RUN_SETTINGS["runSeed"])
     parser.add_argument("--checkpoint-every", type=int, default=DEFAULT_RUN_SETTINGS["checkpointEvery"])
@@ -789,6 +800,7 @@ def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed
         'seeds_per_candidate': args.seeds_per_candidate,
         'evaluation_seeds': best_evaluation_seeds,
         'elites': args.elites if args.optimizer == 'ga' else 0,
+        'reference_candidates': 1 if args.optimizer == 'cma-es' else 0,
         'mutation_sigma': args.mutation_sigma,
         'mutation_factors': list(getattr(args, 'mutation_factors', [1.])),
         'initial_weights': str(args.initial_weights) if getattr(args, 'initial_weights', None) else None,
@@ -812,7 +824,8 @@ def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed
         'fitness_spill_weight': args.fitness_spill_weight,
         'fitness_boundary_weight': args.fitness_boundary_weight,
         'fitness_crowding_weight': args.fitness_crowding_weight,
-        'fitness_temporal_worst_weight': args.fitness_temporal_worst_weight,
+        'fitness_temporal_aggregation': 'min',
+        'fitness_capture_fractions': [1-offset for offset in CAPTURE_OFFSETS],
         'seed': args.seed,
         'damping_loss_fraction': DAMPING_LOSS_FRACTION,
         'material_e': MATERIAL_E,

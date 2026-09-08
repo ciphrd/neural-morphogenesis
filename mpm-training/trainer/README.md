@@ -31,8 +31,17 @@ default 6,158-weight policy, plus optimizer workspace).
 .venv/bin/python evolve.py --target circle --optimizer cma-es --cma-covariance diagonal
 ```
 
-Every CMA candidate comes from its current distribution; GA elites are not
-inserted into its batches. `--elites` applies only to `--optimizer ga`, and
+CMA draws `--population` new policies from its current distribution. Starting
+with the second generation, it also evaluates one unchanged copy of the previous
+generation's winner on the same current seeds and densities. This reference
+competes for winner selection and previews, but does not enter CMA's distribution
+update. Ties retain the reference; a better candidate replaces it. Consequently,
+a population of 16 evaluates 17 policies after the first generation. Reference
+weights are preserved even when the sampled batch is worse, while scores may
+still change as evaluation seeds rotate. Metadata records `referenceCandidates`
+(server settings) / `reference_candidates` (checkpoints).
+
+`--elites` applies only to `--optimizer ga`, and
 nontrivial `--mutation-factors` are rejected for CMA. A random initialized
 policy supplies CMA's initial mean. With `--initial-weights PATH.npy`, that
 policy instead supplies the mean; it is not separately evaluated or preserved
@@ -110,7 +119,7 @@ PNG targets train RGB as well as alpha coverage. Each sample colors its triangle
 
 Stable-match polling and settling are disabled in training. Only the five late-window fitness checkpoints and early terminal states are scored. The legacy `--stable-stop` option is accepted for command compatibility but has no effect; new replay settings export `stableStop: false`.
 
-The training server requests terminal snapshots from workers, then selects the winning candidate's existing worst-seed/density snapshot. It writes the exact scored rasters to preview PNGs without rerunning the winner or rescoring it. The CLI keeps scalar worker results when previews are unnecessary. Run `rollout_control_check.py`, `seed_schedule_check.py`, and `preview_reuse_check.py` to verify these paths.
+The training server requests minimum-loss pose snapshots from workers, then selects the winning candidate's existing worst-seed/density snapshot. It writes the exact scored rasters to preview PNGs without rerunning the winner or rescoring it. The CLI keeps scalar worker results when previews are unnecessary. Run `rollout_control_check.py`, `seed_schedule_check.py`, and `preview_reuse_check.py` to verify these paths.
 
 The frontend's **Training timing** panel shows per-generation wall time and a choice of all-worker totals or the representative winner's rollout. Stages include setup, neural/growth command submission, growth status synchronization, physics, geometry/color/position readback, and fitness scoring. Each stage reports total seconds, call count, mean and maximum duration. Host timers use `perf_counter`; existing queue waits are charged to the host operation that waits, so these are not GPU kernel timings. The status readback is labeled **GPU completion / status readback**, with CPU sample-count updates measured separately. Parallel worker totals can exceed generation elapsed time.
 
@@ -167,3 +176,23 @@ raster resolution/antialiasing still leave a small error floor.
 
 Run `python svg_fitness_check.py` from `trainer/` for rotation, color, subdivision,
 checkpoint and rendering checks, plus a repeatable three-scorer CPU benchmark.
+
+
+### Minimum loss across the late rollout window
+
+Fitness model version 6 scores at 90%, 92.5%, 95%, 97.5%, and 100% of the
+configured macro-step horizon, then uses the **lowest** loss. For 2,000 steps,
+these are steps 1,800, 1,850, 1,900, 1,950, and 2,000. Rounded duplicate steps in
+short rollouts are evaluated once. Capacity/low-growth termination still scores
+the stop state and uses the best sample captured up to that point.
+
+Previews and returned positions come from the selected pose, with the earliest
+pose winning ties. Diagnostics include `scoreStep`, `scoredSteps`, and
+`scoredFitnesses`; `steps` and termination diagnostics still describe the full
+rollout. Seed/density aggregation is unchanged. Metadata records temporal
+aggregation `min` and the five capture fractions. The old
+`--fitness-temporal-worst-weight`/`fitnessTemporalWorstWeight` option is retained
+for compatibility but no longer affects scoring.
+
+Taking the minimum tolerates variations in when the shape is reached. It does
+not require the shape to remain stable throughout the window.

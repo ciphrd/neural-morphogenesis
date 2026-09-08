@@ -1,7 +1,8 @@
 """Seeded pycma ask/tell adapter in semantically scaled policy coordinates.
 
 The float64 search samples are retained for tell(); only the simulator-facing
-weights are rounded to float32. No elites or unevaluated means enter selection.
+weights are rounded to float32. The generation loop separately evaluates an
+unchanged incumbent; only this adapter's sampled batch enters tell().
 """
 from __future__ import annotations
 

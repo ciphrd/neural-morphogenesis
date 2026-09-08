@@ -191,14 +191,14 @@ export class Environment {
     ];
   }
 
-  /** Scale chemistry and neural state by the same per-round timestep. */
+  /** Time-scale decay/diffusion and private state; writes are per tick. */
   setCommunicationTimestep(rounds: number, speed: number): number {
     const macroDt = Math.max(0, speed);
     const neuralDt = macroDt / Math.max(1, Math.round(rounds));
     const decay = Math.pow(Math.max(0, Math.min(1, this.baseDecay)), neuralDt);
     writeFloat32(this.device, this.physicsUniform, 0, new Float32Array([
       decay,
-      this.baseDepositRate * neuralDt,
+      this.baseDepositRate,
       Math.min(neuralDt, 1),
       this.normalizeDepositsByLocalDensity ? 1 : 0,
       this.advectionDt,

@@ -86,7 +86,9 @@ def check_generation():
         actual_scores = tell.call_args.args[0]
         assert list(np.argsort(actual_scores)) == [1, 3, 2, 0]
         np.testing.assert_array_equal(result.winner_weights, original[1])
-        assert not any(np.array_equal(result.winner_weights, x) for x in result.population)
+        assert len(result.population) == args.population + 1
+        np.testing.assert_array_equal(result.population[0], result.winner_weights)
+        assert not np.shares_memory(result.population[0], result.winner_weights)
         assert result.snapshot.diagnostics["candidate"] == 1
         assert result.snapshot.diagnostics["seed"] == result.winner_seed
         assert result.snapshot.diagnostics["density"] == result.winner_density == 1.
@@ -95,6 +97,40 @@ def check_generation():
             assert [seed for candidate, seed, q in calls if candidate == i and q == 1.] == result.evaluation_seeds
         assert result.fitnesses == sorted(actual_scores)
         assert opt.generation == 1
+
+        # The unchanged reference wins against worse samples, and never enters
+        # CMA tell(). All five policies compete under the new common seed batch.
+        incumbent = result.winner_weights.copy()
+        next_calls = []
+        def reference_worker(weights, seed, density, snapshot=False):
+            is_reference = np.array_equal(weights, incumbent)
+            next_calls.append((is_reference, seed, density))
+            score = 1. if is_reference else 10.
+            return RolloutSnapshot(score, None, None, {"reference": is_reference})
+        with patch.object(evolve, "worker_rollout", reference_worker), patch.object(opt, "tell", wraps=opt.tell) as tell:
+            kept = evolve.run_generation(result.population, args, np.random.default_rng(3), RecordingPool(),
+                                         return_snapshot=True, optimizer=opt)
+        np.testing.assert_array_equal(tell.call_args.args[0], [10.]*args.population)
+        np.testing.assert_array_equal(kept.winner_weights, incumbent)
+        np.testing.assert_array_equal(kept.population[0], incumbent)
+        assert kept.snapshot.diagnostics['reference']
+        assert len(next_calls) == (args.population+1)*4
+        assert [(seed,q) for ref,seed,q in next_calls if ref] == [
+            (seed,q) for q in args.particle_densities for seed in kept.evaluation_seeds]
+
+        # Equal scores retain the reference; a strictly better sample replaces
+        # it, and the new winner is copied into the following generation.
+        with patch.object(evolve, "worker_rollout", return_value=5.):
+            tied = evolve.run_generation(kept.population, args, np.random.default_rng(4), RecordingPool(), optimizer=opt)
+        np.testing.assert_array_equal(tied.winner_weights, incumbent)
+        challenger = tied.population[2].copy()
+        def challenger_worker(weights, *args):
+            return 0. if np.array_equal(weights, challenger) else 5.
+        with patch.object(evolve, "worker_rollout", challenger_worker):
+            replaced = evolve.run_generation(tied.population, args, np.random.default_rng(5), RecordingPool(), optimizer=opt)
+        np.testing.assert_array_equal(replaced.winner_weights, challenger)
+        np.testing.assert_array_equal(replaced.population[0], challenger)
+
 
     for flags in (["--population", "1"], ["--mutation-sigma", "0"], ["--mutation-factors", "1", ".1"]):
         bad = evolve.build_arg_parser().parse_args(flags)

@@ -327,7 +327,8 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
 
   var out: PolicyOutput;
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-    out.envWrite[c] = safeTanh(outVec[c]) * physics.maxEnvWrite;
+    // Linear chemical residual, as in Growing NCA. maxEnvWrite is a gain.
+    out.envWrite[c] = outVec[c] * physics.maxEnvWrite;
   }
   out.growthVectorLocal = vec2<f32>(
     safeTanh(outVec[ENV_WRITE_DIM]), safeTanh(outVec[ENV_WRITE_DIM + 1u])
@@ -401,13 +402,10 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (CELL_OWNED_CHEMISTRY) {
 
     for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
-      let chemicalDelta = result.envWrite[c] * communicationDt
+      // Each communication tick applies a full chemical residual.
+      let chemicalDelta = result.envWrite[c]
         / max(FIELD_RELAXATION_TIMES[c], 1e-6);
-      agentState.particleMeta[pi].chemicalState[c] = clamp(
-        agentState.particleMeta[pi].chemicalState[c] + chemicalDelta,
-        -1.0,
-        1.0,
-      );
+      agentState.particleMeta[pi].chemicalState[c] += chemicalDelta;
     }
   } else {
 

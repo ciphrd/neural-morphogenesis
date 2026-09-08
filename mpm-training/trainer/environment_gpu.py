@@ -210,7 +210,7 @@ class EnvironmentGPU:
         return self._parity
 
     def set_communication_timestep(self, rounds: int, speed: float) -> float:
-        """Scale chemistry and neural state by the same per-round timestep."""
+        """Time-scale decay/diffusion and private state; writes are per tick."""
         macro_dt = max(0.0, float(speed))
         neural_dt = macro_dt / max(1, int(rounds))
         decay = max(0.0, min(1.0, self.base_decay)) ** neural_dt
@@ -220,7 +220,7 @@ class EnvironmentGPU:
             np.array(
                 [
                     decay,
-                    self.base_deposit_rate * neural_dt,
+                    self.base_deposit_rate,
                     min(neural_dt, 1.0),
                     1.0 if self.normalize_deposits_by_local_density else 0.0,
                     self.advection_dt, 0.0, 0.0, 0.0,

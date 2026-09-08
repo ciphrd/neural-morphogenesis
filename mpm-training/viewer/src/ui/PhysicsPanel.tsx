@@ -129,7 +129,7 @@ export function physicsSliderSpecsFor(
     },
     {
       key: "maxEnvWrite",
-      label: "Chemical delta amplitude",
+      label: "Chemical delta gain",
       ...scaledRange(trained.maxEnvWrite, 3),
       format: (v) => v.toFixed(3),
     },

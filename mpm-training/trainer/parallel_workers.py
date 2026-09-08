@@ -97,7 +97,7 @@ def _worker_init(
     _args = args
 
 def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1.0, return_snapshot: bool = False):
-    """Optionally return the terminal scoring snapshot for preview reuse.
+    """Optionally return the minimum-loss scoring snapshot for preview reuse.
 
     The only thing actually sent to a worker per candidate — `weights`
     and `seed`. Public (not `_`-prefixed, unlike this module's other

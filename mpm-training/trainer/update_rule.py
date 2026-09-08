@@ -69,8 +69,8 @@ class UpdateRule(nn.Module):
         simply concatenates the three channel blocks. Returns
         (env_write, growth_vector, tail), all raw/un-squashed;
         tail is RGB for stateless policies or concatenated state residual/gate/RGB for recurrent policies
-        and still in LOCAL frame — squashing (tanh for vectors and chemical deltas;
-        and rotating the growth vector to world frame are all training_sim.py's/core/agents.wgsl's
+        and still in LOCAL frame — chemical deltas remain linear; scaling them,
+        squashing other heads, and rotating the growth vector to world frame are training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
         not transient spatial splat geometry), same division of responsibility
         envnca's own UpdateRule/Simulation split."""

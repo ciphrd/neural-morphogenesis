@@ -81,7 +81,7 @@ export interface RunSettings extends ShapeStopSettings {
   depositRate: number;
   normalizeDepositsByLocalDensity: boolean;
   /** Represented-material density at which overcrowding normalization begins. */
-  /** Amplitude of the signed neural chemical delta rate. */
+  /** Gain on the unbounded linear chemical delta rate (legacy name). */
   maxEnvWrite: number;
 
   // Gaussian splat sigma in normalized [0,1] world-domain units. The shader
@@ -125,11 +125,15 @@ export interface RunSettings extends ShapeStopSettings {
   /** Shared rollout-seed batch size used for candidate evaluation. */
   seedsPerCandidate: number;
   elites: number;
+  /** Additional unchanged incumbent evaluated alongside CMA samples. */
+  referenceCandidates?: number;
   mutationSigma: number;
   mutationFactors?: number[];
   initialWeights?: string | null;
   /** Training pose scorer; omitted archived runs use raster alignment. */
   fitnessAlignment?: "raster" | "geometry" | "svg";
+  fitnessTemporalAggregation?: "min";
+  fitnessCaptureFractions?: number[];
   /** Native training diagnostic; browser kernels retain parallel reductions. */
   deterministicReference?: boolean;
   runSeed: number;

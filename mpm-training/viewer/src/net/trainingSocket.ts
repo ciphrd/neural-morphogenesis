@@ -81,9 +81,9 @@ export function applySettings(prev: Accumulator, settings: RunSettings): Accumul
     throw new Error("Run schema does not match the current simulation; start a new run.");
   }
   for (const key of Object.keys(DEFAULT_RUN_SETTINGS)) {
-    // Optimizer metadata is optional for pre-CMA archives and does not
-    // affect simulation playback.
-    if (key === "optimizer" || key === "cmaCovariance") continue;
+    // Optimizer and temporal-scoring metadata may be absent in older
+    // archives and do not affect simulation playback.
+    if (key === "optimizer" || key === "cmaCovariance" || key === "fitnessTemporalAggregation") continue;
     if (!(key in settings)) throw new Error(`Run settings missing required field: ${key}`);
   }
   return { ...prev, settings };
@@ -165,7 +165,10 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): LiveTrainingSo
         .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`GET /settings -> ${res.status}`))))
         .then((data: RunSettings) => {
           if (!cancelled) {
-            setAcc((prev) => applySettings(prev, data));
+            // Validate before scheduling React's updater so failures reach
+            // the fetch catch/retry below rather than throwing during render.
+            const { settings } = applySettings(EMPTY_ACCUMULATOR, data);
+            setAcc((prev) => ({ ...prev, settings }));
           }
         })
         .catch(() => {

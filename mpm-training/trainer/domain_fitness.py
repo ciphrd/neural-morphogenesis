@@ -13,7 +13,7 @@ from scipy.ndimage import affine_transform, distance_transform_edt
 from raster import RasterFitnessBreakdown, _average_pool, _boundary_loss
 from triangle_vertices import unwrap_vertices
 
-FITNESS_MODEL_VERSION = 5
+FITNESS_MODEL_VERSION = 6
 
 def target_mask(target, resolution):
     return target.mask(resolution)
