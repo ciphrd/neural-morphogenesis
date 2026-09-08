@@ -1,3 +1,4 @@
+import { normalizeAttractor } from "./actuators"
 import type { PerformanceSnapshot } from "./types"
 
 /** Carry compatible values forward; newly introduced engine fields use defaults. */
@@ -32,11 +33,13 @@ export function migrateSnapshot(stored: PerformanceSnapshot, defaults: Performan
     const alpha = legacy[alphaKey]
     if (typeof alpha === "number" && Number.isFinite(alpha)) render.particleAlpha = Math.max(0, Math.min(1, alpha))
   }
+  render.centerDotSize = Number.isFinite(stored.render?.centerDotSize) ? Math.max(0.02, Math.min(0.5, stored.render.centerDotSize)) : 0.18
   render.autoZoom = compatibleValues(defaults.render.autoZoom, stored.render?.autoZoom)
   render.bloom = compatibleValues(defaults.render.bloom, stored.render?.bloom)
   return {
     ...compatibleValues(defaults, stored),
     physics: defaults.physics ? compatibleValues(defaults.physics, stored.physics) : null,
     render,
+    attractor: normalizeAttractor(stored.attractor),
   }
 }

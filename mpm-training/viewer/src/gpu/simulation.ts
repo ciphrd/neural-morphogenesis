@@ -1,3 +1,6 @@
+import { outsideCenterCircleMask } from "./materialCull";
+import type { CutPush } from "./cutPush";
+import { MaterialCutter } from "./materialCutter";
 import { VIEWER_DEFAULTS } from "../viewerConfig";
 import { InitialCondition } from "./initialConditions";
 import seedDensityModelConfig from "../../../core/config.json";
@@ -41,6 +44,7 @@ export class GpuSimulation {
   private readonly format: GPUTextureFormat;
 
   private mpmCore: MpmCore | null = null;
+  private materialCutter: MaterialCutter | null = null;
   private environment: Environment | null = null;
   private agents: Agents | null = null;
   private renderer: Renderer | null = null;
@@ -67,6 +71,7 @@ export class GpuSimulation {
   private pendingBoundaryGradientZeroIsBlack = VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack;
   private pendingParticleShape: ParticleShape = VIEWER_DEFAULTS.rendering.particleShape;
   private pendingParticleColorMode: ParticleColorMode = VIEWER_DEFAULTS.rendering.particleColorMode;
+  private pendingCenterDotSize = 0.18;
   private pendingParticleAlpha = VIEWER_DEFAULTS.rendering.particleAlpha;
   private pendingDirectionalLineVisible = VIEWER_DEFAULTS.rendering.directionalLineVisible;
   private pendingGrowthLineVisible = VIEWER_DEFAULTS.rendering.growthLineVisible;
@@ -202,6 +207,7 @@ export class GpuSimulation {
   private resetKeyFor(config: SimulationConfig): string {
     return [
       config.particles,
+      config.fastAccumulation ?? false,
       config.channels,
       config.baseResolution,
       JSON.stringify(config.chemicalChannelProfiles),
@@ -231,9 +237,10 @@ export class GpuSimulation {
     this.destroySimObjects();
     this.particleCap = Math.min(MAX_PARTICLES, Math.max(2, Math.floor(this.pendingParticleCap ?? config.particles)));
 
-    const mpmCore = new MpmCore(this.device);
+    const mpmCore = new MpmCore(this.device, config.fastAccumulation ?? false);
 
     const environment = new Environment(this.device, {
+      fastAccumulation: config.fastAccumulation ?? false,
       channels: config.channels,
       width: config.baseResolution,
       height: config.baseResolution,
@@ -250,6 +257,7 @@ export class GpuSimulation {
     }, mpmCore.gridVel);
 
     const agents = new Agents(this.device, mpmCore, environment, {
+      performanceParallelRefinement: config.fastAccumulation ?? false,
       channels: config.channels,
       hiddenDim: config.hiddenDim,
       policyArchitecture: config.policyArchitecture,
@@ -285,6 +293,7 @@ export class GpuSimulation {
     renderer.setBoundaryGradientZeroIsBlack(this.pendingBoundaryGradientZeroIsBlack);
     renderer.setParticleShape(this.pendingParticleShape);
     renderer.setParticleColorMode(this.pendingParticleColorMode);
+    renderer.setCenterDotSize(this.pendingCenterDotSize);
     renderer.setParticleAlpha(this.pendingParticleAlpha);
     renderer.setDirectionalLineVisible(this.pendingDirectionalLineVisible);
     renderer.setGrowthLineVisible(this.pendingGrowthLineVisible);
@@ -311,6 +320,7 @@ export class GpuSimulation {
     this.renderer = renderer;
     this.interact = interact;
     this.deform = deform;
+    this.materialCutter = new MaterialCutter(this.device, mpmCore);
     this.noiseDisplacement = noiseDisplacement;
     this.config = config;
     this.applyPhysics(physicsSettingsFromConfig(config));
@@ -411,7 +421,7 @@ export class GpuSimulation {
       physics.growthCompressionStop,
     );
     const growthCompressionFeedback = Math.max(
-      0, Math.min(1, physics.growthCompressionFeedback),
+      0, Math.min(1, physics.growthCompressionFeedback ?? 0),
     );
     const growthSpeedMultiplier = Math.max(0, physics.growthSpeedMultiplier);
     const effectiveGrowthDuration = growthSpeedMultiplier > 0
@@ -475,6 +485,8 @@ export class GpuSimulation {
     );
   }
 
+  setAudioEnergy(energy: number): void { this.agents?.setAudioEnergy(energy); }
+
   setPhysics(physics: PhysicsSettings): void {
     this.applyPhysics(physics);
   }
@@ -526,6 +538,41 @@ export class GpuSimulation {
     return killed;
   }
 
+  /** Preserve the central 40%-width disk, using the normal full-state compaction. */
+  async killOutsideCircle(diameter = 0.4): Promise<number> {
+    const core=this.mpmCore, agents=this.agents;
+    if (!core || !agents || !core.activeCount) return 0;
+    const epoch=this.epoch;
+    const positions=await core.readPositions();
+    if (epoch!==this.epoch || core!==this.mpmCore) return 0;
+    const mask=outsideCenterCircleMask(positions, diameter);
+    let killed=0;
+    for (const victim of mask) killed+=victim;
+    if (!killed) return 0;
+    this.epoch++;
+    agents.compactMaterialCull(mask);
+    core.setActiveCount(mask.length-killed);
+    agents.setActiveCount(mask.length-killed);
+    return killed;
+  }
+
+  async cutMaterial(strokes: readonly CutPush[]): Promise<number> {
+    const cutter=this.materialCutter, core=this.mpmCore, agents=this.agents;
+    if (!cutter || !core || !agents || !strokes.length) return 0;
+    const epoch=this.epoch;
+    const mask=await cutter.classify(strokes);
+    // Restart, culling, or a new configuration invalidates the sampled indices.
+    if (epoch!==this.epoch || core!==this.mpmCore) return 0;
+    let killed=0;
+    for (const victim of mask) killed+=victim;
+    if (!killed) return 0;
+    this.epoch++;
+    agents.compactMaterialCull(mask);
+    core.setActiveCount(mask.length-killed);
+    agents.setActiveCount(mask.length-killed);
+    return killed;
+  }
+
   /** `points`: flat [x0,y0,x1,y1,...] in MpmCore's own [0,1]^2 domain.
    * Cached (not just forwarded) since it can arrive before the first
    * rebuild() ever runs. */
@@ -558,9 +605,10 @@ export class GpuSimulation {
    * write, no physics submit, no currentStep bump) if it's changed by
    * the time readSampleCount() resolves — see that field's own comment
    * for the exact restart-vs-in-flight-step race this prevents. */
-  async step(): Promise<void> {
+  async step(transitionDeltaSeconds = 1 / 60): Promise<void> {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     if (this.shapeStop.complete) return;
+    this.agents.advanceWeightTransition(transitionDeltaSeconds);
     const stepEpoch = this.epoch;
     const nextStep = this._currentStep + 1;
     const forcedGrowth = this.scenario?.events.find((event) => {
@@ -679,6 +727,11 @@ export class GpuSimulation {
   setParticleColorMode(mode: ParticleColorMode): void {
     this.pendingParticleColorMode = mode;
     this.renderer?.setParticleColorMode(mode);
+  }
+
+  setCenterDotSize(size: number): void {
+    this.pendingCenterDotSize = size;
+    this.renderer?.setCenterDotSize(size);
   }
 
   setParticleAlpha(alpha: number): void {
@@ -820,11 +873,8 @@ export class GpuSimulation {
     this.noiseDisplacement?.apply(strength, timeSeconds);
   }
 
-  /** Replaces the live update rule with a fresh random init (see
-   * Agents.randomizeWeights()'s own docstring). Existing callers retain the
-   * historical restart behavior by default; performance controls can opt out
-   * to swap brains during the current rollout. Silently does nothing before
-   * the first rebuild(), same stance every other tool method here takes. */
+  /** Blend to a fresh random brain over two playback seconds. Optionally
+   * restart material immediately; restarting does not cancel the blend. */
   randomizeWeights(restart = true): UpdateRuleWeights | null {
     if (!this.agents) return null;
     const weights = this.agents.randomizeWeights();
@@ -839,6 +889,7 @@ export class GpuSimulation {
     this.renderer?.destroy();
     this.interact?.destroy();
     this.deform?.destroy();
+    this.materialCutter?.destroy();
     this.noiseDisplacement?.destroy();
     this.mpmCore = null;
     this.environment = null;
@@ -846,6 +897,7 @@ export class GpuSimulation {
     this.renderer = null;
     this.interact = null;
     this.deform = null;
+    this.materialCutter = null;
     this.noiseDisplacement = null;
   }
 

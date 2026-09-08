@@ -238,7 +238,7 @@ export function PhysicsPanel({
             Average chemical expression
           </label>
           {specs.map((spec) => (
-            <label key={spec.key} className="slider-row">
+            <label data-audio-target={`physics.${spec.key}`} key={spec.key} className="slider-row">
               <span>{spec.label}</span>
               <Slider
                 min={spec.min}

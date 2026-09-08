@@ -48,7 +48,7 @@
     "growthDuration": 12.0,
     "growthCompressionStart": 0.1,
     "growthCompressionStop": 0.1,
-    "growthCompressionFeedback": 1.0,
+    "growthCompressionFeedback": 0.0,
     "growthModelVersion": 18,
     "growthAnisotropy": 1.0,
     "mpmEnabled": true,
@@ -102,7 +102,7 @@
     "decay": 0.91,
     "depositRate": 4.0,
     "normalizeDepositsByLocalDensity": true,
-    "maxEnvWrite": 1.0,
+    "maxEnvWrite": 4.0,
     "chemicalValueInputMultiplier": 1.0,
     "chemicalGradientInputScale": 0.045,
     "communicationSpeed": 1.0,
@@ -252,7 +252,7 @@
       "paused": false,
       "particleCap": null,
       "initialParticleCount": null,
-      "particleDensityMultiplier": null,
+      "particleDensityMultiplier": 4.0,
       "substrateResolution": null
     },
     "rendering": {

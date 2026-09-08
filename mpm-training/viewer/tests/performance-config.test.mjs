@@ -19,7 +19,7 @@ test("performance starts with fresh compatible policies without browser storage 
     const { physicsSettingsFromConfig } = await server.ssrLoadModule("/src/gpu/types.ts")
     const defaults = { physics: physicsSettingsFromConfig(first), render: VIEWER_DEFAULTS.rendering,
       particleCap: 4000, initialParticleCount: 20, noiseDisplacementStrength: 0,
-      paused: false, loopAtTrainedSteps: false, blackout: false }
+      paused: false, loopAtTrainedSteps: false }
     const migrated = migrateSnapshot({ ...defaults, physics: { gravity: 12, steeringStrength: 1 },
       render: { particleRenderMode: "dots-neural-color", neuralColorAlpha: 0.6, zoom: 2 } }, defaults)
     assert.equal(migrated.render.particleColorMode, "neural-color")

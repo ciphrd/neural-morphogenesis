@@ -37,8 +37,8 @@ import { DX, GRID_N, INV_DX, NODE_COUNT, REPULSION_FIELD_N, type MpmCore } from 
 import { templateShader } from "./shaderTemplate";
 
 export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "gradient" | "growth";
-export type ParticleShape = "dot" | "triangle" | "domain";
-export type ParticleColorMode = "white" | "neural-color" | "growth-magnitude" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
+export type ParticleShape = "dot" | "dot-center" | "triangle" | "domain" | "domain-wireframe";
+export type ParticleColorMode = "substrate" | "white" | "neural-color" | "growth-magnitude" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
 export const MAX_ZOOM = 32;
 
 const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "orientation" | "gradient" | "growth">, number> = {
@@ -86,6 +86,8 @@ export class Renderer {
   private readonly viewBindGroup: GPUBindGroup;
   private readonly circlePipeline: GPURenderPipeline;
   private readonly particleCirclePipeline: GPURenderPipeline;
+  private readonly substrateParticlePipeline: GPURenderPipeline;
+  private readonly substrateParticleBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly domainPipeline: GPURenderPipeline;
   private readonly domainBindGroup: GPUBindGroup;
   private particleShape: ParticleShape = VIEWER_DEFAULTS.rendering.particleShape;
@@ -235,7 +237,7 @@ export class Renderer {
     this.environment = environment;
     this.bloom = new BloomPostProcess(device, format);
     const renderModule = device.createShaderModule({
-      code: templateShader(renderSrc, { CHANNELS: environment.channels }),
+      code: templateShader(renderSrc, { CHANNELS: environment.channels, ...environment.layout.shaderConstants }),
     });
 
     // --- particles/target ---
@@ -243,7 +245,7 @@ export class Renderer {
       entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } }],
     });
     this.viewUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    writeFloat32(device, this.viewUniform, 0, new Float32Array([1, 0, 1, 0]));
+    writeFloat32(device, this.viewUniform, 0, new Float32Array([1, 0, 1, 0.18]));
     this.viewBindGroup = device.createBindGroup({
       layout: viewLayout,
       entries: [{ binding: 0, resource: { buffer: this.viewUniform } }],
@@ -649,6 +651,31 @@ export class Renderer {
         ],
       })
     ) as [GPUBindGroup, GPUBindGroup];
+    // Sample the live field directly: independent of the background mode,
+    // with each channel's own resolution and the current ping-pong parity.
+    const substrateParticleLayout = device.createBindGroupLayout({ entries: [
+      ...[0, 3, 4, 11].map(binding => ({ binding, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" as const } })),
+      ...[1, 12, 13, 14].map(binding => ({ binding, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" as const } })),
+    ] });
+    this.substrateParticlePipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [substrateParticleLayout, viewLayout] }),
+      vertex: { module: renderModule, entryPoint: "substrateParticleVertex" },
+      fragment: { module: renderModule, entryPoint: "internalStateParticleFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.substrateParticleBindGroups = [0, 1].map(parity => device.createBindGroup({
+      layout: substrateParticleLayout,
+      entries: [
+        { binding: 0, resource: { buffer: mpmCore.positions } },
+        { binding: 1, resource: { buffer: this.particleRadiusUniform } },
+        { binding: 3, resource: { buffer: particleMetaState, offset: PARTICLE_META_BUFFER_OFFSET } },
+        { binding: 4, resource: { buffer: mpmCore.rest } },
+        { binding: 11, resource: { buffer: environment.buffers[parity] } },
+        { binding: 12, resource: { buffer: this.substrateChannelStartUniform } },
+        { binding: 13, resource: { buffer: this.accentUniform } },
+        { binding: 14, resource: { buffer: this.backgroundZeroIsBlackUniform } },
+      ],
+    })) as [GPUBindGroup, GPUBindGroup];
     this.substrateDispatch = [ceilDiv(environment.maxWidth, 16), ceilDiv(environment.maxHeight, 16)];
 
     this.substratePresentPipeline = device.createRenderPipeline({
@@ -856,8 +883,15 @@ export class Renderer {
 
   setParticleShape(shape: ParticleShape): void {
     this.particleShape = shape;
-    const shapeCode = shape === "domain" ? 2 : shape === "triangle" ? 1 : 0;
+    const shapeCode = shape === "domain-wireframe" ? 3 : shape === "domain" ? 2 : shape === "triangle" ? 1 : shape === "dot-center" ? 0.25 : 0;
     writeFloat32(this.device, this.viewUniform, 4, new Float32Array([shapeCode]));
+  }
+
+  /** Center radius as a fraction of the surrounding dot radius. */
+  setCenterDotSize(size: number): void {
+    writeFloat32(this.device, this.viewUniform, 12, new Float32Array([
+      Number.isFinite(size) ? Math.max(0.02, Math.min(0.5, size)) : 0.18,
+    ]));
   }
 
   setParticleColorMode(mode: ParticleColorMode): void {
@@ -1096,9 +1130,14 @@ export class Renderer {
       pass.setBindGroup(1, this.viewBindGroup);
       // Domain mode expands each particle into at most four periodic triangle
       // instances entirely in the vertex shader. Invalid copies are clipped.
-      const particleVertexCount = this.particleShape === "domain" ? 3 : 6;
-      const particleInstanceCount = this.particleShape === "domain" ? activeCount * 4 : activeCount;
-      if (this.particleColorMode === "white") {
+      const isDomain = this.particleShape === "domain" || this.particleShape === "domain-wireframe";
+      const particleVertexCount = isDomain ? 3 : 6;
+      const particleInstanceCount = isDomain ? activeCount * 4 : activeCount;
+      if (this.particleColorMode === "substrate") {
+        pass.setPipeline(this.substrateParticlePipeline);
+        pass.setBindGroup(0, this.substrateParticleBindGroups[this.environment.parity]);
+        pass.draw(particleVertexCount, particleInstanceCount);
+      } else if (this.particleColorMode === "white") {
         pass.setPipeline(this.particleCirclePipeline);
         pass.setBindGroup(0, this.circleParticleBindGroup);
         pass.draw(particleVertexCount, particleInstanceCount);

@@ -1,3 +1,4 @@
+import type { AttractorSettings, AttractorPosition } from "./actuators"
 import type { FieldMode, ParticleShape, ParticleColorMode } from "../gpu/render"
 import type { PhysicsSettings, SimulationConfig } from "../gpu/types"
 
@@ -10,7 +11,7 @@ export interface PerformanceAutoZoomSettings {
   smoothing: number
 }
 
-export interface PerformanceBloomSettings {
+export interface PerformanceBloomSettings extends Partial<import("../gpu/postEffects").PostEffectSettings> {
   enabled: boolean
   intensity: number
   threshold: number
@@ -24,6 +25,7 @@ export interface PerformanceRenderSettings {
   particleRadiusPx: number
   particleShape: ParticleShape
   particleColorMode: ParticleColorMode
+  centerDotSize: number
   particleAlpha: number
   directionalLineVisible: boolean
   domainVisible: boolean
@@ -45,6 +47,10 @@ export interface PerformanceRenderSettings {
 }
 
 export interface PerformanceSnapshot {
+  autoPruneCircle?: boolean
+  /** Live normalized NN input; absent or disabled audio is silence. */
+  audioEnergy?: number
+  attractor?: AttractorSettings
   physics: PhysicsSettings | null
   render: PerformanceRenderSettings
   particleCap: number
@@ -52,7 +58,6 @@ export interface PerformanceSnapshot {
   noiseDisplacementStrength: number
   paused: boolean
   loopAtTrainedSteps: boolean
-  blackout: boolean
 }
 
 export interface PerformanceScene {
@@ -71,13 +76,14 @@ export interface ProjectionTelemetry {
 export type ControllerToProjectionMessage =
   | { type: "config"; config: SimulationConfig | null }
   | { type: "snapshot"; snapshot: PerformanceSnapshot }
-  | { type: "auto-prune"; fraction: number | null; delayMs: number }
   | {
       type: "command"
-      command: "restart" | "randomize" | "randomize-and-restart" | "kill-20-percent" | "kill-80-percent" | "prune"
+      command: "restart" | "randomize" | "randomize-and-restart" | "kill-20-percent" | "kill-80-percent" | "keep-center-circle" | "prune"
     }
 
 export type ProjectionToControllerMessage =
+  | { type: "policy-weights"; weights: SimulationConfig["weights"] }
+  | { type: "attractor"; position: AttractorPosition }
   | { type: "hello" }
   | { type: "telemetry"; telemetry: ProjectionTelemetry }
 

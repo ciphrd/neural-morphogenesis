@@ -23,13 +23,13 @@ test("edits reset only the edited clock; disabling and removal cancel pending ac
   const scheduler = new SequenceScheduler()
   const a = sequence("a", 1), b = sequence("b", 2, "randomize")
   scheduler.tick([a, b], 0)
-  const edited = { ...a, action: "blackout", intervalSeconds: 3 }
+  const edited = { ...a, action: "kill-20-percent", intervalSeconds: 3 }
   assert.deepEqual(scheduler.tick([edited, b], 500), [])
   assert.deepEqual(scheduler.tick([edited, b], 2000), ["randomize"])
   assert.deepEqual(scheduler.tick([{ ...edited, enabled: false }], 3400), [])
   assert.deepEqual(scheduler.tick([edited], 3500), [])
   assert.deepEqual(scheduler.tick([edited], 6499), [])
-  assert.deepEqual(scheduler.tick([edited], 6500), ["blackout"])
+  assert.deepEqual(scheduler.tick([edited], 6500), ["kill-20-percent"])
   assert.deepEqual(scheduler.tick([], 10000), [])
 })
 
@@ -41,7 +41,7 @@ test("storage migrates legacy settings and rejects malformed sequences", () => {
   assert.deepEqual(loadSequences(), [sequence("legacy-reset", 12)])
   storage.set(SEQUENCES_STORAGE_KEY, "[]")
   assert.deepEqual(loadSequences(), [])
-  storage.set(SEQUENCES_STORAGE_KEY, JSON.stringify([sequence("valid", 0.5), sequence("valid", 2), sequence("bad", -1), sequence("unknown", 1, "invalid"), null]))
+  storage.set(SEQUENCES_STORAGE_KEY, JSON.stringify([sequence("valid", 0.5), sequence("valid", 2), sequence("bad", -1), sequence("unknown", 1, "invalid"), sequence("removed-blackout", 1, "blackout"), sequence("removed-pruning", 1, "toggle-auto-prune"), null]))
   assert.deepEqual(loadSequences(), [sequence("valid", 0.5)])
   storage.set(SEQUENCES_STORAGE_KEY, "broken JSON")
   assert.deepEqual(loadSequences(), [])

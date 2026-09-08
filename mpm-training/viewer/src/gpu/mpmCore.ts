@@ -53,6 +53,7 @@ const coreConstants = coreConstantsConfig.simulation;
 const MORPHOLOGY_MAX_RADIUS = coreConstants.MORPHOLOGY_MAX_RADIUS;
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
+import { densityReductionShader, p2gReductionShader } from "./p2gReduction";
 import type { SceneData } from "./types";
 
 export const GROWTH_FIELD_CHANNELS: number = coreConstants.GROWTH_FIELD_CHANNELS;
@@ -202,7 +203,7 @@ export class MpmCore {
     return this._activeCount;
   }
 
-  constructor(device: GPUDevice) {
+  constructor(device: GPUDevice, private readonly reduceP2g = false) {
     this.device = device;
     const f32 = 4;
 
@@ -233,7 +234,7 @@ export class MpmCore {
       entries: [{ binding: 0, resource: { buffer: this.gridAccum } }],
     });
 
-    const p2gModule = device.createShaderModule({ code: templateShader(p2gSrc, templateVars) });
+    const p2gModule = device.createShaderModule({ code: templateShader(reduceP2g ? p2gReductionShader(p2gSrc) : p2gSrc, templateVars) });
     this.p2gPipeline = device.createComputePipeline({ layout: "auto", compute: { module: p2gModule, entryPoint: "p2g" } });
     this.p2gBindGroup = device.createBindGroup({
       layout: this.p2gPipeline.getBindGroupLayout(0),
@@ -305,7 +306,7 @@ export class MpmCore {
     this.splatParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.repulsionParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
-    const repulsionModule = device.createShaderModule({ code: templateShader(repulsionSrc, { FIELD_N: REPULSION_FIELD_N, DT }) });
+    const repulsionModule = device.createShaderModule({ code: templateShader(reduceP2g ? densityReductionShader(repulsionSrc) : repulsionSrc, { FIELD_N: REPULSION_FIELD_N, DT }) });
 
     this.clearDensityPipeline = device.createComputePipeline({ layout: "auto", compute: { module: repulsionModule, entryPoint: "clearDensity" } });
     this.clearDensityBindGroup = device.createBindGroup({
@@ -647,7 +648,7 @@ export class MpmCore {
   encodeMorphology(encoder: GPUCommandEncoder): void {
     const particleDispatch = ceilDiv(this._activeCount, WORKGROUP);
     const passes: [GPUComputePipeline, GPUBindGroup, [number, number?]][] = [];
-    if (this.densityRenderPipeline && this.densityRenderBindGroup) {
+    if (this.densityRenderPipeline && this.densityRenderBindGroup && (!this.reduceP2g || this._activeCount < 4096)) {
       const pass = encoder.beginRenderPass({ colorAttachments: [{
         view: this.densityTexture.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0],
       }] });

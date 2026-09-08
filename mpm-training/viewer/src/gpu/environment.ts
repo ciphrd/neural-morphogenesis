@@ -13,9 +13,11 @@ import {
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
 import type { ChemicalCommunicationArchitecture } from "./types";
-import { GRID_N } from "./mpmCore";
+import { ChemicalSplats } from "./chemicalSplats";
+import { MAX_PARTICLES, GRID_N } from "./mpmCore";
 
 export interface EnvironmentConfig {
+  fastAccumulation?: boolean;
   channels: number;
   width: number;
   height: number;
@@ -31,6 +33,12 @@ const CLEAR_WORKGROUP = 256;
 const GRID_WORKGROUP = 16;
 
 export class Environment {
+  readonly fastAccumulation: boolean;
+  particleCount = 0;
+  get useWorkgroupDeposits(): boolean {
+    return this.fastAccumulation && (!this.chemicalSplats || this.particleCount >= 4096);
+  }
+  readonly chemicalSplats: ChemicalSplats | null;
   readonly chemicalCommunicationArchitecture: ChemicalCommunicationArchitecture;
   readonly channels: number;
   readonly width: number;
@@ -92,6 +100,8 @@ export class Environment {
     this.advectionDt = Math.max(0, config.advectionDt ?? 0);
 
     const total = this.layout.total;
+    this.fastAccumulation = !!config.fastAccumulation;
+    const useSplats = !!config.fastAccumulation && device.features.has("float32-blendable");
     const scratchTotal = total * 2;
     const f32 = 4;
 
@@ -100,7 +110,8 @@ export class Environment {
       device.createBuffer({ size: total * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }),
     ];
     this.gradient = device.createBuffer({ size: total * 2 * f32, usage: GPUBufferUsage.STORAGE });
-    this.depositScratch = device.createBuffer({ size: scratchTotal * f32, usage: GPUBufferUsage.STORAGE });
+    this.depositScratch = device.createBuffer({ size: Math.max(scratchTotal, useSplats ? MAX_PARTICLES * (config.channels + 3) : 0) * f32, usage: GPUBufferUsage.STORAGE });
+    this.chemicalSplats = useSplats ? new ChemicalSplats(device, this.layout, this.depositScratch) : null;
     this.physicsUniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setCommunicationTimestep(1, 1);
 
@@ -238,6 +249,7 @@ export class Environment {
 
   /** Starts a communication round by removing every previous splat. */
   encodeClear(encoder: GPUCommandEncoder): void {
+    if (this.chemicalSplats && !this.useWorkgroupDeposits) return;
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.clearScratchPipeline);
     pass.setBindGroup(0, this.clearScratchBindGroup);
@@ -286,6 +298,7 @@ export class Environment {
   }
 
   destroy(): void {
+    this.chemicalSplats?.destroy();
     this.buffers[0].destroy();
     this.buffers[1].destroy();
     this.gradient.destroy();

@@ -1,6 +1,6 @@
 struct DownsampleSettings { texelSize: vec2<f32>, threshold: f32, prefilter: f32 }
 struct UpsampleSettings { texelSize: vec2<f32>, radius: f32, scatter: f32 }
-struct CompositeSettings { intensity: f32, bloomEnabled: f32 }
+struct CompositeSettings { bloom: vec4<f32>, dof: vec4<f32>, effects: vec4<f32>, frequency: vec4<f32>, exponent: vec4<f32>, phase: vec4<f32>, texel: vec4<f32>, strobe: vec4<f32>, strobePhase: vec4<f32>, strobeExponent: vec4<f32> }
 
 @group(0) @binding(0) var sourceTexture: texture_2d<f32>;
 @group(0) @binding(1) var linearSampler: sampler;
@@ -80,9 +80,44 @@ fn upsampleFragment(in: VertexOut) -> @location(0) vec4<f32> {
   return vec4<f32>(detail + low * upsampleSettings.scatter, 1.0);
 }
 
+fn compositeColor(uv: vec2<f32>) -> vec3<f32> {
+  let scene = textureSampleLevel(sceneTexture, compositeSampler, uv, 0.0).rgb;
+  if (compositeSettings.bloom.y < 0.5) { return scene; }
+  return scene + textureSampleLevel(bloomTexture, compositeSampler, uv, 0.0).rgb * compositeSettings.bloom.x;
+}
+
 @fragment
 fn compositeFragment(in: VertexOut) -> @location(0) vec4<f32> {
-  let scene = textureSample(sceneTexture, compositeSampler, in.uv).rgb;
-  let bloom = textureSample(bloomTexture, compositeSampler, in.uv).rgb;
-  return vec4<f32>(scene + bloom * compositeSettings.intensity * compositeSettings.bloomEnabled, 1.0);
+  let s = compositeSettings;
+  var color = compositeColor(in.uv);
+  if (s.effects.x > 0.5) {
+    let distance = max(abs(in.uv.y - s.dof.x) - 0.5 * s.dof.y, 0.0);
+    let radius = smoothstep(0.0, 0.35, distance) * select(s.dof.z, s.dof.w, in.uv.y > s.dof.x);
+    if (radius > 0.01) {
+      // A fixed-cost disk kernel avoids a depth buffer or extra full-size targets.
+      var sum = color;
+      var weights = 1.0;
+      for (var i = 0u; i < 32u; i++) {
+        let r = sqrt((f32(i) + 0.5) / 32.0);
+        let angle = f32(i) * 2.39996323;
+        let offset = vec2<f32>(cos(angle), sin(angle)) * r * radius * s.texel.xy;
+        let weight = exp(-2.0 * r * r);
+        sum += compositeColor(in.uv + offset) * weight;
+        weights += weight;
+      }
+      color = sum / weights;
+    }
+  }
+  if (s.effects.y > 0.5) {
+    let coordinate = dot(in.uv - vec2<f32>(0.5), vec2<f32>(cos(s.effects.w), sin(s.effects.w)));
+    let wave = 0.5 + 0.5 * sin(6.283185307 * (coordinate * s.frequency.xyz + s.phase.xyz));
+    let mask = pow(clamp(wave, vec3<f32>(0.0), vec3<f32>(1.0)), s.exponent.xyz);
+    color *= mix(vec3<f32>(1.0), mask, s.effects.z);
+  }
+  if (s.strobe.x > 0.5) {
+    let wave = 0.5 + 0.5 * sin(6.283185307 * s.strobePhase.xyz);
+    let pulse = pow(clamp(wave, vec3<f32>(0.0), vec3<f32>(1.0)), s.strobeExponent.xyz);
+    color *= mix(vec3<f32>(1.0), pulse, s.strobe.y);
+  }
+  return vec4<f32>(color, 1.0);
 }

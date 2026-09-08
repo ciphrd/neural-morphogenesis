@@ -1,9 +1,13 @@
+import { WeightTransition } from "./weightTransition";
+import { materialCullPairs } from "./materialCull";
 
 import randomCullSrc from "./randomCull.wgsl?raw";
 import agentsSrc from "../../../core/agents.wgsl?raw";
 import growthFieldSrc from "../../../core/growthField.wgsl?raw";
 import coreConstantsConfig from "../../../core/config.json";
 const coreConstants = coreConstantsConfig.simulation;
+import { workgroupReductionShader } from "./p2gReduction";
+import { chemicalSplatShader } from "./chemicalSplats";
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
 import type { Environment } from "./environment";
@@ -23,6 +27,7 @@ const particleMetaStride = (channels: number) => Math.ceil((60 + channels * 4) /
 export const PARTICLE_META_BUFFER_OFFSET = 256;
 
 export interface AgentsConfig {
+  performanceParallelRefinement?: boolean;
   channels: number;
   hiddenDim: number;
   policyArchitecture: PolicyArchitecture;
@@ -44,7 +49,7 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
   // core/agents.wgsl's IN_DIM: value + heading-forward gradient + lateral
   // gradient per channel, with no positional inputs.
   const stateful = policyHasRecurrence(architecture);
-  const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
+  const inDim = channels * 3 + 6 + (stateful ? 8 : 0) + 1; // Final viewer input: audio energy.
   // Chemical deltas plus a two-component local growth vector and either
   // private-state updates or RGB.
   const outDim = channels + (stateful ? 21 : 5);
@@ -61,12 +66,15 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
  * the fc1w/fc1b/fc2w/fc2b order agents.wgsl's own FC1W_OFFSET/etc.
  * consts expect. */
 function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim: number, architecture: PolicyArchitecture): Float32Array {
-  const { totalFloats } = weightLayout(channels, hiddenDim, architecture);
+  const { totalFloats, inDim } = weightLayout(channels, hiddenDim, architecture);
   const shapeError = policyWeightsShapeError(weights, channels, hiddenDim, architecture);
   if (shapeError) throw new Error(shapeError);
   const out = new Float32Array(totalFloats);
   let i = 0;
-  for (const row of weights.fc1w) for (const v of row) out[i++] = v;
+  for (const row of weights.fc1w) {
+    for (const v of row) out[i++] = v;
+    if (row.length < inDim) out[i++] = 0; // Legacy checkpoints ignore audio.
+  }
   for (const v of weights.fc1b) out[i++] = v;
   for (const row of weights.fc2w) for (const v of row) out[i++] = v;
   for (const v of weights.fc2b) out[i++] = v;
@@ -130,7 +138,7 @@ export function randomWeights(
   seed?: number,
 ): UpdateRuleWeights {
   const random = policyRandom(seed ?? randomPolicySeed());
-  const { inDim } = weightLayout(channels, hiddenDim, architecture);
+  const inDim = weightLayout(channels, hiddenDim, architecture).inDim - 1;
   const trunk = policyParameters.trunk;
   const trunkBound = trunk.weightGain * Math.sqrt(6 / (inDim + hiddenDim));
   const fc1w = Array.from({ length: hiddenDim }, () =>
@@ -145,6 +153,8 @@ export function randomWeights(
     ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const, [3, policyParameters.heads.color] as const]
     : [...common, [3, policyParameters.heads.color] as const];
   const initialized = specs.map(([size, config]) => randomHead(size, hiddenDim, config, random));
+  // Append after initializing existing weights, preserving the seeded silent policy.
+  for (const row of fc1w) row.push(randomSymmetric(trunkBound, random));
   return {
     fc1w,
     fc1b,
@@ -162,11 +172,17 @@ export class Agents {
   private readonly hiddenDim: number;
   private readonly policyArchitecture: PolicyArchitecture;
 
+  private readonly weightTransition = new WeightTransition();
   private readonly weightsBuffer: GPUBuffer;
   private readonly physicsUniform: GPUBuffer;
   private readonly agentStateBuffer: GPUBuffer;
   private readonly sampleCountStaging: GPUBuffer;
   private readonly pipeline: GPUComputePipeline;
+  private readonly reducedPipeline: GPUComputePipeline;
+  private readonly reducedSplatPipeline: GPUComputePipeline;
+  private readonly reducedSplatBindGroup: GPUBindGroup;
+  private readonly reducedCommunicationBindGroups: [GPUBindGroup, GPUBindGroup];
+  private readonly reducedCommitBindGroups: [GPUBindGroup, GPUBindGroup];
   private readonly splatPipeline: GPUComputePipeline;
   private readonly splatBindGroup: GPUBindGroup;
   private readonly particleMetaStride: number;
@@ -189,7 +205,7 @@ export class Agents {
   // check that's fine, it just can't see through the method call itself.
   private dispatch!: number;
 
-  constructor(device: GPUDevice, mpmCore: MpmCore, environment: Environment, config: AgentsConfig) {
+  constructor(device: GPUDevice, mpmCore: MpmCore, private readonly environment: Environment, config: AgentsConfig) {
     this.device = device;
     this.channels = config.channels;
     this.hiddenDim = config.hiddenDim;
@@ -250,8 +266,10 @@ export class Agents {
           magFilter: "linear",
         })
       : null;
-    const module = device.createShaderModule({
-      code: templateShader(agentsSrc, {
+    const createModule = (source: string) => device.createShaderModule({
+      code: templateShader(source
+        .replace("stateUpdateSpeed: f32,", "stateUpdateSpeed: f32, audioEnergy: f32,")
+        .replace("let result = evalPolicy(inputVec);", "inputVec[IN_DIM - 1u] = stepMode.audioEnergy; let result = evalPolicy(inputVec);"), {
         CHANNELS: config.channels,
         HIDDEN_DIM: config.hiddenDim,
         IN_DIM: layout.inDim,
@@ -282,10 +300,15 @@ export class Agents {
           : "let base = vec2<i32>(floor(p)); let f = fract(p); let a = mix(morphologyLoad(base), morphologyLoad(base + vec2<i32>(1, 0)), f.x); let b = mix(morphologyLoad(base + vec2<i32>(0, 1)), morphologyLoad(base + vec2<i32>(1, 1)), f.x); return mix(a, b, f.y);",
       }),
     });
+    const module = createModule(environment.chemicalSplats ? chemicalSplatShader(agentsSrc) : agentsSrc);
+    const reducedModule = environment.fastAccumulation ? createModule(workgroupReductionShader(agentsSrc, "addDepositFloat",
+      [config.chemicalCommunicationArchitecture === "persistent-environment" ? "agentStep" : "splatChemicalState"], 512)) : module;
+    this.reducedPipeline = device.createComputePipeline({layout: "auto", compute: {module: reducedModule, entryPoint: "agentStep"}});
+    this.reducedSplatPipeline = device.createComputePipeline({layout: "auto", compute: {module: reducedModule, entryPoint: "splatChemicalState"}});
     this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "agentStep" } });
     this.splatPipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "splatChemicalState" } });
-    this.splatBindGroup = device.createBindGroup({
-      layout: this.splatPipeline.getBindGroupLayout(0),
+    const splatGroup = (pipeline: GPUComputePipeline) => device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 1, resource: { buffer: mpmCore.positions } },
         { binding: 2, resource: { buffer: mpmCore.activeCountUniform } },
@@ -295,18 +318,20 @@ export class Agents {
         { binding: 11, resource: { buffer: mpmCore.rest } },
       ],
     });
+    this.splatBindGroup = splatGroup(this.splatPipeline);
+    this.reducedSplatBindGroup = splatGroup(this.reducedSplatPipeline);
     this.stepModeUniforms = [0, 1].map((commit) => {
       const buffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(buffer, 0, new Uint32Array([commit]));
       writeFloat32(device, buffer, 4, new Float32Array([1.0]));
       writeFloat32(device, buffer, 8, new Float32Array([1.0]));
-      writeFloat32(device, buffer, 12, new Float32Array([1.0]));
+      writeFloat32(device, buffer, 12, new Float32Array([0.0]));
       return buffer;
     }) as [GPUBuffer, GPUBuffer];
 
-    const bindGroups = (commitGrowth: 0 | 1) => [0, 1].map((p) =>
+    const bindGroups = (commitGrowth: 0 | 1, pipeline = this.pipeline) => [0, 1].map((p) =>
       device.createBindGroup({
-        layout: this.pipeline.getBindGroupLayout(0),
+        layout: pipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: { buffer: this.weightsBuffer } },
           { binding: 1, resource: { buffer: mpmCore.positions } },
@@ -334,6 +359,8 @@ export class Agents {
     ) as [GPUBindGroup, GPUBindGroup];
     this.communicationBindGroups = bindGroups(0);
     this.commitBindGroups = bindGroups(1);
+    this.reducedCommunicationBindGroups = bindGroups(0, this.reducedPipeline);
+    this.reducedCommitBindGroups = bindGroups(1, this.reducedPipeline);
 
     this.randomCullVictims = device.createBuffer({
       size: MAX_PARTICLES * 2 * 4,
@@ -370,7 +397,11 @@ export class Agents {
       label: "conforming refinement scratch", size: 4 * refineWords, usage: GPUBufferUsage.STORAGE,
     });
     const growthModule = device.createShaderModule({
-      code: templateShader(growthFieldSrc, {
+      // Live output permits scheduling-dependent child IDs; training keeps
+      // the serial reference allocator and its deterministic capacity order.
+      code: templateShader(config.performanceParallelRefinement
+        ? growthFieldSrc.replace("if (gid.x != 0u) { return; }\n  for (var pi=0u; pi<activeCount; pi++) { reserveRefinementSample(pi); }", "reserveRefinementSample(gid.x);")
+        : growthFieldSrc, {
         CHANNELS: config.channels, GRID_N, INV_DX,
         MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
         REFINE_CAPACITY: MAX_PARTICLES, REFINE_HASH_SIZE: refineHashSize,
@@ -386,7 +417,8 @@ export class Agents {
       ...Array.from({ length: Math.ceil(Math.log2(MAX_PARTICLES)) },
         (): [string, null] => ["propagateRefinement", null]),
       ["requestRefinement", null], ["reserveRefinement", null],
-      ["commitResample", null], ["classifyPruning", null], ["pruneMaterial", 1],
+      ["commitResample", null],
+      ["classifyPruning", null], ["pruneMaterial", 1],
       ["stopGrowthAtCapacity", ceilDiv(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)],
     ];
     // Keep one stable ABI for every growth pass. With `layout: "auto"`, WebGPU
@@ -455,19 +487,19 @@ export class Agents {
   }
 
   loadWeights(weights: UpdateRuleWeights): void {
-    writeFloat32(this.device, this.weightsBuffer, 0, flattenWeights(weights, this.channels, this.hiddenDim, this.policyArchitecture));
+    writeFloat32(this.device, this.weightsBuffer, 0, this.weightTransition.load(flattenWeights(weights, this.channels, this.hiddenDim, this.policyArchitecture)));
   }
 
-  /** Overwrites the weights buffer with a fresh random init (see
-   * randomWeights()'s own docstring) — same live buffer write as
-   * loadWeights(), no rebuild. Callers generally want to follow this
-   * with restartRollout() too (see GpuSimulation.randomizeWeights()) —
-   * particles already grown under the old weights don't retroactively
-   * un-grow just because the policy driving them changed. */
+  /** Blend toward a fresh brain; repeated requests start at the current blend. */
   randomizeWeights(): UpdateRuleWeights {
     const weights = randomWeights(this.channels, this.hiddenDim, this.policyArchitecture);
-    this.loadWeights(weights);
+    this.weightTransition.start(flattenWeights(weights, this.channels, this.hiddenDim, this.policyArchitecture));
     return weights;
+  }
+
+  advanceWeightTransition(seconds: number): void {
+    const weights = this.weightTransition.advance(seconds);
+    if (weights) writeFloat32(this.device, this.weightsBuffer, 0, weights);
   }
 
   setPhysics(settings: {
@@ -586,7 +618,11 @@ export class Agents {
    * distinct method, on a distinct object) owns that, since it's shared
    * with p2g/gridUpdate-adjacent/g2p/repulsion too, not just this
    * class's own dispatch. */
+  private splatParticleCount = 0;
+
   setActiveCount(activeCount: number): void {
+    this.splatParticleCount = activeCount;
+    this.environment.particleCount = activeCount;
     this.refinementRounds = Math.ceil(Math.log2(Math.max(1, activeCount)));
     this.dispatch = ceilDiv(activeCount, WORKGROUP);
     writeFloat32(this.device, this.agentStateBuffer, 0, new Uint32Array([activeCount]));
@@ -600,7 +636,6 @@ export class Agents {
   compactRandomCull(activeCount: number, killCount: number): void {
     const killed = Math.min(activeCount - 1, Math.max(0, Math.floor(killCount)));
     if (killed === 0) return;
-    const survivorCount = activeCount - killed;
     const candidates = new Uint32Array(activeCount);
     for (let index = 0; index < activeCount; index++) candidates[index] = index;
     const victimMask = new Uint8Array(activeCount);
@@ -611,19 +646,12 @@ export class Agents {
       candidates[index] = victim;
       victimMask[victim] = 1;
     }
-    const replacementPairs = new Uint32Array(Math.min(killed, survivorCount) * 2);
-    let pairCount = 0;
-    let survivingTail = survivorCount;
-    for (let destination = 0; destination < survivorCount; destination++) {
-      if (victimMask[destination] === 0) continue;
-      while (survivingTail < activeCount && victimMask[survivingTail] !== 0) {
-        survivingTail++;
-      }
-      replacementPairs[pairCount * 2] = destination;
-      replacementPairs[pairCount * 2 + 1] = survivingTail;
-      pairCount++;
-      survivingTail++;
-    }
+    this.compactMaterialCull(victimMask);
+  }
+
+  compactMaterialCull(victimMask: Uint8Array): void {
+    const { pairs: replacementPairs } = materialCullPairs(victimMask);
+    const pairCount = replacementPairs.length / 2;
     if (pairCount === 0) return;
     this.device.queue.writeBuffer(
       this.randomCullVictims,
@@ -696,12 +724,23 @@ export class Agents {
 
   }
 
+  setAudioEnergy(energy: number): void {
+    const value = Number.isFinite(energy) ? Math.max(0, Math.min(1, energy)) : 0;
+    for (const buffer of this.stepModeUniforms) writeFloat32(this.device, buffer, 12, new Float32Array([value]));
+  }
+
   encodeStep(encoder: GPUCommandEncoder, parity: number, commitGrowth = true): void {
     const pass = encoder.beginComputePass();
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, (commitGrowth ? this.commitBindGroups : this.communicationBindGroups)[parity]);
+    const reduced = this.environment.useWorkgroupDeposits;
+    pass.setPipeline(reduced ? this.reducedPipeline : this.pipeline);
+    pass.setBindGroup(0, (reduced
+      ? (commitGrowth ? this.reducedCommitBindGroups : this.reducedCommunicationBindGroups)
+      : (commitGrowth ? this.commitBindGroups : this.communicationBindGroups))[parity]);
     pass.dispatchWorkgroups(this.dispatch);
     pass.end();
+    if (this.environment.chemicalCommunicationArchitecture === "persistent-environment" && !reduced) {
+      this.environment.chemicalSplats?.encode(encoder, this.splatParticleCount);
+    }
     if (commitGrowth) this.encodeGrowthField(encoder);
   }
 
@@ -726,10 +765,12 @@ export class Agents {
    * transient substrate before any brain in this round runs. */
   encodeSplatChemicalState(encoder: GPUCommandEncoder): void {
     const pass = encoder.beginComputePass();
-    pass.setPipeline(this.splatPipeline);
-    pass.setBindGroup(0, this.splatBindGroup);
+    const reduced = this.environment.useWorkgroupDeposits;
+    pass.setPipeline(reduced ? this.reducedSplatPipeline : this.splatPipeline);
+    pass.setBindGroup(0, reduced ? this.reducedSplatBindGroup : this.splatBindGroup);
     pass.dispatchWorkgroups(this.dispatch);
     pass.end();
+    if (!reduced) this.environment.chemicalSplats?.encode(encoder, this.splatParticleCount);
   }
 
   destroy(): void {

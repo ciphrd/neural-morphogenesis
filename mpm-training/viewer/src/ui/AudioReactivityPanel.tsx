@@ -1,5 +1,7 @@
+import { appendAudioMapping } from "../audio/mappingState"
+import type { AudioSettings } from "../performance/workspacePresets"
 import { ToggleButton } from "./ToggleButton"
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, type ReactNode, type Dispatch, type SetStateAction } from "react"
 import {
   applyAudioMappings,
   audioTargetSpecsFor,
@@ -10,19 +12,23 @@ import {
 import { useAudioInput } from "../audio/useAudioInput"
 import type { PerformanceSnapshot } from "../performance/types"
 import { AudioSignalVisualizer } from "./AudioSignalVisualizer"
+import { ParameterPicker } from "./ParameterPicker"
 import { Slider } from "./Slider"
 
 interface AudioReactivityPanelProps {
+  settings: AudioSettings
+  onSettingsChange: Dispatch<SetStateAction<AudioSettings>>
   baseSnapshot: PerformanceSnapshot
+  renderPanels: (panels: { audio: ReactNode; mappings: ReactNode }) => ReactNode
   onOutputChange: (snapshot: PerformanceSnapshot | null) => void
 }
 
-let nextMappingId = 1
 const TARGET_GROUPS: AudioTargetGroup[] = [
+  "Actuators",
   "Simulation",
   "Rendering",
   "Auto zoom",
-  "Bloom",
+  "Post-processing",
   "Displacement",
 ]
 
@@ -75,17 +81,21 @@ function DecimalInput({ label, value, onChange }: DecimalInputProps) {
 }
 
 export function AudioReactivityPanel({
+  settings, onSettingsChange,
   baseSnapshot,
+  renderPanels,
   onOutputChange,
 }: AudioReactivityPanelProps) {
   const [open, setOpen] = useState(true)
-  const [enabled, setEnabled] = useState(false)
-  const [deviceId, setDeviceId] = useState("")
-  const [gain, setGain] = useState(8)
-  const [threshold, setThreshold] = useState(0.01)
-  const [smoothing, setSmoothing] = useState(0.75)
-  const [mappings, setMappings] = useState<AudioMapping[]>([])
-  const { devices, energy, status, error, analysis } = useAudioInput({
+  const [mappingsOpen, setMappingsOpen] = useState(true)
+  const { enabled, deviceId, gain, threshold, smoothing, mappings } = settings
+  const setEnabled = (enabled: boolean) => onSettingsChange(current => ({ ...current, enabled }))
+  const setDeviceId = (deviceId: string) => onSettingsChange(current => ({ ...current, deviceId }))
+  const setGain = (gain: number) => onSettingsChange(current => ({ ...current, gain }))
+  const setThreshold = (threshold: number) => onSettingsChange(current => ({ ...current, threshold }))
+  const setSmoothing = (smoothing: number) => onSettingsChange(current => ({ ...current, smoothing }))
+  const setMappings = (update: (current: AudioMapping[]) => AudioMapping[]) => onSettingsChange(current => ({ ...current, mappings: update(current.mappings) }))
+  const { devices, energy, status, error, analysis, energyHistory } = useAudioInput({
     enabled,
     deviceId,
     gain,
@@ -96,7 +106,7 @@ export function AudioReactivityPanel({
   const active = enabled && status === "active"
   const targets = useMemo(() => audioTargetSpecsFor(baseSnapshot), [baseSnapshot])
   const output = useMemo(
-    () => active ? applyAudioMappings(baseSnapshot, mappings, energy, true) : null,
+    () => active ? { ...applyAudioMappings(baseSnapshot, mappings, energy, true), audioEnergy: energy } : null,
     [active, baseSnapshot, energy, mappings],
   )
   useEffect(() => {
@@ -104,13 +114,7 @@ export function AudioReactivityPanel({
   }, [onOutputChange, output])
 
   const addMapping = () => {
-    const spec = targets.find(({ key }) => !mappings.some((mapping) => mapping.target === key))
-      ?? targets[0]
-    if (!spec) return
-    setMappings((current) => [
-      ...current,
-      { id: nextMappingId++, enabled: true, target: spec.key, min: spec.min, max: spec.max },
-    ])
+    setMappings(current => appendAudioMapping(current, targets))
   }
 
   const updateMapping = (id: number, patch: Partial<AudioMapping>) => {
@@ -119,14 +123,17 @@ export function AudioReactivityPanel({
     ))
   }
 
-  return (
+  const audio = (
     <section>
       <div className="physics-panel-header">
         <button className="physics-panel-toggle" onClick={() => setOpen((value) => !value)}>
           <span className={"physics-panel-chevron" + (open ? " is-open" : "")}>▸</span>
           <h2>Audio reactivity</h2>
         </button>
-        <ToggleButton label="Audio input" hideLabel checked={enabled} onChange={setEnabled} title="Enable audio input" />
+        <ToggleButton label="Audio input" hideLabel checked={enabled} onChange={(next) => {
+          setEnabled(next)
+          if (next) setOpen(true)
+        }} title="Enable audio input" />
       </div>
       {open && (
         <div className="physics-panel-body audio-panel-body">
@@ -144,17 +151,15 @@ export function AudioReactivityPanel({
             </select>
           </label>
 
-          <div className="audio-meter-row" aria-label={`Audio energy ${Math.round(energy * 100)} percent`}>
-            <span>Energy</span>
-            <div className="audio-meter"><span style={{ width: `${energy * 100}%` }} /></div>
-            <span>{Math.round(energy * 100)}%</span>
-          </div>
-          <div className={`audio-status is-${status}`}>
-            {error ?? (status === "requesting" ? "Waiting for microphone permission…" : status)}
-          </div>
+          {status !== "active" && (
+            <div className={`audio-status is-${status}`}>
+              {error ?? (status === "requesting" ? "Waiting for microphone permission…" : status)}
+            </div>
+          )}
 
           <AudioSignalVisualizer
             analysis={analysis}
+            energyHistory={energyHistory}
             active={active}
             gain={gain}
             threshold={threshold}
@@ -176,10 +181,21 @@ export function AudioReactivityPanel({
             <span className="slider-value">{smoothing.toFixed(2)}</span>
           </label>
 
-          <div className="audio-mappings-header">
-            <span>Mappings</span>
-            <button className="icon-button" onClick={addMapping} title="Add mapping" aria-label="Add audio mapping">+</button>
-          </div>
+
+        </div>
+      )}
+    </section>
+  )
+  const mappingsPanel = (
+    <section>
+      <div className="physics-panel-header">
+        <button className="physics-panel-toggle" onClick={() => setMappingsOpen((value) => !value)}>
+          <span className={"physics-panel-chevron" + (mappingsOpen ? " is-open" : "")}>▸</span>
+          <h2>Mappings</h2>
+        </button>
+        <button className="icon-button" onClick={() => { setMappingsOpen(true); addMapping() }} title="Add mapping" aria-label="Add audio mapping">+</button>
+      </div>
+      {mappingsOpen && <div className="physics-panel-body audio-panel-body">
           {mappings.length === 0 && <p className="hint">Add a mapping to drive a simulation parameter.</p>}
           {mappings.map((mapping) => (
             <div className={"audio-mapping" + (mapping.enabled === false ? " is-disabled" : "")} key={mapping.id}>
@@ -204,6 +220,10 @@ export function AudioReactivityPanel({
                     </optgroup>
                   ))}
                 </select>
+                <ParameterPicker targets={targets} onPick={(target) => {
+                  const spec = targets.find(candidate => candidate.key === target)!
+                  updateMapping(mapping.id, { target, min: spec.min, max: spec.max })
+                }} />
               </div>
               <div className="audio-range">
                 <label>
@@ -227,8 +247,9 @@ export function AudioReactivityPanel({
               <button className="audio-remove" onClick={() => setMappings((current) => current.filter(({ id }) => id !== mapping.id))} aria-label="Remove audio mapping">Remove</button>
             </div>
           ))}
-        </div>
-      )}
+      </div>}
     </section>
   )
+  return renderPanels({ audio, mappings: mappingsPanel })
+
 }

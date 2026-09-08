@@ -3,7 +3,7 @@ import { policyArchitectureForCellMemory, type SimulationConfig } from "../gpu/t
 import { DEFAULT_RUN_SETTINGS } from "../net/settingsStorage"
 
 /** Performance sessions never consume cached settings or checkpoint weights. */
-export function createPerformanceConfig(seed: number): SimulationConfig {
+export function createPerformanceConfig(seed: number, fastAccumulation = true): SimulationConfig {
   const cellMemory = DEFAULT_RUN_SETTINGS.cellMemory ?? "recurrent"
   const policyArchitecture = policyArchitectureForCellMemory(cellMemory)
   return {
@@ -11,6 +11,7 @@ export function createPerformanceConfig(seed: number): SimulationConfig {
     hiddenLayers: [DEFAULT_RUN_SETTINGS.hiddenDim],
     cellMemory,
     policyArchitecture,
+    fastAccumulation,
     stableStop: false,
     shapeTarget: undefined,
     growthSteps: null,

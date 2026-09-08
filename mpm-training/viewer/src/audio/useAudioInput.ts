@@ -13,6 +13,14 @@ export interface AudioAnalysisFrame {
   sampleRate: number
 }
 
+export interface AudioEnergySample {
+  time: number
+  value: number
+}
+
+export const ENERGY_HISTORY_DURATION_MS = 2_500
+const ENERGY_SAMPLE_INTERVAL_MS = 50
+
 interface AudioInputOptions {
   enabled: boolean
   deviceId: string
@@ -32,6 +40,7 @@ export function useAudioInput({
   const [energy, setEnergy] = useState(0)
   const [status, setStatus] = useState<AudioInputStatus>("idle")
   const [error, setError] = useState<string | null>(null)
+  const energyHistory = useRef<AudioEnergySample[]>([])
   const smoothedEnergy = useRef(0)
   const analysis = useRef<AudioAnalysisFrame | null>(null)
   const processing = useRef({ gain, threshold, smoothing })
@@ -61,6 +70,7 @@ export function useAudioInput({
   }, [])
 
   useEffect(() => {
+    energyHistory.current = []
     if (!enabled) {
       setStatus("idle")
       setEnergy(0)
@@ -116,6 +126,15 @@ export function useAudioInput({
           smoothedEnergy.current +=
             (normalized - smoothedEnergy.current) * (1 - current.smoothing)
           setEnergy(smoothedEnergy.current)
+          const now = performance.now()
+          const history = energyHistory.current
+          const previous = history[history.length - 1]
+          if (!previous || now - previous.time >= ENERGY_SAMPLE_INTERVAL_MS) {
+            history.push({ time: now, value: smoothedEnergy.current })
+            while (history.length && history[0].time < now - ENERGY_HISTORY_DURATION_MS) {
+              history.shift()
+            }
+          }
           frame = requestAnimationFrame(sample)
         }
         sample()
@@ -144,5 +163,5 @@ export function useAudioInput({
     }
   }, [deviceId, enabled])
 
-  return { devices, energy, status, error, analysis }
+  return { devices, energy, status, error, analysis, energyHistory }
 }

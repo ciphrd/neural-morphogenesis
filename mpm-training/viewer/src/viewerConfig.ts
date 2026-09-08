@@ -1,3 +1,4 @@
+import { POST_EFFECT_DEFAULTS } from "./gpu/postEffects";
 import type { FieldMode, ParticleColorMode, ParticleShape } from "./gpu/render"
 import type { DeformSettings, Tool } from "./render/GridCanvas"
 
@@ -44,14 +45,7 @@ interface ViewerDefaults {
       /** Fraction of the remaining zoom distance applied per rendered frame. */
       smoothing: number
     }
-    bloom: {
-      enabled: boolean
-      intensity: number
-      threshold: number
-      radiusPx: number
-      scatter: number
-      levels: number
-    }
+    bloom: import("./gpu/bloom").BloomSettings
     particleRadiusPx: number
     targetVisible: boolean
     growthMagnitudeBoost: number
@@ -76,4 +70,6 @@ interface ViewerDefaults {
  */
 import config from "../../core/config.json"
 
-export const VIEWER_DEFAULTS = config.viewer as ViewerDefaults
+export const VIEWER_DEFAULTS = { ...config.viewer, rendering: { ...config.viewer.rendering,
+  bloom: { ...POST_EFFECT_DEFAULTS, ...config.viewer.rendering.bloom },
+} } as ViewerDefaults

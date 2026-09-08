@@ -1,3 +1,5 @@
+import { MAX_WAVE_SPEED } from "../gpu/postEffects"
+import { ATTRACTOR_CONTROLS, normalizeAttractor, type AttractorSettings } from "../performance/actuators"
 import type { PhysicsSettings } from "../gpu/types"
 import type {
   PerformanceAutoZoomSettings,
@@ -7,17 +9,18 @@ import type {
 } from "../performance/types"
 
 type NumericKey<T> = {
-  [Key in keyof T]-?: T[Key] extends number ? Key : never
+  [Key in keyof T]-?: NonNullable<T[Key]> extends number ? Key : never
 }[keyof T] & string
 
 export type AudioTarget =
+  | `attractor.${NumericKey<AttractorSettings>}`
   | `physics.${NumericKey<PhysicsSettings>}`
   | `render.${NumericKey<PerformanceRenderSettings>}`
   | `render.autoZoom.${NumericKey<PerformanceAutoZoomSettings>}`
   | `render.bloom.${NumericKey<PerformanceBloomSettings>}`
   | "noiseDisplacementStrength"
 
-export type AudioTargetGroup = "Simulation" | "Rendering" | "Auto zoom" | "Bloom" | "Displacement"
+export type AudioTargetGroup = "Actuators" | "Simulation" | "Rendering" | "Auto zoom" | "Post-processing" | "Displacement"
 
 export interface AudioTargetSpec {
   key: AudioTarget
@@ -44,6 +47,13 @@ const FIXED_RANGES: Partial<Record<AudioTarget, readonly [number, number]>> = {
   "physics.friction": [0, 1],
   "physics.growthAnisotropy": [0, 1],
   "physics.growthCompressionFeedback": [0, 1],
+  "render.bloom.strobeRedSpeed": [-MAX_WAVE_SPEED, MAX_WAVE_SPEED],
+  "render.bloom.strobeGreenSpeed": [-MAX_WAVE_SPEED, MAX_WAVE_SPEED],
+  "render.bloom.strobeBlueSpeed": [-MAX_WAVE_SPEED, MAX_WAVE_SPEED],
+
+  "render.bloom.redSpeed": [-MAX_WAVE_SPEED, MAX_WAVE_SPEED],
+  "render.bloom.greenSpeed": [-MAX_WAVE_SPEED, MAX_WAVE_SPEED],
+  "render.bloom.blueSpeed": [-MAX_WAVE_SPEED, MAX_WAVE_SPEED],
   "physics.neuralUpdatesPerMacro": [1, 16],
   "physics.communicationSpeed": [0, 4],
   "physics.internalStateSpeed": [0, 4],
@@ -53,6 +63,7 @@ const FIXED_RANGES: Partial<Record<AudioTarget, readonly [number, number]>> = {
   "physics.repulsionStrength": [0, 1000],
   "physics.repulsionMaxDelta": [1, 250],
   "physics.growthSpeedMultiplier": [0, 8],
+  "render.centerDotSize": [0.02, 0.5],
   "render.particleAlpha": [0, 1],
   "render.zoom": [0.25, 8],
   "render.particleRadiusPx": [0.25, 16],
@@ -87,6 +98,7 @@ const INTEGER_TARGETS = new Set<AudioTarget>([
 
 const TARGET_LABELS: Partial<Record<AudioTarget, string>> = {
   "physics.gravity": "Gravity",
+  "physics.growthCompressionFeedback": "Growth blockage",
 }
 
 function humanize(value: string): string {
@@ -123,7 +135,7 @@ export function audioTargetSpecsFor(base: PerformanceSnapshot): AudioTargetSpec[
   const targets = base.physics ? numericSpecs(base.physics, "physics", "Simulation") : []
   targets.push(...numericSpecs(base.render, "render", "Rendering"))
   targets.push(...numericSpecs(base.render.autoZoom, "render.autoZoom", "Auto zoom"))
-  targets.push(...numericSpecs(base.render.bloom, "render.bloom", "Bloom"))
+  targets.push(...numericSpecs(base.render.bloom, "render.bloom", "Post-processing"))
   const [min, max] = inferredRange("noiseDisplacementStrength", base.noiseDisplacementStrength)
   targets.push({
     key: "noiseDisplacementStrength",
@@ -132,6 +144,9 @@ export function audioTargetSpecsFor(base: PerformanceSnapshot): AudioTargetSpec[
     min,
     max,
   })
+  targets.push(...ATTRACTOR_CONTROLS.map(({ key, label, min, max }) => ({
+    key: `attractor.${key}` as AudioTarget, label: `Attractor · ${label}`, group: "Actuators" as const, min, max,
+  })))
   return targets
 }
 
@@ -144,6 +159,7 @@ export function applyAudioMappings(
   if (!active || !mappings.some((mapping) => mapping.enabled !== false)) return base
   const next: PerformanceSnapshot = {
     ...base,
+    attractor: normalizeAttractor(base.attractor),
     physics: base.physics ? { ...base.physics } : null,
     render: {
       ...base.render,
@@ -157,7 +173,9 @@ export function applyAudioMappings(
     let value = mapping.min + (mapping.max - mapping.min) * normalizedEnergy
     if (INTEGER_TARGETS.has(mapping.target)) value = Math.round(value)
     const parts = mapping.target.split(".")
-    if (parts[0] === "physics" && next.physics) {
+    if (parts[0] === "attractor") {
+      Object.assign(next.attractor!, { [parts[1]]: value })
+    } else if (parts[0] === "physics" && next.physics) {
       Object.assign(next.physics, { [parts[1]]: value })
     } else if (parts[0] === "render" && parts.length === 2) {
       Object.assign(next.render, { [parts[1]]: value })
@@ -169,5 +187,6 @@ export function applyAudioMappings(
       next.noiseDisplacementStrength = value
     }
   }
+  next.attractor = normalizeAttractor(next.attractor)
   return next
 }

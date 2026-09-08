@@ -29,7 +29,7 @@ export function policyWeightsShapeError(
   const valid =
     Array.isArray(fc1w) &&
     fc1w.length === hiddenDim &&
-    fc1w.every((row) => Array.isArray(row) && row.length === inDim) &&
+    fc1w.every((row) => Array.isArray(row) && row.length === fc1w[0].length && (row.length === inDim || row.length === inDim + 1)) &&
     Array.isArray(fc1b) &&
     fc1b.length === hiddenDim &&
     Array.isArray(fc2w) &&

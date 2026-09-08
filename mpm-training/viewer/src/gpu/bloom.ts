@@ -1,10 +1,11 @@
 import { VIEWER_DEFAULTS } from "../viewerConfig";
+import { advanceStrobePhases, advanceRgbPhases, normalizePostEffects, type PostEffectSettings } from "./postEffects"
 import bloomSrc from "./bloom.wgsl?raw"
 import { writeFloat32 } from "./gpuUtil"
 
 export const BLOOM_SCENE_FORMAT: GPUTextureFormat = "rgba16float"
 
-export interface BloomSettings {
+export interface BloomSettings extends Partial<PostEffectSettings> {
   enabled: boolean
   intensity: number
   threshold: number
@@ -36,6 +37,9 @@ export class BloomPostProcess {
   private compositeBindGroup: GPUBindGroup
   private width = 1
   private height = 1
+  private strobePhases = [0, 0, 0]
+  private rgbPhases = [0, 1/3, 2/3]
+  private rgbLastTime = performance.now()
   private settings: BloomSettings = { ...VIEWER_DEFAULTS.rendering.bloom }
 
   constructor(device: GPUDevice, outputFormat: GPUTextureFormat) {
@@ -50,7 +54,7 @@ export class BloomPostProcess {
       addressModeU: "clamp-to-edge",
       addressModeV: "clamp-to-edge",
     })
-    this.compositeUniform = this.createUniform()
+    this.compositeUniform = device.createBuffer({ size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST })
     this.sceneTexture = this.createTexture(1, 1)
     this.compositeBindGroup = this.createCompositeBindGroup(this.sceneTexture)
     this.rebuildPyramid()
@@ -61,9 +65,11 @@ export class BloomPostProcess {
   }
 
   setSettings(settings: BloomSettings): void {
+    this.advanceRgbAnimation()
     const levels = Math.min(10, Math.max(2, Math.floor(settings.levels)))
     const levelsChanged = levels !== this.settings.levels
     this.settings = {
+      ...normalizePostEffects(settings),
       enabled: settings.enabled,
       intensity: Math.max(0, settings.intensity),
       threshold: Math.max(0, settings.threshold),
@@ -95,6 +101,7 @@ export class BloomPostProcess {
         this.draw(encoder, this.levels[index].up.createView(), this.upsamplePipeline, 1, this.upsampleBindGroups[index])
       }
     }
+    this.writeCompositeUniform()
     this.draw(encoder, destination, this.compositePipeline, 2, this.compositeBindGroup)
   }
 
@@ -158,8 +165,30 @@ export class BloomPostProcess {
         ]))
       }
     }
+    this.writeCompositeUniform()
+  }
+
+  private advanceRgbAnimation(): void {
+    const now = performance.now()
+    this.rgbPhases = advanceRgbPhases(this.rgbPhases, (now - this.rgbLastTime) / 1000, normalizePostEffects(this.settings))
+    this.strobePhases = advanceStrobePhases(this.strobePhases, (now - this.rgbLastTime) / 1000, normalizePostEffects(this.settings))
+    this.rgbLastTime = now
+  }
+
+  private writeCompositeUniform(): void {
+    this.advanceRgbAnimation()
+    const s = normalizePostEffects(this.settings)
     writeFloat32(this.device, this.compositeUniform, 0, new Float32Array([
       this.settings.intensity, this.settings.enabled ? 1 : 0, 0, 0,
+      s.dofFocus, s.dofWidth, s.dofTop, s.dofFront,
+      s.dofEnabled ? 1 : 0, s.rgbEnabled ? 1 : 0, s.rgbMix, s.rgbAngle * Math.PI / 180,
+      s.redFrequency, s.greenFrequency, s.blueFrequency, 0,
+      s.redExponent, s.greenExponent, s.blueExponent, 0,
+      ...this.rgbPhases, 0,
+      1 / this.width, 1 / this.height, 0, 0,
+      s.strobeEnabled ? 1 : 0, s.strobeMix, 0, 0,
+      ...this.strobePhases, 0,
+      s.strobeRedExponent, s.strobeGreenExponent, s.strobeBlueExponent, 0,
     ]))
   }
 

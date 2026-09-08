@@ -76,12 +76,12 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   },
   {
     key: "growthCompressionFeedback",
-    label: "Compression feedback",
-    hint: "Strength of physical contact inhibition. 1× fully applies the compression gate; 0 restores pressure-independent growth.",
+    label: "Growth blockage",
+    hint: "How much inward compression blocks expansion. 0: no blockage, so growth pushes against compression. 1: current compression slowdown and arrest behavior. Intermediate values blend between the two.",
     min: 0,
     max: 1,
     step: 0.01,
-    format: (v) => `${v.toFixed(2)}×`,
+    format: (v) => v.toFixed(2),
   },
   {
     key: "growthCompressionStart",
@@ -136,7 +136,7 @@ export function GrowthPanel({
       {open && (
         <div className="physics-panel-body">
           {GROWTH_SLIDER_SPECS.map((spec) => (
-            <label key={spec.key} className="slider-row" title={spec.hint}>
+            <label data-audio-target={`physics.${spec.key}`} key={spec.key} className="slider-row" title={spec.hint}>
               <span>{spec.label}</span>
               <Slider min={spec.min} max={spec.max} step={spec.step}
                 value={value[spec.key]}

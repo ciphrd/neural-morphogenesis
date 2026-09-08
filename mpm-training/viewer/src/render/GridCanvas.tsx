@@ -1,3 +1,5 @@
+import type { CutPush } from "../gpu/cutPush";
+import { AttractorMotion, normalizeAttractor, type AttractorSettings, type AttractorPosition } from "../performance/actuators";
 import { VIEWER_DEFAULTS } from "../viewerConfig";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { DeformDirection, DeformMode } from "../gpu/deform";
@@ -45,6 +47,7 @@ export interface AutoZoomSettings {
 }
 
 interface GridCanvasProps {
+  showSamplingStatus?: boolean;
   config: SimulationConfig | null;
   /** Optional deterministic lab setup; null preserves training playback. */
   scenario?: SimulationScenario | null;
@@ -53,6 +56,8 @@ interface GridCanvasProps {
   /** Rendering-only visibility of the training-target overlay. */
   targetVisible?: boolean;
   physics: PhysicsSettings | null;
+  autoPruneCircle?: boolean;
+  audioEnergy?: number;
   /** Playback-only growth/interaction cap; does not alter training. */
   particleCap?: number;
   /** Playback-only number of genuinely seeded agents. */
@@ -67,6 +72,7 @@ interface GridCanvasProps {
   boundaryGradientZeroIsBlack?: boolean;
   particleShape?: ParticleShape;
   particleColorMode?: ParticleColorMode;
+  centerDotSize?: number;
   particleAlpha?: number;
   directionalLineVisible?: boolean;
   growthLineVisible?: boolean;
@@ -100,6 +106,8 @@ interface GridCanvasProps {
   zoom?: number;
   /** Viewer-only coherent simplex position displacement strength. */
   noiseDisplacementStrength?: number;
+  attractor?: AttractorSettings;
+  onAttractorPosition?: (position: AttractorPosition) => void;
   /** Periodically samples live agents and fits their bounds into the center. */
   autoZoom?: AutoZoomSettings;
   /** Reports the actual camera zoom while auto zoom is smoothing. */
@@ -118,6 +126,8 @@ interface GridCanvasProps {
    * see GpuSimulation's own particleCount getter). Both ride the same
    * callback rather than getting their own, since they're read from the
    * same sim at the same instant and always displayed together. */
+  /** Called immediately after drawing, for optional output thumbnails. */
+  onRendered?: (canvas: HTMLCanvasElement, zoom: number) => void;
   onStep?: (step: number, particleCount: number, shapeStatus: GpuSimulation["shapeStatus"]) => void;
   // Default (true): restart with a fresh rollout (same seed) once
   // currentStep reaches config.macroSteps — the rollout was only ever
@@ -155,6 +165,8 @@ export interface GridCanvasHandle {
   randomizeWeights(restart?: boolean): UpdateRuleWeights | null;
   /** Immediately retires a fraction of live agents without replacement. */
   killFraction(fraction: number): number;
+  killOutsideCircle(): void;
+  pushCut(push: CutPush): void;
   /** Starts capturing the canvas's own rendered output — see
    * canvasRecorder.ts's own CanvasRecorder.start() docstring. Throws if
    * this browser has no MediaRecorder at all — TrainingView checks
@@ -295,7 +307,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     scenario = null,
     targetPoints,
     targetVisible = VIEWER_DEFAULTS.rendering.targetVisible,
+    showSamplingStatus = true,
     physics,
+    audioEnergy = 0,
     particleCap,
     initialParticleCount,
     fieldMode = VIEWER_DEFAULTS.rendering.fieldMode,
@@ -304,6 +318,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     boundaryGradientZeroIsBlack = VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack,
     particleShape = VIEWER_DEFAULTS.rendering.particleShape,
     particleColorMode = VIEWER_DEFAULTS.rendering.particleColorMode,
+    autoPruneCircle = false,
+    centerDotSize = 0.18,
     particleAlpha = VIEWER_DEFAULTS.rendering.particleAlpha,
     directionalLineVisible = VIEWER_DEFAULTS.rendering.directionalLineVisible,
     growthLineVisible = VIEWER_DEFAULTS.rendering.growthLineVisible,
@@ -321,11 +337,14 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     bloom,
     zoom = VIEWER_DEFAULTS.rendering.zoom,
     noiseDisplacementStrength = 0,
+    attractor,
+    onAttractorPosition,
     autoZoom,
     onEffectiveZoomChange,
     tool = VIEWER_DEFAULTS.tools.selected,
     deformSettings,
     onStep,
+    onRendered,
     loopAtTrainedSteps = VIEWER_DEFAULTS.playback.loopAtTrainedSteps,
     paused = VIEWER_DEFAULTS.playback.paused,
   },
@@ -338,6 +357,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const deviceRef = useRef<GPUDevice | null>(null);
   const configRef = useRef<SimulationConfig | null>(null);
   const scenarioRef = useRef(scenario);
+  const audioEnergyRef = useRef(audioEnergy);
+  audioEnergyRef.current = audioEnergy;
   const physicsRef = useRef(physics);
   const particleCapRef = useRef(particleCap);
   const initialParticleCountRef = useRef(initialParticleCount);
@@ -347,6 +368,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const boundaryGradientZeroIsBlackRef = useRef(boundaryGradientZeroIsBlack);
   const particleShapeRef = useRef(particleShape);
   const particleColorModeRef = useRef(particleColorMode);
+  const centerDotSizeRef = useRef(centerDotSize);
+  centerDotSizeRef.current = centerDotSize;
   const particleAlphaRef = useRef(particleAlpha);
   const directionalLineVisibleRef = useRef(directionalLineVisible);
   const growthLineVisibleRef = useRef(growthLineVisible);
@@ -363,6 +386,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const gradientExponentRef = useRef(gradientExponent);
   const bloomRef = useRef(bloom);
   const zoomRef = useRef(zoom);
+  const attractorRef = useRef(attractor);
+  attractorRef.current = attractor;
+  const onAttractorPositionRef = useRef(onAttractorPosition);
+  onAttractorPositionRef.current = onAttractorPosition;
+  const attractorMotionRef = useRef(new AttractorMotion());
   const noiseDisplacementStrengthRef = useRef(noiseDisplacementStrength);
   const effectiveZoomRef = useRef(zoom);
   const autoZoomTargetRef = useRef(zoom);
@@ -374,6 +402,12 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const toolRef = useRef(tool);
   const deformSettingsRef = useRef(deformSettings);
   const onStepRef = useRef(onStep);
+  const onRenderedRef = useRef(onRendered);
+  const autoPruneCircleRef = useRef(autoPruneCircle);
+  autoPruneCircleRef.current = autoPruneCircle;
+  const keepCircleRef = useRef(false);
+  const cutsRef = useRef<CutPush[]>([]);
+
   const loopAtTrainedStepsRef = useRef(loopAtTrainedSteps);
   const pausedRef = useRef(paused);
   // "Move" tool's own live drag state — a ref, not React state, since it
@@ -476,7 +510,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   // start()/stop() cycles rather than recreated each time.
   const recorderRef = useRef<CanvasRecorder | null>(null);
   const batchRunningRef = useRef(false);
-  const activeStepRef = useRef<Promise<void> | null>(null);
+  const activeStepRef = useRef<Promise<unknown> | null>(null);
   const configReloadingRef = useRef(false);
   const configRevisionRef = useRef(0);
   function getRecorder(): CanvasRecorder {
@@ -515,6 +549,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   toolRef.current = tool;
   deformSettingsRef.current = deformSettings;
   onStepRef.current = onStep;
+  onRenderedRef.current = onRendered;
   loopAtTrainedStepsRef.current = loopAtTrainedSteps;
   pausedRef.current = paused;
 
@@ -524,12 +559,15 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulationRef.current?.setPhysics(nextPhysics);
     },
     restart: () => {
+      keepCircleRef.current=false;
+      cutsRef.current=[];
       simulationRef.current?.restartRollout();
       autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
       autoZoomTargetRef.current = effectiveZoomRef.current;
       autoZoomHardResetRef.current = true;
     },
     randomizeWeights: (restart = true) => {
+      if (restart) { cutsRef.current=[]; keepCircleRef.current=false; }
       const weights = simulationRef.current?.randomizeWeights(restart) ?? null;
       if (weights) {
         autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
@@ -538,7 +576,13 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       }
       return weights;
     },
+    killOutsideCircle: () => { keepCircleRef.current=true; },
     killFraction: (fraction) => simulationRef.current?.killFraction(fraction) ?? 0,
+    pushCut: (push) => {
+      if (!simulationRef.current?.ready) return;
+      cutsRef.current.push(push);
+
+    },
     startRecording: () => {
       if (canvasRef.current) getRecorder().start(canvasRef.current);
     },
@@ -689,6 +733,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setBoundaryGradientZeroIsBlack(boundaryGradientZeroIsBlackRef.current);
       simulation.setParticleShape(particleShapeRef.current);
       simulation.setParticleColorMode(particleColorModeRef.current);
+      simulation.setCenterDotSize(centerDotSizeRef.current);
       simulation.setParticleAlpha(particleAlphaRef.current);
       simulation.setDirectionalLineVisible(directionalLineVisibleRef.current);
       simulation.setGrowthLineVisible(growthLineVisibleRef.current);
@@ -952,6 +997,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         // The frame loop owns reporting genuine step failures.
       }
       if (revision !== configRevisionRef.current) return;
+      keepCircleRef.current=false;
+      cutsRef.current=[];
       simulation.loadGeneration(config);
       autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
       autoZoomTargetRef.current = effectiveZoomRef.current;
@@ -1015,6 +1062,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     simulationRef.current?.setParticleColorMode(particleColorMode);
   }, [particleColorMode]);
+
+  useEffect(() => {
+    simulationRef.current?.setCenterDotSize(centerDotSize);
+  }, [centerDotSize]);
 
   useEffect(() => {
     simulationRef.current?.setParticleAlpha(particleAlpha);
@@ -1136,13 +1187,40 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     // ignores; `cancelled` (this effect's own flag) tells the two apart
     // from a real bug, which still surfaces via console.error rather than
     // vanishing silently.
+    let lastAttractorFrame = performance.now();
     const frame = async () => {
+      const now = performance.now();
+      const actuatorDt = Math.min(0.1, Math.max(0, (now - lastAttractorFrame) / 1000));
+      lastAttractorFrame = now;
       const sim = simulationRef.current;
       const context = contextRef.current;
       if (sim?.ready && context && !batchRunningRef.current && !configReloadingRef.current) {
+        if (keepCircleRef.current) {
+          keepCircleRef.current=false;
+          try {
+            const operation=sim.killOutsideCircle();
+            activeStepRef.current=operation;
+            await operation;
+          } catch (err) {
+            if (!cancelled) console.error(err);
+          } finally { activeStepRef.current=null; }
+          if (cancelled) return;
+        }
+        const pendingCuts=cutsRef.current.splice(0);
+        if (pendingCuts.length) {
+          try {
+            const cutPromise=sim.cutMaterial(pendingCuts);
+            activeStepRef.current=cutPromise;
+            await cutPromise;
+          } catch (err) {
+            if (!cancelled) console.error(err);
+          } finally { activeStepRef.current=null; }
+          if (cancelled) return;
+        }
         if (!pausedRef.current) {
           try {
-            const stepPromise = sim.step();
+            sim.setAudioEnergy(audioEnergyRef.current);
+            const stepPromise = sim.step(actuatorDt);
             activeStepRef.current = stepPromise;
             await stepPromise;
             activeStepRef.current = null;
@@ -1265,7 +1343,24 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
             performance.now() * 0.001,
           );
         }
+        const actuator = normalizeAttractor(attractorRef.current);
+        const position = attractorMotionRef.current.advance(actuator, pausedRef.current ? 0 : actuatorDt);
+        if (!pausedRef.current && actuator.enabled && actuator.range > 0 && actuator.strength !== 0) {
+          sim.injectDeform(position.x, position.y, actuator.strength < 0 ? "outward" : "inward", Math.abs(actuator.strength) * actuatorDt, actuator.range, "velocity");
+        }
+        onAttractorPositionRef.current?.(position);
+        if (autoPruneCircleRef.current) {
+          try {
+            const operation=sim.killOutsideCircle(0.9);
+            activeStepRef.current=operation;
+            await operation;
+          } catch (err) {
+            if (!cancelled) console.error(err);
+          } finally { activeStepRef.current=null; }
+          if (cancelled) return;
+        }
         sim.render(context);
+        if (canvasRef.current) onRenderedRef.current?.(canvasRef.current, effectiveZoomRef.current);
         const sampling = sim.samplingStatus;
         setSamplingMessage(sampling.atCapacity || sampling.capacityBlocked
           ? `Sampling limit reached; growth paused${sampling.unresolvedSamples ? ` (${sampling.unresolvedSamples} unresolved patches)` : ""}.`
@@ -1292,7 +1387,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
        * this needs to update on every pointermove, which would be a lot
        * of wasted React re-renders for a pure style mutation. */}
       <div ref={deformPreviewRef} className="deform-preview" style={{ display: "none" }} />
-      {status === "ready" && samplingMessage && (
+      {showSamplingStatus && status === "ready" && samplingMessage && (
         <div className="sampling-status" role="status">{samplingMessage}</div>
       )}
       {status === "loading" && <div className="webgpu-banner hint">Acquiring WebGPU device…</div>}

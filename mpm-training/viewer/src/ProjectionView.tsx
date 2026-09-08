@@ -1,3 +1,4 @@
+import { useOutputPreviewSender } from "./performance/outputPreview"
 import { useEffect, useRef, useState } from "react"
 import type { SimulationConfig } from "./gpu/types"
 import {
@@ -25,13 +26,9 @@ export function ProjectionView() {
   const channelRef = useRef<BroadcastChannel | null>(null)
   const visualSignatureRef = useRef("")
   const telemetryRef = useRef({ lastSentAt: 0, lastFrameAt: performance.now(), fps: 0 })
-  const particleCapRef = useRef(0)
-  const autoPruneFractionRef = useRef<number | null>(null)
-  const autoPruneDelayMsRef = useRef(30_000)
-  const autoPruneArmedRef = useRef(true)
-  const autoPruneReachedCapAtRef = useRef<number | null>(null)
   const [config, setConfig] = useState<SimulationConfig | null>(null)
   const [snapshot, setSnapshot] = useState<PerformanceSnapshot | null>(null)
+  const sendPreview = useOutputPreviewSender( push => canvasRef.current?.pushCut(push))
   const [connected, setConnected] = useState(false)
 
   useEffect(() => {
@@ -43,24 +40,21 @@ export function ProjectionView() {
       if (message.type === "config") {
         setConfig(message.config)
       } else if (message.type === "snapshot") {
-        particleCapRef.current = message.snapshot.particleCap
         if (message.snapshot.physics) canvasRef.current?.setPhysics(message.snapshot.physics)
         const signature = visualSignature(message.snapshot)
         if (signature !== visualSignatureRef.current) {
           visualSignatureRef.current = signature
           setSnapshot(message.snapshot)
         }
-      } else if (message.type === "auto-prune") {
-        autoPruneFractionRef.current = message.fraction
-        autoPruneDelayMsRef.current = Math.max(0, message.delayMs)
-        autoPruneArmedRef.current = true
-        autoPruneReachedCapAtRef.current = null
       } else if (message.type === "command") {
         if (message.command === "prune") canvasRef.current?.killFraction(0.995)
         else if (message.command === "restart") canvasRef.current?.restart()
-        else if (message.command === "randomize") canvasRef.current?.randomizeWeights(false)
-        else if (message.command === "randomize-and-restart") canvasRef.current?.randomizeWeights(true)
+        else if (message.command === "randomize" || message.command === "randomize-and-restart") {
+          const weights = canvasRef.current?.randomizeWeights(message.command === "randomize-and-restart")
+          if (weights) channel.postMessage({ type: "policy-weights", weights } satisfies ProjectionToControllerMessage)
+        }
         else if (message.command === "kill-20-percent") canvasRef.current?.killFraction(0.2)
+        else if (message.command === "keep-center-circle") canvasRef.current?.killOutsideCircle()
         else if (message.command === "kill-80-percent") canvasRef.current?.killFraction(0.8)
       }
     }
@@ -84,25 +78,6 @@ export function ProjectionView() {
 
   const onStep = (step: number, particleCount: number) => {
     const now = performance.now()
-    const autoPruneFraction = autoPruneFractionRef.current
-    const particleCap = particleCapRef.current
-    if (autoPruneFraction !== null && particleCap > 0) {
-      if (particleCount < particleCap) {
-        autoPruneArmedRef.current = true
-        autoPruneReachedCapAtRef.current = null
-      } else if (autoPruneArmedRef.current) {
-        if (autoPruneReachedCapAtRef.current === null) {
-          autoPruneReachedCapAtRef.current = now
-        }
-        if (now - autoPruneReachedCapAtRef.current >= autoPruneDelayMsRef.current) {
-          autoPruneArmedRef.current = false
-          autoPruneReachedCapAtRef.current = null
-          canvasRef.current?.killFraction(autoPruneFraction)
-        }
-      }
-    } else {
-      autoPruneReachedCapAtRef.current = null
-    }
     const elapsed = now - telemetryRef.current.lastFrameAt
     telemetryRef.current.lastFrameAt = now
     const instantaneousFps = elapsed > 0 ? 1000 / elapsed : 0
@@ -121,16 +96,21 @@ export function ProjectionView() {
   }
 
   return (
-    <main className={"projection-view" + (snapshot?.blackout ? " is-blackout" : "")}>
+    <main className="projection-view">
       {snapshot && (
         <GridCanvas
+          showSamplingStatus={false}
           ref={canvasRef}
           config={config}
           targetPoints={null}
           targetVisible={false}
           physics={snapshot.physics}
+          autoPruneCircle={snapshot.autoPruneCircle ?? false}
+          audioEnergy={snapshot.audioEnergy ?? 0}
           particleCap={snapshot.particleCap}
           initialParticleCount={snapshot.initialParticleCount}
+          attractor={snapshot.attractor}
+          onAttractorPosition={position => channelRef.current?.postMessage({ type: "attractor", position } satisfies ProjectionToControllerMessage)}
           noiseDisplacementStrength={snapshot.noiseDisplacementStrength ?? 0}
           fieldMode={snapshot.render.fieldMode}
           substrateChannelStart={snapshot.render.substrateChannelStart}
@@ -141,6 +121,7 @@ export function ProjectionView() {
           gradientExponent={snapshot.render.gradientExponent}
           particleShape={snapshot.render.particleShape}
           particleColorMode={snapshot.render.particleColorMode}
+          centerDotSize={snapshot.render.centerDotSize ?? 0.18}
           particleAlpha={snapshot.render.particleAlpha}
           directionalLineVisible={snapshot.render.directionalLineVisible}
           domainVisible={snapshot.render.domainVisible}
@@ -156,6 +137,7 @@ export function ProjectionView() {
           chemicalMemoryOpponentSubtraction={snapshot.render.chemicalMemoryOpponentSubtraction}
           deformSettings={DEFAULT_DEFORM_SETTINGS}
           onStep={onStep}
+          onRendered={sendPreview}
           loopAtTrainedSteps={snapshot.loopAtTrainedSteps}
           paused={snapshot.paused}
         />
@@ -166,7 +148,6 @@ export function ProjectionView() {
           <span>Open the Performance panel in the main viewer.</span>
         </div>
       )}
-      <div className="projection-blackout" />
     </main>
   )
 }

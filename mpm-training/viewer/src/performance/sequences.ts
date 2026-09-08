@@ -5,8 +5,6 @@ export const SEQUENCE_ACTIONS = [
   { value: "kill-20-percent", label: "Kill 20%" },
   { value: "kill-80-percent", label: "Kill 80%" },
   { value: "prune", label: "Prune 99.5%" },
-  { value: "toggle-auto-prune", label: "Toggle auto prune" },
-  { value: "blackout", label: "Blackout / restore" },
 ] as const
 
 export type SequenceAction = typeof SEQUENCE_ACTIONS[number]["value"]

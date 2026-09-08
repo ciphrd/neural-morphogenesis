@@ -108,6 +108,12 @@ fn particleOffset(vertexIndex: u32, instanceIndex: u32) -> vec2<f32> {
 }
 
 fn outsideParticleShape(uv: vec2<f32>) -> bool {
+  if (viewStyle.y > 2.5) {
+    // Barycentric distance in screen pixels leaves only the three borders.
+    let barycentric = vec3<f32>(uv, 1.0 - uv.x - uv.y);
+    let edgePixels = barycentric / max(fwidth(barycentric), vec3<f32>(1e-6));
+    return min(edgePixels.x, min(edgePixels.y, edgePixels.z)) > 1.0;
+  }
   return viewStyle.y < 0.5 && dot(uv, uv) > 1.0;
 }
 
@@ -119,6 +125,7 @@ struct ParticleGeometry {
   position: vec4<f32>,
   uv: vec2<f32>,
   particleIndex: u32,
+  world: vec2<f32>,
 }
 
 fn particleGeometry(vertexIndex: u32, instanceIndex: u32) -> ParticleGeometry {
@@ -127,7 +134,9 @@ fn particleGeometry(vertexIndex: u32, instanceIndex: u32) -> ParticleGeometry {
     geometry.particleIndex = instanceIndex / 4u;
     let world = domainWorldPosition(vertexIndex, instanceIndex % 4u, geometry.particleIndex);
     geometry.position = vec4<f32>(viewCenter(world * 2.0 - vec2<f32>(1.0)), 0.0, 1.0);
-    geometry.uv = vec2<f32>(0.0);
+    let barycentricUV = array<vec2<f32>, 3>(vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0));
+    geometry.uv = barycentricUV[vertexIndex];
+    geometry.world = world;
     return geometry;
   }
   geometry.particleIndex = instanceIndex;
@@ -138,6 +147,7 @@ fn particleGeometry(vertexIndex: u32, instanceIndex: u32) -> ParticleGeometry {
     0.0, 1.0,
   );
   geometry.uv = offset;
+  geometry.world = pointPositions[instanceIndex];
   return geometry;
 }
 
@@ -160,12 +170,24 @@ fn targetVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index
   return out;
 }
 
+fn particleDisplayColor(color: vec3<f32>, uv: vec2<f32>) -> vec4<f32> {
+  let distance = length(uv);
+  let smoothing = max(fwidth(distance), 1e-5);
+  if (viewStyle.y > 0.1 && viewStyle.y < 0.5) {
+    let centerAlpha = 0.55 * (1.0 - smoothstep(viewStyle.w - smoothing, viewStyle.w + smoothing, distance));
+    let alpha = centerAlpha + viewStyle.z * (1.0 - centerAlpha);
+    let premultiplied = vec3<f32>(centerAlpha) + color * viewStyle.z * (1.0 - centerAlpha);
+    return vec4<f32>(premultiplied / max(alpha, 1e-6), alpha);
+  }
+  return vec4<f32>(color, viewStyle.z);
+}
+
 @fragment
 fn particleFragment(in: VOut) -> @location(0) vec4<f32> {
   if (outsideParticleShape(in.uv)) {
     discard;
   }
-  return vec4<f32>(pointColor.rgb, viewStyle.z);
+  return particleDisplayColor(pointColor.rgb, in.uv);
 }
 
 @fragment
@@ -213,7 +235,7 @@ fn activationParticleFragment(in: ActivationDotOut) -> @location(0) vec4<f32> {
   if (outsideParticleShape(in.uv)) {
     discard;
   }
-  return vec4<f32>(neuronActivationColor(in.activation), viewStyle.z);
+  return particleDisplayColor(neuronActivationColor(in.activation), in.uv);
 }
 
 @group(0) @binding(7) var<uniform> neuralColorStyle: vec4<f32>;
@@ -263,8 +285,7 @@ fn neuralColorParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(i
 
 @fragment
 fn neuralColorParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
-  let radiusSquared = dot(in.uv, in.uv);
-  if (viewStyle.y < 0.5 && radiusSquared > 1.0) {
+  if (outsideParticleShape(in.uv)) {
     discard;
   }
 
@@ -275,7 +296,7 @@ fn neuralColorParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> 
     vec3<f32>(0.0),
     vec3<f32>(1.0),
   );
-  return vec4<f32>(boosted, viewStyle.z);
+  return particleDisplayColor(boosted, in.uv);
 }
 
 const BERLIN = array<vec3<f32>, 17>(
@@ -322,7 +343,7 @@ fn growthMagnitudeParticleVertex(@builtin(vertex_index) vertexIndex: u32, @built
 @fragment
 fn growthMagnitudeParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
   if (outsideParticleShape(in.uv)) { discard; }
-  return vec4<f32>(in.color, viewStyle.z);
+  return particleDisplayColor(in.color, in.uv);
 }
 
 @vertex
@@ -378,7 +399,7 @@ fn chemicalLevelsParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builti
 @fragment
 fn internalStateParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
   if (outsideParticleShape(in.uv)) { discard; }
-  return vec4<f32>(in.color, viewStyle.z);
+  return particleDisplayColor(in.color, in.uv);
 }
 
 @group(0) @binding(9) var boundaryMorphologyTexture: texture_2d<f32>;
@@ -419,7 +440,7 @@ fn boundaryValueColor(value: f32) -> vec3<f32> {
 @vertex
 fn boundaryValueParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
   let geometry = particleGeometry(vertexIndex, instanceIndex);
-  let position = fract(pointPositions[geometry.particleIndex]);
+  let position = fract(geometry.world);
   let dims = vec2<f32>(textureDimensions(boundaryMorphologyTexture));
   let fieldPos = position * dims;
   let gx = 0.5 * (
@@ -444,7 +465,7 @@ fn boundaryValueParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
 @fragment
 fn boundaryValueParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f32> {
   if (outsideParticleShape(in.uv)) { discard; }
-  return vec4<f32>(in.color, viewStyle.z);
+  return particleDisplayColor(in.color, in.uv);
 }
 
 @group(0) @binding(5) var<uniform> directionalLineStyle: vec4<f32>;
@@ -478,4 +499,44 @@ fn growthLineVertex(
   let direction = select(vec2<f32>(0.0), vector / max(length(vector), 1e-8), magnitude > 1e-8);
   let offset = select(vec2<f32>(0.0), direction * directionalLineStyle.y * 1.5 * magnitude, vertexIndex == 1u);
   return vec4<f32>(center + offset * viewStyle.x, 0.0, 1.0);
+}
+
+// Channel-major chemical field; bilinear sampling wraps at simulation seams.
+const COLOR_FIELD_WIDTHS: array<u32, __CHANNELS__> = __FIELD_WIDTHS__;
+const COLOR_FIELD_HEIGHTS: array<u32, __CHANNELS__> = __FIELD_HEIGHTS__;
+const COLOR_FIELD_OFFSETS: array<u32, __CHANNELS__> = __FIELD_OFFSETS__;
+@group(0) @binding(11) var<storage, read> colorSubstrate: array<f32>;
+@group(0) @binding(12) var<uniform> colorSubstrateChannels: vec4<u32>;
+@group(0) @binding(13) var<uniform> colorSubstrateAccent: f32;
+@group(0) @binding(14) var<uniform> colorSubstrateZero: vec2<u32>;
+
+fn loadColorSubstrate(channel: u32, p: vec2<i32>) -> f32 {
+  let dims = vec2<i32>(i32(COLOR_FIELD_WIDTHS[channel]), i32(COLOR_FIELD_HEIGHTS[channel]));
+  let wrapped = ((p % dims) + dims) % dims;
+  return colorSubstrate[COLOR_FIELD_OFFSETS[channel] + u32(wrapped.y) * COLOR_FIELD_WIDTHS[channel] + u32(wrapped.x)];
+}
+
+fn sampleColorSubstrate(channel: u32, world: vec2<f32>) -> f32 {
+  let p = fract(world) * vec2<f32>(f32(COLOR_FIELD_WIDTHS[channel]), f32(COLOR_FIELD_HEIGHTS[channel])) - vec2<f32>(0.5);
+  let base = vec2<i32>(floor(p));
+  let f = fract(p);
+  return mix(mix(loadColorSubstrate(channel, base), loadColorSubstrate(channel, base + vec2<i32>(1, 0)), f.x),
+    mix(loadColorSubstrate(channel, base + vec2<i32>(0, 1)), loadColorSubstrate(channel, base + vec2<i32>(1, 1)), f.x), f.y);
+}
+
+fn substrateParticleComponent(channel: u32, world: vec2<f32>) -> f32 {
+  let raw = clamp(sampleColorSubstrate(min(channel, __CHANNELS__u - 1u), world) / 2.0, -1.0, 1.0);
+  let accented = sign(raw) * pow(abs(raw), exp(-colorSubstrateAccent));
+  return select(accented * 0.5 + 0.5, max(accented, 0.0), colorSubstrateZero.x != 0u);
+}
+
+@vertex
+fn substrateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
+  let geometry = particleGeometry(vertexIndex, instanceIndex);
+  var out: NeuralColorDotOut;
+  out.position = geometry.position;
+  out.uv = geometry.uv;
+  let start = colorSubstrateChannels.x;
+  out.color = vec3<f32>(substrateParticleComponent(start, geometry.world), substrateParticleComponent(start + 1u, geometry.world), substrateParticleComponent(start + 2u, geometry.world));
+  return out;
 }

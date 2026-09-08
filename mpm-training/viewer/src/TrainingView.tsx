@@ -1,3 +1,4 @@
+import { PerformanceOutputPanel, type PerformanceOutputStatus } from "./ui/PerformanceOutputPanel"
 import { TrainingTimingPanel, TimingHistoryChart } from "./ui/TrainingTimingPanel"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom"
@@ -20,6 +21,7 @@ import {
   type ParticleShape,
 } from "./gpu/render"
 import type {
+  SimulationConfig,
   CellMemory,
   ChemicalCommunicationArchitecture,
   PhysicsSettings,
@@ -53,7 +55,9 @@ import { GrowthPanel } from "./ui/GrowthPanel"
 import { NetworkPanel } from "./ui/NetworkPanel"
 import { loadSequences, SEQUENCES_STORAGE_KEY } from "./performance/sequences"
 import { SequencesPanel } from "./ui/SequencesPanel"
-import { PerformancePanel } from "./ui/PerformancePanel"
+import { ActuatorsPanel } from "./ui/ActuatorsPanel"
+import { DEFAULT_ATTRACTOR, normalizeAttractor } from "./performance/actuators"
+import { PerformanceController } from "./ui/PerformanceController"
 import { PhysicsPanel } from "./ui/PhysicsPanel"
 import { PolicyWeightControl } from "./ui/PolicyWeightControl"
 import { RunPicker } from "./ui/RunPicker"
@@ -62,10 +66,8 @@ import type {
   SweepParameterKey,
 } from "./ui/SampleSweepModal"
 import { SampleSweepModal, sweepValues } from "./ui/SampleSweepModal"
-import {
-  SimulationPresetPanel,
-  type SimulationPresetValue,
-} from "./ui/SimulationPresetPanel"
+import { WorkspacePresetPanel } from "./ui/WorkspacePresetPanel"
+import { DEFAULT_AUDIO_SETTINGS, readLastWorkspacePreset, type WorkspacePresetValue, type AudioSettings } from "./performance/workspacePresets"
 import { Slider } from "./ui/Slider"
 import { VIEWER_DEFAULTS } from "./viewerConfig"
 
@@ -90,6 +92,11 @@ interface TrainingViewProps {
 }
 
 export function TrainingView({ performanceMode = false }: TrainingViewProps) {
+  const [bootPreset] = useState(() => performanceMode ? readLastWorkspacePreset() : null)
+  const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => structuredClone(bootPreset?.value.audio ?? DEFAULT_AUDIO_SETTINGS))
+  const [performanceControls, setPerformanceControls] = useState(() => bootPreset?.value.controls ?? {})
+  const loadedPolicyRef = useRef<SimulationConfig["weights"] | null>(null)
+  const [savedPerformanceConfig, setSavedPerformanceConfig] = useState<SimulationConfig | null>(() => bootPreset?.value.config ?? null)
   const [sequences, setSequences] = useState(loadSequences)
   useEffect(() => {
     localStorage.setItem(SEQUENCES_STORAGE_KEY, JSON.stringify(sequences))
@@ -207,6 +214,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
   const [particleColorMode, setParticleColorMode] = useState<ParticleColorMode>(
     VIEWER_DEFAULTS.rendering.particleColorMode
   )
+  const [centerDotSize, setCenterDotSize] = useState(0.18)
   const [particleAlpha, setParticleAlpha] = useState(
     VIEWER_DEFAULTS.rendering.particleAlpha
   )
@@ -277,9 +285,12 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
   // past generation was scrubbed to. configByGeneration and history are
   // evicted in lockstep (see net/trainingSocket.ts), so any generation
   // number that still appears on the chart is guaranteed to resolve here.
+  const [fastAccumulation, setFastAccumulation] = useState(bootPreset?.value.config.fastAccumulation ?? true)
+  const performanceSeed = useMemo(() => performanceMode
+    ? crypto.getRandomValues(new Uint32Array(1))[0] : 0, [performanceMode])
   const performanceConfig = useMemo(() => performanceMode
-    ? createPerformanceConfig(crypto.getRandomValues(new Uint32Array(1))[0])
-    : null, [performanceMode])
+    ? savedPerformanceConfig ? { ...savedPerformanceConfig, fastAccumulation } : createPerformanceConfig(performanceSeed, fastAccumulation)
+    : null, [performanceMode, performanceSeed, fastAccumulation, savedPerformanceConfig])
   const activeConfig = performanceConfig ?? (
     selectedGeneration !== null
       ? (configByGeneration.get(selectedGeneration) ?? latest)
@@ -519,18 +530,23 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
     [playbackConfig]
   )
   const physicsValues = physicsOverride ?? trainedPhysics
+  const [outputStatus, setOutputStatus] = useState<PerformanceOutputStatus>({ connected: false, telemetry: null })
   const [audioPerformanceSnapshot, setAudioPerformanceSnapshot] =
     useState<PerformanceSnapshot | null>(null)
-  const [performanceBlackout, setPerformanceBlackout] = useState(false)
+  const [autoPruneCircle, setAutoPruneCircle] = useState(false)
+  const [attractor, setAttractor] = useState(() => ({ ...DEFAULT_ATTRACTOR }))
   const [noiseDisplacementStrength, setNoiseDisplacementStrength] = useState(0)
   const basePerformanceSnapshot = useMemo<PerformanceSnapshot>(
     () => ({
+      autoPruneCircle,
+      attractor,
       physics: physicsValues,
       render: {
         zoom,
         particleRadiusPx,
         particleShape,
         particleColorMode,
+        centerDotSize,
         particleAlpha,
         directionalLineVisible,
         domainVisible,
@@ -555,9 +571,10 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
       noiseDisplacementStrength,
       paused,
       loopAtTrainedSteps,
-      blackout: performanceBlackout,
     }),
     [
+      autoPruneCircle,
+      attractor,
       accent,
       autoZoomSettings,
       bloom,
@@ -576,6 +593,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
       particleRadiusPx,
       particleShape,
       particleColorMode,
+      centerDotSize,
       particleAlpha,
       directionalLineVisible,
       domainVisible,
@@ -583,7 +601,6 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
       substrateZeroIsBlack,
       boundaryGradientZeroIsBlack,
       paused,
-      performanceBlackout,
       physicsValues,
       substrateChannelStart,
       zoom,
@@ -597,7 +614,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
   useEffect(() => {
     if (!performanceMode) setAudioPerformanceSnapshot(null)
   }, [performanceMode])
-  const applyPerformanceSnapshot = useCallback((next: PerformanceSnapshot) => {
+  const applyPerformanceSnapshot = useCallback((next: PerformanceSnapshot, density = effectiveParticleDensity) => {
     setPhysicsOverride(
       next.physics
         ? {
@@ -609,6 +626,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
     setParticleRadiusPx(next.render.particleRadiusPx)
     setParticleShape(next.render.particleShape)
     setParticleColorMode(next.render.particleColorMode)
+    setCenterDotSize(next.render.centerDotSize ?? 0.18)
     setParticleAlpha(next.render.particleAlpha)
     setDirectionalLineVisible(next.render.directionalLineVisible)
     setDomainVisible(next.render.domainVisible)
@@ -632,49 +650,51 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
       setAutoZoomSettings(next.render.autoZoom)
     }
     if (next.render.bloom) setBloom(next.render.bloom)
-    setFrontendParticleCap(Math.max(2, Math.round(next.particleCap / effectiveParticleDensity)))
-    setFrontendInitialParticleCount(Math.max(1, Math.round(next.initialParticleCount / effectiveParticleDensity)))
-    setFrontendInitialParticleCountInput(String(Math.max(1, Math.round(next.initialParticleCount / effectiveParticleDensity))))
+    setFrontendParticleCap(Math.max(2, Math.round(next.particleCap / density)))
+    setFrontendInitialParticleCount(Math.max(1, Math.round(next.initialParticleCount / density)))
+    setFrontendInitialParticleCountInput(String(Math.max(1, Math.round(next.initialParticleCount / density))))
+    setAutoPruneCircle(next.autoPruneCircle ?? false)
+    setAttractor(normalizeAttractor(next.attractor))
     setNoiseDisplacementStrength(next.noiseDisplacementStrength ?? 0)
     setPaused(next.paused)
     setLoopAtTrainedSteps(next.loopAtTrainedSteps)
-    setPerformanceBlackout(next.blackout)
   }, [effectiveParticleDensity])
-  const simulationPresetValue = useMemo<SimulationPresetValue | null>(() => {
-    if (!physicsValues || !activeConfig) return null
-    return {
-      physics: physicsValues,
-      particleCap: frontendParticleCap,
-      initialParticleCount: frontendInitialParticleCount,
-      noiseDisplacementStrength,
-      particleDensityMultiplier: effectiveParticleDensity,
-      chemicalArchitecture:
-        chemicalArchitectureOverride ??
-        chemicalCommunicationArchitectureFromConfig(activeConfig),
-      policyExploration,
-    }
-  }, [
-    activeConfig,
-    chemicalArchitectureOverride,
-    effectiveParticleDensity,
-    frontendInitialParticleCount,
-    frontendParticleCap,
-    noiseDisplacementStrength,
-    physicsValues,
-    policyExploration,
-  ])
-  const applySimulationPreset = useCallback((preset: SimulationPresetValue) => {
-    setPhysicsOverride({
-			...preset.physics,
+  useEffect(() => { loadedPolicyRef.current = previewConfig?.weights ?? null }, [previewConfig])
+  const captureWorkspacePreset = (): WorkspacePresetValue | null => {
+    if (!activeConfig || !previewConfig || !basePerformanceSnapshot.physics) return null
+    return structuredClone({
+      config: { ...activeConfig, ...initialConditionOverride,
+        particles: frontendParticleCap, initialParticleCount: frontendInitialParticleCount,
+        fastAccumulation, baseResolution: effectiveSubstrateResolution,
+        chemicalCommunicationArchitecture: chemicalArchitectureOverride ?? chemicalCommunicationArchitectureFromConfig(activeConfig),
+        cellMemory: previewConfig.cellMemory, hiddenDim: previewConfig.hiddenDim, hiddenLayers: previewConfig.hiddenLayers,
+        policyArchitecture: previewConfig.policyArchitecture, weights: loadedPolicyRef.current ?? previewConfig.weights },
+      snapshot: basePerformanceSnapshot, density: effectiveParticleDensity,
+      audio: audioSettings, sequences, controls: performanceControls,
     })
-    setFrontendParticleCap(preset.particleCap)
-    setFrontendInitialParticleCount(preset.initialParticleCount)
-    setFrontendInitialParticleCountInput(String(preset.initialParticleCount))
-    setNoiseDisplacementStrength(preset.noiseDisplacementStrength ?? 0)
-    setParticleDensityOverride(preset.particleDensityMultiplier)
-    setChemicalArchitectureOverride(preset.chemicalArchitecture)
-    setPolicyExploration(preset.policyExploration)
-  }, [])
+  }
+  const applyWorkspacePreset = useCallback((preset: WorkspacePresetValue) => {
+    setSavedPerformanceConfig(preset.config)
+    setFastAccumulation(preset.config.fastAccumulation ?? true)
+    setPolicyExploration(null)
+    setInitialConditionOverride(null)
+    setChemicalArchitectureOverride(preset.config.chemicalCommunicationArchitecture ?? "cell-owned-projection")
+    setSubstrateResolutionOverride(preset.config.baseResolution)
+    setParticleDensityOverride(preset.density)
+    applyPerformanceSnapshot(preset.snapshot, preset.density)
+    setAudioSettings(preset.audio)
+    setAudioPerformanceSnapshot(null)
+    setSequences(preset.sequences.map(sequence => ({ ...sequence, id: crypto.randomUUID() })))
+    setPerformanceControls(preset.controls)
+    loadedPolicyRef.current = preset.config.weights
+  }, [applyPerformanceSnapshot])
+  const restoredPreset = useRef(false)
+  useEffect(() => {
+    if (bootPreset && !restoredPreset.current) {
+      restoredPreset.current = true
+      applyWorkspacePreset(structuredClone(bootPreset.value))
+    }
+  }, [bootPreset, applyWorkspacePreset])
   const activeStat =
     selectedGeneration !== null
       ? (history.find((h) => h.generation === selectedGeneration) ?? null)
@@ -858,8 +878,14 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
 
   if (performanceMode) {
     return (
-      <div className="performance-mode-layout">
-        <aside className="performance-simulation-sidebar">
+      <AudioReactivityPanel
+        settings={audioSettings}
+        onSettingsChange={setAudioSettings}
+        baseSnapshot={basePerformanceSnapshot}
+        onOutputChange={setAudioPerformanceSnapshot}
+        renderPanels={({ audio, mappings }) => (
+      <main className="performance-mode-layout" aria-label="Performance workspace">
+        <aside className="performance-simulation-sidebar performance-column" aria-label="Simulation">
           <div className="performance-sidebar-title">
             <span>Simulation</span>
             <strong>Fresh policy</strong>
@@ -927,6 +953,10 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
           </section>
           <section>
             <h2>Playback</h2>
+            <label className="checkbox-row" title="Reduces contention with floating-point workgroups and instanced splats. Preserves small-particle motion. Changing this restarts the output.">
+              <input type="checkbox" checked={fastAccumulation} onChange={(event) => setFastAccumulation(event.target.checked)} />
+              Fast accumulation
+            </label>
             <label className="slider-row">
               <span>Density</span>
               <Slider
@@ -941,6 +971,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
               </span>
             </label>
             <label
+              data-audio-target="noiseDisplacementStrength"
               className="slider-row"
               title="Animated coherent simplex-noise displacement applied after each simulation step"
             >
@@ -973,7 +1004,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                   }
                 }}
               />
-              <span className="slider-value">{frontendParticleCap}</span>
+              <span className="slider-value">{densityScaledParticleCap.toLocaleString()}</span>
             </label>
             <label className="performance-setting-row">
               <span>Initial cells</span>
@@ -998,10 +1029,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
               />
             </label>
           </section>
-          <SimulationPresetPanel
-            value={simulationPresetValue}
-            onLoad={applySimulationPreset}
-          />
+          <WorkspacePresetPanel capture={captureWorkspacePreset} onLoad={applyWorkspacePreset} />
           {trainedPhysics && physicsValues && (
             <>
               <PhysicsPanel
@@ -1020,10 +1048,10 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
             </>
           )}
         </aside>
-        <main className="performance-mode">
-          <div className="performance-dashboard-grid">
-            <div className="performance-dashboard-card performance-master-card">
-              <PerformancePanel
+        <div className="performance-column" role="region" aria-label="Rendering and post-processing">
+              <PerformanceController
+                onPolicyWeights={(weights) => { loadedPolicyRef.current = weights }}
+                onOutputStatusChange={setOutputStatus}
                 sequences={sequences}
                 config={previewConfig}
                 snapshot={performanceSnapshot}
@@ -1032,29 +1060,31 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                 onRandomize={(restart) =>
                   gridCanvasRef.current?.randomizeWeights(restart)
                 }
+                onKillOutsideCircle={() => gridCanvasRef.current?.killOutsideCircle()}
                 onKillFraction={(fraction) =>
                   gridCanvasRef.current?.killFraction(fraction)
                 }
               />
-            </div>
-            <div className="performance-dashboard-card performance-audio-card">
-              {physicsValues ? (
-                <AudioReactivityPanel
-                  baseSnapshot={basePerformanceSnapshot}
-                  onOutputChange={setAudioPerformanceSnapshot}
-                />
-              ) : (
-                <p className="hint">Waiting for simulation settings…</p>
-              )}
-            </div>
-            <div className="performance-dashboard-card performance-sequences-card">
-              <SequencesPanel sequences={sequences} onChange={setSequences} />
-            </div>
+        </div>
+        <div className="performance-column" role="region" aria-label="Mappings, sequences and actuators">
+          <div className="performance-dashboard-card performance-mappings-card">{mappings}</div>
+          <div className="performance-dashboard-card performance-sequences-card">
+            <SequencesPanel sequences={sequences} onChange={setSequences} />
           </div>
-        </main>
-      </div>
+          <div className="performance-dashboard-card performance-actuators-card">
+            <ActuatorsPanel value={attractor} effective={normalizeAttractor(performanceSnapshot.attractor)} onChange={setAttractor} />
+          </div>
+        </div>
+        <aside className="performance-column" aria-label="Monitoring">
+          <PerformanceOutputPanel {...outputStatus} controls={performanceControls} onControlsChange={setPerformanceControls} />
+          <div className="performance-dashboard-card performance-audio-card">{audio}</div>
+        </aside>
+      </main>
+        )}
+      />
     )
   }
+
   const particleStateChannelCount =
     particleColorMode === "neural-memory" ? 8 : (activeConfig?.channels ?? 1)
   const particleStateChannelStart = Math.min(
@@ -1254,7 +1284,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
               </select>
             </div>
             <label className="slider-row playback-cap-row">
-              <span>Playback sample cap (at 1×)</span>
+              <span>Playback sample cap</span>
               <Slider
                 min={2}
                 max={MAX_PARTICLES}
@@ -1272,9 +1302,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                 }}
               />
               <span className="slider-value playback-cap-value">
-                {effectiveParticleDensity === 1
-                  ? frontendParticleCap.toLocaleString()
-                  : `${frontendParticleCap.toLocaleString()} → ${densityScaledParticleCap.toLocaleString()}`}
+                {densityScaledParticleCap.toLocaleString()}
               </span>
             </label>
             <label className="slider-row">
@@ -1480,23 +1508,6 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
                   }
                 />
               </div>
-              {particleColorMode === "neural-memory" && (
-                <label
-                  className={`slider-row${neuralMemoryControlsInactive ? " is-inactive" : ""}`}
-                >
-                  <span>Opponent subtraction</span>
-                  <Slider
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={chemicalMemoryOpponentSubtraction}
-                    onChange={setChemicalMemoryOpponentSubtraction}
-                  />
-                  <span className="slider-value">
-                    {chemicalMemoryOpponentSubtraction.toFixed(2)}
-                  </span>
-                </label>
-              )}
             </>
           )}
           {particleColorMode === "boundary-value" && (
@@ -1787,6 +1798,7 @@ export function TrainingView({ performanceMode = false }: TrainingViewProps) {
             targetPoints={targetPoints}
             targetVisible={targetVisible}
             physics={simulationPhysics}
+            audioEnergy={performanceSnapshot?.audioEnergy ?? 0}
             particleCap={densityScaledParticleCap}
             initialParticleCount={densityScaledInitialParticleCount}
             noiseDisplacementStrength={noiseDisplacementStrength}

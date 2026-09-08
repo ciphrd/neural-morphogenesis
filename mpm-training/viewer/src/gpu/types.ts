@@ -1,7 +1,7 @@
 import type { InitialConditionPreset } from "./initialConditions";
 import type { ShapeStopSettings } from "./shapeMatch";
 export interface UpdateRuleWeights {
-  fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6 [+ 8 private state])
+  fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6 [+ 8 private state] [+ audio energy])
   fc1b: number[]; // (HIDDEN_DIM,)
   fc2w: number[][]; // stateless: channels+10; stateful: channels+23
   fc2b: number[];
@@ -26,6 +26,8 @@ export type ChemicalCommunicationArchitecture = "persistent-environment" | "cell
 // randomWeights() for how that gap gets filled with a placeholder
 // rollout in the meantime).
 export interface RunSettings extends ShapeStopSettings {
+  /** Viewer-only floating-point reductions, grouped splats, and parallel refinement. */
+  fastAccumulation?: boolean;
   rasterResolution: number;
   estimatedSampleCapacity?: number;
   // The growth CAP, not the starting count — rollouts start with
@@ -319,7 +321,7 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     growthAnisotropy: config.growthAnisotropy,
     growthCompressionStart: config.growthCompressionStart,
     growthCompressionStop: config.growthCompressionStop,
-    growthCompressionFeedback: config.growthCompressionFeedback,
+    growthCompressionFeedback: config.growthCompressionFeedback ?? 0,
     splatRadius: config.splatRadius,
     morphologyBlurSigma: config.morphologyBlurSigma,
     morphologyDensityReference: config.morphologyDensityReference,
