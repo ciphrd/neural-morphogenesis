@@ -48,7 +48,7 @@ def native_check():
     from update_rule import UpdateRule
     from simulation_settings import CHEM_CHANNELS
     from parallel_workers import build_pool
-    args=evolve.build_arg_parser().parse_args(['--target','lizard-64','--cell-memory','recurrent',
+    args=evolve.build_arg_parser().parse_args(['--optimizer','ga','--target','lizard-64','--cell-memory','recurrent',
         '--macro-steps','45','--particles','64','--population','2','--elites','1'])
     evolve.finalize_policy_configuration(args)
     evolve.finalize_density_configuration(args)

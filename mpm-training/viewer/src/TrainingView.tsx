@@ -1774,6 +1774,14 @@ export function TrainingView() {
             <span>Worst (this gen)</span>
             <span>{activeStat ? activeStat.worst.toFixed(3) : "—"}</span>
           </div>
+          {(activeConfig?.optimizer === "cma-es" || activeStat?.optimizerState?.name === "cma-es") && (
+            <div className="stat-row" title="Global CMA-ES step size after this generation's update, used for the next batch.">
+              <span>CMA-ES sigma (σ)</span>
+              <span>{activeStat?.optimizerState && Number.isFinite(activeStat.optimizerState.sigma)
+                ? activeStat.optimizerState.sigma.toPrecision(4)
+                : "—"}</span>
+            </div>
+          )}
         </section>
 
         <TrainingTimingPanel history={timingHistory} scope={timingScope} onScopeChange={setTimingScope} />

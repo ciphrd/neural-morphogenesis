@@ -12,7 +12,7 @@ from seed_schedule_check import RecordingPool
 
 
 def main():
-    args = evolve.build_arg_parser().parse_args(['--population','6','--elites','2',
+    args = evolve.build_arg_parser().parse_args(['--optimizer','ga','--population','6','--elites','2',
         '--mutation-factors','1','.1','.01','--fitness-alignment','geometry'])
     evolve.finalize_policy_configuration(args)
     evolve.validate_fitness_configuration(args)

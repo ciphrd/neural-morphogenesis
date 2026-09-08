@@ -119,6 +119,9 @@ export interface RunSettings extends ShapeStopSettings {
   repulsionMaxDelta: number;
   target: string;
   population: number;
+  /** Missing in older archives, which used the mutation-only GA. */
+  optimizer?: "ga" | "cma-es";
+  cmaCovariance?: "diagonal" | "full" | null;
   /** Shared rollout-seed batch size used for candidate evaluation. */
   seedsPerCandidate: number;
   elites: number;
@@ -126,7 +129,7 @@ export interface RunSettings extends ShapeStopSettings {
   mutationFactors?: number[];
   initialWeights?: string | null;
   /** Training pose scorer; omitted archived runs use raster alignment. */
-  fitnessAlignment?: "raster" | "geometry";
+  fitnessAlignment?: "raster" | "geometry" | "svg";
   /** Native training diagnostic; browser kernels retain parallel reductions. */
   deterministicReference?: boolean;
   runSeed: number;
@@ -202,6 +205,17 @@ export interface TimingEntry {
 }
 
 export interface GenerationRecord {
+  /** Search diagnostics after this generation's update; absent in older runs. */
+  optimizerState?: {
+    name: "cma-es";
+    sigma: number;
+    covariance: "diagonal" | "full";
+    libraryVersion: string;
+    parents?: number;
+    restarts: number;
+    restartReasons: string[];
+    generation: number;
+  } | null;
   timing?: GenerationTiming;
   generation: number;
   best: number;

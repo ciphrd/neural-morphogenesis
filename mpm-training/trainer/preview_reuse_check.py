@@ -51,6 +51,16 @@ def main():
             pixels=np.asarray(Image.open(Path(tmp)/f'gen_00007_{kind}.png'))
             np.testing.assert_array_equal(pixels,(expected[::-1]*255).astype(np.uint8))
         assert (Path(tmp)/'gen_00007_grown.png').exists()
+        # SVG scores compare a fixed candidate with a rotated target raster.
+        evaluation.target_raster = np.flip(mask, axis=0).copy()
+        evaluation.target_color_raster = np.flip(rgb, axis=0).copy()
+        snapshot.evaluation = evaluation
+        train_server._save_generation_images(8, snapshot)
+        for kind, expected in [('target', evaluation.target_color_raster),
+                               ('diff', np.abs(candidate-evaluation.target_color_raster))]:
+            pixels = np.asarray(Image.open(Path(tmp)/f'gen_00008_{kind}.png'))
+            np.testing.assert_array_equal(pixels, (expected[::-1]*255).astype(np.uint8))
+
     print('[PASS] Correct winner/seed/density snapshot, pickling and exact PNG reuse without replay or rescoring')
 
 if __name__=='__main__':main()

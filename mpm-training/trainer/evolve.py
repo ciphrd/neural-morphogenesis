@@ -5,6 +5,7 @@ import json
 import os
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -163,11 +164,11 @@ def offspring_sigma(args, index):
     factors = getattr(args, "mutation_factors", (1.,))
     return args.mutation_sigma * factors[index % len(factors)]
 
-def initial_population(args, rng):
-    """Start a new objective from random policies or an explicitly supplied parent."""
+def initial_weights(args):
+    """One random policy or validated explicit starting policy."""
     path = getattr(args, "initial_weights", None)
     if path is None:
-        return [get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture)) for _ in range(args.population)]
+        return get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture))
     weights = np.load(path, allow_pickle=False)
     expected = mutation_scale_vector(CHEM_CHANNELS, policy_hidden_dim(args.policy_architecture), args.policy_architecture)
     if weights.shape != expected.shape or not np.isfinite(weights).all():
@@ -175,8 +176,34 @@ def initial_population(args, rng):
     weights = weights.astype(np.float32)
     if not np.isfinite(weights).all():
         raise ValueError("initial weights overflow float32")
+    return weights
+
+def initial_population(args, rng):
+    """Legacy GA initialization: independent policies or parent plus mutations."""
+    if getattr(args, "initial_weights", None) is None:
+        return [initial_weights(args) for _ in range(args.population)]
+    weights = initial_weights(args)
     return [weights.copy()] + [mutate(weights, offspring_sigma(args, i), rng, args.policy_architecture)
                                for i in range(args.population-1)]
+
+def initialize_search(args, rng):
+    if args.optimizer == "ga":
+        return initial_population(args, rng), None
+    from cma_optimizer import CmaOptimizer
+    scales = mutation_scale_vector(CHEM_CHANNELS, policy_hidden_dim(args.policy_architecture), args.policy_architecture)
+    optimizer = CmaOptimizer(initial_weights(args), scales, args.mutation_sigma,
+                             args.population, args.seed, args.cma_covariance)
+    return optimizer.ask(), optimizer
+
+class GenerationResult(NamedTuple):
+    population: list[np.ndarray]
+    fitnesses: list[float]
+    winner_seed: int
+    winner_density: float
+    evaluation_seeds: list[int]
+    density_fitnesses: dict[str, float]
+    snapshot: RolloutSnapshot | None
+    winner_weights: np.ndarray
 
 def report_shape_capacity(args, target):
     if target.filled_area() <= 0:
@@ -343,7 +370,8 @@ def run_generation(
     rng: np.random.Generator,
     pool: ProcessPoolExecutor,
     return_snapshot: bool = False,
-) -> tuple:
+    optimizer=None,
+) -> GenerationResult:
     """Evaluates every candidate on the same rotating seed batch.
 
     A fresh batch is drawn from the run RNG once per generation, then every
@@ -358,20 +386,20 @@ def run_generation(
     `pool`'s worker processes (see parallel_workers.py's own module
     docstring for why: a single process evaluating candidates
     sequentially, or even several MpmCore instances batched within one
-    process, both measured as CPU-bound on one core — see this module's
-    own module docstring) — then sorts best-first and refills back up to
-    `args.population` via elitism + Gaussian mutation of a randomly-
-    chosen elite — plain (mu, lambda) ES, no memetic refinement. Returns
-    the next population, sorted fitnesses, representative seed/density, seed
-    batch, and per-density scores. With return_snapshot, also return the
-    winning candidate's worst-scoring seed/density terminal snapshot, already
-    rasterized by its worker. Ties preserve the original task order.
+    process, both measured as CPU-bound on one core). CMA receives fitnesses
+    in sampled order before sorting, then asks for a new batch. The legacy GA
+    preserves elites and mutates them. The evaluated winner is returned
+    explicitly: the next CMA batch contains entirely new, unscored policies.
+    Optional previews use the winner's worst seed/density terminal snapshot.
+    Ties preserve the original task order.
 
     `target` is NOT passed here — it's baked into each worker's own
     globals once, at pool creation (parallel_workers.build_pool()'s own
     initializer), since it never changes generation to generation and
     re-sending it with every task would be pure waste."""
     generation_started = perf_counter()
+    if optimizer is None and getattr(args, "optimizer", "ga") != "ga":
+        raise ValueError("CMA generation requires the optimizer returned by initialize_search")
     seeds_per_candidate = max(1, int(getattr(args, "seeds_per_candidate", 1)))
     evaluation_seeds = [
         int(seed) for seed in rng.integers(0, 2**31 - 1, size=seeds_per_candidate)
@@ -396,6 +424,7 @@ def run_generation(
     pool_seconds = perf_counter()-pool_started
     rollout_fitnesses = np.asarray(values, dtype=np.float64).reshape(
         len(population), len(densities), seeds_per_candidate)
+    rollout_fitnesses[~np.isfinite(rollout_fitnesses)] = np.inf
     per_density_fitnesses = np.mean(rollout_fitnesses, axis=2)
     fitnesses = (
         np.max(per_density_fitnesses, axis=1)
@@ -420,21 +449,23 @@ def run_generation(
         candidate_index = int(order[0])
         case_index = int(np.argmax(rollout_fitnesses[candidate_index]))
         winner_snapshot = results[candidate_index * len(densities) * seeds_per_candidate + case_index]
+    if optimizer is not None:
+        optimizer.tell(fitnesses)
     population = [population[i] for i in order]
     fitnesses = [float(fitnesses[i]) for i in order]
     representative_cases = [representative_cases[i] for i in order]
 
-    elites = population[: args.elites]
-    next_population = list(elites)
-    while len(next_population) < args.population:
-        parent = elites[rng.integers(len(elites))]
-        next_population.append(mutate(parent, offspring_sigma(args, len(next_population)-len(elites)), rng, args.policy_architecture))
+    winner_weights = population[0].copy()
+    if optimizer is not None:
+        next_population = optimizer.ask()
+    else:
+        elites = population[: args.elites]
+        next_population = list(elites)
+        while len(next_population) < args.population:
+            parent = elites[rng.integers(len(elites))]
+            next_population.append(mutate(parent, offspring_sigma(args, len(next_population)-len(elites)), rng, args.policy_architecture))
 
     winner_seed, winner_density = representative_cases[0]
-    result = (
-        next_population, fitnesses, winner_seed, winner_density,
-        evaluation_seeds, winner_density_fitnesses,
-    )
     if return_snapshot:
         winner_snapshot.generation_timings = {
             "poolSeconds": pool_seconds,
@@ -442,10 +473,15 @@ def run_generation(
             "rollouts": aggregate_rollouts([item.timings for item in results]),
             "winner": winner_snapshot.timings,
         }
-    return (*result, winner_snapshot) if return_snapshot else result
+    return GenerationResult(next_population, fitnesses, winner_seed, winner_density,
+                            evaluation_seeds, winner_density_fitnesses, winner_snapshot, winner_weights)
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--optimizer", choices=("cma-es", "ga"), default=DEFAULT_RUN_SETTINGS["optimizer"],
+                        help="learning algorithm (default: cma-es; ga preserves the mutation-only search)")
+    parser.add_argument("--cma-covariance", choices=("diagonal", "full"), default=DEFAULT_RUN_SETTINGS["cmaCovariance"],
+                        help="CMA covariance model; diagonal uses linear storage, full uses quadratic storage")
     # Defaults live in core/config.json; both architecture axes are public
     # run selections. The hidden alias remains exclusively for the paired
     # comparison utility's existing subprocess interface.
@@ -494,7 +530,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "across the batch (default: 1, preserving the previous rollout cost)"
         ),
     )
-    parser.add_argument("--elites", type=int, default=DEFAULT_RUN_SETTINGS["elites"], help="top performers carried into the next generation unmutated")
+    parser.add_argument("--elites", type=int, default=DEFAULT_RUN_SETTINGS["elites"], help="GA only: top performers carried into the next generation unmutated")
     parser.add_argument("--generations", type=int, default=DEFAULT_RUN_SETTINGS["totalGenerations"])
     parser.add_argument(
         "--particles",
@@ -558,13 +594,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # middle of the space, not offset toward any one wall.
     parser.add_argument("--spawn-x", type=float, default=DEFAULT_RUN_SETTINGS["spawnX"])
     parser.add_argument("--spawn-y", type=float, default=DEFAULT_RUN_SETTINGS["spawnY"])
-    parser.add_argument("--mutation-sigma", type=float, default=DEFAULT_RUN_SETTINGS["mutationSigma"])
+    parser.add_argument("--mutation-sigma", type=float, default=DEFAULT_RUN_SETTINGS["mutationSigma"],
+                        help="initial CMA step size (adapted during search), or fixed GA mutation sigma")
     parser.add_argument("--mutation-factors", type=float, nargs="+", default=[1.],
-        help="cycle offspring through these sigma multipliers, e.g. 1 .1 .01 .001; elites are preserved")
+        help="GA only: cycle offspring through these sigma multipliers, e.g. 1 .1 .01 .001")
     parser.add_argument("--initial-weights", type=Path,
-        help="start a new run from this flat .npy policy; select its matching architecture; scores are reevaluated")
+        help="starting CMA mean or GA parent as flat .npy policy; select its matching architecture; not optimizer resume")
     parser.add_argument("--fitness-alignment", choices=("raster", "geometry"), default="raster",
-        help="raster uses fast image rotation; geometry refines pose with exact triangle integration (slower)")
+        help="PNG/JSON: raster uses image rotation; geometry refines exact triangle integration. SVG targets automatically use continuous vector target rotation")
     parser.add_argument(
         "--raster-resolution",
         type=int,
@@ -656,6 +693,13 @@ def validate_fitness_configuration(args: argparse.Namespace) -> None:
     factors = getattr(args, "mutation_factors", [1.])
     if not factors or any(not np.isfinite(f) or f <= 0 for f in factors):
         raise SystemExit("--mutation-factors must be finite and positive")
+    if getattr(args, "optimizer", "ga") == "cma-es":
+        if args.population < 2 or args.mutation_sigma <= 0:
+            raise SystemExit("CMA-ES requires --population >= 2 and --mutation-sigma > 0")
+        if list(factors) != [1.]:
+            raise SystemExit("--mutation-factors requires --optimizer ga; CMA adapts its own step size")
+    elif not 1 <= args.elites <= args.population:
+        raise SystemExit("--elites must be between 1 and --population")
     if args.gpu_timing_interval < 0:
         raise SystemExit("--gpu-timing-interval must be non-negative")
     from initial_conditions import validate_initial_condition
@@ -689,7 +733,7 @@ def validate_fitness_configuration(args: argparse.Namespace) -> None:
     if not 0.0 <= args.fitness_temporal_worst_weight <= 1.0:
         raise SystemExit("--fitness-temporal-worst-weight must be between 0 and 1")
 
-def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds):
+def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds, optimizer=None):
     """Complete checkpoint settings shared by CLI training and the server."""
     return {
         'generation': generation,
@@ -739,13 +783,16 @@ def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed
         'field_n': FIELD_N,
         'chemical_channel_profiles': profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
         'population': args.population,
+        'optimizer': args.optimizer,
+        'cma_covariance': args.cma_covariance if args.optimizer == 'cma-es' else None,
+        'optimizer_state': optimizer.diagnostics() if optimizer is not None else None,
         'seeds_per_candidate': args.seeds_per_candidate,
         'evaluation_seeds': best_evaluation_seeds,
-        'elites': args.elites,
+        'elites': args.elites if args.optimizer == 'ga' else 0,
         'mutation_sigma': args.mutation_sigma,
         'mutation_factors': list(getattr(args, 'mutation_factors', [1.])),
         'initial_weights': str(args.initial_weights) if getattr(args, 'initial_weights', None) else None,
-        'fitness_alignment': getattr(args, 'fitness_alignment', 'raster'),
+        'fitness_alignment': 'svg' if target.svg_source is not None else getattr(args, 'fitness_alignment', 'raster'),
         'deterministic_reference': getattr(args, 'deterministic_reference', False),
         'policy_architecture': args.policy_architecture,
         'cell_memory': args.cell_memory,
@@ -781,8 +828,6 @@ def main() -> None:
     args = build_arg_parser().parse_args()
     finalize_policy_configuration(args)
 
-    if not 1 <= args.elites <= args.population:
-        raise SystemExit("--elites must be between 1 and --population")
     if args.seeds_per_candidate < 1:
         raise SystemExit("--seeds-per-candidate must be at least 1")
     if not 1 <= args.initial_particles <= args.particles // 2:
@@ -812,7 +857,7 @@ def main() -> None:
     # the checkpoint block below) — it never runs a live forward pass,
     # see training_sim.py's own module docstring for why.
     num_workers = args.workers if args.workers is not None else min(os.cpu_count() or 4, args.population)
-    population = initial_population(args, rng)
+    population, optimizer = initialize_search(args, rng)
     pool = build_pool(num_workers, args.particle_capacity, target, target_raster, target_distance_field, args)
     update_rule = UpdateRule(CHEM_CHANNELS, args.policy_architecture)
 
@@ -826,13 +871,12 @@ def main() -> None:
     best_density_fitnesses: dict[str, float] = {}
 
     for generation in range(args.generations):
-        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses = run_generation(
-            population, args, rng, pool
-        )
+        result = run_generation(population, args, rng, pool, optimizer=optimizer)
+        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses = result[:6]
 
         if fitnesses[0] < best_fitness:
             best_fitness = fitnesses[0]
-            best_weights = population[0].copy()
+            best_weights = result.winner_weights.copy()
             best_evaluation_seeds = list(evaluation_seeds)
             best_winner_seed = winner_seed
             best_winner_density = winner_density
@@ -843,6 +887,8 @@ def main() -> None:
             f"gen {generation:4d}  best {fitnesses[0]:.4f}  mean {np.mean(finite) if finite else float('inf'):.4f}  "
             f"worst {fitnesses[-1]:.4f}  (all-time best {best_fitness:.4f})"
         )
+        if optimizer is not None:
+            print(f"  CMA {args.cma_covariance}: sigma={optimizer.es.sigma:.6g}, restarts={optimizer.restarts}")
 
         if (generation + 1) % args.checkpoint_every == 0 or generation == args.generations - 1:
             set_weights(update_rule, best_weights)
@@ -850,7 +896,7 @@ def main() -> None:
             (checkpoint_dir / "best_weights.json").write_text(json.dumps(update_rule.export_weights()))
             (checkpoint_dir / "best_meta.json").write_text(
                 json.dumps(
-                    checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds),
+                    checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds, optimizer),
                     indent=2,
                 )
             )

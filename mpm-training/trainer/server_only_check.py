@@ -37,6 +37,15 @@ def main() -> None:
             assert train_server.latest_generation_message == records[-1]
             assert train_server.target is not None
 
+            # Embedded SVG remains usable after its named source is removed.
+            from targets import load_target
+            svg = load_target('vector-l')
+            saved_settings = {"target": "removed-vector-source", "rasterResolution": 32,
+                              "shapeTarget": svg.wire(32)}
+            train_server.SETTINGS_PATH.write_text(json.dumps(saved_settings))
+            train_server._restore_current_run()
+            assert train_server.target.svg_source == svg.svg_source
+
             train_server.SETTINGS_PATH.unlink()
             train_server.settings = None
             train_server.latest_generation_message = None

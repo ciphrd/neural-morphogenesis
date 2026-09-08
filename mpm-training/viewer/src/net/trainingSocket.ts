@@ -20,6 +20,7 @@ import type { TimingEntry, GenerationTiming, GenerationRecord, RunSettings, Simu
 import { DEFAULT_RUN_SETTINGS, loadInitialRunSettings } from "./settingsStorage";
 
 export interface GenerationStat {
+  optimizerState?: GenerationRecord["optimizerState"];
   timing?: GenerationTiming;
   generation: number;
   best: number;
@@ -80,6 +81,9 @@ export function applySettings(prev: Accumulator, settings: RunSettings): Accumul
     throw new Error("Run schema does not match the current simulation; start a new run.");
   }
   for (const key of Object.keys(DEFAULT_RUN_SETTINGS)) {
+    // Optimizer metadata is optional for pre-CMA archives and does not
+    // affect simulation playback.
+    if (key === "optimizer" || key === "cmaCovariance") continue;
     if (!(key in settings)) throw new Error(`Run settings missing required field: ${key}`);
   }
   return { ...prev, settings };
@@ -115,7 +119,7 @@ export function applyHistory(prev: Accumulator, data: { generations: GenerationR
  * applyGeneration() above can stay plain, mechanical reducers. */
 export function deriveState(acc: Accumulator): TrainingSocketState {
   const history: GenerationStat[] = Array.from(acc.records.values())
-    .map((r) => ({ generation: r.generation, best: r.best, mean: r.mean, worst: r.worst, allTimeBest: r.allTimeBest, timing: r.timing }))
+    .map((r) => ({ generation: r.generation, best: r.best, mean: r.mean, worst: r.worst, allTimeBest: r.allTimeBest, timing: r.timing, optimizerState: r.optimizerState }))
     .sort((a, b) => a.generation - b.generation);
 
   const timingHistory = Array.from(acc.timings ?? []).map(([generation, timing]) => ({ generation, timing })).sort((a, b) => a.generation - b.generation);

@@ -15,9 +15,53 @@ not rotate or modify checkpoint files.
 
 `evolve.py` evaluates and mutates policy populations. `parallel_workers.py` owns worker-local GPU systems. `training_sim.py` seeds and advances rollouts. `mpm_core.py`, `agents_gpu.py`, and `environment_gpu.py` allocate buffers and schedule the shared shaders. `domain_fitness.py` scores the transported material geometry and computes shape/color losses. `train_server.py` publishes run settings, generation records, weights and diagnostic images.
 
+New CLI and server runs default to **CMA-ES**, using pinned `cma==4.4.4` and
+diagonal covariance (separable CMA-ES). Install the updated requirements into
+the trainer environment before starting a run. The existing population default
+is 16, and `--mutation-sigma 0.05` now sets CMA's **initial** step size; CMA
+adapts the mean, step size, and coordinate variances after every generation.
+The fixed policy-head mutation scales are applied once as a coordinate
+transform. Diagonal covariance keeps optimizer storage linear in the number
+of weights. `--cma-covariance full` enables dense covariance and correlated
+search at quadratic storage cost (about 303 MB per float64 matrix for the
+default 6,158-weight policy, plus optimizer workspace).
+
+```sh
+.venv/bin/python train_server.py --target lizard-256 --optimizer cma-es --population 32
+.venv/bin/python evolve.py --target circle --optimizer cma-es --cma-covariance diagonal
+```
+
+Every CMA candidate comes from its current distribution; GA elites are not
+inserted into its batches. `--elites` applies only to `--optimizer ga`, and
+nontrivial `--mutation-factors` are rejected for CMA. A random initialized
+policy supplies CMA's initial mean. With `--initial-weights PATH.npy`, that
+policy instead supplies the mean; it is not separately evaluated or preserved
+as an elite. Match its architecture and choose the initial sigma for the
+desired refinement scale. `--initial-weights` is a fresh optimizer warm start,
+not a resume of CMA's accumulated distribution state.
+
+CMA restarts with the initial sigma and reset covariance around the current
+batch's best evaluated policy when pycma reports convergence. An entirely
+invalid batch resets around the existing reference without learning an
+arbitrary ranking. Restarts consume the remaining generation budget normally.
+Checkpoint metadata records optimizer/version, covariance mode, current sigma,
+and restart diagnostics; server generation records include `optimizerState`.
+These diagnostics describe the search at checkpoint time, which can be later
+than the generation that produced the saved best policy. They do not contain
+the full distribution needed for exact optimizer resume.
+
+Both paths save and preview the **evaluated winning policy**, never the new
+batch's first sample or an unevaluated CMA mean. Fitness, rollout seeds,
+density aggregation, stopping, and historical best-score promotion retain
+their existing behavior. Current numerical noise still limits interpretation
+of tiny fitness improvements. The GA remains available with `--optimizer ga`.
+Run `.venv/bin/python cma_optimizer_check.py` for convergence and integration
+checks and `.venv/bin/python cma_server_check.py` for isolated server checkpoint
+and history checks.
+
 For refinement experiments, `--initial-weights PATH.npy` starts a new run from
 a parent policy (select its matching `--cell-memory` architecture), and
-`--mutation-factors 1 .1 .01 .001` cycles offspring through multiples of
+`--optimizer ga --mutation-factors 1 .1 .01 .001` cycles offspring through multiples of
 `--mutation-sigma`. Elites remain intact and scores are reevaluated. The default
 factor is `[1]`. `--fitness-alignment geometry` opts into slower, exact triangle
 integration while optimizing rotation; the default `raster` mode is unchanged.
@@ -85,3 +129,41 @@ The detailed GPU view separates physics grid clearing, particles-to-grid, grid u
 Morphology now uses one instanced additive `r32float` render pass for density on adapters exposing `float32-blendable`, followed by horizontal and vertical blur. Unsupported adapters retain clear/deposit/convert compute passes. Nine periodic images per particle preserve wrapped kernels, and fragment contributions retain the compute path’s fixed-point rounding before floating-point blending. Small accumulation differences remain possible. Repulsion retains its existing compute implementation. Browser replay uses the same render shader and feature fallback.
 
 Blur weights are normalized and uploaded only when morphology settings change, removing repeated Gaussian exponentials from each texel. Resolution and blur width are unchanged. GPU charts distinguish quad/compute deposition, clearing/conversion, and the two blur passes. Run `trainer/.venv/bin/python trainer/morphology_render_check.py` from the project root for native parity checks and an alternating warmed benchmark. On the M2 Max, the initial morphology-only benchmark measured 1.36–1.49× speedup for quads versus compute at 40–4,000 clustered particles (both using precomputed blur weights). These measurements include CPU encoding and terminal synchronization, and do not establish a whole-generation speedup.
+
+### SVG targets and continuous alignment
+
+Place a self-contained SVG in `trainer/targets/<name>.svg`, then select it with
+`--target <name>` when starting the trainer or server. For example,
+`--target vector-l` selects the included colored vector example. A target name
+must have only one file format. Install the updated `requirements.txt`; SVG
+rendering uses CairoSVG and the system Cairo library.
+
+SVG targets automatically use continuous vector-target alignment, regardless of
+the PNG/JSON `--fitness-alignment` setting. The SVG is compiled once into a Cairo
+vector recording. Each candidate's triangle geometry is rasterized exactly once;
+the target drawing is rotated before rasterization at 2× resolution and averaged
+down. Sixteen cached coarse poses seed continuous optimization of the actual
+weighted fitness around the two best coarse local minima. Target pyramids,
+boundary features and distance fields are cached for those reusable poses;
+candidate pyramids and boundary features are computed once per evaluation.
+
+Artwork is alpha-centered and uniformly fitted inside radius 0.48 of the unit
+canvas, leaving room for every rotation. This changes scale relative to PNG
+loading, which preserves artboard scale. Use an SVG namespace and a valid
+`viewBox` (or numeric width/height); paths, curves, holes, fills, strokes and
+transparency use CairoSVG rendering. External assets/styles are rejected. Convert
+text to paths for portable results. RGB follows the target rotation and remains
+premultiplied by alpha. Checkpoints embed the SVG source and its normalization,
+so replay does not depend on the original target file.
+
+SVG stopping metrics use the same selected pose as the weighted training score.
+Saved comparison images show the fixed candidate and the rotated reference.
+Metadata reports `fitnessAlignment: svg` and fitness model version 5. Browser
+simulation stopping still uses its existing raster approximation; it is not
+numerically identical to SVG training stopping (as with geometry alignment).
+PNG/JSON scoring is unchanged. Scores from different alignment modes should not
+be compared directly. Continuous refinement remains a local search, and finite
+raster resolution/antialiasing still leave a small error floor.
+
+Run `python svg_fitness_check.py` from `trainer/` for rotation, color, subdivision,
+checkpoint and rendering checks, plus a repeatable three-scorer CPU benchmark.

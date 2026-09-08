@@ -1,4 +1,4 @@
-"""Load shape targets from PNG alpha masks (and legacy pixel-export JSON).
+"""Load SVG vector targets, PNG alpha masks, and legacy pixel-export JSON.
 
 PNG RGB supplies color supervision; alpha is continuous occupancy.
 """
@@ -25,6 +25,11 @@ class TargetShape:
     source_centroid: tuple[float, float] | None = None
     resolved_mask: np.ndarray | None = None
     target_center: tuple[float, float] | None = None
+
+    svg_source: str | None = None
+    svg_transform: tuple[float, float, float] | None = None
+    _svg_pose_cache: dict = field(default_factory=dict, init=False, repr=False)
+    _svg_raster_cache: dict = field(default_factory=dict, init=False, repr=False)
 
     rgb: np.ndarray | None = None
     resolved_rgb: np.ndarray | None = None
@@ -56,6 +61,8 @@ class TargetShape:
         return np.average(self.points.astype(np.float64), axis=0, weights=self.weights)
 
     def filled_area(self) -> float:
+        if self.svg_source is not None:
+            return float(self.mask(256).mean())
         if self.resolved_mask is not None:
             return float(np.asarray(self.resolved_mask, dtype=np.float64).mean())
         if self.occupancy is not None:
@@ -67,6 +74,8 @@ class TargetShape:
 
     def mask(self, resolution: int) -> np.ndarray:
         """Return cell-average occupancy in the simulation's unit domain."""
+        if self.svg_source is not None:
+            return self._svg_rasters(resolution)[0].copy()
         if self.resolved_mask is not None:
             mask = np.asarray(self.resolved_mask, dtype=np.float64)
             if mask.shape != (resolution, resolution):
@@ -110,12 +119,23 @@ class TargetShape:
         result = (wx @ rows_by_source_x.T).T
         return np.clip(np.asarray(result) * resolution**2, 0, 1)
 
+    def _svg_rasters(self, resolution):
+        from svg_target import render_svg
+        if resolution not in self._svg_raster_cache:
+            if len(self._svg_raster_cache) >= 2:
+                self._svg_raster_cache.pop(next(iter(self._svg_raster_cache)))
+            self._svg_raster_cache[resolution] = render_svg(
+                self.svg_source, resolution, transform=self.svg_transform)
+        return self._svg_raster_cache[resolution]
+
     @property
     def has_color(self) -> bool:
-        return self.rgb is not None or self.resolved_rgb is not None
+        return self.svg_source is not None or self.rgb is not None or self.resolved_rgb is not None
 
     def color_raster(self, resolution: int) -> np.ndarray | None:
         """Cell-average premultiplied RGB, with the same mapping as alpha."""
+        if self.svg_source is not None:
+            return self._svg_rasters(resolution)[1].copy()
         if self.resolved_rgb is not None:
             rgb = np.asarray(self.resolved_rgb, dtype=float)
             if rgb.shape != (resolution, resolution, 3):
@@ -136,11 +156,13 @@ class TargetShape:
         rgb = self.color_raster(resolution)
         if rgb is not None:
             data["rgb"] = rgb.ravel().tolist()
+        if self.svg_source is not None:
+            data.update(svgSource=self.svg_source, svgTransform=list(self.svg_transform))
         return data
 
     def overlay_points(self, resolution: int = 128) -> np.ndarray:
         """Return a bounded point approximation used only for visualization."""
-        if self.occupancy is None and self.resolved_mask is None:
+        if self.svg_source is None and self.occupancy is None and self.resolved_mask is None:
             return self.points
         mask = self.mask(resolution)
         ys, xs = np.nonzero(mask >= 0.5)
@@ -159,6 +181,13 @@ class TargetShape:
         centroid = centers.mean(axis=0)
         points = (centers - centroid) * (TARGET_SPAN_FRACTION / max(nx, ny)) + 0.5
         return cls(points.astype(np.float32), (nx, ny), target_center=(0.5, 0.5))
+
+    @classmethod
+    def from_svg(cls, path: Path) -> "TargetShape":
+        from svg_target import svg_transform
+        source = path.read_text()
+        return cls(np.zeros((0, 2)), (512, 512), target_center=(.5, .5),
+                   svg_source=source, svg_transform=svg_transform(source))
 
     @classmethod
     def from_png(cls, path: Path) -> "TargetShape":
@@ -191,6 +220,14 @@ class TargetShape:
 
     @classmethod
     def from_wire(cls, data: dict) -> "TargetShape":
+        if "svgSource" in data:
+            from svg_target import svg_transform
+            source = data["svgSource"]
+            transform = tuple(data["svgTransform"]) if "svgTransform" in data else svg_transform(source)
+            if len(transform) != 3 or not np.isfinite(transform).all() or transform[2] <= 0:
+                raise ValueError("invalid SVG target transform")
+            return cls(np.zeros((0, 2)), (512, 512), target_center=(.5, .5),
+                       svg_source=source, svg_transform=transform)
         resolution = int(data["resolution"])
         mask = np.asarray(data["mask"], dtype=np.float64).reshape(resolution, resolution)
         ys, xs = np.nonzero(mask > 0)
@@ -202,19 +239,22 @@ class TargetShape:
 
 
 def available_targets() -> list[str]:
-    return sorted({p.stem for pattern in ("*.png", "*.json") for p in TARGETS_DIR.glob(pattern)})
+    return sorted({p.stem for pattern in ("*.svg", "*.png", "*.json") for p in TARGETS_DIR.glob(pattern)})
 
 
 def load_target(name: str) -> TargetShape:
-    png_path = TARGETS_DIR / f"{name}.png"
-    json_path = TARGETS_DIR / f"{name}.json"
-    if png_path.is_file() and json_path.is_file():
-        raise SystemExit(f"ambiguous target {name!r}: both {png_path.name} and {json_path.name} exist")
+    paths = [TARGETS_DIR / f"{name}{suffix}" for suffix in (".svg", ".png", ".json")]
+    existing = [path for path in paths if path.is_file()]
+    if len(existing) > 1:
+        raise SystemExit(f"ambiguous target {name!r}: multiple target formats exist")
     try:
-        if png_path.is_file():
-            return TargetShape.from_png(png_path)
-        if json_path.is_file():
-            return TargetShape.from_export(json.loads(json_path.read_text()))
+        if existing:
+            path = existing[0]
+            if path.suffix == '.svg':
+                return TargetShape.from_svg(path)
+            if path.suffix == '.png':
+                return TargetShape.from_png(path)
+            return TargetShape.from_export(json.loads(path.read_text()))
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
         raise SystemExit(f"invalid target {name!r}: {error}") from error
     raise SystemExit(f"unknown target {name!r} — choices: {available_targets()}")

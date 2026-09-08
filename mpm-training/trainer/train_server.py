@@ -32,7 +32,7 @@ from evolve import (
     finalize_density_configuration,
     finalize_policy_configuration,
     get_weights,
-    initial_population,
+    initialize_search,
     shape_settings,
     report_shape_capacity,
     run_generation,
@@ -80,7 +80,7 @@ from simulation_settings import (
     SPLAT_RADIUS,
     SAMPLE_SPACING,
 )
-from targets import available_targets, load_target
+from targets import TargetShape, available_targets, load_target
 from update_rule import UpdateRule
 
 parser = build_arg_parser()
@@ -131,8 +131,6 @@ def _setup() -> None:
 
     finalize_policy_configuration(args)
 
-    if not 1 <= args.elites <= args.population:
-        raise SystemExit("--elites must be between 1 and --population")
     if args.seeds_per_candidate < 1:
         raise SystemExit("--seeds-per-candidate must be at least 1")
     if not 1 <= args.initial_particles <= args.particles // 2:
@@ -241,8 +239,11 @@ def _save_generation_images(generation: int, snapshot: RolloutSnapshot) -> dict[
 
     prefix = f"gen_{generation:05d}"
     save_grown_image(positions, target.overlay_points(args.raster_resolution), IMAGES_DIR / f"{prefix}_grown.png")
-    target_rgb = target.color_raster(args.raster_resolution)
-    save_raster_image(target_rgb if target_rgb is not None else target_raster, IMAGES_DIR / f"{prefix}_target.png")
+    target_rgb = evaluation.target_color_raster
+    if target_rgb is None:
+        target_rgb = target.color_raster(args.raster_resolution)
+    comparison_mask = evaluation.target_raster if evaluation.target_raster is not None else target_raster
+    save_raster_image(target_rgb if target_rgb is not None else comparison_mask, IMAGES_DIR / f"{prefix}_target.png")
     if agent_raster is not None:
         save_raster_image(evaluation.color_raster if evaluation.color_raster is not None else agent_raster, IMAGES_DIR / f"{prefix}_agents.png")
     if target_rgb is not None and evaluation.color_raster is not None:
@@ -295,10 +296,14 @@ def _restore_current_run() -> None:
     except (json.JSONDecodeError, OSError) as error:
         raise SystemExit(f"cannot read saved run settings from {SETTINGS_PATH}: {error}") from error
 
-    target_name = settings.get("target")
-    if target_name not in available_targets():
-        raise SystemExit(f"saved run refers to unavailable target {target_name!r}")
-    target = load_target(target_name)
+    embedded_target = settings.get("shapeTarget")
+    if embedded_target and "mask" in embedded_target:
+        target = TargetShape.from_wire(embedded_target)
+    else:
+        target_name = settings.get("target")
+        if target_name not in available_targets():
+            raise SystemExit(f"saved run refers to unavailable target {target_name!r}")
+        target = load_target(target_name)
 
     generations = _history_payload(HISTORY_PATH)["generations"]
     latest_generation_message = generations[-1] if generations else None
@@ -337,7 +342,7 @@ async def _training_loop_body() -> None:
     # ..." confirmation once, above, for this process's own wgpu_device;
     # see build_pool()'s own docstring for why it would otherwise repeat
     # that exact line a second time.
-    population = initial_population(args, rng)
+    population, optimizer = initialize_search(args, rng)
     pool = build_pool(num_workers, args.particle_capacity, target, target_raster, target_distance_field, args, log_device=False)
     update_rule = UpdateRule(CHEM_CHANNELS, args.policy_architecture)
 
@@ -422,12 +427,14 @@ async def _training_loop_body() -> None:
         "repulsionStrength": REPULSION_STRENGTH,
         "repulsionMaxDelta": REPULSION_MAX_DELTA,
         "population": args.population,
+        "optimizer": args.optimizer,
+        "cmaCovariance": args.cma_covariance if args.optimizer == "cma-es" else None,
         "seedsPerCandidate": args.seeds_per_candidate,
-        "elites": args.elites,
+        "elites": args.elites if args.optimizer == "ga" else 0,
         "mutationSigma": args.mutation_sigma,
         "mutationFactors": list(getattr(args, "mutation_factors", [1.])),
         "initialWeights": str(args.initial_weights) if getattr(args, "initial_weights", None) else None,
-        "fitnessAlignment": getattr(args, "fitness_alignment", "raster"),
+        "fitnessAlignment": "svg" if target.svg_source is not None else getattr(args, "fitness_alignment", "raster"),
         "deterministicReference": getattr(args, "deterministic_reference", False),
         "rasterResolution": args.raster_resolution,
         "outsideWeight": args.outside_weight,
@@ -458,11 +465,13 @@ async def _training_loop_body() -> None:
         # see parallel_workers.py's own module docstring), and doing that
         # directly on the event loop thread would stall websocket message
         # flushing for as long as it takes.
-        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses, snapshot = await asyncio.to_thread(
-            run_generation, population, args, rng, pool, return_snapshot=True
+        result = await asyncio.to_thread(
+            run_generation, population, args, rng, pool, return_snapshot=True, optimizer=optimizer
         )
+        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses = result[:6]
+        snapshot = result.snapshot
 
-        winner_weights = population[0]
+        winner_weights = result.winner_weights
         if fitnesses[0] < best_fitness:
             best_fitness = fitnesses[0]
             best_weights = winner_weights.copy()
@@ -511,6 +520,7 @@ async def _training_loop_body() -> None:
             # on the next generation; `seed` above is the winning candidate's
             # worst member, used for the single-rollout browser replay.
             "evaluationSeeds": evaluation_seeds,
+            "optimizerState": optimizer.diagnostics() if optimizer is not None else None,
             "weights": update_rule.export_weights(),
             # Everything else a replay needs (particles/channels/decay/
             # target/population/...) is fixed for the whole run and lives
@@ -542,7 +552,7 @@ async def _training_loop_body() -> None:
             (CHECKPOINTS_DIR / "best_weights.json").write_text(json.dumps(update_rule.export_weights()))
             (CHECKPOINTS_DIR / "best_meta.json").write_text(
                 json.dumps(
-                    checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds),
+                    checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds, optimizer),
                     indent=2,
                 )
             )

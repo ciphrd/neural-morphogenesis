@@ -2,8 +2,11 @@ import config from "../../../core/config.json";
 /** Material-area stopping metrics. Keep in parity with trainer/domain_fitness.py.
  * Exact triangle/cell intersections precede bilinear rotation alignment.
  */
-/** Resolved PNG occupancy mask. Optional point fields read legacy runs. */
+/** Resolved occupancy mask. SVG source is retained for trainer checkpoint replay.
+ * Browser stopping uses the raster approximation, including for SVG targets. */
 export interface ShapeTarget {
+  svgSource?: string;
+  svgTransform?: number[];
   mask?: number[];
   resolution?: number;
   center?: number[];

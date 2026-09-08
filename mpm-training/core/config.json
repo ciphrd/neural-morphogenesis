@@ -60,6 +60,8 @@
     "splatRadius": 0.016,
     "repulsionStrength": 0.0,
     "repulsionMaxDelta": 40.0,
+    "optimizer": "cma-es",
+    "cmaCovariance": "diagonal",
     "population": 16,
     "seedsPerCandidate": 1,
     "elites": 3,
