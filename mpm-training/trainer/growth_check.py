@@ -1,4 +1,4 @@
-"""Focused GPU checks for the conservative grow-then-divide model.
+"""Focused GPU checks for field-integrated growth and resampling.
 
 Run from this directory with ``.venv/bin/python growth_check.py``.
 """
@@ -10,96 +10,9 @@ import wgpu
 from agents_gpu import PARTICLE_META_BUFFER_OFFSET, AgentsGPU, weight_layout
 from device import pick_device
 from environment_gpu import EnvironmentGPU
-from mpm_core import DT, MpmCore, ceil_div
+from mpm_core import DT, GRID_N, REPULSION_FIELD_N, MpmCore, ceil_div
 from policy_parameters import PERSISTENT_ENVIRONMENT_ARCHITECTURE, STATEFUL_128_ARCHITECTURE
 from training_sim import TrainingRollout
-
-
-def _rest_state(
-    jp: np.ndarray,
-    growth: np.ndarray,
-    cycle: np.ndarray,
-    growth_f: np.ndarray | None = None,
-    growth_direction: np.ndarray | None = None,
-    anisotropy: np.ndarray | None = None,
-    division_bias: np.ndarray | None = None,
-    appearance_scale: np.ndarray | None = None,
-) -> np.ndarray:
-    count = len(jp)
-    out = np.zeros((count, 12), dtype=np.float32)
-    if growth_f is None:
-        root = np.sqrt(np.asarray(growth, dtype=np.float32))
-        out[:, 0] = root
-        out[:, 3] = root
-    else:
-        out[:, :4] = np.asarray(growth_f, dtype=np.float32).reshape(count, 4)
-    out[:, 4] = jp
-    out[:, 5] = cycle
-    if growth_direction is not None:
-        direction = np.asarray(growth_direction, dtype=np.float32)
-        out[:, 6] = np.arctan2(direction[:, 1], direction[:, 0])
-    if anisotropy is not None:
-        out[:, 7] = np.asarray(anisotropy, dtype=np.float32)
-    if division_bias is not None:
-        out[:, 8] = np.asarray(division_bias, dtype=np.float32)
-    out[:, 10] = 1.0 if appearance_scale is None else np.asarray(appearance_scale, dtype=np.float32)
-    return out
-
-
-def _probe(core: MpmCore, count: int) -> np.ndarray:
-    """Returns [Je, g, cycleActive] without adding COPY_SRC to hot buffers."""
-    shader = core.device.create_shader_module(
-        code="""
-        struct Rest { growthF: vec4<f32>, jp: f32, cycleActive: f32, growthAngle: f32, growthAnisotropy: f32, divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, _padding: f32, }
-        @group(0) @binding(0) var<storage, read> particleF: array<vec4<f32>>;
-        @group(0) @binding(1) var<storage, read> rest: array<Rest>;
-        @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
-        @compute @workgroup_size(1)
-        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-          let f = particleF[gid.x];
-          let fg = rest[gid.x].growthF;
-          let g = max(fg.x * fg.w - fg.y * fg.z, 1e-6);
-          let invFg = vec4<f32>(fg.w, -fg.y, -fg.z, fg.x) / g;
-          let fe = vec4<f32>(
-            f.x * invFg.x + f.y * invFg.z,
-            f.x * invFg.y + f.y * invFg.w,
-            f.z * invFg.x + f.w * invFg.z,
-            f.z * invFg.y + f.w * invFg.w
-          );
-          out[gid.x] = vec4<f32>(
-            fe.x * fe.w - fe.y * fe.z,
-            g,
-            rest[gid.x].cycleActive,
-            0.0
-          );
-        }
-        """
-    )
-    pipeline = core.device.create_compute_pipeline(
-        layout=wgpu.AutoLayoutMode.auto,
-        compute={"module": shader, "entry_point": "main"},
-    )
-    out = core.device.create_buffer(
-        size=count * 16,
-        usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
-    )
-    bind_group = core.device.create_bind_group(
-        layout=pipeline.get_bind_group_layout(0),
-        entries=[
-            {"binding": 0, "resource": {"buffer": core.F}},
-            {"binding": 1, "resource": {"buffer": core.rest}},
-            {"binding": 2, "resource": {"buffer": out}},
-        ],
-    )
-    encoder = core.device.create_command_encoder()
-    compute = encoder.begin_compute_pass()
-    compute.set_pipeline(pipeline)
-    compute.set_bind_group(0, bind_group)
-    compute.dispatch_workgroups(count)
-    compute.end()
-    core.device.queue.submit([encoder.finish()])
-    return np.frombuffer(core.device.queue.read_buffer(out), np.float32).reshape(count, 4)[:, :3]
-
 
 def _load_two(core: MpmCore) -> None:
     positions = np.array([[0.495, 0.5], [0.505, 0.5]], dtype=np.float32)
@@ -107,7 +20,6 @@ def _load_two(core: MpmCore) -> None:
     deformation = np.tile(np.array([1, 0, 0, 1], dtype=np.float32), (2, 1))
     affine = np.zeros((2, 4), dtype=np.float32)
     core.load_scene(positions, velocities, deformation, affine, np.ones(2, dtype=np.float32))
-
 
 def check_morphology_occupancy(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
@@ -129,33 +41,30 @@ def check_morphology_occupancy(device: wgpu.GPUDevice) -> None:
     assert float(weaker.max()) < float(occupancy.max())
     print(f"[PASS] morphology_occupancy bounded=yes blurred=yes reference_response=yes peak={occupancy.max():.6f}")
 
-
 def check_single_cell_rollout_seed(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
-    environment = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 1, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
-        4, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
-    )
+    environment = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0, chemical_communication_architecture="cell-owned-projection")
+    agents = AgentsGPU(device, core, environment, 1, 128, 1.0, 4, 0.01, 1.0, 1.0, 0.5, 0.5, chemical_communication_architecture="cell-owned-projection")
     TrainingRollout(
         core, agents, environment,
-        spawn_center=(0.5, 0.5), spawn_half_width=0.0,
-        gravity=0.0, seed=17, initial_particle_count=1,
+        spawn_center=(0.5, 0.5), gravity=0.0, seed=17, initial_particle_count=1,
     )
-    assert core.read_positions().shape == (1, 2)
-    assert agents.read_grown_count() == 1
-    print("[PASS] rollout starts with exactly one seeded particle")
-
+    assert core.read_positions().shape == (2, 2)
+    assert agents.read_sample_count() == 2
+    np.testing.assert_allclose(core.read_rest_state()[:, 15], .5)
+    # A capacity-limited restart must keep complete seed pairs and must clear
+    # the previous rollout's domains before writing the new geometry.
+    agents.set_max_active_particles(3)
+    TrainingRollout(core, agents, environment, spawn_center=(.4,.4), gravity=0, seed=17, initial_particle_count=1)
+    assert core.active_count == agents.read_sample_count() == 2
+    np.testing.assert_allclose(core.read_rest_state()[:, 15].sum(),1)
+    np.testing.assert_allclose(core.read_positions().mean(axis=0),[.4,.4],atol=1e-7)
+    print("[PASS] one seed cell starts as two half-weight triangle samples")
 
 def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
-    environment = EnvironmentGPU(device, 1, 64, 64, 0.5, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 1, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
-        2, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
-    )
+    environment = EnvironmentGPU(device, 1, 64, 64, 0.5, 1.0, chemical_communication_architecture="cell-owned-projection")
+    agents = AgentsGPU(device, core, environment, 1, 128, 1.0, 2, 0.01, 1.0, 1.0, 0.5, 0.5, chemical_communication_architecture="cell-owned-projection")
     core.load_scene(
         np.array([[0.5, 0.5]], dtype=np.float32),
         np.zeros((1, 2), dtype=np.float32),
@@ -197,7 +106,7 @@ def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
 
     def field_sum(rounds: int) -> float:
         environment.reset()
-        agents.reset_heading(23)
+        agents.reset_state()
         communication_dt = environment.set_communication_timestep(rounds, 1.0)
         agents.set_communication_timestep(communication_dt)
         encoder = device.create_command_encoder()
@@ -206,7 +115,7 @@ def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
             environment.encode_clear(encoder)
             agents.encode_splat_chemical_state(encoder)
             environment.encode_sense(encoder)
-            agents.encode_step(encoder, environment.parity, commit_lifecycle=communication_round == rounds - 1)
+            agents.encode_step(encoder, environment.parity, commit_growth=communication_round == rounds - 1)
         device.queue.submit([encoder.finish()])
         raw = device.queue.read_buffer(
             agents._agent_state_buffer,
@@ -215,241 +124,24 @@ def check_supersampled_communication_rounds(device: wgpu.GPUDevice) -> None:
         )
         return float(np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)["chemicalState"].sum())
 
-    once = field_sum(1)
-    four = field_sum(4)
-    assert np.isclose(once, four, atol=2e-6), (once, four)
-    print(f"[PASS] supersampled_communication cell_state1={once:.3f} cell_state4={four:.3f}")
-
-
-def check_growth_without_repulsion(device: wgpu.GPUDevice) -> None:
-    core = MpmCore(device)
-    core.set_gravity(0.0)
-    core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(1e4, 0.2, 3.0, 0.2, 400.0, 2.0)
-    _load_two(core)
-    # cycleActive=1 for both particles: growth must not require prior dilation.
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(2), np.ones(2), np.ones(2)))
-    core.step(40)
-    positions = core.read_positions()
-    delta = np.abs(positions[1] - positions[0])
-    separation = float(np.linalg.norm(np.minimum(delta, 1.0 - delta)))
-    state = _probe(core, 2)
-    assert separation > 0.0105, separation
-    assert np.all(state[:, 1] > 1.9), state
-    print(f"[PASS] growth_without_repulsion separation={separation:.6f}")
-
-
-def check_compressed_growth_pauses_and_resumes(device: wgpu.GPUDevice) -> None:
-    """Compression arrests active rest growth; release resumes without loss."""
-    core = MpmCore(device)
-    core.set_gravity(0.0)
-    core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(
-        0.0, 0.2, 3.0, 0.2, growth_rate=50.0,
-        growth_compression_start=0.10,
-        growth_compression_stop=0.10,
-        growth_compression_feedback=1.0,
-    )
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        np.array([[np.sqrt(0.5), 0, 0, np.sqrt(0.5)]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
-    core.step(1)
-    arrested = float(_probe(core, 1)[0, 1])
-    assert np.isclose(arrested, 1.0, atol=2e-6), arrested
-
-    # Release the elastic compression while preserving the active cycle.
-    device.queue.write_buffer(
-        core.F, 0, np.array([[1.0, 0.0, 0.0, 1.0]], dtype=np.float32)
-    )
-    core.step(1)
-    resumed = float(_probe(core, 1)[0, 1])
-    expected = np.exp(50.0 * DT)
-    assert np.isclose(resumed, expected, atol=2e-6), (resumed, expected)
-
-    # Strength zero is the exact compatibility/ablation path.
-    core.set_material(
-        0.0, 0.2, 3.0, 0.2, growth_rate=50.0,
-        growth_compression_start=0.10,
-        growth_compression_stop=0.10,
-        growth_compression_feedback=0.0,
-    )
-    device.queue.write_buffer(
-        core.F, 0,
-        np.array([[np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)]], dtype=np.float32),
-    )
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
-    core.step(1)
-    legacy = float(_probe(core, 1)[0, 1])
-    assert np.isclose(legacy, expected, atol=2e-6), (legacy, expected)
-    print(
-        "[PASS] compression feedback arrests/resumes growth and strength=0 "
-        f"preserves legacy rate g={resumed:.6f}"
-    )
-
-
-def check_transient_cell_chemical_splats(device: wgpu.GPUDevice) -> None:
-    """Cell deltas persist locally; rebuilt Gaussian fields do not persist."""
-    channels = 8
-    width = height = 32
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, channels, width, height, 0.91, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, channels, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False,
-        0.0,  # legacy deposit-distance ABI slot; centered writes ignore it
-        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
-    )
-    # Exactly the center of texel (x=8,y=24), avoiding an argmax tie.
-    position = np.array([[(8.5 / width), (24.5 / height)]], dtype=np.float32)
-    core.load_scene(
-        position,
-        np.zeros((1, 2), dtype=np.float32),
-        np.array([[1, 0, 0, 1]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    agents.set_active_count(1)
-    agents.reset_heading(5)
-    agents.set_headings(np.array([0.0], dtype=np.float32))
-    layout = weight_layout(channels, 128)
-    weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Give the first four channels saturated deltas. On the following round
-    # their cell-owned levels must splat at the particle, independent of heading.
-    for channel in range(4):
-        weights[layout["fc2b_offset"] + channel] = 20.0
-    env_write_dim = channels
-    weights[layout["fc2b_offset"] + env_write_dim + 6] = 20.0
-    weights[layout["fc2b_offset"] + env_write_dim + 7] = -20.0
-    # Blue stays at logit 0 -> sigmoid 0.5.
-    agents.load_weights(weights)
-
-    count = channels * width * height
-    readback = device.create_buffer(
-        size=count * 4,
-        usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
-    )
-    probe = device.create_shader_module(
-        code="""
-        @group(0) @binding(0) var<storage, read> source: array<i32>;
-        @group(0) @binding(1) var<storage, read_write> destination: array<i32>;
-        @compute @workgroup_size(64)
-        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-          if (gid.x < arrayLength(&source)) { destination[gid.x] = source[gid.x]; }
-        }
-        """
-    )
-    pipeline = device.create_compute_pipeline(
-        layout=wgpu.AutoLayoutMode.auto,
-        compute={"module": probe, "entry_point": "main"},
-    )
-    bind_group = device.create_bind_group(
-        layout=pipeline.get_bind_group_layout(0),
-        entries=[
-            {"binding": 0, "resource": {"buffer": environment.deposit_scratch}},
-            {"binding": 1, "resource": {"buffer": readback}},
-        ],
-    )
-
-    encoder = device.create_command_encoder()
-    environment.encode_clear(encoder)
-    agents.encode_splat_chemical_state(encoder)
-    environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity)
-    environment.encode_clear(encoder)
-    agents.encode_splat_chemical_state(encoder)
-    compute = encoder.begin_compute_pass()
-    compute.set_pipeline(pipeline)
-    compute.set_bind_group(0, bind_group)
-    compute.dispatch_workgroups((count + 63) // 64)
-    compute.end()
-    device.queue.submit([encoder.finish()])
-
-    scratch = np.frombuffer(device.queue.read_buffer(readback), np.int32).reshape(channels, height, width)
-    target = (8, 24)
-    for channel in range(4):
-        max_y, max_x = np.unravel_index(np.argmax(scratch[channel]), scratch[channel].shape)
-        assert (max_x, max_y) == target, (channel, (max_x, max_y), target)
-        assert scratch[channel, max_y, max_x] > 0
-    assert not np.any(scratch[4:]), "one output channel leaked into another"
-
-    # The transient substrate contribution follows newborn visible area while
-    # the cell-owned chemical state remains unchanged. Fixed-point rounding can
-    # differ by one unit between scaling before and after quantization.
-    device.queue.write_buffer(
-        core.rest,
-        0,
-        _rest_state(np.ones(1), np.ones(1), np.ones(1), appearance_scale=np.array([0.25])),
-    )
-    encoder = device.create_command_encoder()
-    environment.encode_clear(encoder)
-    agents.encode_splat_chemical_state(encoder)
-    compute = encoder.begin_compute_pass()
-    compute.set_pipeline(pipeline)
-    compute.set_bind_group(0, bind_group)
-    compute.dispatch_workgroups((count + 63) // 64)
-    compute.end()
-    device.queue.submit([encoder.finish()])
-    quarter_scratch = np.frombuffer(
-        device.queue.read_buffer(readback), np.int32
-    ).reshape(channels, height, width)
-    assert np.max(np.abs(quarter_scratch[:4] - np.rint(scratch[:4] * 0.25))) <= 1
-    assert not np.any(quarter_scratch[4:])
-
-    meta = np.frombuffer(
-        device.queue.read_buffer(
-            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
-            agents._particle_meta_dtype.itemsize,
-        ),
-        dtype=agents._particle_meta_dtype, count=1,
-    ).copy()
-    np.testing.assert_allclose(meta["chemicalState"][0, :4], 1.0, atol=1e-7)
-    meta["chemicalState"][:] = 0.0
-    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
-    encoder = device.create_command_encoder()
-    environment.encode_clear(encoder)
-    agents.encode_splat_chemical_state(encoder)
-    compute = encoder.begin_compute_pass()
-    compute.set_pipeline(pipeline)
-    compute.set_bind_group(0, bind_group)
-    compute.dispatch_workgroups((count + 63) // 64)
-    compute.end()
-    device.queue.submit([encoder.finish()])
-    cleared = np.frombuffer(device.queue.read_buffer(readback), np.int32)
-    assert not np.any(cleared), "transient field retained a prior round's splat"
-    print("[PASS] cell chemical state persists locally; transient splats scale with newborn area and discard old writes")
-
-    meta_raw = device.queue.read_buffer(
-        agents._agent_state_buffer,
-        PARTICLE_META_BUFFER_OFFSET,
-        agents._particle_meta_dtype.itemsize,
-    )
-    meta = np.frombuffer(meta_raw, dtype=agents._particle_meta_dtype, count=1)
-    assert np.allclose(meta["color"][0, :3], [1.0, 0.0, 0.5], atol=1e-6), meta["color"][0]
-    assert np.isclose(meta["color"][0, 3], 1.0), meta["color"][0]
-    print("[PASS] sigmoid RGB outputs are stored in particle state")
-
+    # Exercise both signs beyond the former output and state bounds. Constant
+    # residuals must accumulate once per communication tick.
+    for expected in (3.0, -3.0):
+        weights[layout["fc2b_offset"]] = expected * environment.channel_profiles[0].relaxation_time
+        agents.load_weights(weights)
+        once = field_sum(1)
+        four = field_sum(4)
+        np.testing.assert_allclose([once, four], [expected, 4 * expected], atol=2e-6)
+    print("[PASS] linear chemical residuals reach ±3 in one tick and ±12 in four")
 
 def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
-    """Direct policy writes survive spatially, then diffuse and decay."""
+    """Every tick writes fully while decay retains its per-frame timing."""
     channels = 1
     width = height = 16
     decay = 0.81
     core = MpmCore(device)
-    environment = EnvironmentGPU(
-        device, channels, width, height, decay, 1.0,
-        PERSISTENT_ENVIRONMENT_ARCHITECTURE,
-    )
-    agents = AgentsGPU(
-        device, core, environment, channels, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
-        2, 0.01, 1.0, 1.0, 0.2, 0.0, 0.5, 0.5,
-        chemical_communication_architecture=PERSISTENT_ENVIRONMENT_ARCHITECTURE,
-    )
+    environment = EnvironmentGPU(device, channels, width, height, decay, 1.0, PERSISTENT_ENVIRONMENT_ARCHITECTURE)
+    agents = AgentsGPU(device, core, environment, channels, 128, 1.0, 2, 0.01, 1.0, 0.0, 0.5, 0.5, chemical_communication_architecture=PERSISTENT_ENVIRONMENT_ARCHITECTURE)
     core.load_scene(
         np.array([[0.5, 0.5]], dtype=np.float32),
         np.zeros((1, 2), dtype=np.float32),
@@ -459,822 +151,118 @@ def check_persistent_environment_chemistry(device: wgpu.GPUDevice) -> None:
     )
     core.set_active_count(1)
     agents.set_active_count(1)
-    agents.reset_heading(23)
+    agents.reset_state()
     layout = weight_layout(channels, 128)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
     weights[layout["fc2b_offset"]] = 20.0
     agents.load_weights(weights)
 
-    def communication_round() -> np.ndarray:
+    def macro_tick(rounds: int) -> np.ndarray:
+        communication_dt = environment.set_communication_timestep(rounds, 1.0)
+        agents.set_communication_timestep(communication_dt)
         encoder = device.create_command_encoder()
-        environment.encode_clear(encoder)
-        environment.encode_sense(encoder)
-        agents.encode_step(encoder, environment.parity)
-        environment.encode_advance_persistent(encoder)
+        for communication_round in range(rounds):
+            final_round = communication_round == rounds - 1
+            environment.encode_prepare_persistent(encoder, transport=communication_round == 0)
+            environment.encode_clear(encoder)
+            environment.encode_sense(encoder)
+            agents.encode_step(
+                encoder, environment.parity, commit_growth=final_round
+            )
+            environment.encode_merge_persistent(encoder)
         device.queue.submit([encoder.finish()])
         return np.frombuffer(
             device.queue.read_buffer(environment.buffers[environment.parity]), np.float32
         ).copy()
 
-    deposited = communication_round()
-    assert deposited.max() > 0.0 and deposited.sum() > 0.0, deposited
-    agents.load_weights(np.zeros_like(weights))
-    aged = communication_round()
-    np.testing.assert_allclose(aged.sum(), deposited.sum() * decay, rtol=2e-5, atol=2e-5)
-    assert aged.max() < deposited.max(), (aged.max(), deposited.max())
-    print("[PASS] persistent-environment direct writes survive, diffuse, and decay")
-
-
-def check_elastic_strain_policy_inputs(device: wgpu.GPUDevice) -> None:
-    """Route each new GPU strain input to one RGB output and compare it to
-    an independent NumPy matrix-log calculation."""
-    from elastic_diagnostics import policy_elastic_strain_input
-
-    channels = 1
-    hidden = 128
-    scale = 0.15
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, channels, 32, 32, 1.0, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, channels, hidden,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
-        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5, scale, True,
-    )
-    layout = weight_layout(channels, hidden)
-    weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    elastic_offset = channels * 3 + 3
-    color_start = channels + 6
-    for component in range(3):
-        weights[layout["fc1w_offset"] + component * layout["in_dim"] + elastic_offset + component] = 1.0
-        weights[layout["fc2w_offset"] + (color_start + component) * hidden + component] = 1.0
-    agents.load_weights(weights)
-
-    def gpu_color(active_agents: AgentsGPU, f: np.ndarray, fg: np.ndarray, heading: float) -> np.ndarray:
-        core.reset_growth_buffers(2)
-        core.load_scene(
-            np.array([[0.5, 0.5]], dtype=np.float32),
-            np.zeros((1, 2), dtype=np.float32),
-            np.asarray(f, dtype=np.float32).reshape(1, 4),
-            np.zeros((1, 4), dtype=np.float32),
-            np.ones(1, dtype=np.float32),
-        )
-        device.queue.write_buffer(
-            core.rest,
-            0,
-            _rest_state(np.ones(1), np.ones(1), np.zeros(1), growth_f=np.asarray(fg).reshape(1, 4)),
-        )
-        environment.reset()
-        active_agents.set_active_count(1)
-        active_agents.reset_heading(29)
-        active_agents.set_headings(np.array([heading], dtype=np.float32))
-        encoder = device.create_command_encoder()
-        core.encode_morphology(encoder)
-        environment.encode_sense(encoder)
-        active_agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
-        device.queue.submit([encoder.finish()])
+    def reset_cellular_chemistry() -> None:
         raw = device.queue.read_buffer(
-            active_agents._agent_state_buffer,
+            agents._agent_state_buffer,
             PARTICLE_META_BUFFER_OFFSET,
-            active_agents._particle_meta_dtype.itemsize,
-        )
-        return np.frombuffer(raw, dtype=active_agents._particle_meta_dtype, count=1)["color"][0, :3].copy()
-
-    fg = np.array([[1.25, 0.12], [0.04, 0.92]], dtype=np.float64)
-    fe = np.array([[1.11, 0.08], [0.02, 0.90]], dtype=np.float64)
-    heading = 0.31
-    normalized = policy_elastic_strain_input(
-        (fe @ fg)[None], fg[None], np.array([heading]), scale=scale
-    )[0]
-    expected_color = 1.0 / (1.0 + np.exp(-np.tanh(normalized)))
-    actual_color = gpu_color(agents, fe @ fg, fg, heading)
-    assert np.allclose(actual_color, expected_color, atol=2e-5), (actual_color, expected_color, normalized)
-
-    theta = -0.72
-    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
-    stress_free_color = gpu_color(agents, rotation @ fg, fg, theta)
-    assert np.allclose(stress_free_color, 0.5, atol=2e-5), stress_free_color
-
-    disabled_agents = AgentsGPU(
-        device, core, environment, channels, hidden,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
-        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5, scale, False,
-    )
-    disabled_agents.load_weights(weights)
-    disabled_color = gpu_color(disabled_agents, fe @ fg, fg, heading)
-    assert np.allclose(disabled_color, 0.5, atol=2e-5), disabled_color
-    print("[PASS] GPU elastic inputs are correct when enabled and exactly zero in the temporary ablation")
-
-
-def check_conservative_split(device: wgpu.GPUDevice) -> None:
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 8, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, True, 2.0,
-        4, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
-    )
-    parent_c = np.array([[30.0, -10.0, 5.0, 20.0]], dtype=np.float32)
-    parent_velocity = np.array([0.25, -0.1], dtype=np.float32)
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        parent_velocity[None, :],
-        np.array([[1, 0, 0, 1]], dtype=np.float32),
-        parent_c,
-        np.ones(1, dtype=np.float32),
-    )
-    core.reset_growth_buffers(4)
-    root2 = np.float32(np.sqrt(2.0))
-    device.queue.write_buffer(core.F, 0, np.array([[root2, 0, 0, root2]], dtype=np.float32))
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.array([2.0]), np.ones(1)))
-    device.queue.write_buffer(core.C, 0, parent_c)
-    device.queue.write_buffer(core.velocities, 0, parent_velocity[None, :])
-    core.set_active_count(1)
-    environment.reset()
-    agents.set_active_count(1)
-    agents.reset_heading(7)
-    neutral_weights = np.zeros(agents._total_floats, dtype=np.float32)
-    layout = weight_layout(8, 128)
-    neutral_weights[layout["fc2b_offset"] + 8 + 3] = -20.0
-    agents.load_weights(neutral_weights)
-
-    encoder = device.create_command_encoder()
-    environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity)
-    device.queue.submit([encoder.finish()])
-    count = agents.read_grown_count()
-    core.set_active_count(count)
-
-    positions = core.read_positions()
-    velocities = core.read_velocities()
-    affine = core.read_affine()
-    state = _probe(core, count)
-    rest_state = core.read_rest_state()
-    assert count == 2
-    assert np.allclose(positions.mean(axis=0), [0.5, 0.5], atol=1e-5), positions
-    assert np.allclose(state[:, 0], 1.0, atol=1e-5), state
-    assert np.isclose(state[:, 1].sum(), 2.0, atol=1e-5), state
-    assert np.all(state[:, 2] == 0.0), state
-    assert np.allclose(rest_state[0, 6:8], rest_state[1, 6:8], atol=1e-7), rest_state[:, 6:8]
-    assert np.isclose(rest_state[0, 10], 1.0)
-    assert np.isclose(rest_state[1, 10], 0.0)
-
-    # Visual disc area uses the same normalized exponential curve as rest
-    # growth: over one of eight macro steps it advances from 0 to 2^(1/8)-1.
-    core.set_material(
-        0.0, 0.2, 3.0, 0.0,
-        growth_duration_macro_steps=8.0,
-        substeps_per_macro=4,
-        growth_compression_feedback=0.0,
-    )
-    core.step(4)
-    ramped_rest = core.read_rest_state()
-    assert np.isclose(ramped_rest[0, 10], 1.0)
-    assert np.isclose(ramped_rest[1, 10], 2.0 ** (1.0 / 8.0) - 1.0, atol=2e-6), ramped_rest[:, 10]
-    print("[PASS] conservative_split preserves physics and ramps newborn visual area with growth duration")
-    offsets = (positions - np.array([0.5, 0.5], dtype=np.float32) + 0.5) % 1.0 - 0.5
-    c_matrix = parent_c.reshape(2, 2)
-    expected_velocity = parent_velocity + offsets @ c_matrix.T
-    assert np.allclose(affine, np.repeat(parent_c, 2, axis=0), atol=1e-6), affine
-    assert np.allclose(velocities, expected_velocity, atol=1e-5), (velocities, expected_velocity)
-    assert np.allclose(velocities.mean(axis=0), parent_velocity, atol=1e-6), velocities
-    print("[PASS] conservative_split count=2 sum_g=2 Fe=identity center_and_apic_preserved")
-
-
-
-
-def check_desired_heading_derives_angular_acceleration(device: wgpu.GPUDevice) -> None:
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 32, 32, 1.0, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 8, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
-        2, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
-    )
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        np.array([[1.0, 0.0, 0.0, 1.0]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    environment.reset()
-    agents.set_active_count(1)
-    agents.reset_heading(31)
-    agents.set_headings(np.array([0.0], dtype=np.float32))
-    layout = weight_layout(8, 128)
-    weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Desired local heading points left (+lateral, +pi/2 from forward).
-    weights[layout["fc2b_offset"] + 8 + 1] = 20.0
-    agents.load_weights(weights)
-    encoder = device.create_command_encoder()
-    environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
-    device.queue.submit([encoder.finish()])
-    raw = device.queue.read_buffer(
-        agents._agent_state_buffer,
-        PARTICLE_META_BUFFER_OFFSET,
-        agents._particle_meta_dtype.itemsize,
-    )
-    meta = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)
-    # The proportional controller exceeds the configured 0.1 turn-rate cap,
-    # so one unit communication step lands exactly at that cap.
-    assert np.isclose(meta["angularVelocity"][0], 0.1, atol=2e-6), meta["angularVelocity"][0]
-    assert np.isclose(meta["heading"][0], 0.1, atol=2e-6), meta["heading"][0]
-    print("[PASS] desired heading vector derives bounded angular acceleration and persistent turn state")
-
-
-def _polarized_split_case(
-    device: wgpu.GPUDevice,
-    signed_bias: float,
-    polarity_bias: float = 20.0,
-    directionality: float = 1.0,
-) -> np.ndarray:
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 8, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
-        4, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
-    )
-    origin = np.array([[0.5, 0.5]], dtype=np.float32)
-    root2 = np.float32(np.sqrt(2.0))
-    core.load_scene(
-        origin,
-        np.zeros((1, 2), dtype=np.float32),
-        np.array([[root2, 0.0, 0.0, root2]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    core.reset_growth_buffers(4)
-    device.queue.write_buffer(core.F, 0, np.array([[root2, 0.0, 0.0, root2]], dtype=np.float32))
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.array([2.0]), np.ones(1)))
-    core.set_active_count(1)
-    environment.reset()
-    agents.set_active_count(1)
-    agents.set_division_directionality(directionality)
-    agents.reset_heading(19)
-    agents.set_headings(np.array([0.0], dtype=np.float32))
-    layout = weight_layout(8, 128)
-    weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Division-bias target plus desired local growth direction.
-    weights[layout["fc2b_offset"] + 8 + 3] = polarity_bias
-    weights[layout["fc2b_offset"] + 8 + 4] = signed_bias
-    agents.load_weights(weights)
-    # Let the persistent growth-angle state settle before the division event.
-    for _ in range(16):
-        encoder = device.create_command_encoder()
-        environment.encode_sense(encoder)
-        agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
-        device.queue.submit([encoder.finish()])
-    encoder = device.create_command_encoder()
-    environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity)
-    device.queue.submit([encoder.finish()])
-    count = agents.read_grown_count()
-    core.set_active_count(count)
-    assert count == 2
-    return core.read_positions()
-
-
-def check_polarized_division_uses_signed_growth_direction(device: wgpu.GPUDevice) -> None:
-    positive = _polarized_split_case(device, 20.0)
-    negative = _polarized_split_case(device, -20.0)
-    unbiased = _polarized_split_case(device, 20.0, -20.0)
-    globally_symmetric = _polarized_split_case(device, 20.0, directionality=0.0)
-    expected_positive = np.array([[0.5, 0.5], [0.51, 0.5]], dtype=np.float32)
-    expected_negative = np.array([[0.5, 0.5], [0.49, 0.5]], dtype=np.float32)
-    assert np.allclose(positive, expected_positive, atol=2e-6), positive
-    assert np.allclose(negative, expected_negative, atol=2e-6), negative
-    assert np.allclose(unbiased, [[0.495, 0.5], [0.505, 0.5]], atol=2e-6), unbiased
-    assert np.allclose(globally_symmetric, [[0.495, 0.5], [0.505, 0.5]], atol=2e-6), globally_symmetric
-    assert positive[:, 0].mean() > 0.5 and negative[:, 0].mean() < 0.5
-    print("[PASS] signed growth direction places child; global directionality can restore symmetric division")
-
-
-def check_boundary_gradient_forces_tangent_split(device: wgpu.GPUDevice) -> None:
-    """The daughter axis must be perpendicular to the sampled morphology gradient."""
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 8, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
-        6, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
-    )
-    # This diagnostic deliberately exercises tangent placement even for its
-    # small synthetic gradient; production uses the shared 8e-3 flat cutoff.
-    agents.set_boundary_tangent_min_gradient(1e-6)
-    # Particle 0 is just to the right of a small cluster. Its morphology
-    # gradient is nonzero, while a zeroed policy would otherwise request a
-    # horizontal split. The assertion below reconstructs the exact sampled
-    # gradient rather than assuming an ideal direction on the discrete grid.
-    positions = np.array([
-        [0.53, 0.50],
-        [0.50, 0.49],
-        [0.50, 0.50],
-        [0.50, 0.51],
-        [0.505, 0.50],
-    ], dtype=np.float32)
-    count = len(positions)
-    root2 = np.float32(np.sqrt(2.0))
-    particle_f = np.tile(np.eye(2, dtype=np.float32).reshape(1, 4), (count, 1))
-    particle_f[0] = np.array([root2, 0.0, 0.0, root2], dtype=np.float32)
-    core.load_scene(
-        positions,
-        np.zeros((count, 2), dtype=np.float32),
-        particle_f,
-        np.zeros((count, 4), dtype=np.float32),
-        np.ones(count, dtype=np.float32),
-    )
-    core.reset_growth_buffers(6)
-    growth = np.ones(count, dtype=np.float32)
-    growth[0] = 2.0
-    cycle = np.zeros(count, dtype=np.float32)
-    cycle[0] = 1.0
-    device.queue.write_buffer(core.F, 0, particle_f)
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(count), growth, cycle))
-    core.set_active_count(count)
-    environment.reset()
-    agents.set_active_count(count)
-    agents.reset_heading(29)
-    agents.set_headings(np.zeros(count, dtype=np.float32))
-    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
-
-    encoder = device.create_command_encoder()
-    core.encode_morphology(encoder)
-    environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity)
-    device.queue.submit([encoder.finish()])
-    grown_count = agents.read_grown_count()
-    core.set_active_count(grown_count)
-    assert grown_count == count + 1
-    morphology = core.read_morphology()
-
-    def sample_morphology(field_position: np.ndarray) -> float:
-        base = np.floor(field_position).astype(np.int32)
-        fraction = field_position - base
-        n = morphology.shape[0]
-
-        def load(dx: int, dy: int) -> float:
-            return float(morphology[(base[1] + dy) % n, (base[0] + dx) % n])
-
-        a = load(0, 0) * (1.0 - fraction[0]) + load(1, 0) * fraction[0]
-        b = load(0, 1) * (1.0 - fraction[0]) + load(1, 1) * fraction[0]
-        return a * (1.0 - fraction[1]) + b * fraction[1]
-
-    field_position = positions[0] * morphology.shape[0]
-    gradient = 0.5 * np.array([
-        sample_morphology(field_position + [1.0, 0.0])
-        - sample_morphology(field_position - [1.0, 0.0]),
-        sample_morphology(field_position + [0.0, 1.0])
-        - sample_morphology(field_position - [0.0, 1.0]),
-    ])
-    assert np.linalg.norm(gradient) > 1e-6, gradient
-    result = core.read_positions()
-    daughters = result[[0, count]]
-    separation = daughters[1] - daughters[0]
-    separation = (separation + 0.5) % 1.0 - 0.5
-    assert np.isclose(np.linalg.norm(separation), 0.01, atol=2e-5), daughters
-    tangent_error = abs(np.dot(separation, gradient)) / (
-        np.linalg.norm(separation) * np.linalg.norm(gradient)
-    )
-    assert tangent_error < 5e-4, (daughters, gradient, tangent_error)
-    np.testing.assert_allclose(daughters.mean(axis=0), positions[0], atol=2e-5)
-    print("[PASS] morphology boundary normal forces a symmetric tangent split")
-
-
-def check_anisotropic_tensor_split(device: wgpu.GPUDevice) -> None:
-    """A det(Fg)=2 sheared rest state must split into two Fe daughters."""
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 8, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, True, 2.0,
-        4, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
-    )
-    fe = np.array([[1.04, 0.03], [-0.02, 0.98]], dtype=np.float32)
-    fg = np.array([[1.6, 0.3], [0.1, 1.26875]], dtype=np.float32)
-    assert np.isclose(np.linalg.det(fg), 2.0)
-    total_f = fe @ fg
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        total_f.reshape(1, 4),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    core.reset_growth_buffers(4)
-    device.queue.write_buffer(core.F, 0, total_f.reshape(1, 4))
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.array([2.0]), np.ones(1), fg[None, :, :]))
-    core.set_active_count(1)
-    environment.reset()
-    agents.set_active_count(1)
-    agents.reset_heading(73)
-    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
-    encoder = device.create_command_encoder()
-    environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity)
-    device.queue.submit([encoder.finish()])
-    count = agents.read_grown_count()
-    core.set_active_count(count)
-
-    daughter_f = core.read_deformation().reshape(-1, 2, 2)
-    daughter_rest = core.read_rest_state()
-    identity = np.array([1.0, 0.0, 0.0, 1.0])
-    assert count == 2
-    assert np.allclose(daughter_f, np.repeat(fe[None, :, :], 2, axis=0), atol=2e-6), daughter_f
-    assert np.allclose(daughter_rest[:, :4], identity, atol=1e-7), daughter_rest
-    assert np.allclose(daughter_rest[:, 4], 1.0) and np.allclose(daughter_rest[:, 5], 0.0)
-    print("[PASS] anisotropic_tensor_split preserves Fe and resets both daughter Fg tensors")
-
-
-def check_isotropic_increment_preserves_tensor_shape(device: wgpu.GPUDevice) -> None:
-    core = MpmCore(device)
-    core.set_gravity(0.0)
-    core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(
-        0.0, 0.2, 3.0, 1.0, growth_rate=50.0, growth_max=2.0,
-        growth_compression_feedback=0.0,
-    )
-    fg = np.array([[1.15, 0.18], [0.04, 0.92]], dtype=np.float32)
-    fe = np.array([[1.02, 0.01], [-0.02, 0.99]], dtype=np.float32)
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        (fe @ fg).reshape(1, 4),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.array([np.linalg.det(fg)]), np.ones(1), fg[None]))
-    normalized_before = fg / np.sqrt(np.linalg.det(fg))
-    core.step(1)
-    fg_after = core.read_rest_state()[0, :4].reshape(2, 2)
-    normalized_after = fg_after / np.sqrt(np.linalg.det(fg_after))
-    assert np.linalg.det(fg_after) > np.linalg.det(fg)
-    assert np.allclose(normalized_after, normalized_before, atol=2e-6), (normalized_before, normalized_after)
-    print("[PASS] isotropic tensor increment grows det(Fg) without changing anisotropic shape")
-
-
-def _directional_increment_case(
-    device: wgpu.GPUDevice,
-    rotation_angle: float,
-    anisotropy: float = 1.0,
-    global_anisotropy: float = 1.0,
-) -> tuple[np.ndarray, float]:
-    core = MpmCore(device)
-    core.set_gravity(0.0)
-    core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(
-        0.0,
-        0.2,
-        3.0,
-        1.0,
-        growth_rate=50.0,
-        growth_max=2.0,
-        growth_anisotropy=global_anisotropy,
-        growth_compression_feedback=0.0,
-    )
-    c, s = np.cos(rotation_angle), np.sin(rotation_angle)
-    rotation = np.array([[c, -s], [s, c]], dtype=np.float32)
-    world_direction = rotation @ np.array([1.0, 0.0], dtype=np.float32)
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        rotation.reshape(1, 4),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    device.queue.write_buffer(
-        core.rest,
-        0,
-        _rest_state(
-            np.ones(1), np.ones(1), np.ones(1),
-            growth_direction=world_direction[None], anisotropy=np.array([anisotropy]),
-        ),
-    )
-    core.step(1)
-    return core.read_rest_state()[0, :4].reshape(2, 2), float(np.exp(50.0 * DT))
-
-
-def check_directional_increment_and_objectivity(device: wgpu.GPUDevice) -> None:
-    fg_axis, expected_area = _directional_increment_case(device, 0.0)
-    fg_rotated, _ = _directional_increment_case(device, 0.83)
-    fg_isotropic_with_axis, _ = _directional_increment_case(device, 0.0, anisotropy=0.0)
-    fg_globally_isotropic, _ = _directional_increment_case(device, 0.0, global_anisotropy=0.0)
-    # Full-strength direction puts the complete area increment along n;
-    # the perpendicular rest stretch stays one. Pulling a rotated world
-    # direction back through Re must produce the same intermediate Fg.
-    assert np.isclose(np.linalg.det(fg_axis), expected_area, rtol=2e-5)
-    assert np.allclose(fg_axis, np.diag([expected_area, 1.0]), atol=3e-6), fg_axis
-    assert np.allclose(fg_rotated, fg_axis, atol=3e-6), (fg_axis, fg_rotated)
-    assert np.allclose(fg_isotropic_with_axis, np.eye(2) * np.sqrt(expected_area), atol=3e-6), fg_isotropic_with_axis
-    assert np.allclose(fg_globally_isotropic, np.eye(2) * np.sqrt(expected_area), atol=3e-6), fg_globally_isotropic
-    print("[PASS] directional increment is objective and the global anisotropy multiplier can force isotropic growth")
-
-
-def _duration_growth_case(device: wgpu.GPUDevice, substeps: int) -> float:
-    core = MpmCore(device)
-    core.set_gravity(0.0)
-    core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(
-        0.0,
-        0.2,
-        3.0,
-        1.0,
-        growth_duration_macro_steps=20.0,
-        substeps_per_macro=substeps,
-        growth_compression_feedback=0.0,
-    )
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        np.eye(2, dtype=np.float32).reshape(1, 4),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.ones(1), np.ones(1)))
-    core.step(substeps)
-    return float(np.linalg.det(core.read_rest_state()[0, :4].reshape(2, 2)))
-
-
-def check_growth_duration_is_substep_invariant(device: wgpu.GPUDevice) -> None:
-    values = np.array([_duration_growth_case(device, s) for s in (1, 16, 64)])
-    expected = 2.0 ** (1.0 / 20.0)
-    assert np.allclose(values, expected, rtol=2e-5, atol=2e-6), (values, expected)
-    print("[PASS] one controller tick advances the same growth at 1/16/64 physics substeps")
-
-
-def check_persistent_growth_targets_drive_state_not_motion(device: wgpu.GPUDevice) -> None:
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 8, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 2.0,
-        4, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
-    )
-    initial_velocity = np.array([[0.3, -0.2]], dtype=np.float32)
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        initial_velocity,
-        np.array([[1.0, 0.0, 0.0, 1.0]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    environment.reset()
-    agents.set_active_count(1)
-    agents.reset_heading(11)
-    agents.set_headings(np.array([0.0], dtype=np.float32))
-    layout = weight_layout(8, 128)
-    weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    weights[layout["fc2b_offset"] + 8 + 2] = 2.0
-    weights[layout["fc2b_offset"] + 8 + 3] = -2.0
-    weights[layout["fc2b_offset"] + 8 + 4] = 1.0
-    agents.load_weights(weights)
-    encoder = device.create_command_encoder()
-    environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity)
-    device.queue.submit([encoder.finish()])
-    state = core.read_rest_state()[0]
-    expected_anisotropy = (1 / (1 + np.exp(-2))) * (1 - np.exp(-1))
-    assert np.allclose(core.read_velocities(), initial_velocity, atol=1e-7)
-    assert np.isclose(state[6], 0.0, atol=2e-6), state
-    assert np.isclose(state[7], expected_anisotropy, atol=2e-6), state
-    assert np.isclose(state[8], 1 / (1 + np.exp(2)), atol=2e-6), state
-    print("[PASS] desired growth vector and anisotropy target smoothly update persistent state")
-
-
-def check_p2g_fixed_point_headroom(device: wgpu.GPUDevice) -> None:
-    """A deliberately crowded, fast transfer must retain momentum in i32."""
-    core = MpmCore(device)
-    count = 4096
-    speed = 100.0
-    core.set_gravity(0.0)
-    core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(0.0, 0.2, 3.0, elasticity=0.0, particle_mass=1.0)
-    core.load_scene(
-        np.full((count, 2), [0.5, 0.5], dtype=np.float32),
-        np.full((count, 2), [speed, 0.0], dtype=np.float32),
-        np.tile(np.array([1, 0, 0, 1], dtype=np.float32), (count, 1)),
-        np.zeros((count, 4), dtype=np.float32),
-        np.ones(count, dtype=np.float32),
-    )
-    core.step(1)
-    accum = np.frombuffer(device.queue.read_buffer(core.grid_accum), np.int32).reshape(-1, 3)
-    scale = 4096.0
-    mass = float(accum[:, 2].astype(np.int64).sum() / scale)
-    momentum_x = float(accum[:, 0].astype(np.int64).sum() / scale)
-    max_raw = int(np.abs(accum.astype(np.int64)).max())
-    assert np.isclose(mass, count * core.particle_mass, rtol=2e-3), mass
-    assert np.isclose(momentum_x, count * core.particle_mass * speed, rtol=2e-3), momentum_x
-    assert max_raw < np.iinfo(np.int32).max * 0.75, max_raw
-    print(f"[PASS] p2g_headroom mass={mass:.1f} momentum={momentum_x:.1f} max_raw={max_raw}")
-
-
-def check_high_strain_elastic_stability(device: wgpu.GPUDevice) -> None:
-    """Regression for the F=1.2I, E=1e4 collapse seen at the old DT."""
-    core = MpmCore(device)
-    rng = np.random.default_rng(31)
-    count = 512
-    positions = (np.array([0.5, 0.5]) + rng.uniform(-0.04, 0.04, (count, 2))).astype(np.float32)
-    start_radius = float(np.sqrt(np.mean(np.sum((positions - positions.mean(axis=0)) ** 2, axis=1))))
-    core.set_gravity(0.0)
-    core.set_repulsion_strength(0.0, 40.0)
-    core.set_material(1e4, 0.2, 3.0, elasticity=0.2, growth_rate=0.0)
-    core.load_scene(
-        positions,
-        np.zeros((count, 2), dtype=np.float32),
-        np.tile(np.array([1.2, 0, 0, 1.2], dtype=np.float32), (count, 1)),
-        np.zeros((count, 4), dtype=np.float32),
-        np.ones(count, dtype=np.float32),
-    )
-    core.step(400)
-    final_positions = core.read_positions()
-    velocities = core.read_velocities()
-    deformation = core.read_deformation().reshape(-1, 2, 2)
-    singular = np.linalg.svd(deformation, compute_uv=False)
-    final_radius = float(np.sqrt(np.mean(np.sum((final_positions - final_positions.mean(axis=0)) ** 2, axis=1))))
-    max_speed = float(np.linalg.norm(velocities, axis=1).max())
-    assert np.isfinite(final_positions).all() and np.isfinite(velocities).all() and np.isfinite(singular).all()
-    assert final_radius > start_radius * 0.5, (start_radius, final_radius)
-    assert max_speed < 100.0, max_speed
-    assert singular.min() > 0.75 and singular.max() < 1.3, (singular.min(), singular.max())
-    print(
-        f"[PASS] high_strain_stability radius={final_radius:.5f}/{start_radius:.5f} "
-        f"max_speed={max_speed:.3f} singular=[{singular.min():.3f},{singular.max():.3f}]"
-    )
-
-
-def _cycle_gate_case(
-    device: wgpu.GPUDevice,
-    cap: int,
-    enabled: bool,
-    *,
-    initial_growth: float = 1.0,
-    initial_cycle: float = 0.0,
-    runtime_cap: int | None = None,
-    commit_lifecycle: bool = True,
-    elastic_area: float = 1.0,
-) -> np.ndarray:
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 0.91, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 8, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, True, 2.0,
-        cap, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
-    )
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        np.array([[1, 0, 0, 1]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    core.reset_growth_buffers(cap)
-    elastic_root = np.float32(np.sqrt(elastic_area))
-    device.queue.write_buffer(
-        core.F, 0,
-        np.array([[elastic_root, 0.0, 0.0, elastic_root]], dtype=np.float32),
-    )
-    device.queue.write_buffer(
-        core.rest,
-        0,
-        _rest_state(np.ones(1), np.array([initial_growth]), np.array([initial_cycle])),
-    )
-    core.set_active_count(1)
-    environment.reset()
-    agents.set_active_count(1)
-    agents.reset_heading(19)
-    meta = np.frombuffer(
-        device.queue.read_buffer(
-            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
-            agents._particle_meta_dtype.itemsize,
-        ),
-        dtype=agents._particle_meta_dtype, count=1,
-    ).copy()
-    meta["chemicalState"][0, 7] = 1.0
-    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
-    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
-    agents.set_growth_enabled(enabled)
-    if runtime_cap is not None:
-        agents.set_max_active_particles(runtime_cap)
-
-    encoder = device.create_command_encoder()
-    environment.encode_clear(encoder)
-    agents.encode_splat_chemical_state(encoder)
-    environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity, commit_lifecycle=commit_lifecycle)
-    device.queue.submit([encoder.finish()])
-    return _probe(core, 1)[0]
-
-
-def check_cycle_start_gates(device: wgpu.GPUDevice) -> None:
-    assert _cycle_gate_case(device, cap=4, enabled=True)[2] == 1.0
-    assert _cycle_gate_case(device, cap=4, enabled=False)[2] == 0.0
-    assert _cycle_gate_case(device, cap=1, enabled=True)[2] == 0.0
-    assert _cycle_gate_case(device, cap=4, enabled=True, runtime_cap=1)[2] == 0.0
-    assert _cycle_gate_case(device, cap=4, enabled=True, commit_lifecycle=False)[2] == 0.0
-    assert _cycle_gate_case(device, cap=4, enabled=True, elastic_area=0.8)[2] == 0.0
-    compressed_ready = _cycle_gate_case(
-        device, cap=4, enabled=True,
-        initial_growth=2.0, initial_cycle=1.0, elastic_area=0.8,
-    )
-    assert compressed_ready[2] == 1.0 and np.isclose(compressed_ready[1], 2.0)
-
-    # A cycle that began before other particles consumed the remaining
-    # slots must be closed at cap without rolling back its accumulated g.
-    capped = _cycle_gate_case(
-        device,
-        cap=1,
-        enabled=True,
-        initial_growth=1.4,
-        initial_cycle=1.0,
-    )
-    assert capped[2] == 0.0, capped
-    assert np.isclose(capped[1], 1.4), capped
-    print("[PASS] cycle_start_gates include mechanical compression arrest and preserve capped-cycle growth")
-
-
-def check_persistent_division_hazard(device: wgpu.GPUDevice) -> None:
-    """Weak growth drive accumulates, survives zero-signal gaps, then admits."""
-    core = MpmCore(device)
-    environment = EnvironmentGPU(device, 8, 256, 256, 1.0, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 8, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, True, 2.0,
-        4, 0.01, 1.0, 1.0, 0.4, 1.0, 0.5, 0.5,
-    )
-    core.load_scene(
-        np.array([[0.5, 0.5]], dtype=np.float32),
-        np.zeros((1, 2), dtype=np.float32),
-        np.array([[1, 0, 0, 1]], dtype=np.float32),
-        np.zeros((1, 4), dtype=np.float32),
-        np.ones(1, dtype=np.float32),
-    )
-    agents.set_active_count(1)
-    agents.reset_heading(37)
-    agents.load_weights(np.zeros(agents._total_floats, dtype=np.float32))
-    meta = np.frombuffer(
-        device.queue.read_buffer(
-            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
-            agents._particle_meta_dtype.itemsize,
-        ),
-        dtype=agents._particle_meta_dtype, count=1,
-    ).copy()
-    meta["divisionThreshold"][0] = 10.0
-    meta["chemicalState"][0, 7] = 0.2
-    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, meta.tobytes())
-
-    def advance(rounds: int) -> None:
-        encoder = device.create_command_encoder()
-        for _ in range(rounds):
-            environment.encode_clear(encoder)
-            agents.encode_splat_chemical_state(encoder)
-            environment.encode_sense(encoder)
-            agents.encode_step(encoder, environment.parity, commit_lifecycle=True)
-        device.queue.submit([encoder.finish()])
-
-    def read_meta() -> np.ndarray:
-        raw = device.queue.read_buffer(
-            agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET,
             agents._particle_meta_dtype.itemsize,
         )
-        return np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1).copy()
+        meta = np.frombuffer(
+            raw, dtype=agents._particle_meta_dtype, count=1
+        ).copy()
+        meta["chemicalState"][0] = 0.0
+        device.queue.write_buffer(
+            agents._agent_state_buffer,
+            PARTICLE_META_BUFFER_OFFSET,
+            meta.tobytes(),
+        )
 
-    advance(3)
-    accumulated = read_meta()
-    represented_signal = round(0.2 * 4096.0) / 4096.0
-    expected = 3.0 * -np.log(1.0 - represented_signal)
-    assert np.isclose(accumulated["divisionHazard"][0], expected, atol=2e-6), accumulated
-    assert _probe(core, 1)[0, 2] == 0.0
+    environment.reset()
+    reset_cellular_chemistry()
+    deposited_once = macro_tick(1)
+    assert deposited_once.max() > 0.0 and deposited_once.sum() > 0.0, deposited_once
 
-    accumulated["chemicalState"][0, 7] = 0.0
-    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, accumulated.tobytes())
-    advance(2)
-    paused = read_meta()
-    assert np.isclose(paused["divisionHazard"][0], expected, atol=2e-6), paused
+    # Every tick adds a full deposit; earlier deposits decay and spread
+    # before the next neural evaluation.
+    environment.reset()
+    reset_cellular_chemistry()
+    deposited_four = macro_tick(4)
+    four_factor = sum(decay ** (k / 4) for k in range(4))
+    np.testing.assert_allclose(deposited_four.sum(), deposited_once.sum() * four_factor, rtol=2e-5, atol=2e-5)
+    assert deposited_four.max() < deposited_once.max() * four_factor
+    environment.reset()
+    deposited_three = macro_tick(3)
+    three_factor = sum(decay ** (k / 3) for k in range(3))
+    np.testing.assert_allclose(deposited_three.sum(), deposited_once.sum() * three_factor, rtol=2e-5, atol=2e-5)
+    environment.reset()
+    deposited_four = macro_tick(4)
 
-    paused["divisionThreshold"][0] = expected + 0.1
-    paused["chemicalState"][0, 7] = 0.2
-    device.queue.write_buffer(agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, paused.tobytes())
-    advance(1)
-    admitted = read_meta()
-    assert _probe(core, 1)[0, 2] == 1.0
-    assert admitted["divisionHazard"][0] == 0.0
-    assert admitted["divisionThreshold"][0] == 0.0
-    print(
-        "[PASS] persistent_division_hazard "
-        f"weak_signal_accumulated={expected:.6f} zero_signal_preserved=yes threshold_admitted=yes"
-    )
+    agents.load_weights(np.zeros_like(weights))
+    reset_cellular_chemistry()
+    agents.set_active_count(0)
+    aged = macro_tick(4)
+    np.testing.assert_allclose(aged.sum(), deposited_four.sum() * decay, rtol=2e-5, atol=2e-5)
+    assert aged.max() < deposited_four.max(), (aged.max(), deposited_four.max())
+    # Route sensed concentration through a hidden neuron into secretion.
+    # Later rounds must respond to earlier deposits within the same macro tick.
+    agents.set_active_count(1)
+    weights[:] = 0.0
+    weights[layout["fc1w_offset"]] = 100.0
+    weights[layout["fc2w_offset"]] = 1.0
+    weights[layout["fc2b_offset"]] = 0.1
+    agents.load_weights(weights)
+    environment.reset()
+    feedback_once = macro_tick(1)
+    environment.reset()
+    feedback_four = macro_tick(4)
+    assert feedback_four.sum() > feedback_once.sum() * 1.01, (feedback_once.sum(), feedback_four.sum())
+    print("[PASS] persistent ticks each deposit fully, preserve frame decay, and exchange neural feedback")
 
+def check_persistent_substrate_advection(device: wgpu.GPUDevice) -> None:
+    """A uniform MPM velocity translates persistent chemistry one texel."""
+    width = height = 16
+    core = MpmCore(device)
+    environment = EnvironmentGPU(device, 1, width, height, 1.0, 1.0, PERSISTENT_ENVIRONMENT_ARCHITECTURE, grid_velocity=core.grid_vel)
+    # Disable diffusion and decay to isolate semi-Lagrangian transport.
+    environment.set_communication_timestep(1, 0.0)
+    environment.set_advection_timestep(1.0)
+    substrate = np.zeros((height, width), dtype=np.float32)
+    substrate[8, 4] = 1.0
+    device.queue.write_buffer(environment.buffers[0], 0, substrate)
+    velocity = np.zeros(((GRID_N + 1) * (GRID_N + 1), 2), dtype=np.float32)
+    velocity[:, 0] = 1.0 / width
+    device.queue.write_buffer(core.grid_vel, 0, velocity)
+
+    encoder = device.create_command_encoder()
+    environment.encode_prepare_persistent(encoder)
+    for _ in range(3):
+        environment.encode_prepare_persistent(encoder, transport=False)
+    device.queue.submit([encoder.finish()])
+    moved = np.frombuffer(
+        device.queue.read_buffer(environment.buffers[environment.parity]), np.float32
+    ).reshape(height, width)
+    assert np.isclose(moved[8, 5], 1.0, atol=2e-5), moved[8]
+    assert np.isclose(moved.sum(), 1.0, atol=2e-5), moved.sum()
+    print("[PASS] persistent substrate is advected with the MPM velocity field")
 
 def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     core = MpmCore(device)
-    environment = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0)
-    agents = AgentsGPU(
-        device, core, environment, 1, 128,
-        0.0, 0.0, 1.0, 1.4, 0.8, 0.1, False, 0.0,
-        4, 0.01, 1.0, 1.0, 0.2, 1.0, 0.5, 0.5,
-        policy_architecture=STATEFUL_128_ARCHITECTURE,
-    )
+    environment = EnvironmentGPU(device, 1, 32, 32, 0.5, 1.0, chemical_communication_architecture="cell-owned-projection")
+    agents = AgentsGPU(device, core, environment, 1, 128, 1.0, 4, 0.01, 1.0, 1.0, 0.5, 0.5, policy_architecture=STATEFUL_128_ARCHITECTURE, internal_state_speed=1.0, chemical_communication_architecture="cell-owned-projection")
     core.load_scene(
         np.array([[0.5, 0.5]], dtype=np.float32),
         np.zeros((1, 2), dtype=np.float32),
@@ -1284,20 +272,28 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     )
     agents.set_active_count(1)
     agents.set_growth_enabled(False)
-    agents.reset_heading(31)
+    agents.reset_state()
     layout = weight_layout(1, 128, STATEFUL_128_ARCHITECTURE)
     weights = np.zeros(layout["total_floats"], dtype=np.float32)
-    # Common outputs occupy C+6 rows. Drive private channel 0 positively and
-    # open its corresponding gate; all other private channels remain still.
-    weights[layout["fc2b_offset"] + 7] = 1.0
-    weights[layout["fc2b_offset"] + 15] = 20.0
+    # Resolve logical head offsets instead of the retired motion/division ABI.
+    from policy_parameters import policy_heads
+    head_offsets = {}
+    offset = 0
+    for head in policy_heads(1, STATEFUL_128_ARCHITECTURE):
+        head_offsets[head.name] = offset
+        offset += head.size
+    weights[layout["fc2b_offset"] + head_offsets["stateDelta"]] = 1.0
+    weights[layout["fc2b_offset"] + head_offsets["stateGate"]] = 20.0
+    color_offset = layout["fc2b_offset"] + head_offsets["color"]
+    color_logits = np.array([-20.0, 0.7, 20.0], dtype=np.float32)
+    weights[color_offset:color_offset + 3] = color_logits
     agents.load_weights(weights)
     agents.set_communication_timestep(0.25)
 
     encoder = device.create_command_encoder()
     core.encode_morphology(encoder)
     environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
+    agents.encode_step(encoder, environment.parity, commit_growth=False)
     device.queue.submit([encoder.finish()])
     raw = device.queue.read_buffer(
         agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, agents._particle_meta_dtype.itemsize
@@ -1306,61 +302,73 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     expected_state = np.tanh(1.0) * 0.25
     assert np.isclose(meta["privateState"][0], expected_state, atol=2e-6), meta
     assert np.allclose(meta["privateState"][1:], 0.0, atol=1e-7), meta
-    expected_red = 1.0 / (1.0 + np.exp(-expected_state))
-    assert np.isclose(meta["color"][0], expected_red, atol=2e-6), meta
-    assert np.allclose(meta["color"][1:3], 0.5, atol=1e-7), meta
+    expected_color = 1.0 / (1.0 + np.exp(-color_logits))
+    np.testing.assert_allclose(meta["color"][:3], expected_color, atol=2e-6)
+    assert np.all((meta["color"][:3] >= 0) & (meta["color"][:3] <= 1))
     agents.set_internal_state_speed(0.0)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity, commit_lifecycle=False)
+    agents.encode_step(encoder, environment.parity, commit_growth=False)
     device.queue.submit([encoder.finish()])
     frozen_raw = device.queue.read_buffer(
         agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, agents._particle_meta_dtype.itemsize
     )
     frozen = np.frombuffer(frozen_raw, dtype=agents._particle_meta_dtype, count=1)[0]
     np.testing.assert_allclose(frozen["privateState"], meta["privateState"], atol=1e-7)
+    np.testing.assert_allclose(frozen["color"][:3], expected_color, atol=2e-6)
     agents.set_internal_state_speed(1.0)
     root2 = np.float32(np.sqrt(2.0))
     device.queue.write_buffer(core.F, 0, np.array([[root2, 0, 0, root2]], dtype=np.float32))
-    device.queue.write_buffer(core.rest, 0, _rest_state(np.ones(1), np.array([2.0]), np.ones(1)))
+    from triangle_vertices import vertices_from_edges
+    rest = core.read_rest_state()
+    rest[:, :4] = [root2, 0, 0, root2]
+    rest[:, 8:14] = vertices_from_edges(core.read_positions(), np.array([[.03,0,0,.03]]))
+    rest[:, 14] = .03**2 / 4
+    device.queue.write_buffer(core.rest, 0, rest)
     encoder = device.create_command_encoder()
     environment.encode_sense(encoder)
-    agents.encode_step(encoder, environment.parity, commit_lifecycle=True)
+    agents.encode_step(encoder, environment.parity, commit_growth=True)
     device.queue.submit([encoder.finish()])
-    assert agents.read_grown_count() == 2
+    assert agents.read_sample_count() == 2
     raw = device.queue.read_buffer(
         agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, 2 * agents._particle_meta_dtype.itemsize
     )
-    daughters = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=2)
-    np.testing.assert_allclose(daughters[0]["privateState"], daughters[1]["privateState"], atol=1e-7)
-    print("[PASS] recurrent-128 policy applies speed-scaled gated memory, freezes at 0x, derives RGB, and inherits state at division")
+    samples = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=2)
+    np.testing.assert_allclose(samples[0]["privateState"], samples[1]["privateState"], atol=1e-7)
+    print("[PASS] recurrent-128 policy emits bounded RGB independently of memory and new material samples inherit private state")
 
+def check_forced_growth_direction(device):
+    """Exercise the shared uniform offsets for retained explicit Lab directions."""
+    from continuous_growth_check import make_system, load_samples, read_rest
+    core, agents = make_system(device)
+    load_samples(core, agents, [[.5, .5]], [[0, 0]])
+    agents.load_weights(np.zeros(agents._total_floats, np.float32))
+    for direction in [(1., 0.), (0., 1.)]:
+        device.queue.write_buffer(agents._physics_uniform, 36, np.array([0, 1], np.uint32))
+        device.queue.write_buffer(agents._physics_uniform, 48, np.array(direction, np.float32))
+        device.queue.write_buffer(agents._physics_uniform, 56, np.array([0], np.uint32))
+        encoder = device.create_command_encoder()
+        agents.encode_step(encoder, 0)
+        device.queue.submit([encoder.finish()])
+        np.testing.assert_allclose(read_rest(core, 1)[0, 5:7], direction, atol=1e-6)
+    device.queue.write_buffer(agents._physics_uniform, 36, np.array([0xffffffff, 0], np.uint32))
+    encoder = device.create_command_encoder()
+    agents.encode_step(encoder, 0)
+    device.queue.submit([encoder.finish()])
+    np.testing.assert_allclose(read_rest(core, 1)[0, 5:7], [0, 0], atol=1e-6)
+    print('[PASS] explicit horizontal/vertical growth and return to policy control')
 
 def main() -> None:
     device = pick_device()
+    check_forced_growth_direction(device)
     check_morphology_occupancy(device)
     check_single_cell_rollout_seed(device)
     check_supersampled_communication_rounds(device)
-    check_growth_without_repulsion(device)
-    check_compressed_growth_pauses_and_resumes(device)
-    check_transient_cell_chemical_splats(device)
     check_persistent_environment_chemistry(device)
-    check_elastic_strain_policy_inputs(device)
-    check_conservative_split(device)
-    check_desired_heading_derives_angular_acceleration(device)
-    check_polarized_division_uses_signed_growth_direction(device)
-    check_boundary_gradient_forces_tangent_split(device)
-    check_anisotropic_tensor_split(device)
-    check_isotropic_increment_preserves_tensor_shape(device)
-    check_directional_increment_and_objectivity(device)
-    check_growth_duration_is_substep_invariant(device)
-    check_persistent_growth_targets_drive_state_not_motion(device)
-    check_p2g_fixed_point_headroom(device)
-    check_high_strain_elastic_stability(device)
-    check_cycle_start_gates(device)
-    check_persistent_division_hazard(device)
+    check_persistent_substrate_advection(device)
     check_stateful_private_memory(device)
-
+    from continuous_growth_check import main as check_domains
+    check_domains()
 
 if __name__ == "__main__":
     main()

@@ -40,22 +40,15 @@ from device import pick_device
 from environment_gpu import EnvironmentGPU
 from mpm_core import MpmCore
 from simulation_settings import (
-    ANGULAR_DAMPING,
     CHEM_CHANNELS,
-    CHIRALITY,
+    CHEMICAL_CHANNEL_PROFILES,
     DECAY,
-    DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
-    DEPOSIT_SIGMA,
-    DIVISION_COOLDOWN,
+    NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
     FIELD_N,
     FRICTION,
-    MAX_ACCEL,
-    MAX_ANGULAR_ACCEL,
-    MAX_ANGULAR_VELOCITY,
     MAX_ENV_WRITE,
-    MAX_STRAFE,
-    SPLIT_DISPLACEMENT,
+    SAMPLE_SPACING,
 )
 from policy_parameters import policy_hidden_dim
 from targets import TargetShape
@@ -73,7 +66,6 @@ _target_raster: Optional[np.ndarray] = None
 _target_distance_field: Optional[np.ndarray] = None
 _args: Optional[argparse.Namespace] = None
 
-
 def _worker_init(
     particles: int,
     target: TargetShape,
@@ -90,48 +82,24 @@ def _worker_init(
     evolve.py's own module docstring already applies to a single
     process)."""
     global _core, _agents, _environment, _target, _target_raster, _target_distance_field, _args
+    from deterministic_reference import install_ordered_stages, REFERENCE_STAGES
+    install_ordered_stages(REFERENCE_STAGES if getattr(args, 'deterministic_reference', False) else ())
     # verbose=False — build_pool() already logged this once, in the main
     # process, before spawning any worker (see pick_device()'s own
     # docstring for why one line is enough on a single machine).
     wgpu_device = pick_device(verbose=False)
     _core = MpmCore(wgpu_device)
-    _environment = EnvironmentGPU(
-        wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE,
-        args.chemical_communication_architecture,
-    )
-    _agents = AgentsGPU(
-        wgpu_device,
-        _core,
-        _environment,
-        CHEM_CHANNELS,
-        policy_hidden_dim(args.policy_architecture),
-        MAX_ACCEL,
-        MAX_STRAFE,
-        MAX_ENV_WRITE,
-        MAX_ANGULAR_ACCEL,
-        ANGULAR_DAMPING,
-        MAX_ANGULAR_VELOCITY,
-        CHIRALITY,
-        DEPOSIT_DISTANCE,
-        particles,
-        SPLIT_DISPLACEMENT,
-        DIVISION_COOLDOWN,
-        FRICTION,
-        DEPOSIT_SIGMA,
-        1.0,
-        args.spawn_x,
-        args.spawn_y,
-        policy_architecture=args.policy_architecture,
-        chemical_communication_architecture=args.chemical_communication_architecture,
-    )
+    _environment = EnvironmentGPU(wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE, args.chemical_communication_architecture, NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY, grid_velocity=_core.grid_vel, channel_profiles=CHEMICAL_CHANNEL_PROFILES)
+    _agents = AgentsGPU(wgpu_device, _core, _environment, CHEM_CHANNELS, policy_hidden_dim(args.policy_architecture), MAX_ENV_WRITE, particles, SAMPLE_SPACING, FRICTION, 1.0, args.spawn_x, args.spawn_y, policy_architecture=args.policy_architecture, chemical_communication_architecture=args.chemical_communication_architecture)
     _target = target
     _target_raster = target_raster
     _target_distance_field = target_distance_field
     _args = args
 
+def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1.0, return_snapshot: bool = False):
+    """Optionally return the minimum-loss scoring snapshot for preview reuse.
 
-def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1.0) -> float:
-    """The only thing actually sent to a worker per candidate — `weights`
+    The only thing actually sent to a worker per candidate — `weights`
     and `seed`. Public (not `_`-prefixed, unlike this module's other
     worker-local state) because evolve.py's own run_generation() needs a
     module-level, picklable reference to hand to ProcessPoolExecutor.map()
@@ -145,8 +113,8 @@ def worker_rollout(weights: np.ndarray, seed: int, density_multiplier: float = 1
     return rollout(
         weights, _target, _target_raster, _target_distance_field, _args, seed,
         _core, _agents, _environment, density_multiplier=density_multiplier,
+        return_snapshot=return_snapshot,
     )
-
 
 def build_pool(
     num_workers: int,

@@ -16,11 +16,6 @@ export class Interact {
   private readonly device: GPUDevice;
   private readonly mpmCore: MpmCore;
 
-  // Per-particle offset from the click point, captured once at grab time
-  // — sized to MAX_PARTICLES, not whatever activeCount happened to be at
-  // construction, for the same reason gpu/agents.ts's own heading/
-  // angularVelocity buffers are: the "Add Particle" tool can grow
-  // MpmCore's own activeCount past that at runtime, with no rebuild.
   private readonly grabOffsetBuffer: GPUBuffer;
   private readonly pickPosUniform: GPUBuffer;
   private readonly dragTargetUniform: GPUBuffer;

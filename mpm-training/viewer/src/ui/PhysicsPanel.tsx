@@ -1,3 +1,4 @@
+import { ToggleButton } from "./ToggleButton"
 import { useState } from "react"
 import type { PhysicsSettings } from "../gpu/types"
 import { Slider } from "./Slider"
@@ -21,7 +22,10 @@ interface PhysicsPanelProps {
 
 // Excludes mpmEnabled — the one boolean field in PhysicsSettings, its own
 // checkbox row below rather than a numeric-range SliderSpec.
-export type PhysicsSliderKey = Exclude<keyof PhysicsSettings, "mpmEnabled">
+export type PhysicsSliderKey = Exclude<
+  keyof PhysicsSettings,
+  "mpmEnabled" | "normalizeDepositsByLocalDensity"
+>
 
 export interface PhysicsSliderSpec {
   key: PhysicsSliderKey
@@ -41,9 +45,10 @@ export interface PhysicsSliderSpec {
  * envnca/frontend/src/ui/PhysicsPanel.tsx's own scaledRange() exactly. */
 function scaledRange(
   trained: number,
-  multiplier: number
+  multiplier: number,
+  minimumMax = 0.05
 ): { min: number; max: number; step: number } {
-  const max = Math.max(trained * multiplier, 0.05)
+  const max = Math.max(trained * multiplier, minimumMax)
   return { min: 0, max, step: max / 200 }
 }
 
@@ -57,7 +62,7 @@ export function physicsSliderSpecsFor(
   return [
     {
       key: "gravity",
-      label: "Center gravity",
+      label: "Gravity",
       ...scaledRange(trained.gravity, 3),
       format: (v) => v.toFixed(1),
     },
@@ -100,35 +105,21 @@ export function physicsSliderSpecsFor(
       format: (v) => v.toFixed(2),
     },
     {
-      key: "materialFluidity",
-      label: "Fluidity (shear relaxation)",
-      ...FRACTION_RANGE,
-      format: (v) => v.toFixed(3),
-    },
-    {
       key: "decay",
       label: "Substrate decay",
       ...FRACTION_RANGE,
       format: (v) => v.toFixed(3),
     },
     {
-      key: "maxAccel",
-      label: "Max accel",
-      ...scaledRange(trained.maxAccel, 3),
+      key: "depositRate",
+      label: "Chemical delta rate",
+      ...scaledRange(trained.depositRate, 4),
       format: (v) => v.toFixed(3),
     },
     {
-      key: "maxStrafe",
-      label: "Physical strafe scale",
-      ...scaledRange(trained.maxStrafe, 3),
-      format: (v) => v.toFixed(3),
-    },
-    {
-      key: "steeringStrength",
-      label: "Steering strength",
-      min: 0,
-      max: 1,
-      step: 0.01,
+      key: "chemicalValueInputMultiplier",
+      label: "Chemical neural input multiplier",
+      ...scaledRange(trained.chemicalValueInputMultiplier, 10, 1),
       format: (v) => v.toFixed(2),
     },
     {
@@ -139,47 +130,15 @@ export function physicsSliderSpecsFor(
     },
     {
       key: "maxEnvWrite",
-      label: "Max env write",
+      label: "Chemical delta gain",
       ...scaledRange(trained.maxEnvWrite, 3),
       format: (v) => v.toFixed(3),
     },
     {
-      key: "maxAngularAccel",
-      label: "Max angular accel",
-      min: 0,
-      max: 1.8,
-      step: 0.0001,
-      format: (v) => v.toFixed(3),
-    },
-    {
-      key: "angularDamping",
-      label: "Angular damping",
-      ...FRACTION_RANGE,
-      format: (v) => v.toFixed(3),
-    },
-    {
-      key: "maxAngularVelocity",
-      label: "Max angular velocity",
-      ...scaledRange(trained.maxAngularVelocity, 3),
-      format: (v) => v.toFixed(3),
-    },
-    {
-      key: "depositSigma",
-      label: "Deposit splat radius",
-      ...scaledRange(trained.depositSigma, 3),
-      format: (v) => v.toFixed(3),
-    },
-    {
-      key: "splitDisplacement",
-      label: "Split displacement",
-      ...scaledRange(trained.splitDisplacement, 3),
+      key: "sampleSpacing",
+      label: "Growth sample spacing",
+      ...scaledRange(trained.sampleSpacing, 3),
       format: (v) => v.toFixed(4),
-    },
-    {
-      key: "divisionCooldown",
-      label: "Division cooldown",
-      ...scaledRange(trained.divisionCooldown, 3),
-      format: (v) => v.toFixed(1),
     },
     {
       key: "splatRadius",
@@ -226,36 +185,6 @@ export function physicsSliderSpecsFor(
   ]
 }
 
-/** Collapsible "Physics" section (default closed) exposing every
- * live-adjustable simulation setting as a slider — gravity, damping, MPM
- * material (E/nu/hardening/elasticity), persistent substrate decay,
- * cell-chemical delta magnitude,
- * strafe's own maxAccel/maxStrafe/friction (strafe
- * drives MpmCore's own velocity directly — an acceleration, damped by
- * friction — see agents.wgsl's own module docstring for the full
- * history), the heading integrator's maxAngularAccel/angularDamping/
- * maxAngularVelocity, and depositSigma (the cell-state Gaussian splat radius — see
- * agents.wgsl's own depositGaussian() for the exact kernel this drives,
- * replacing that shader's old flat 4-corner bilinear scatter),
- * growth's own splitDisplacement (daughter separation; the signed growth
- * vector biases the new daughter and pair center toward +n) and
- * divisionCooldown (macro steps a particle refuses
- * to split again for, right after splitting, whether as parent or child
- * — see agents.wgsl's own module docstring for the full growth design;
- * the growth cap itself is `particles` — see types.ts's own
- * SimulationConfig.particles docstring for why that's a CAP now, not a
- * starting count, and not a slider here since it's rebuild-triggering,
- * same as channels/fieldN/hiddenDim), density's splatRadius,
- * morphologyBlurSigma, and morphologyDensityReference, repulsion strength,
- * and mpmEnabled (a checkbox, not a slider — off skips MpmCore's own
- * physics substeps entirely each macro step, a debug/testing aid to
- * isolate sensing/communication/growth/chirality from elastic material
- * response/gravity/repulsion — see types.ts's own
- * RunSettings.mpmEnabled docstring for the full reasoning).
- * See gpu/simulation.ts's applyPhysics() for why moving any of these
- * never disturbs the rollout currently in flight (a plain uniform-buffer
- * write, not a pipeline rebuild) — this is playback-only, doesn't affect
- * training itself. */
 export function PhysicsPanel({
   trained,
   value,
@@ -290,22 +219,23 @@ export function PhysicsPanel({
       </div>
       {open && (
         <div className="physics-panel-body">
-          {/* Boolean, not a slider — kept out of specsFor()'s own
-           * SliderSpec list (which assumes a numeric range) and rendered
-           * as its own checkbox row instead (same label-left/checkbox-
-           * right layout the "Point particles toward heading" row uses
-           * — see style.css's own .checkbox-row). See gpu/types.ts's own
-           * RunSettings.mpmEnabled docstring for exactly what turning
-           * this off does. */}
-          <label className="checkbox-row">
+          <ToggleButton className="toggle-row" label="MPM physics" checked={value.mpmEnabled}
+            onChange={(mpmEnabled) => onChange({ ...value, mpmEnabled })} />
+          <label
+            className="checkbox-row"
+            title="Average chemical expression by represented material area, with partial coverage at empty edges. Disable for secretion proportional to material density."
+          >
             <input
               type="checkbox"
-              checked={value.mpmEnabled}
+              checked={value.normalizeDepositsByLocalDensity}
               onChange={(e) =>
-                onChange({ ...value, mpmEnabled: e.target.checked })
+                onChange({
+                  ...value,
+                  normalizeDepositsByLocalDensity: e.target.checked,
+                })
               }
             />
-            MPM physics
+            Average chemical expression
           </label>
           {specs.map((spec) => (
             <label key={spec.key} className="slider-row">

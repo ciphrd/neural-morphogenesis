@@ -34,7 +34,6 @@ IMG_SIZE = 512
 TARGET_COLOR = (90, 90, 90)
 GROWN_COLOR = (255, 255, 255)
 
-
 def rasterize(grown: np.ndarray, target: np.ndarray, size: int = IMG_SIZE) -> Image.Image:
     """Both point clouds share MpmCore's own [0,1]^2 domain convention
     (y-up) — flipped to image space (y-down)
@@ -56,10 +55,8 @@ def rasterize(grown: np.ndarray, target: np.ndarray, size: int = IMG_SIZE) -> Im
     splat(grown, GROWN_COLOR)  # drawn second/on top, so overlap reads as "covered"
     return Image.fromarray(img, mode="RGB")
 
-
 def save_grown_image(positions: np.ndarray, target_points: np.ndarray, path: Path) -> None:
     rasterize(positions, target_points).save(path)
-
 
 def save_raster_image(raster: np.ndarray, path: Path) -> None:
     """Grayscale heatmap of a [0,1]-ish raster (raster.rasterize_points/
@@ -79,4 +76,4 @@ def save_raster_image(raster: np.ndarray, path: Path) -> None:
     Flipping here keeps every image this module produces in the same
     visual orientation."""
     img = np.clip(raster[::-1], 0.0, 1.0)
-    Image.fromarray((img * 255.0).astype(np.uint8), mode="L").save(path)
+    Image.fromarray((img * 255.0).astype(np.uint8), mode="RGB" if img.ndim == 3 else "L").save(path)

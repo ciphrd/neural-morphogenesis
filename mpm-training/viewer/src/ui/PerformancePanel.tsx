@@ -1,5 +1,8 @@
+import { ToggleButton } from "./ToggleButton"
 import { useEffect, useRef, useState } from "react"
+import { SequenceScheduler, type PerformanceSequence, type SequenceAction } from "../performance/sequences"
 import type { SimulationConfig } from "../gpu/types"
+import { migrateSnapshot } from "../performance/migrateSnapshot"
 import { interpolateSnapshot } from "../performance/interpolate"
 import {
   PERFORMANCE_CHANNEL_NAME,
@@ -12,7 +15,7 @@ import {
 import { PerformanceRenderingPanel } from "./PerformanceRenderingPanel"
 import { Slider } from "./Slider"
 
-const SCENES_STORAGE_KEY = "mpm-training-performance-scenes-v1"
+const SCENES_STORAGE_KEY = "mpm-training-performance-scenes-v2"
 const AUTO_PRUNE_STORAGE_KEY = "mpm-training-performance-auto-prune-99-5-v1"
 const LEGACY_AUTO_PRUNE_STORAGE_KEYS = [
   "mpm-training-performance-auto-prune-98-v1",
@@ -20,32 +23,12 @@ const LEGACY_AUTO_PRUNE_STORAGE_KEYS = [
   "mpm-training-performance-auto-prune-80-v1",
 ]
 const AUTO_PRUNE_DELAY_STORAGE_KEY = "mpm-training-performance-auto-prune-delay-v1"
-const AUTO_RANDOMIZE_STORAGE_KEY = "mpm-training-performance-auto-randomize-v1"
-const AUTO_RANDOMIZE_DURATION_STORAGE_KEY = "mpm-training-performance-auto-randomize-duration-v1"
-const AUTO_RESET_STORAGE_KEY = "mpm-training-performance-auto-reset-v1"
-const AUTO_RESET_DURATION_STORAGE_KEY = "mpm-training-performance-auto-reset-duration-v1"
-
 function loadAutoPrune(): boolean {
   const stored = localStorage.getItem(AUTO_PRUNE_STORAGE_KEY)
     ?? LEGACY_AUTO_PRUNE_STORAGE_KEYS
       .map((key) => localStorage.getItem(key))
       .find((value) => value !== null)
   return stored === "true"
-}
-
-function loadAutoRandomize(): boolean {
-  return localStorage.getItem(AUTO_RANDOMIZE_STORAGE_KEY) === "true"
-}
-
-function loadAutoReset(): boolean {
-  return localStorage.getItem(AUTO_RESET_STORAGE_KEY) === "true"
-}
-
-function loadAutomationDurationSeconds(storageKey: string): number {
-  const raw = localStorage.getItem(storageKey)
-  if (raw === null) return 20
-  const stored = Number(raw)
-  return Number.isFinite(stored) ? Math.max(1, Math.min(120, stored)) : 20
 }
 
 function loadAutoPruneDelaySeconds(): number {
@@ -56,6 +39,7 @@ function loadAutoPruneDelaySeconds(): number {
 }
 
 interface PerformancePanelProps {
+  sequences: PerformanceSequence[]
   config: SimulationConfig | null
   snapshot: PerformanceSnapshot
   onApplySnapshot: (snapshot: PerformanceSnapshot) => void
@@ -64,16 +48,18 @@ interface PerformancePanelProps {
   onKillFraction: (fraction: number) => void
 }
 
-function loadScenes(): PerformanceScene[] {
+function loadScenes(defaults: PerformanceSnapshot): PerformanceScene[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem(SCENES_STORAGE_KEY) ?? "[]")
-    return Array.isArray(parsed) ? parsed as PerformanceScene[] : []
+    const parsed = JSON.parse(localStorage.getItem(SCENES_STORAGE_KEY) ?? localStorage.getItem("mpm-training-performance-scenes-v1") ?? "[]")
+    return Array.isArray(parsed) ? parsed.filter((scene) => scene?.snapshot?.render && typeof scene.id === "string" && typeof scene.name === "string")
+      .map((scene) => ({ ...scene, snapshot: migrateSnapshot(scene.snapshot, defaults) })) : []
   } catch {
     return []
   }
 }
 
 export function PerformancePanel({
+  sequences,
   config,
   snapshot,
   onApplySnapshot,
@@ -82,19 +68,11 @@ export function PerformancePanel({
   onKillFraction,
 }: PerformancePanelProps) {
   const [open, setOpen] = useState(true)
-  const [scenes, setScenes] = useState<PerformanceScene[]>(loadScenes)
+  const [scenes, setScenes] = useState<PerformanceScene[]>(() => loadScenes(snapshot))
   const [sceneName, setSceneName] = useState("")
   const [transitionMs, setTransitionMs] = useState(1200)
   const [autoPruneEnabled, setAutoPruneEnabled] = useState(loadAutoPrune)
   const [autoPruneDelaySeconds, setAutoPruneDelaySeconds] = useState(loadAutoPruneDelaySeconds)
-  const [autoRandomize, setAutoRandomize] = useState(loadAutoRandomize)
-  const [autoRandomizeDurationSeconds, setAutoRandomizeDurationSeconds] = useState(
-    () => loadAutomationDurationSeconds(AUTO_RANDOMIZE_DURATION_STORAGE_KEY),
-  )
-  const [autoReset, setAutoReset] = useState(loadAutoReset)
-  const [autoResetDurationSeconds, setAutoResetDurationSeconds] = useState(
-    () => loadAutomationDurationSeconds(AUTO_RESET_DURATION_STORAGE_KEY),
-  )
   const [outputConnected, setOutputConnected] = useState(false)
   const [telemetry, setTelemetry] = useState<ProjectionTelemetry | null>(null)
   const channelRef = useRef<BroadcastChannel | null>(null)
@@ -102,19 +80,11 @@ export function PerformancePanel({
   const snapshotRef = useRef(snapshot)
   const autoPruneRef = useRef(autoPruneEnabled)
   const autoPruneDelayRef = useRef(autoPruneDelaySeconds)
-  const autoRandomizeRef = useRef(autoRandomize)
-  const autoRandomizeDurationRef = useRef(autoRandomizeDurationSeconds)
-  const autoResetRef = useRef(autoReset)
-  const autoResetDurationRef = useRef(autoResetDurationSeconds)
   const transitionFrameRef = useRef(0)
   configRef.current = config
   snapshotRef.current = snapshot
   autoPruneRef.current = autoPruneEnabled
   autoPruneDelayRef.current = autoPruneDelaySeconds
-  autoRandomizeRef.current = autoRandomize
-  autoRandomizeDurationRef.current = autoRandomizeDurationSeconds
-  autoResetRef.current = autoReset
-  autoResetDurationRef.current = autoResetDurationSeconds
 
   useEffect(() => {
     const channel = new BroadcastChannel(PERFORMANCE_CHANNEL_NAME)
@@ -128,14 +98,6 @@ export function PerformancePanel({
           type: "auto-prune",
           fraction: autoPruneRef.current ? 0.995 : null,
           delayMs: autoPruneDelayRef.current * 1000,
-        } satisfies ControllerToProjectionMessage)
-        channel.postMessage({
-          type: "auto-randomize",
-          intervalMs: autoRandomizeRef.current ? autoRandomizeDurationRef.current * 1000 : null,
-        } satisfies ControllerToProjectionMessage)
-        channel.postMessage({
-          type: "auto-reset",
-          intervalMs: autoResetRef.current ? autoResetDurationRef.current * 1000 : null,
         } satisfies ControllerToProjectionMessage)
       } else if (event.data.type === "telemetry") {
         setOutputConnected(true)
@@ -170,24 +132,6 @@ export function PerformancePanel({
       delayMs: autoPruneDelaySeconds * 1000,
     } satisfies ControllerToProjectionMessage)
   }, [autoPruneDelaySeconds, autoPruneEnabled])
-
-  useEffect(() => {
-    localStorage.setItem(AUTO_RANDOMIZE_STORAGE_KEY, String(autoRandomize))
-    localStorage.setItem(AUTO_RANDOMIZE_DURATION_STORAGE_KEY, String(autoRandomizeDurationSeconds))
-    channelRef.current?.postMessage({
-      type: "auto-randomize",
-      intervalMs: autoRandomize ? autoRandomizeDurationSeconds * 1000 : null,
-    } satisfies ControllerToProjectionMessage)
-  }, [autoRandomize, autoRandomizeDurationSeconds])
-
-  useEffect(() => {
-    localStorage.setItem(AUTO_RESET_STORAGE_KEY, String(autoReset))
-    localStorage.setItem(AUTO_RESET_DURATION_STORAGE_KEY, String(autoResetDurationSeconds))
-    channelRef.current?.postMessage({
-      type: "auto-reset",
-      intervalMs: autoReset ? autoResetDurationSeconds * 1000 : null,
-    } satisfies ControllerToProjectionMessage)
-  }, [autoReset, autoResetDurationSeconds])
 
   useEffect(() => {
     if (!outputConnected) return
@@ -235,6 +179,40 @@ export function PerformancePanel({
     } satisfies ControllerToProjectionMessage)
   }
 
+  const executeAction = (action: SequenceAction) => {
+    if (action === "restart") restart()
+    else if (action === "randomize") randomize(false)
+    else if (action === "randomize-and-restart") randomize(true)
+    else if (action === "kill-20-percent") killTwentyPercent()
+    else if (action === "kill-80-percent") killEightyPercent()
+    else if (action === "prune") {
+      onKillFraction(0.995)
+      channelRef.current?.postMessage({ type: "command", command: "prune" } satisfies ControllerToProjectionMessage)
+    } else if (action === "toggle-auto-prune") setAutoPruneEnabled((enabled) => !enabled)
+    else if (action === "blackout") {
+      const next = { ...snapshotRef.current, blackout: !snapshotRef.current.blackout }
+      snapshotRef.current = next
+      onApplySnapshot(next)
+    }
+  }
+  const actionsRef = useRef(executeAction)
+  actionsRef.current = executeAction
+  const sequencesRef = useRef(sequences)
+  sequencesRef.current = sequences
+  const schedulerRef = useRef(new SequenceScheduler())
+  useEffect(() => {
+    // Reconcile edits immediately, including a quick off/on toggle.
+    for (const action of schedulerRef.current.tick(sequences, performance.now())) actionsRef.current(action)
+  }, [sequences])
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      for (const action of schedulerRef.current.tick(sequencesRef.current, performance.now())) {
+        actionsRef.current(action)
+      }
+    }, 50)
+    return () => window.clearInterval(timer)
+  }, [])
+
   const saveScene = () => {
     const trimmed = sceneName.trim()
     const name = trimmed || `Scene ${scenes.length + 1}`
@@ -278,65 +256,11 @@ export function PerformancePanel({
             <button className="select" onClick={restart}>Restart</button>
             <button className="select" onClick={() => randomize(false)}>Randomize</button>
             <button className="select" onClick={() => randomize(true)}>Rand + res</button>
-            <button
-              className={"select performance-auto-randomize" + (autoRandomize ? " is-active" : "")}
-              aria-pressed={autoRandomize}
-              title={`Randomize the live neural weights every ${autoRandomizeDurationSeconds} seconds without restarting`}
-              onClick={() => setAutoRandomize((enabled) => !enabled)}
-            >
-              Auto randomize · {autoRandomizeDurationSeconds}s
-            </button>
-            <button
-              className={"select performance-auto-reset" + (autoReset ? " is-active" : "")}
-              aria-pressed={autoReset}
-              title={`Restart the live rollout every ${autoResetDurationSeconds} seconds without changing its neural weights`}
-              onClick={() => setAutoReset((enabled) => !enabled)}
-            >
-              Auto reset · {autoResetDurationSeconds}s
-            </button>
             <button className="select performance-kill" onClick={killTwentyPercent}>Kill 20%</button>
             <button className="select performance-kill" onClick={killEightyPercent}>Kill 80%</button>
-            <button
-              className={"select performance-auto-prune" + (autoPruneEnabled ? " is-active" : "")}
-              aria-pressed={autoPruneEnabled}
-              title="Randomly cull 99.5% of the live population after it remains at the particle cap for the configured delay"
-              onClick={() => setAutoPruneEnabled((enabled) => !enabled)}
-            >
-              Auto prune 99.5%
-            </button>
-            <button
-              className={"select performance-blackout" + (snapshot.blackout ? " is-active" : "")}
-              onClick={() => onApplySnapshot({ ...snapshot, blackout: !snapshot.blackout })}
-            >
-              {snapshot.blackout ? "Restore" : "Blackout"}
-            </button>
+            <ToggleButton label="Auto prune 99.5%" checked={autoPruneEnabled} onChange={setAutoPruneEnabled} title="Randomly cull 99.5% of the live population after it remains at the particle cap for the configured delay" />
+            <ToggleButton label="Blackout" checked={snapshot.blackout} onChange={(blackout) => onApplySnapshot({ ...snapshot, blackout })} />
           </div>
-          {autoRandomize && (
-            <label className="slider-row" title="Time between automatic neural-weight randomizations">
-              <span>Randomize every</span>
-              <Slider
-                min={1}
-                max={120}
-                step={1}
-                value={autoRandomizeDurationSeconds}
-                onChange={setAutoRandomizeDurationSeconds}
-              />
-              <span className="slider-value">{autoRandomizeDurationSeconds.toFixed(0)}s</span>
-            </label>
-          )}
-          {autoReset && (
-            <label className="slider-row" title="Time between automatic rollout resets">
-              <span>Reset every</span>
-              <Slider
-                min={1}
-                max={120}
-                step={1}
-                value={autoResetDurationSeconds}
-                onChange={setAutoResetDurationSeconds}
-              />
-              <span className="slider-value">{autoResetDurationSeconds.toFixed(0)}s</span>
-            </label>
-          )}
           {autoPruneEnabled && (
             <label className="slider-row" title="Time spent at the population cap before automatic pruning">
               <span>Prune delay</span>

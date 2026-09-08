@@ -2,7 +2,7 @@
 
 The GPU intentionally consumes one concatenated output matrix.  This module
 defines how the Python model's separate heads map into that stable wire format,
-and applies the initialization/mutation policy from core/policy_parameters.json.
+and applies the initialization/mutation policy from core/config.json.
 """
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
-
-_CONFIG = json.loads((Path(__file__).parent.parent / "core" / "policy_parameters.json").read_text())
+from config import CONFIG
+_CONFIG = CONFIG["policy"]
 STATELESS_ARCHITECTURE = "stateless-128"
 STATEFUL_ARCHITECTURE = "stateful-64"
 STATEFUL_128_ARCHITECTURE = "stateful-128"
@@ -29,7 +29,6 @@ CHEMICAL_COMMUNICATION_ARCHITECTURES = (
     CELL_OWNED_PROJECTION_ARCHITECTURE,
 )
 
-
 @dataclass(frozen=True)
 class PolicyHead:
     name: str
@@ -39,31 +38,23 @@ class PolicyHead:
     bias_jitter: float
     mutation_scale: float
 
-
-def normalize_architecture(architecture: str | None) -> str:
-    architecture = architecture or STATELESS_ARCHITECTURE
+def normalize_architecture(architecture: str) -> str:
     if architecture not in POLICY_ARCHITECTURES:
         raise ValueError(f"unknown policy architecture {architecture!r}; expected one of {POLICY_ARCHITECTURES}")
     return architecture
 
-
 def policy_has_recurrence(architecture: str) -> bool:
     return normalize_architecture(architecture) in (STATEFUL_ARCHITECTURE, STATEFUL_128_ARCHITECTURE)
-
 
 def cell_memory_for_architecture(architecture: str) -> str:
     return RECURRENT_CELL_MEMORY if policy_has_recurrence(architecture) else NO_CELL_MEMORY
 
-
-def architecture_for_cell_memory(cell_memory: str | None) -> str:
-    cell_memory = cell_memory or RECURRENT_CELL_MEMORY
+def architecture_for_cell_memory(cell_memory: str) -> str:
     if cell_memory not in CELL_MEMORY_OPTIONS:
         raise ValueError(f"unknown cell memory {cell_memory!r}; expected one of {CELL_MEMORY_OPTIONS}")
     return STATEFUL_128_ARCHITECTURE if cell_memory == RECURRENT_CELL_MEMORY else STATELESS_ARCHITECTURE
 
-
-def normalize_chemical_communication_architecture(architecture: str | None) -> str:
-    architecture = architecture or CELL_OWNED_PROJECTION_ARCHITECTURE
+def normalize_chemical_communication_architecture(architecture: str) -> str:
     if architecture not in CHEMICAL_COMMUNICATION_ARCHITECTURES:
         raise ValueError(
             f"unknown chemical communication architecture {architecture!r}; "
@@ -71,41 +62,24 @@ def normalize_chemical_communication_architecture(architecture: str | None) -> s
         )
     return architecture
 
-
-def resolve_chemical_communication_architecture(
-    architecture: str | None, decay: float = 0.0
-) -> str:
-    """Infer the lifecycle used by checkpoints created before it was tagged."""
-    if architecture is None:
-        architecture = (
-            PERSISTENT_ENVIRONMENT_ARCHITECTURE
-            if decay > 0.0
-            else CELL_OWNED_PROJECTION_ARCHITECTURE
-        )
+def resolve_chemical_communication_architecture(architecture: str) -> str:
     return normalize_chemical_communication_architecture(architecture)
-
 
 def policy_hidden_dim(architecture: str) -> int:
     return 64 if normalize_architecture(architecture) == STATEFUL_ARCHITECTURE else 128
 
-
 def policy_input_dim(num_channels: int, architecture: str) -> int:
     return 3 * num_channels + 6 + (PRIVATE_STATE_DIM if policy_has_recurrence(architecture) else 0)
 
-
-def policy_heads(num_channels: int, architecture: str = STATELESS_ARCHITECTURE) -> tuple[PolicyHead, ...]:
+def policy_heads(num_channels: int, architecture: str = CONFIG["run"]["policyArchitecture"]) -> tuple[PolicyHead, ...]:
     architecture = normalize_architecture(architecture)
     sizes: dict[str, int] = {
         "chemical": num_channels,
-        "heading": 2,
-        "anisotropy": 1,
-        "division": 1,
-        "growthDirection": 2,
+        "growthVector": 2,
     }
     if policy_has_recurrence(architecture):
         sizes.update({"stateDelta": PRIVATE_STATE_DIM, "stateGate": PRIVATE_STATE_DIM})
-    else:
-        sizes["color"] = 3
+    sizes["color"] = 3
     heads: list[PolicyHead] = []
     for name, size in sizes.items():
         raw = _CONFIG["heads"][name]
@@ -126,21 +100,18 @@ def policy_heads(num_channels: int, architecture: str = STATELESS_ARCHITECTURE) 
         )
     return tuple(heads)
 
-
 def trunk_initialization() -> tuple[float, float]:
     trunk = _CONFIG["trunk"]
     return float(trunk["weightGain"]), float(trunk["biasJitter"])
 
-
 def _xavier_bound(fan_in: int, fan_out: int, gain: float) -> float:
     return gain * np.sqrt(6.0 / float(fan_in + fan_out))
-
 
 def random_flat_policy_weights(
     num_channels: int,
     hidden_dim: int,
     rng: np.random.Generator,
-    architecture: str = STATELESS_ARCHITECTURE,
+    architecture: str = CONFIG["run"]["policyArchitecture"],
 ) -> np.ndarray:
     """Create the canonical fc1w/fc1b/fc2w/fc2b flat GPU layout."""
     architecture = normalize_architecture(architecture)
@@ -166,9 +137,8 @@ def random_flat_policy_weights(
         [fc1w.ravel(), fc1b, *(w.ravel() for w in head_weights), *head_biases]
     ).astype(np.float32)
 
-
 def mutation_scale_vector(
-    num_channels: int, hidden_dim: int, architecture: str = STATELESS_ARCHITECTURE
+    num_channels: int, hidden_dim: int, architecture: str = CONFIG["run"]["policyArchitecture"]
 ) -> np.ndarray:
     """Per-parameter multiplier for the CLI's global mutation sigma."""
     architecture = normalize_architecture(architecture)
@@ -183,8 +153,7 @@ def mutation_scale_vector(
     chunks.extend(np.full(head.size, head.mutation_scale) for head in heads)
     return np.concatenate(chunks).astype(np.float32)
 
-
-def mutation_scales(architecture: str = STATELESS_ARCHITECTURE) -> dict[str, float]:
+def mutation_scales(architecture: str = CONFIG["run"]["policyArchitecture"]) -> dict[str, float]:
     """Human/metadata-friendly summary of the fixed scale buckets."""
     return {
         "trunk": float(_CONFIG["trunk"]["mutationScale"]),

@@ -1,0 +1,179 @@
+{
+  "settings": {
+    "output": "/tmp/pressure-burst",
+    "densities": [
+      1,
+      4
+    ],
+    "divisors": [
+      1,
+      2,
+      4
+    ],
+    "macros": 120,
+    "capacity": 4096,
+    "sample_ticks": 4,
+    "damping": 0.0
+  },
+  "reference_dt": 1.5625e-05,
+  "material": {
+    "E": 10000,
+    "nu": 0.2,
+    "hardening": 3,
+    "elasticity": 0.5,
+    "fluidity": 0,
+    "growth_rate": 120,
+    "growth_axis": [
+      1,
+      0
+    ]
+  },
+  "runs": [
+    {
+      "name": "density-1_dt-1",
+      "density": 1,
+      "dt": 1.5625e-05,
+      "first_inversion_time": 0.0471875,
+      "first_capacity_time": 0.0455625,
+      "checkpoint_time": 0.0454375,
+      "max_kinetic_jump_before_inversion": 14537.247085658088,
+      "peak_speed": 37.78296400953206,
+      "samples": 4096,
+      "elapsed_seconds": 10.06050087499898
+    },
+    {
+      "name": "density-1_dt-2",
+      "density": 1,
+      "dt": 7.8125e-06,
+      "first_inversion_time": 0.0485,
+      "first_capacity_time": 0.0455625,
+      "checkpoint_time": 0.0454375,
+      "max_kinetic_jump_before_inversion": 14142.239077322523,
+      "peak_speed": 37.76238479787698,
+      "samples": 4096,
+      "elapsed_seconds": 11.139928707969375
+    },
+    {
+      "name": "density-1_dt-4",
+      "density": 1,
+      "dt": 3.90625e-06,
+      "first_inversion_time": 0.05075,
+      "first_capacity_time": 0.0455625,
+      "checkpoint_time": 0.0454375,
+      "max_kinetic_jump_before_inversion": 14133.159373026274,
+      "peak_speed": 37.75651673122422,
+      "samples": 4096,
+      "elapsed_seconds": 13.384279833000619
+    },
+    {
+      "name": "density-4_dt-1",
+      "density": 4,
+      "dt": 1.5625e-05,
+      "first_inversion_time": 0.0499375,
+      "first_capacity_time": 0.0460625,
+      "checkpoint_time": 0.0459375,
+      "max_kinetic_jump_before_inversion": 15715.612749082999,
+      "peak_speed": 40.827938472071395,
+      "samples": 16384,
+      "elapsed_seconds": 14.332364000030793
+    },
+    {
+      "name": "density-4_dt-2",
+      "density": 4,
+      "dt": 7.8125e-06,
+      "first_inversion_time": 0.050875000000000004,
+      "first_capacity_time": 0.0460625,
+      "checkpoint_time": 0.0459375,
+      "max_kinetic_jump_before_inversion": 15625.303320779338,
+      "peak_speed": 40.889325758426224,
+      "samples": 16384,
+      "elapsed_seconds": 16.865388332982548
+    },
+    {
+      "name": "density-4_dt-4",
+      "density": 4,
+      "dt": 3.90625e-06,
+      "first_inversion_time": 0.0575,
+      "first_capacity_time": 0.0460625,
+      "checkpoint_time": 0.045875,
+      "max_kinetic_jump_before_inversion": 15619.210180236298,
+      "peak_speed": 40.95303619746571,
+      "samples": 16384,
+      "elapsed_seconds": 24.142698124982417
+    }
+  ],
+  "replays": [
+    {
+      "density": 1,
+      "divisor": 1,
+      "relative_energy_change": 5.743025624349585e-05,
+      "max_relative_energy": 5.743025624349585e-05,
+      "kinetic_change": 35275.495391283366,
+      "elastic_change": -35192.18165689263,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 1,
+      "divisor": 2,
+      "relative_energy_change": -7.417503584117302e-05,
+      "max_relative_energy": 0.0,
+      "kinetic_change": 35059.9857952401,
+      "elastic_change": -35167.59108274403,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 1,
+      "divisor": 4,
+      "relative_energy_change": -0.00019571927867423344,
+      "max_relative_energy": 0.0,
+      "kinetic_change": 34851.68559008273,
+      "elastic_change": -35135.614394605334,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 1,
+      "divisor": 8,
+      "relative_energy_change": -0.00035025482472617053,
+      "max_relative_energy": 0.0,
+      "kinetic_change": 34579.28206553817,
+      "elastic_change": -35087.39467629575,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 4,
+      "divisor": 1,
+      "relative_energy_change": 5.7237690394229546e-05,
+      "max_relative_energy": 8.948406803122033e-05,
+      "kinetic_change": 35892.939450590435,
+      "elastic_change": -35801.8734182146,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 4,
+      "divisor": 2,
+      "relative_energy_change": -0.00011532606091080311,
+      "max_relative_energy": 0.0,
+      "kinetic_change": 35604.40995622266,
+      "elastic_change": -35787.895465934176,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 4,
+      "divisor": 4,
+      "relative_energy_change": -0.0003451251419152035,
+      "max_relative_energy": 0.0,
+      "kinetic_change": 35217.24141180681,
+      "elastic_change": -35766.34074008075,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 4,
+      "divisor": 8,
+      "relative_energy_change": -0.0007305560896128105,
+      "max_relative_energy": 0.0,
+      "kinetic_change": 34577.00430021671,
+      "elastic_change": -35739.33010426163,
+      "inverted_triangles": 0
+    }
+  ]
+}

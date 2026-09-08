@@ -11,14 +11,12 @@ import numpy as np
 
 import evolve
 
-
 class RecordingPool:
     def __init__(self) -> None:
         self.calls: list[tuple[int, int]] = []
 
-    def map(self, function, weights, seeds, densities):
-        return [function(weight, seed, density) for weight, seed, density in zip(weights, seeds, densities)]
-
+    def map(self, function, *iterables):
+        return [function(*values) for values in zip(*iterables)]
 
 def check_shared_rotating_seed_batch() -> None:
     args = SimpleNamespace(
@@ -69,7 +67,6 @@ def check_shared_rotating_seed_batch() -> None:
         "[PASS] shared rotating seed batches "
         f"first={first_seeds} second={second[4]} replay_seed={first[2]} replay_density={first[3]}"
     )
-
 
 if __name__ == "__main__":
     check_shared_rotating_seed_batch()

@@ -16,10 +16,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { randomWeights } from "../gpu/agents";
-import type { GenerationRecord, RunSettings, SimulationConfig } from "../gpu/types";
-import { loadDefaultRunSettings, storeRunSettings } from "./settingsStorage";
+import type { TimingEntry, GenerationTiming, GenerationRecord, RunSettings, SimulationConfig } from "../gpu/types";
+import { DEFAULT_RUN_SETTINGS, loadInitialRunSettings } from "./settingsStorage";
 
 export interface GenerationStat {
+  optimizerState?: GenerationRecord["optimizerState"];
+  timing?: GenerationTiming;
   generation: number;
   best: number;
   mean: number;
@@ -29,11 +31,17 @@ export interface GenerationStat {
 
 export interface TrainingSocketState {
   history: GenerationStat[];
+  timingHistory: TimingEntry[];
   latest: SimulationConfig | null;
   configByGeneration: Map<number, SimulationConfig>;
 }
 
-export const EMPTY_STATE: TrainingSocketState = { history: [], latest: null, configByGeneration: new Map() };
+export interface LiveTrainingSocketState extends TrainingSocketState {
+  /** True only while the viewer has an open connection to train_server.py. */
+  serverConnected: boolean;
+}
+
+export const EMPTY_STATE: TrainingSocketState = { history: [], timingHistory: [], latest: null, configByGeneration: new Map() };
 const MAX_HISTORY = 500;
 
 // Never a real generation number (train_server.py's own counter starts
@@ -49,7 +57,7 @@ function placeholderRecord(settings: RunSettings): GenerationRecord {
     worst: NaN,
     allTimeBest: NaN,
     seed: 0,
-    weights: randomWeights(settings.channels, settings.hiddenDim, settings.policyArchitecture ?? "stateless-128"),
+    weights: randomWeights(settings.channels, settings.hiddenDim, settings.policyArchitecture),
   };
 }
 
@@ -62,10 +70,22 @@ function placeholderRecord(settings: RunSettings): GenerationRecord {
 export interface Accumulator {
   settings: RunSettings | null;
   records: Map<number, GenerationRecord>;
+  timings?: Map<number, GenerationTiming>;
 }
 export const EMPTY_ACCUMULATOR: Accumulator = { settings: null, records: new Map() };
 
 export function applySettings(prev: Accumulator, settings: RunSettings): Accumulator {
+  if (settings.growthModelVersion !== DEFAULT_RUN_SETTINGS.growthModelVersion ||
+      settings.densityModelVersion !== DEFAULT_RUN_SETTINGS.densityModelVersion ||
+      settings.domainGeometry !== DEFAULT_RUN_SETTINGS.domainGeometry) {
+    throw new Error("Run schema does not match the current simulation; start a new run.");
+  }
+  for (const key of Object.keys(DEFAULT_RUN_SETTINGS)) {
+    // Optimizer and temporal-scoring metadata may be absent in older
+    // archives and do not affect simulation playback.
+    if (key === "optimizer" || key === "cmaCovariance" || key === "fitnessTemporalAggregation") continue;
+    if (!(key in settings)) throw new Error(`Run settings missing required field: ${key}`);
+  }
   return { ...prev, settings };
 }
 
@@ -79,7 +99,17 @@ export function applyGeneration(prev: Accumulator, message: GenerationRecord): A
     // multi-drop slice dance.
     records.delete(Math.min(...records.keys()));
   }
-  return { ...prev, records };
+  const timings = new Map(prev.timings);
+  if (message.timing) timings.set(message.generation, message.timing);
+  return { ...prev, records, timings };
+}
+
+export function applyHistory(prev: Accumulator, data: { generations: GenerationRecord[]; timings?: TimingEntry[] }): Accumulator {
+  const timings = new Map(prev.timings);
+  for (const entry of data.timings ?? []) {
+    if (!timings.has(entry.generation)) timings.set(entry.generation, entry.timing);
+  }
+  return data.generations.reduce<Accumulator>((acc, message) => applyGeneration(acc, message), { ...prev, timings });
 }
 
 /** The one place settings + every known generation record get merged
@@ -89,10 +119,11 @@ export function applyGeneration(prev: Accumulator, message: GenerationRecord): A
  * applyGeneration() above can stay plain, mechanical reducers. */
 export function deriveState(acc: Accumulator): TrainingSocketState {
   const history: GenerationStat[] = Array.from(acc.records.values())
-    .map((r) => ({ generation: r.generation, best: r.best, mean: r.mean, worst: r.worst, allTimeBest: r.allTimeBest }))
+    .map((r) => ({ generation: r.generation, best: r.best, mean: r.mean, worst: r.worst, allTimeBest: r.allTimeBest, timing: r.timing, optimizerState: r.optimizerState }))
     .sort((a, b) => a.generation - b.generation);
 
-  if (!acc.settings) return { history, latest: null, configByGeneration: new Map() };
+  const timingHistory = Array.from(acc.timings ?? []).map(([generation, timing]) => ({ generation, timing })).sort((a, b) => a.generation - b.generation);
+  if (!acc.settings) return { history, timingHistory, latest: null, configByGeneration: new Map() };
 
   const configByGeneration = new Map<number, SimulationConfig>();
   for (const record of acc.records.values()) {
@@ -113,19 +144,20 @@ export function deriveState(acc: Accumulator): TrainingSocketState {
         // point for it.
         { ...acc.settings, ...placeholderRecord(acc.settings) };
 
-  return { history, latest, configByGeneration };
+  return { history, timingHistory, latest, configByGeneration };
 }
 
-export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocketState {
-  // Seed a randomized placeholder rollout immediately. Browser storage holds
-  // the last settings received from a backend; the bundled fallback covers a
-  // first-ever visit made while the backend is down.
+export function useTrainingSocket(wsUrl: string, apiUrl: string, enabled = true): LiveTrainingSocketState {
+  // Seed a randomized placeholder immediately from either the last settings
+  // supplied by a backend or the shared trainer/viewer defaults.
   const [acc, setAcc] = useState<Accumulator>(() => ({
-    settings: loadDefaultRunSettings(),
+    settings: loadInitialRunSettings(),
     records: new Map(),
   }));
+  const [serverConnected, setServerConnected] = useState(false);
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -134,15 +166,17 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocket
         .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`GET /settings -> ${res.status}`))))
         .then((data: RunSettings) => {
           if (!cancelled) {
-            storeRunSettings(data);
-            setAcc((prev) => applySettings(prev, data));
+            // Validate before scheduling React's updater so failures reach
+            // the fetch catch/retry below rather than throwing during render.
+            const { settings } = applySettings(EMPTY_ACCUMULATOR, data);
+            setAcc((prev) => ({ ...prev, settings }));
           }
         })
         .catch(() => {
           // 503 while _training_loop_body() hasn't reached its own
           // settings assignment yet (see train_server.py's own /settings
           // docstring) — retry rather than give up; this is the ONLY
-          // authoritative source of live-run settings. The cached/fallback
+          // authoritative source of live-run settings. The shared fallback
           // settings keep the viewer usable while this retries; in practice
           // a running backend resolves within one or two attempts (settings
           // are written near the top of the training loop, well before
@@ -156,45 +190,81 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): TrainingSocket
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [apiUrl]);
+  }, [apiUrl, enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     fetch(`${apiUrl}/history`)
       .then((res) => res.json())
-      .then((data: { generations: GenerationRecord[] }) => {
+      .then((data: { generations: GenerationRecord[]; timings?: TimingEntry[] }) => {
         if (cancelled) return;
-        setAcc((prev) => data.generations.reduce((a, message) => applyGeneration(a, message), prev));
+        setAcc((prev) => applyHistory(prev, data));
       })
       .catch((err) => console.error("[trainingSocket] history backfill failed:", err));
     return () => {
       cancelled = true;
     };
-  }, [apiUrl]);
+  }, [apiUrl, enabled]);
 
   useEffect(() => {
-    const ws = new WebSocket(wsUrl);
-    ws.onmessage = (event: MessageEvent<string>) => {
-      let message: GenerationRecord & { type?: string };
-      try {
-        message = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      if (message.type !== "generation") return;
-      setAcc((prev) => applyGeneration(prev, message));
+    if (!enabled) return;
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let hadConnection = false;
+
+    const connect = () => {
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => {
+        if (!cancelled) {
+          setServerConnected(true);
+          if (hadConnection) {
+            fetch(`${apiUrl}/history`).then(res => res.json()).then(data => {
+              if (!cancelled) setAcc(prev => applyHistory(prev, data));
+            }).catch(err => console.error("[trainingSocket] timing/history reconnect failed:", err));
+          }
+          hadConnection = true;
+        }
+      };
+      ws.onmessage = (event: MessageEvent<string>) => {
+        let message: GenerationRecord & { type?: string };
+        try {
+          message = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+        if (message.type !== "generation") return;
+        setAcc((prev) => applyGeneration(prev, message));
+      };
+      ws.onerror = () => {
+        if (!cancelled) setServerConnected(false);
+      };
+      ws.onclose = () => {
+        if (cancelled) return;
+        setServerConnected(false);
+        reconnectTimer = setTimeout(connect, 1000);
+      };
     };
-    ws.onerror = (err) => console.error("[trainingSocket] websocket error:", err);
+    connect();
+
     return () => {
+      cancelled = true;
+      clearTimeout(reconnectTimer);
       // StrictMode double-mount safety: closing a still-CONNECTING socket
       // immediately can throw/warn on some browsers — wait for open first.
-      if (ws.readyState === WebSocket.CONNECTING) {
-        ws.addEventListener("open", () => ws.close());
+      const socket = ws;
+      if (!socket) return;
+      if (socket.readyState === WebSocket.CONNECTING) {
+        socket.addEventListener("open", () => socket.close());
       } else {
-        ws.close();
+        socket.close();
       }
     };
-  }, [wsUrl]);
+  }, [wsUrl, apiUrl, enabled]);
 
-  return useMemo(() => deriveState(acc), [acc]);
+  return useMemo(
+    () => ({ ...deriveState(acc), serverConnected }),
+    [acc, serverConnected]
+  );
 }

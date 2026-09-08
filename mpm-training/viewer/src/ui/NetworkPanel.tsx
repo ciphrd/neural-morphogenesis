@@ -1,7 +1,7 @@
 import type { PointerEvent as ReactPointerEvent } from "react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { evalPolicy, policyWeightsShapeError } from "../gpu/policyEval"
-import { chemicalCommunicationArchitectureFromConfig, policyHasRecurrence, type PhysicsSettings, type PolicyArchitecture, type SimulationConfig, type UpdateRuleWeights } from "../gpu/types"
+import { policyHasRecurrence, type PhysicsSettings, type PolicyArchitecture, type SimulationConfig, type UpdateRuleWeights } from "../gpu/types"
 import { Slider } from "./Slider"
 
 interface NetworkPanelProps {
@@ -11,9 +11,7 @@ interface NetworkPanelProps {
    * picking those three fields apart at every call site. null before
    * the first generation loads. */
   config: SimulationConfig | null
-  /** maxEnvWrite/maxAngularAccel give their output bars' true domains.
-   * Desired heading/growth vectors are normalized for display; anisotropy
-   * and division bias are independent [0,1] targets. */
+
   physics: PhysicsSettings | null
 }
 
@@ -290,8 +288,6 @@ function buildChannelHeatmaps(
   elastic: ManualElasticInput,
   manualChannelCount: number,
   maxEnvWrite: number,
-  maxAngularAccel: number,
-  maxStrafe: number,
   architecture: PolicyArchitecture,
 ): Float32Array[] {
   const res = VECTOR_PAD_HEATMAP_RESOLUTION
@@ -307,7 +303,7 @@ function buildChannelHeatmaps(
         const dx = res > 1 ? -DOMAIN + (2 * DOMAIN * gx) / (res - 1) : 0
         input[channels + c] = dx
         input[2 * channels + c] = dy
-        const result = evalPolicy(input, weights, channels, hiddenDim, maxEnvWrite, maxAngularAccel, maxStrafe, architecture)
+        const result = evalPolicy(input, weights, channels, hiddenDim, maxEnvWrite, architecture)
         grid[gy * res + gx] = result.envWrite[c]
       }
     }
@@ -319,8 +315,8 @@ function buildChannelHeatmaps(
  * particle probe: the first MANUAL_CHANNELS policy-normalized channels are
  * each dialed in by hand here (a square pad for that channel's normalized
  * local-frame gradient, plus a slider for its normalized sensed value), every
- * other input stays at zero, and the whole output (centered chemical
- * env-writes per channel + turn/growth controls + RGB) is evalPolicy()'s (gpu/policyEval.ts,
+ * other input stays at zero, and the whole output (signed chemical
+ * deltas per channel + turn/growth controls + RGB) is evalPolicy()'s (gpu/policyEval.ts,
  * mirroring core/agents.wgsl) own response to THAT exact vector,
  * recomputed live on every pad drag/slider tick — cheap enough (one
  * forward pass, no sweep) to do inline via useMemo, no probe timer
@@ -329,11 +325,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
   const channels = config?.channels ?? 0
   const hiddenDim = config?.hiddenDim ?? 0
   const architecture = config?.policyArchitecture ?? "stateless-128"
-  const cellOwnedChemistry = !config
-    || chemicalCommunicationArchitectureFromConfig(config) === "cell-owned-projection"
   const maxEnvWrite = physics?.maxEnvWrite ?? 1
-  const maxAngularAccel = physics?.maxAngularAccel ?? 1
-  const maxStrafe = physics?.maxStrafe ?? 1
   const elasticInputsEnabled = config?.elasticStrainInputsEnabled ?? false
   const weightsError = config?.weights
     ? policyWeightsShapeError(config.weights, channels, hiddenDim, architecture)
@@ -362,8 +354,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       channels,
       hiddenDim,
       maxEnvWrite,
-      maxAngularAccel,
-      maxStrafe,
       architecture
     )
   }, [
@@ -375,8 +365,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     elastic,
     elasticInputsEnabled,
     maxEnvWrite,
-    maxAngularAccel,
-    maxStrafe,
     architecture,
     weightsError,
   ])
@@ -394,8 +382,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       elasticInputsEnabled ? elastic : { volume: 0, axial: 0, shear: 0 },
       manualChannelCount,
       maxEnvWrite,
-      maxAngularAccel,
-      maxStrafe,
       architecture
     )
   }, [
@@ -408,8 +394,6 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
     elasticInputsEnabled,
     manualChannelCount,
     maxEnvWrite,
-    maxAngularAccel,
-    maxStrafe,
     architecture,
     weightsError,
   ])
@@ -438,7 +422,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       <div className="nn-block">
         <h3>Input</h3>
         <p className="hint">
-          Background: this channel's own {cellOwnedChemistry ? "cell-state delta" : "environment deposit"} output, swept across the pad (its own value + every other
+          Background: this channel's signed chemical delta, swept across the pad (its own value + every other
           channel held as set). Contrast is exaggerated independently per pad
           by stretching its observed min/max across Viridis. This shows
           response shape, not absolute output strength.
@@ -525,7 +509,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           </div>
           <p className="hint">
             {elasticInputsEnabled
-              ? "Normalized heading-relative Hencky strain as received by the policy."
+              ? "Normalized channel-index-3-gradient-frame Hencky strain as received by the policy."
               : "Temporarily unwired: all three policy lanes are forced to zero."}
           </p>
         </div>
@@ -534,7 +518,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
       {output && (
         <>
           <div className="nn-block">
-            <h3>Output — chemical {cellOwnedChemistry ? "Δ" : "deposit"}</h3>
+            <h3>Output — chemical delta</h3>
             <div className="nn-group">
               <span className="nn-group-label">Under particle</span>
               {Array.from({ length: channels }, (_, c) => (
@@ -549,37 +533,23 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           </div>
 
           <div className="nn-block">
-            <h3>Output — growth direction</h3>
+            <h3>Output — local growth vector</h3>
             <div className="nn-group">
               <ActivationBar
-                label="derived turn"
-                value={output.angularAccel}
-                domain={maxAngularAccel}
-              />
-              <ActivationBar label="heading forward" value={output.headingDirection[0]} domain={1} />
-              <ActivationBar label="heading lateral" value={output.headingDirection[1]} domain={1} />
-              <ActivationBar
-                label="direction x"
-                value={output.direction[0]}
+                label="local forward"
+                value={output.growthVector[0]}
                 domain={1}
               />
               <ActivationBar
-                label="direction y"
-                value={output.direction[1]}
+                label="local lateral"
+                value={output.growthVector[1]}
                 domain={1}
               />
               <ActivationBar
-                label="anisotropy"
-                value={output.anisotropy}
+                label="magnitude"
+                value={Math.min(1, Math.hypot(...output.growthVector))}
                 domain={1}
               />
-              <ActivationBar
-                label="division bias"
-                value={output.divisionBias}
-                domain={1}
-              />
-              <ActivationBar label="steering x (forward)" value={output.steering[0]} domain={1} />
-              <ActivationBar label="steering y (lateral)" value={output.steering[1]} domain={1} />
             </div>
           </div>
 
@@ -599,15 +569,15 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           )}
 
           <div className="nn-block">
-            <h3>{policyHasRecurrence(architecture) ? "Derived color — zero private state" : "Output — cell color"}</h3>
+            <h3>Output — cell color [0, 1]</h3>
             <div
               aria-label="Current neural RGB color"
               style={{
                 height: "2rem",
-                borderRadius: "0.35rem",
+                borderRadius: 0,
                 backgroundColor: `rgb(${output.color.map((v) => Math.round(v * 255)).join(",")})`,
                 border: "1px solid rgba(255,255,255,0.18)",
-                marginBottom: "0.5rem",
+                marginBottom: "0.25rem",
               }}
             />
             <div className="nn-group">

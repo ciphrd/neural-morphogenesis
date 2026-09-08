@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import wgpu
 
-
 def pick_device(verbose: bool = True) -> wgpu.GPUDevice:
     """Requests a high-performance adapter and its default device,
     logging which backend actually got picked — on this project's own
@@ -31,4 +30,7 @@ def pick_device(verbose: bool = True) -> wgpu.GPUDevice:
     required_features = (
         [float32_filterable] if float32_filterable in adapter.features else []
     )
+    for feature in ("timestamp-query", "timestamp-query-inside-encoders", "float32-blendable"):
+        if feature in adapter.features:
+            required_features.append(feature)
     return adapter.request_device_sync(required_features=required_features)

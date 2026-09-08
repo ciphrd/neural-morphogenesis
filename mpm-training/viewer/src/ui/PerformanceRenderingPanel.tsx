@@ -1,5 +1,6 @@
+import { ToggleButton } from "./ToggleButton"
 import { useState } from "react"
-import type { FieldMode, ParticleRenderMode } from "../gpu/render"
+import type { FieldMode, ParticleShape, ParticleColorMode } from "../gpu/render"
 import {
   cellMemoryFromConfig,
   chemicalCommunicationArchitectureFromConfig,
@@ -61,14 +62,8 @@ export function PerformanceRenderingPanel({ config, value, onChange }: Performan
         <div className="physics-panel-body performance-rendering-body">
           <div className="slider-row">
             <span>Zoom</span>
-            <label className="auto-zoom-toggle">
-              <input
-                type="checkbox"
-                checked={value.autoZoom.enabled}
-                onChange={(event) => patch("autoZoom", { ...value.autoZoom, enabled: event.target.checked })}
-              />
-              Auto
-            </label>
+            <ToggleButton label="Auto zoom" checked={value.autoZoom.enabled}
+              onChange={(enabled) => patch("autoZoom", { ...value.autoZoom, enabled })} />
             <Slider
               min={0.25}
               max={8}
@@ -82,14 +77,8 @@ export function PerformanceRenderingPanel({ config, value, onChange }: Performan
 
           <details className="settings-category">
             <summary>Post-processing</summary>
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={value.bloom.enabled}
-                onChange={(event) => patch("bloom", { ...value.bloom, enabled: event.target.checked })}
-              />
-              Bloom
-            </label>
+            <ToggleButton className="toggle-row" label="Bloom" checked={value.bloom.enabled}
+              onChange={(enabled) => patch("bloom", { ...value.bloom, enabled })} />
             {value.bloom.enabled && (
               <>
                 <RenderSlider label="Bloom intensity" min={0} max={3} step={0.05} value={value.bloom.intensity} display={value.bloom.intensity.toFixed(2)} onChange={(intensity) => patch("bloom", { ...value.bloom, intensity })} />
@@ -103,67 +92,31 @@ export function PerformanceRenderingPanel({ config, value, onChange }: Performan
 
           <RenderSlider label="Particle size" min={0.25} max={16} step={0.25} value={value.particleRadiusPx} display={`${value.particleRadiusPx.toFixed(2)}px`} onChange={(next) => patch("particleRadiusPx", next)} />
           <label className="slider-row">
-            <span>Particles</span>
-            <select className="select" value={value.particleRenderMode} onChange={(event) => patch("particleRenderMode", event.target.value as ParticleRenderMode)}>
-              <option value="dots-white">Dots (white)</option>
-              <option value="dots-neural-color">Dots (neural RGB)</option>
-              <option value="dots-internal-state">Chemical memory</option>
-              <option value="dots-chemical-levels">Chemical levels</option>
-              <option value="dots-boundary-value">Boundary value</option>
-              <option value="dots-activation">Dots (neurons)</option>
-              <option value="dots-activation-translucent">Dots (translucent neurons)</option>
-              <option value="directional-arrows">Directional triangles</option>
+            <span>Shape</span>
+            <select className="select" value={value.particleShape} onChange={(event) => patch("particleShape", event.target.value as ParticleShape)}>
+              <option value="dot">Dots</option><option value="triangle">Triangles</option><option value="domain">Material domain</option>
             </select>
           </label>
-
-          {value.particleRenderMode === "dots-white" && (
-            <RenderSlider label="Dots alpha" min={0} max={1} step={0.01} value={value.whiteDotsAlpha} display={value.whiteDotsAlpha.toFixed(2)} onChange={(next) => patch("whiteDotsAlpha", next)} />
-          )}
-          {value.particleRenderMode === "dots-neural-color" && (
-            <RenderSlider label="Neural RGB alpha" min={0} max={1} step={0.01} value={value.neuralColorAlpha} display={value.neuralColorAlpha.toFixed(2)} onChange={(next) => patch("neuralColorAlpha", next)} />
-          )}
-          {(value.particleRenderMode === "dots-internal-state" || value.particleRenderMode === "dots-chemical-levels") && (
-            <>
-              <RenderSlider
-                label={value.particleRenderMode === "dots-internal-state" ? "Chemical memory alpha" : "Chemical levels alpha"}
-                min={0}
-                max={1}
-                step={0.01}
-                value={value.internalStateAlpha}
-                display={value.internalStateAlpha.toFixed(2)}
-                onChange={(next) => patch("internalStateAlpha", next)}
-              />
-              <div className="channel-window-control">
-                <div className="channel-window-label">
-                  <span>Channels</span>
-                  <span>{value.internalStateChannelStart}–{value.internalStateChannelStart + 2}</span>
-                </div>
-                <ChannelWindowSlider
-                  channels={value.particleRenderMode === "dots-internal-state" ? 8 : (config?.channels ?? 8)}
-                  value={value.internalStateChannelStart}
-                  onChange={(next) => patch("internalStateChannelStart", next)}
-                  channelKind={value.particleRenderMode === "dots-internal-state" ? "chemical memory" : "chemical levels"}
-                />
-              </div>
-              {value.particleRenderMode === "dots-internal-state" && (
-                <RenderSlider label="Opponent subtraction" min={0} max={1} step={0.01} value={value.chemicalMemoryOpponentSubtraction} display={value.chemicalMemoryOpponentSubtraction.toFixed(2)} onChange={(next) => patch("chemicalMemoryOpponentSubtraction", next)} />
-              )}
-              {value.particleRenderMode === "dots-internal-state" && !cellMemoryEnabled && <p className="hint">Cell memory is disabled, so these channels remain zero.</p>}
-              {value.particleRenderMode === "dots-chemical-levels" && !chemicalLevelsActive && <p className="hint">Chemical levels are inactive in persistent-environment mode.</p>}
-            </>
-          )}
-          {value.particleRenderMode === "dots-boundary-value" && (
-            <>
-              <RenderSlider label="Boundary g0" min={0.001} max={0.1} step={0.001} value={value.boundaryGradientScale} display={value.boundaryGradientScale.toFixed(3)} onChange={(next) => patch("boundaryGradientScale", next)} />
-              <p className="hint">Cell color shows boundary-gradient strength from dark blue to yellow.</p>
-            </>
-          )}
-          {value.particleRenderMode === "dots-activation-translucent" && (
-            <RenderSlider label="Activation alpha" min={0} max={1} step={0.01} value={value.activationAlpha} display={value.activationAlpha.toFixed(2)} onChange={(next) => patch("activationAlpha", next)} />
-          )}
-          {value.particleRenderMode === "directional-arrows" && (
-            <RenderSlider label="Triangle size" min={8} max={80} step={1} value={value.growthAxisLengthPx} display={`${value.growthAxisLengthPx}px`} onChange={(next) => patch("growthAxisLengthPx", next)} />
-          )}
+          <label className="slider-row">
+            <span>Color</span>
+            <select className="select" value={value.particleColorMode} onChange={(event) => patch("particleColorMode", event.target.value as ParticleColorMode)}>
+              <option value="white">White</option><option value="neural-color">Neural RGB</option>
+              <option value="growth-magnitude">Growth magnitude</option><option value="neural-memory">Neural memory</option>
+              <option value="chemical-memory">Chemical memory</option><option value="boundary-value">Boundary value</option>
+              <option value="neurons">Neurons</option>
+            </select>
+          </label>
+          <RenderSlider label="Opacity" min={0} max={1} step={0.01} value={value.particleAlpha} display={value.particleAlpha.toFixed(2)} onChange={(next) => patch("particleAlpha", next)} />
+          <ToggleButton className="toggle-row" label="Domain" checked={value.domainVisible} onChange={(next) => patch("domainVisible", next)} />
+          <ToggleButton className="toggle-row" label="Alignment lines" checked={value.directionalLineVisible} onChange={(next) => patch("directionalLineVisible", next)} />
+          <ToggleButton className="toggle-row" label="Growth lines" checked={value.growthLineVisible} onChange={(next) => patch("growthLineVisible", next)} />
+          {(value.particleColorMode === "neural-memory" || value.particleColorMode === "chemical-memory") && <>
+            <ChannelWindowSlider channels={value.particleColorMode === "neural-memory" ? 8 : (config?.channels ?? 8)} value={value.internalStateChannelStart} onChange={(next) => patch("internalStateChannelStart", next)} />
+            <RenderSlider label="Opponent subtraction" min={0} max={1} step={0.01} value={value.chemicalMemoryOpponentSubtraction} display={value.chemicalMemoryOpponentSubtraction.toFixed(2)} onChange={(next) => patch("chemicalMemoryOpponentSubtraction", next)} />
+            {value.particleColorMode === "neural-memory" && !cellMemoryEnabled && <p className="hint">Enable cell memory to use these channels.</p>}
+            {value.particleColorMode === "chemical-memory" && !chemicalLevelsActive && <p className="hint">Chemical memory is inactive in environment mode.</p>}
+          </>}
+          {value.particleColorMode === "boundary-value" && <RenderSlider label="Boundary scale" min={0.001} max={0.1} step={0.001} value={value.boundaryGradientScale} display={value.boundaryGradientScale.toFixed(3)} onChange={(next) => patch("boundaryGradientScale", next)} />}
 
           <label className="slider-row">
             <span>Background</span>
@@ -178,13 +131,14 @@ export function PerformanceRenderingPanel({ config, value, onChange }: Performan
               <option value="morphology">Policy morphology</option>
               <option value="substrate">Substrate</option>
               <option value="growth">Growth (cividis)</option>
+              <option value="orientation">Orientation</option>
               <option value="gradient">Boundary gradient</option>
             </select>
           </label>
           {value.fieldMode === "morphology" && (
             <>
-              <label className="checkbox-row"><input type="checkbox" checked={value.morphologyGradientVisible} onChange={(event) => patch("morphologyGradientVisible", event.target.checked)} />Show morphology gradient (R/G)</label>
-              <label className="checkbox-row"><input type="checkbox" checked={value.morphologyDensityVisible} onChange={(event) => patch("morphologyDensityVisible", event.target.checked)} />Show morphology density (B)</label>
+              <ToggleButton className="toggle-row" label="Show morphology gradient (R/G)" checked={value.morphologyGradientVisible} onChange={(next) => patch("morphologyGradientVisible", next)} />
+              <ToggleButton className="toggle-row" label="Show morphology density (B)" checked={value.morphologyDensityVisible} onChange={(next) => patch("morphologyDensityVisible", next)} />
             </>
           )}
           {value.fieldMode === "substrate" && config && (
@@ -193,6 +147,8 @@ export function PerformanceRenderingPanel({ config, value, onChange }: Performan
               <ChannelWindowSlider channels={config.channels} value={value.substrateChannelStart} onChange={(next) => patch("substrateChannelStart", next)} />
             </div>
           )}
+          <ToggleButton className="toggle-row" label="Zero substrate is black" checked={value.substrateZeroIsBlack} onChange={(next) => patch("substrateZeroIsBlack", next)} />
+          <ToggleButton className="toggle-row" label="Zero boundary gradient is black" checked={value.boundaryGradientZeroIsBlack} onChange={(next) => patch("boundaryGradientZeroIsBlack", next)} />
           <RenderSlider label="Accent" min={-2} max={2} step={0.01} value={value.accent} display={value.accent.toFixed(2)} onChange={(next) => patch("accent", next)} />
           {value.fieldMode === "gradient" && (
             <>

@@ -1,5 +1,11 @@
 # Particle-density model
 
+Model version 4 derives seed spacing as twice the density-resolved refinement
+spacing. Initial lattice cells are divided into two triangle samples, each with
+material weight 0.5. The initial-count setting and lattice area formulas below
+refer to seed cells; actual initial sample count is twice that count, while total
+material is unchanged. See `GROWTH_MODEL.md` for initialization and capacity rules.
+
 ## Goal
 
 Make one policy and one semantic simulation preset produce comparable
@@ -23,7 +29,7 @@ s = particle_spacing / reference_particle_spacing = 1 / sqrt(q)
 The current preset is the reference:
 
 ```text
-reference_split_displacement h0 = 0.0027
+reference_growth_sample_spacing h0 = 0.0108
 reference density multiplier q = 1
 ```
 
@@ -43,7 +49,8 @@ and do not expose a large domain-dependent number to the user.
 `SPLIT_DISPLACEMENT` then becomes a derived value:
 
 ```text
-split_displacement(q) = h0 / sqrt(q) = h0 * s
+growth_sample_spacing(q) = h0 / sqrt(q) = h0 * s
+seed_spacing(q) = 2 * growth_sample_spacing(q)
 ```
 
 The particle cap and seeded population should describe the same initial and
@@ -68,7 +75,7 @@ These quantities are lengths measured in cell spacings. They scale with `s`.
 
 | Quantity | Proposed resolution | Current reference ratio |
 | --- | --- | --- |
-| daughter separation | `h0 * s` | `1.0 h` |
+| emitted-sample radial spacing | `h0 * s` | `1.0 h` |
 | repulsion splat sigma | `repulsion_radius_in_cells * h` world units | `1.481 h` |
 | directional deposit offset, if restored | `deposit_offset_in_cells * h` | current `DEPOSIT_DISTANCE` is inactive |
 
@@ -94,10 +101,11 @@ particle-sampled signal, represented population N/q, and controlled spatial
 spread across q={0.5,1,2}.
 
 Density model v3 also removes particle-slot identity from the branching
-process. Initial headings and division thresholds sample a rollout-seeded
-128x128 world-space random field. Nearby numerical samples therefore share the
-same macroscopic stochastic forcing at every q. After a conservative split,
-both daughters advance a lineage-generation counter so the next threshold is a
+process. Growth thresholds and the fallback emission direction used only where
+the channel-3 gradient is flat sample a rollout-seeded 128x128 world-space random
+field. Nearby numerical samples therefore share the same macroscopic stochastic
+forcing at every q. After material emission, the source and new samples
+advance a lineage-generation counter so the next threshold is a
 new spatial-field layer rather than a child-slot hash.
 
 This intentionally changes stochastic q=1 trajectories relative to model v2;
@@ -169,31 +177,24 @@ the resolver, not be confused with the material model.
 
 ## Density-normalized scoring and diagnostics
 
-The live evolutionary fitness is currently the rotation-aligned symmetric
-Chamfer distance in `alignment.py`, not the raster distance. Its mean
-nearest-neighbor reductions do not grow directly with particle count, but the
-sampling error will still change with density and must be included in the
-cross-density baselines.
+The live evolutionary fitness uses the bounded weighted-occupancy raster in
+`raster.py`. Per-particle weight is `1/q`; its summed density is calibrated from
+the target mass and expected represented particle count before being saturated
+with `1 - exp(-weighted_density / reference)`. Static cross-density baselines
+must still verify residual sampling error.
 
-The debug-image path is density-sensitive: candidate particles are sum-splatted
-into its raster at unit amplitude. Increasing `q` therefore increases raster
-brightness even when the represented world-space shape is unchanged.
-
-The candidate raster should accept a per-particle area weight:
+Candidate particles carry a per-particle represented-area weight:
 
 ```text
 candidate_weight = 1 / q
 ```
 
-and use `candidate_weight * kernel` in the sum scatter. This preserves the
-current `q=1` debug raster exactly. The outside-shape penalty in that path is
-already a mean over particles, so it is much less sensitive to particle count;
-it should still be tested with deliberately nonuniform sampling.
+and use `candidate_weight * kernel` in the sum scatter. The bounded occupancy
+and aligned debug raster use the same weighting. The outside-shape penalty is
+already a mean over particles and remains comparable across densities.
 
-If Chamfer proves to favor one sampling density after the static-shape baseline,
-an eventual stronger live fitness would compare bounded occupancy fields, for
-example `1 - exp(-weighted_density / reference)`. Do not change the live fitness
-until the measurements show that this is necessary.
+Selection compares that bounded field at multiple scales and scores missing
+coverage, spill, boundary disagreement, and crowding separately.
 
 ## Morphology-density sensing
 
@@ -213,7 +214,7 @@ The density multiplier cannot be arbitrary. A valid range must satisfy all of
 these constraints:
 
 - enough particles per occupied MPM grid cell for stable continuum sampling;
-- split spacing and repulsion sigma resolved by the repulsion field;
+- growth-sample spacing and repulsion sigma resolved by the repulsion field;
 - chemical sigma resolved by the chemical field and not dominated by its
   one-texel minimum footprint;
 - bounded Gaussian kernels not materially truncated;
@@ -224,7 +225,7 @@ these constraints:
 At the reference preset:
 
 ```text
-MPM cell width / h             = 0.015625 / 0.0027 = 5.79
+MPM cell width / h             = 0.0078125 / 0.0027 = 2.89
 repulsion texel width / h      = (1 / 512) / 0.0027 = 0.72
 chemical texel width / h       = (1 / 256) / 0.0027 = 1.45
 morphology blur sigma / h      = 0.01 / 0.0027 = 3.70

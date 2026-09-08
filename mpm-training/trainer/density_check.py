@@ -8,13 +8,12 @@ import numpy as np
 
 from density import (
     DENSITY_MODEL_VERSION,
+    INITIAL_PACKING_SPACING_SCALE,
     DensityReference,
     resolve_density,
     validate_multiplier,
 )
 from raster import rasterize_points_sum
-from agents_gpu import _SPATIAL_HEADING_DOMAIN, _spatial_uniform01_batch
-
 
 def main() -> None:
     cases = json.loads((Path(__file__).parent.parent / "core" / "density_cases.json").read_text())
@@ -25,27 +24,27 @@ def main() -> None:
         chemical_field_n=ref["chemicalFieldN"],
         particle_mass=ref["particleMass"],
         particle_volume=ref["particleVolume"],
-        deposit_sigma=ref["depositSigma"],
         chemical_gradient_input_scale=ref["chemicalGradientInputScale"],
         repulsion_strength=ref["repulsionStrength"],
         repulsion_max_delta=ref["repulsionMaxDelta"],
     )
     fields = (
-        "spacing", "particle_mass", "particle_volume", "deposit_sigma", "chemical_projection_weight", "splat_radius",
+        "spacing", "initial_spacing", "particle_mass", "particle_volume", "splat_radius",
         "chemical_gradient_input_scale", "repulsion_strength", "repulsion_max_delta",
     )
     json_names = {
+        "initial_spacing": "initialSpacing",
         "particle_mass": "particleMass",
         "particle_volume": "particleVolume",
-        "deposit_sigma": "depositSigma",
-        "chemical_projection_weight": "chemicalProjectionWeight",
         "splat_radius": "splatRadius",
         "chemical_gradient_input_scale": "chemicalGradientInputScale",
         "repulsion_strength": "repulsionStrength",
         "repulsion_max_delta": "repulsionMaxDelta",
     }
+    resolved_cases = []
     for expected in cases["cases"]:
         actual = resolve_density(reference, expected["multiplier"])
+        resolved_cases.append(actual)
         assert actual.model_version == DENSITY_MODEL_VERSION
         assert actual.initial_particles == expected["initialParticles"]
         assert actual.particle_cap == expected["particleCap"]
@@ -53,11 +52,19 @@ def main() -> None:
             key = json_names.get(field, field)
             assert np.isclose(getattr(actual, field), expected[key], rtol=1e-12, atol=1e-12), (field, actual, expected)
 
+    seed_areas = np.array([
+        case.initial_particles
+        * (case.initial_spacing * INITIAL_PACKING_SPACING_SCALE) ** 2
+        * np.sqrt(3) / 2
+        for case in resolved_cases
+    ])
+    np.testing.assert_allclose(seed_areas, seed_areas[0], rtol=1e-12)
+
     q1 = resolve_density(reference, 1.0)
-    assert q1.spacing == 0.0027
-    assert q1.deposit_sigma == 0.324
-    assert q1.splat_radius == 0.004
-    for invalid in (0.0, -1.0, float("nan"), float("inf"), 0.25, 4.0):
+    assert q1.spacing == 0.0108
+    assert q1.initial_spacing == 0.0216
+    assert q1.splat_radius == 0.016
+    for invalid in (0.0, -1.0, float("nan"), float("inf"), 0.125, 8.0):
         try:
             validate_multiplier(invalid)
         except ValueError:
@@ -72,17 +79,7 @@ def main() -> None:
         particle_weight=0.5,
     )
     assert np.allclose(reference_raster, doubled_raster)
-    spatial_points = np.array([
-        [0.5001, 0.5001], [0.5002, 0.5003], [0.72, 0.31], [0.5001, 0.5001],
-    ], dtype=np.float32)
-    spatial = _spatial_uniform01_batch(12345, spatial_points, _SPATIAL_HEADING_DOMAIN)
-    # Same spatial cell/value regardless of numerical particle identity/order.
-    assert spatial[0] == spatial[1] == spatial[3]
-    permuted = _spatial_uniform01_batch(12345, spatial_points[[2, 0]], _SPATIAL_HEADING_DOMAIN)
-    assert permuted[0] == spatial[2] and permuted[1] == spatial[0]
-    assert _spatial_uniform01_batch(54321, spatial_points[:1], _SPATIAL_HEADING_DOMAIN)[0] != spatial[0]
-    print("[PASS] density resolver, q=1 constants, spatial RNG, and validation")
-
+    print("[PASS] density resolver, q=1 constants, and validation")
 
 if __name__ == "__main__":
     main()

@@ -9,7 +9,8 @@
 // comment on why that path needs server.fs.allow).
 //
 // Repulsion (clearDensity/splatDensity/densityToTexture/applyRepulsion,
-// all from ../../../core/repulsion.wgsl) runs FIRST each substep —
+// all from ../../../core/repulsion.wgsl) runs FIRST each substep when
+// repulsion is enabled —
 // applyRepulsion nudges velocity from THIS substep's own freshly-built
 // density field, at each particle's own exact position, so the push
 // reaches the grid through the very same substep's own P2G->gridUpdate
@@ -45,12 +46,16 @@ import p2gSrc from "../../../core/p2g.wgsl?raw";
 import gridUpdateSrc from "../../../core/gridUpdate.wgsl?raw";
 import g2pSrc from "../../../core/g2p.wgsl?raw";
 import repulsionSrc from "../../../core/repulsion.wgsl?raw";
+import densityQuadsSrc from "../../../core/densityQuads.wgsl?raw";
 import morphologySrc from "../../../core/morphology.wgsl?raw";
-import coreConstants from "../../../core/constants.json";
+import coreConstantsConfig from "../../../core/config.json";
+const coreConstants = coreConstantsConfig.simulation;
+const MORPHOLOGY_MAX_RADIUS = coreConstants.MORPHOLOGY_MAX_RADIUS;
 import { templateShader } from "./shaderTemplate";
-import { ceilDiv, writeFloat32 } from "./gpuUtil";
+import { ceilDiv, flatDispatch2D, writeFloat32 } from "./gpuUtil";
 import type { SceneData } from "./types";
 
+export const GROWTH_FIELD_CHANNELS: number = coreConstants.GROWTH_FIELD_CHANNELS;
 export const GRID_N: number = coreConstants.GRID_N;
 export const DX: number = coreConstants.DX;
 // Exported — gpu/fieldDiagnostics.wgsl's own scatterDiagnostics pass
@@ -58,35 +63,32 @@ export const DX: number = coreConstants.DX;
 // math (see that file's own module docstring).
 export const INV_DX: number = coreConstants.INV_DX;
 const DT: number = coreConstants.DT;
-export const PARTICLE_MASS: number = coreConstants.PARTICLE_MASS;
-export const PARTICLE_VOLUME: number = coreConstants.VOL;
+export const PARTICLE_MASS: number = coreConstantsConfig.run.particleMass;
+export const PARTICLE_VOLUME: number = coreConstantsConfig.run.particleVolume;
 export const MAX_PARTICLES: number = coreConstants.MAX_PARTICLES;
-// core/constants.json's own FIELD_N is the repulsion density texture's
+// core/config.json's own FIELD_N is the repulsion density texture's
 // resolution — renamed here to avoid collision with the chemical field's
 // own (unrelated) FIELD_N in gpu/environment.ts.
-export const REPULSION_FIELD_N: number = coreConstants.FIELD_N;
+export const REPULSION_FIELD_N: number = coreConstants.MORPHOLOGY_FIELD_N;
 
-const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
+export const NODE_COUNT = (GRID_N + 1) * (GRID_N + 1);
 const WORKGROUP = 64;
 const FIELD_WORKGROUP = 16;
 const GRID_ACCUM_CHANNELS = 3;
-// growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-// growthFrameHeading, appearanceScale, padding — 48 bytes.
-const REST_FIELDS = 12;
+export const REST_FIELDS = 16;
 
 /** Expands a flat (count,) Jp array into ParticleRest's own
- * tensor-rest layout, defaulting growthF=I and cycleActive=0.
- * Mirrors trainer/mpm_core.py's own
- * _pack_rest() exactly — exists so loadScene()/resetGrowthBuffers() keep
- * their original scalar-Jp signatures and rng.ts's own seedBlob() never
- * has to know the underlying buffer grew two siblings. */
+ * tensor-rest layout, defaulting growthF=I and growthVectorX=0.
+ * Mirrors trainer/mpm_core.py's _pack_rest. Scene loading overlays explicit
+ * triangle domains and material weights after generic reset defaults. */
 function packRest(jp: Float32Array): Float32Array {
   const packed = new Float32Array(jp.length * REST_FIELDS);
   for (let i = 0; i < jp.length; i++) {
     packed[i * REST_FIELDS] = 1;
     packed[i * REST_FIELDS + 3] = 1;
     packed[i * REST_FIELDS + 4] = jp[i];
-    packed[i * REST_FIELDS + 10] = 1;
+
+    packed[i * REST_FIELDS + 15] = 1;
   }
   return packed;
 }
@@ -102,10 +104,10 @@ function lameParams(e: number, nu: number): [number, number] {
   return [mu0, lambda0];
 }
 
-const SNOW_YIELD_LOW = 1.0 - 2.5e-2;
-const SNOW_YIELD_HIGH = 1.0 + 7.5e-3;
-const WIDE_YIELD_LOW = 0.5;
-const WIDE_YIELD_HIGH = 2.0;
+const SNOW_YIELD_LOW = coreConstants.SNOW_YIELD_LOW;
+const SNOW_YIELD_HIGH = coreConstants.SNOW_YIELD_HIGH;
+const WIDE_YIELD_LOW = coreConstants.WIDE_YIELD_LOW;
+const WIDE_YIELD_HIGH = coreConstants.WIDE_YIELD_HIGH;
 
 function yieldBounds(elasticity: number): [number, number] {
   const t = Math.min(Math.max(elasticity, 0.0), 1.0);
@@ -136,6 +138,8 @@ export class MpmCore {
   // velocity. Neither is written by anything outside MpmCore itself.
   readonly gridAccum: GPUBuffer;
   readonly gridVel: GPUBuffer;
+  /** Continuous growth tensor/vector accumulator on the MPM node grid. */
+  readonly growthField: GPUBuffer;
 
   private readonly gravityUniform: GPUBuffer;
   // Public — fieldDiagnostics.wgsl's own scatterDiagnostics pass needs
@@ -171,7 +175,6 @@ export class MpmCore {
   private readonly gridUpdateBindGroup: GPUBindGroup;
   private readonly g2pPipeline: GPUComputePipeline;
   private g2pBindGroup: GPUBindGroup;
-  private readonly chemicalStateFallback: GPUBuffer;
 
   private readonly clearDensityPipeline: GPUComputePipeline;
   private readonly clearDensityBindGroup: GPUBindGroup;
@@ -181,16 +184,19 @@ export class MpmCore {
   private readonly densityToTextureBindGroup: GPUBindGroup;
   private readonly applyRepulsionPipeline: GPUComputePipeline;
   private readonly applyRepulsionBindGroup: GPUBindGroup;
+  private readonly densityRenderPipeline?: GPURenderPipeline;
+  private readonly densityRenderBindGroup?: GPUBindGroup;
   private readonly morphologyHorizontalPipeline: GPUComputePipeline;
   private readonly morphologyVerticalPipeline: GPUComputePipeline;
   private readonly morphologyHorizontalBindGroup: GPUBindGroup;
   private readonly morphologyVerticalBindGroup: GPUBindGroup;
 
   private readonly gridDispatch: number;
-  private readonly densityClearDispatch: number;
+  private readonly densityClearDispatch: [number, number];
   private readonly densityTextureDispatch: [number, number];
 
   private _activeCount = 0;
+  private repulsionEnabled = false;
 
   get activeCount(): number {
     return this._activeCount;
@@ -204,18 +210,16 @@ export class MpmCore {
     this.velocities = device.createBuffer({ size: MAX_PARTICLES * 2 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.F = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.C = device.createBuffer({ size: MAX_PARTICLES * 4 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.rest = device.createBuffer({ size: MAX_PARTICLES * REST_FIELDS * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.chemicalStateFallback = device.createBuffer({
-      size: 256 + MAX_PARTICLES * 112,
-      usage: GPUBufferUsage.STORAGE,
-    });
+    this.rest = device.createBuffer({ size: MAX_PARTICLES * REST_FIELDS * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
 
     this.gridAccum = device.createBuffer({ size: NODE_COUNT * GRID_ACCUM_CHANNELS * f32, usage: GPUBufferUsage.STORAGE });
-    this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE });
+    this.gridVel = device.createBuffer({ size: NODE_COUNT * 2 * f32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.growthField = device.createBuffer({
+      size: NODE_COUNT * GROWTH_FIELD_CHANNELS * f32,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
 
     this.gravityUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    // 64 bytes — fourteen material/growth/fluidity floats plus padding,
-    // matching ../../../core/p2g.wgsl's and g2p.wgsl's identical Material.
     this.materialUniform = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.activeCountUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.dampingUniform = device.createBuffer({ size: 4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -272,7 +276,7 @@ export class MpmCore {
         { binding: 5, resource: { buffer: this.gridVel } },
         { binding: 6, resource: { buffer: this.activeCountUniform } },
         { binding: 7, resource: { buffer: this.materialUniform } },
-        { binding: 8, resource: { buffer: this.chemicalStateFallback } },
+        { binding: 9, resource: { buffer: this.growthField } },
       ],
     });
 
@@ -284,7 +288,7 @@ export class MpmCore {
     this.densityTexture = device.createTexture({
       size: [REPULSION_FIELD_N, REPULSION_FIELD_N, 1],
       format: "r32float",
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
     });
     const densityTextureView = this.densityTexture.createView();
     this.morphologyTexture = device.createTexture({
@@ -297,7 +301,7 @@ export class MpmCore {
       format: "r32float",
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
-    this.morphologyParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.morphologyParamsUniform = device.createBuffer({ size: 16 + 16 * Math.ceil((2 * MORPHOLOGY_MAX_RADIUS + 1) / 4), usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.splatParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.repulsionParamsUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
@@ -319,6 +323,7 @@ export class MpmCore {
         { binding: 1, resource: { buffer: this.positions } },
         { binding: 2, resource: { buffer: this.activeCountUniform } },
         { binding: 3, resource: { buffer: this.splatParamsUniform } },
+        { binding: 8, resource: { buffer: this.rest } },
       ],
     });
 
@@ -343,10 +348,14 @@ export class MpmCore {
       ],
     });
 
-    this.densityClearDispatch = ceilDiv(texelCount, WORKGROUP);
+    this.densityClearDispatch = flatDispatch2D(
+      texelCount,
+      WORKGROUP,
+      device.limits.maxComputeWorkgroupsPerDimension,
+    );
     this.densityTextureDispatch = [ceilDiv(REPULSION_FIELD_N, FIELD_WORKGROUP), ceilDiv(REPULSION_FIELD_N, FIELD_WORKGROUP)];
 
-    const morphologyModule = device.createShaderModule({ code: templateShader(morphologySrc, { FIELD_N: REPULSION_FIELD_N }) });
+    const morphologyModule = device.createShaderModule({ code: templateShader(morphologySrc, { FIELD_N: REPULSION_FIELD_N, MORPHOLOGY_WEIGHT_VECTORS: Math.ceil((2 * MORPHOLOGY_MAX_RADIUS + 1) / 4) }) });
     this.morphologyHorizontalPipeline = device.createComputePipeline({ layout: "auto", compute: { module: morphologyModule, entryPoint: "blurHorizontal" } });
     this.morphologyVerticalPipeline = device.createComputePipeline({ layout: "auto", compute: { module: morphologyModule, entryPoint: "blurVerticalAndNormalize" } });
     this.morphologyHorizontalBindGroup = device.createBindGroup({
@@ -366,20 +375,65 @@ export class MpmCore {
       ],
     });
 
+    if (device.features.has("float32-blendable")) {
+      const module = device.createShaderModule({ code: templateShader(densityQuadsSrc, { FIELD_N: REPULSION_FIELD_N }) });
+      const blend: GPUBlendComponent = { srcFactor: "one", dstFactor: "one", operation: "add" };
+      this.densityRenderPipeline = device.createRenderPipeline({
+        layout: "auto", vertex: { module, entryPoint: "vertexMain" },
+        fragment: { module, entryPoint: "fragmentMain", targets: [{ format: "r32float", blend: { color: blend, alpha: blend }, writeMask: GPUColorWrite.RED }] },
+        primitive: { topology: "triangle-list" },
+      });
+      this.densityRenderBindGroup = device.createBindGroup({
+        layout: this.densityRenderPipeline.getBindGroupLayout(0), entries: [
+          { binding: 0, resource: { buffer: this.positions } },
+          { binding: 1, resource: { buffer: this.rest } },
+          { binding: 2, resource: { buffer: this.splatParamsUniform } },
+        ],
+      });
+    }
+
   }
 
   loadScene(scene: SceneData): void {
     if (scene.count > MAX_PARTICLES) throw new Error(`scene.count (${scene.count}) exceeds MAX_PARTICLES (${MAX_PARTICLES})`);
+    if (scene.domain && scene.domainGeometry !== "triangle-vertices") {
+      throw new Error('Explicit domains require domainGeometry="triangle-vertices"');
+    }
+    const rest = packRest(scene.Jp);
+    if (scene.quadratureWeights) {
+      if (scene.quadratureWeights.length !== scene.count) throw new Error("Scene weight count mismatch");
+      for (let i = 0; i < scene.count; i++) {
+        const weight = scene.quadratureWeights[i];
+        if (!Number.isFinite(weight) || weight <= 0) throw new Error("Scene weights must be finite and positive");
+        rest[i*REST_FIELDS+15] = weight;
+      }
+    }
+    if (scene.domain) {
+      if (scene.domain.length !== scene.count*6) throw new Error("Scene domain count mismatch");
+      for (let i = 0; i < scene.count; i++) {
+        const vertices = scene.domain.subarray(i*6,i*6+6);
+        if (vertices.some(v => !Number.isFinite(v) || v < 0 || v >= 1)) throw new Error("Vertices must be canonical positions in [0,1)");
+        const delta = (v: number) => v-Math.floor(v+.5);
+        const h = [delta(vertices[2]-vertices[0]),delta(vertices[4]-vertices[0]),
+                   delta(vertices[3]-vertices[1]),delta(vertices[5]-vertices[1])];
+        const f = scene.F.subarray(i*4, i*4+4);
+        const det = h[0]*h[3]-h[1]*h[2];
+        const detF = f[0]*f[3]-f[1]*f[2];
+        if (!Number.isFinite(det) || !Number.isFinite(detF) || det <= 0 || detF <= 0) {
+          throw new Error("Scene triangles and deformation must have finite positive determinants");
+        }
+        rest.set(vertices, i*REST_FIELDS+8);
+        rest[i*REST_FIELDS+14] = .5*det/detF;
+        if (!Number.isFinite(rest[i*REST_FIELDS+14]) || rest[i*REST_FIELDS+14] <= 0) {
+          throw new Error("Scene rest areas must be finite and positive");
+        }
+      }
+    }
     writeFloat32(this.device, this.positions, 0, scene.positions);
     writeFloat32(this.device, this.velocities, 0, scene.velocities);
     writeFloat32(this.device, this.F, 0, scene.F);
     writeFloat32(this.device, this.C, 0, scene.C);
-    // Scene API deliberately unchanged: callers still hand over a flat
-    // (count,) Jp array (rng.ts's own seedBlob()). Expanded here into
-    // ParticleRest's tensor layout — growthF=I and cycleActive=0 are
-    // exactly right for
-    // genuinely-seeded particles, which have no ramp to serve.
-    writeFloat32(this.device, this.rest, 0, packRest(scene.Jp));
+    writeFloat32(this.device, this.rest, 0, rest);
     this.setActiveCount(scene.count);
   }
 
@@ -416,6 +470,23 @@ export class MpmCore {
     return result;
   }
 
+  async readTriangles(): Promise<Float32Array> {
+    const count = this._activeCount;
+    if (!count) return new Float32Array();
+    const size = count * REST_FIELDS * 4;
+    const staging = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyBufferToBuffer(this.rest, 0, staging, 0, size);
+      this.device.queue.submit([encoder.finish()]);
+      await staging.mapAsync(GPUMapMode.READ);
+      const rest = new Float32Array(staging.getMappedRange());
+      const triangles = new Float32Array(count * 6);
+      for (let i = 0; i < count; i++) triangles.set(rest.subarray(i*REST_FIELDS+8, i*REST_FIELDS+14), i*6);
+      return triangles;
+    } finally { staging.destroy(); }
+  }
+
   /** Read an evenly distributed subset of active positions for inexpensive
    * viewer diagnostics such as auto-framing. */
   async readPositionSamples(maxSamples: number): Promise<Float32Array> {
@@ -449,25 +520,12 @@ export class MpmCore {
     return result;
   }
 
-  /** Zero/identity-fills velocities/F/C/ParticleRest for [0, maxActive) — call once
-   * per rollout, after loadScene(). Slots beyond this rollout's own
-   * particle count are destined to become real particles via growth
-   * (core/agents.wgsl's own agentStep() — see that file's own module
-   * docstring for why every claimable slot must be initialized before
-   * division overwrites it with inherited live state), and need to
-   * start from the exact same fresh MPM state seedBlob() already gives
-   * every genuinely-seeded particle — WITHOUT this, a slot THIS
-   * rollout's own growth later claims could inherit a PREVIOUS rollout's
-   * stale, possibly heavily-deformed state instead (loadScene() only
-   * ever writes the HEAD of each buffer, up to that rollout's own
-   * particle count, never the tail a previous rollout's growth may have
-   * touched — and unlike the Python trainer, this object is reused
-   * across every rollout a session ever plays, not rebuilt). Safe
-   * (idempotent) to run over indices loadScene() ALSO just wrote —
-   * seedBlob()'s own velocity/F/C/ParticleRest defaults are identical —
-   * so this can unconditionally cover the whole [0, maxActive) range
-   * rather than needing to carefully skip the already-real particles. */
+  /** Clear stale state in all claimable slots before loading a new scene.
+   * Always call BEFORE loadScene: generic defaults erase seeded triangle
+   * domains and half weights if applied afterward. */
   resetGrowthBuffers(maxActive: number): void {
+    // Chemistry transports before the first physics step after restart.
+    writeFloat32(this.device, this.gridVel, 0, new Float32Array(NODE_COUNT * 2));
     writeFloat32(this.device, this.velocities, 0, new Float32Array(maxActive * 2));
     const identityF = new Float32Array(maxActive * 4);
     for (let i = 0; i < maxActive; i++) {
@@ -498,7 +556,7 @@ export class MpmCore {
     writeFloat32(this.device, this.velocities, i * 2 * 4, new Float32Array([0, 0]));
     writeFloat32(this.device, this.F, i * 4 * 4, new Float32Array([1, 0, 0, 1]));
     writeFloat32(this.device, this.C, i * 4 * 4, new Float32Array([0, 0, 0, 0]));
-    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, new Float32Array([1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0]));
+    writeFloat32(this.device, this.rest, i * REST_FIELDS * 4, packRest(new Float32Array([1])));
     this.setActiveCount(this._activeCount + 1);
     return true;
   }
@@ -520,15 +578,13 @@ export class MpmCore {
     hardening: number,
     elasticity: number,
     growthDuration: number,
-    growthMax: number,
     growthAnisotropy: number,
     substepsPerMacro: number,
     particleMass: number = PARTICLE_MASS,
     particleVolume: number = PARTICLE_VOLUME,
-    growthCompressionStart: number = 0.10,
-    growthCompressionStop: number = 0.10,
-    growthCompressionFeedback: number = 1.0,
-    fluidity: number = 0,
+    growthCompressionStart: number = coreConstantsConfig.run.growthCompressionStart,
+    growthCompressionStop: number = coreConstantsConfig.run.growthCompressionStop,
+    growthCompressionFeedback: number = coreConstantsConfig.run.growthCompressionFeedback,
   ): void {
     if (!(particleMass > 0) || !(particleVolume > 0)) {
       throw new Error("particle mass and volume must be positive");
@@ -553,30 +609,11 @@ export class MpmCore {
       0,
       new Float32Array([
         mu0, lambda0, hardening, yieldLow,
-        yieldHigh, growthRate, growthMax, growthAnisotropy,
+        yieldHigh, growthRate, growthAnisotropy,
         particleMass, particleVolume,
         growthCompressionStart, growthCompressionStop, growthCompressionFeedback,
-        fluidity,
       ])
     );
-  }
-
-  /** Supplies the persistent per-cell chemistry used by fluidity. */
-  setChemicalStateBuffer(buffer: GPUBuffer): void {
-    this.g2pBindGroup = this.device.createBindGroup({
-      layout: this.g2pPipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.positions } },
-        { binding: 1, resource: { buffer: this.velocities } },
-        { binding: 2, resource: { buffer: this.F } },
-        { binding: 3, resource: { buffer: this.C } },
-        { binding: 4, resource: { buffer: this.rest } },
-        { binding: 5, resource: { buffer: this.gridVel } },
-        { binding: 6, resource: { buffer: this.activeCountUniform } },
-        { binding: 7, resource: { buffer: this.materialUniform } },
-        { binding: 8, resource: { buffer } },
-      ],
-    });
   }
 
   setSplatRadius(sigma: number): void {
@@ -586,25 +623,49 @@ export class MpmCore {
   /** `maxDelta` is core/repulsion.wgsl's own RepulsionParams.maxDelta —
    * see that field's own comment for what it bounds and why. */
   setRepulsionStrength(strength: number, maxDelta: number): void {
+    this.repulsionEnabled = Number.isFinite(strength) && strength !== 0;
     writeFloat32(this.device, this.repulsionParamsUniform, 0, new Float32Array([
       strength, maxDelta, 0, 0,
     ]));
   }
 
   setMorphology(sigmaDomain: number, densityReference: number): void {
-    writeFloat32(this.device, this.morphologyParamsUniform, 0, new Float32Array([sigmaDomain, densityReference, 0, 0]));
+    const data = new Float32Array(this.morphologyParamsUniform.size / 4);
+    const sigma = Math.max(sigmaDomain * REPULSION_FIELD_N, 0);
+    const radius = Math.min(Math.ceil(3 * sigma), MORPHOLOGY_MAX_RADIUS);
+    data[0] = radius; data[1] = densityReference;
+    const weights = Array.from({length: 2 * radius + 1}, (_, i) => {
+      const offset = i - radius;
+      return sigma > 1e-5 ? Math.exp(-.5 * offset * offset / Math.max(sigma * sigma, 1e-8)) : Number(offset === 0);
+    });
+    const sum = weights.reduce((a, b) => a + b, 0);
+    weights.forEach((w, i) => { data[4 + MORPHOLOGY_MAX_RADIUS - radius + i] = w / sum; });
+    writeFloat32(this.device, this.morphologyParamsUniform, 0, data);
   }
 
   /** Rebuilds policy occupancy from current positions once per controller tick. */
   encodeMorphology(encoder: GPUCommandEncoder): void {
     const particleDispatch = ceilDiv(this._activeCount, WORKGROUP);
-    const passes: [GPUComputePipeline, GPUBindGroup, [number, number?]][] = [
-      [this.clearDensityPipeline, this.clearDensityBindGroup, [this.densityClearDispatch]],
-      [this.splatDensityPipeline, this.splatDensityBindGroup, [particleDispatch]],
-      [this.densityToTexturePipeline, this.densityToTextureBindGroup, this.densityTextureDispatch],
+    const passes: [GPUComputePipeline, GPUBindGroup, [number, number?]][] = [];
+    if (this.densityRenderPipeline && this.densityRenderBindGroup) {
+      const pass = encoder.beginRenderPass({ colorAttachments: [{
+        view: this.densityTexture.createView(), loadOp: "clear", storeOp: "store", clearValue: [0, 0, 0, 0],
+      }] });
+      pass.setPipeline(this.densityRenderPipeline);
+      pass.setBindGroup(0, this.densityRenderBindGroup);
+      pass.draw(6, this._activeCount * 9);
+      pass.end();
+    } else {
+      passes.push(
+        [this.clearDensityPipeline, this.clearDensityBindGroup, this.densityClearDispatch],
+        [this.splatDensityPipeline, this.splatDensityBindGroup, [particleDispatch]],
+        [this.densityToTexturePipeline, this.densityToTextureBindGroup, this.densityTextureDispatch],
+      );
+    }
+    passes.push(
       [this.morphologyHorizontalPipeline, this.morphologyHorizontalBindGroup, this.densityTextureDispatch],
       [this.morphologyVerticalPipeline, this.morphologyVerticalBindGroup, this.densityTextureDispatch],
-    ];
+    );
     for (const [pipeline, bindGroup, dispatch] of passes) {
       const pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);
@@ -621,29 +682,32 @@ export class MpmCore {
   encodeSteps(encoder: GPUCommandEncoder, substeps: number): void {
     const particleDispatch = ceilDiv(this._activeCount, WORKGROUP);
     for (let i = 0; i < substeps; i++) {
-      let pass = encoder.beginComputePass();
-      pass.setPipeline(this.clearDensityPipeline);
-      pass.setBindGroup(0, this.clearDensityBindGroup);
-      pass.dispatchWorkgroups(this.densityClearDispatch);
-      pass.end();
+      let pass: GPUComputePassEncoder;
+      if (this.repulsionEnabled) {
+        pass = encoder.beginComputePass();
+        pass.setPipeline(this.clearDensityPipeline);
+        pass.setBindGroup(0, this.clearDensityBindGroup);
+        pass.dispatchWorkgroups(...this.densityClearDispatch);
+        pass.end();
 
-      pass = encoder.beginComputePass();
-      pass.setPipeline(this.splatDensityPipeline);
-      pass.setBindGroup(0, this.splatDensityBindGroup);
-      pass.dispatchWorkgroups(particleDispatch);
-      pass.end();
+        pass = encoder.beginComputePass();
+        pass.setPipeline(this.splatDensityPipeline);
+        pass.setBindGroup(0, this.splatDensityBindGroup);
+        pass.dispatchWorkgroups(particleDispatch);
+        pass.end();
 
-      pass = encoder.beginComputePass();
-      pass.setPipeline(this.densityToTexturePipeline);
-      pass.setBindGroup(0, this.densityToTextureBindGroup);
-      pass.dispatchWorkgroups(...this.densityTextureDispatch);
-      pass.end();
+        pass = encoder.beginComputePass();
+        pass.setPipeline(this.densityToTexturePipeline);
+        pass.setBindGroup(0, this.densityToTextureBindGroup);
+        pass.dispatchWorkgroups(...this.densityTextureDispatch);
+        pass.end();
 
-      pass = encoder.beginComputePass();
-      pass.setPipeline(this.applyRepulsionPipeline);
-      pass.setBindGroup(0, this.applyRepulsionBindGroup);
-      pass.dispatchWorkgroups(particleDispatch);
-      pass.end();
+        pass = encoder.beginComputePass();
+        pass.setPipeline(this.applyRepulsionPipeline);
+        pass.setBindGroup(0, this.applyRepulsionBindGroup);
+        pass.dispatchWorkgroups(particleDispatch);
+        pass.end();
+      }
 
       pass = encoder.beginComputePass();
       pass.setPipeline(this.clearGridPipeline);
@@ -679,6 +743,7 @@ export class MpmCore {
     this.rest.destroy();
     this.gridAccum.destroy();
     this.gridVel.destroy();
+    this.growthField.destroy();
     this.gravityUniform.destroy();
     this.materialUniform.destroy();
     this.activeCountUniform.destroy();

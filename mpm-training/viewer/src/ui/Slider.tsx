@@ -20,15 +20,15 @@
 
 const TRACK_HEIGHT_PX = 4
 const TRACK_COLOR = "#2a2a2a"
-const TRACK_RADIUS_PX = 2
+const TRACK_RADIUS_PX = 0
 
 const FILL_COLOR = "#7dd3fc" // this app's own existing accent — see style.css's own .is-active/.run-picker-item rules
 const FILL_COLOR_DISABLED = "#4a4a4a"
 
-const THUMB_SIZE_PX = 13
+const THUMB_SIZE_PX = 10
 const THUMB_COLOR = "#7dd3fc"
 const THUMB_COLOR_DISABLED = "#6a6a6a"
-const THUMB_BORDER_COLOR = "#0d0d0d" // matches .controls/.controls-right's own panel background, see style.css
+const THUMB_BORDER_COLOR = "#000000" // matches .controls/.controls-right's own panel background, see style.css
 const THUMB_BORDER_WIDTH_PX = 2
 
 // Total hit height for the invisible real <input> — generous relative

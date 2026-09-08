@@ -1,33 +1,16 @@
-"""FastAPI server that runs evolve.py's training loop in the background
-and hands each generation's stats + winning weights to any connected
-browser over a websocket — same overall shape as envnca/train_server.py
-and trainer/backend/train_server.py, ported to this project's own
-evolve.py/training_sim.py.
-
-Unlike envnca's frontend (which replays the winning rollout itself,
-entirely client-side, on WebGPU), mpm-training's own viewer is still
-unbuilt (../viewer/README.md's own staging is explicitly blocked on,
-among other things, this exact server's message schema) — so for now
-this server *also* renders each generation's winning rollout server-side
-(debug_images.py) and serves those PNGs directly: the "collect renders
-of the best of each generation so the frontend can parse these" fallback
-envnca/train_server.py already uses for its own debug snapshots, just
-promoted here from a debug aid to the primary way progress is shown. The
-`weights` broadcast on every message is still included (see
-latest_generation_message below) so a future client-side replay isn't
-blocked on anything this server would need to change.
-
-Usage:
-    python train_server.py --target circle --population 16 --generations 100 --port 8003
-"""
+"""FastAPI training server: stream generation results and serve run settings, archives, and diagnostic images."""
 from __future__ import annotations
+from config import CONFIG
+from evolve import checkpoint_metadata
 
 import asyncio
 import json
 import os
 import shutil
 import traceback
+from time import perf_counter
 from contextlib import asynccontextmanager
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator, Optional
@@ -38,40 +21,41 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-from agents_gpu import AgentsGPU
+from chemical_channels import profiles_to_wire
 from debug_images import save_grown_image, save_raster_image
 from density import DENSITY_MODEL_VERSION
 from device import pick_device
-from environment_gpu import EnvironmentGPU
 from evolve import (
+    CAPTURE_OFFSETS,
     CHECKPOINTS_DIR,
     RASTER_EXTENT,
     build_arg_parser,
     finalize_density_configuration,
     finalize_policy_configuration,
     get_weights,
-    rollout,
+    initialize_search,
+    shape_settings,
+    report_shape_capacity,
     run_generation,
     set_weights,
+    validate_fitness_configuration,
 )
-from mpm_core import PARTICLE_MASS, VOL, MpmCore
+from mpm_core import PARTICLE_MASS, VOL
 from parallel_workers import build_pool
+from rollout_snapshot import RolloutSnapshot
 from policy_parameters import mutation_scales, policy_hidden_dim
-from raster import build_target_distance_field, build_target_raster, training_raster_distance
+from raster import build_target_distance_field
+from domain_fitness import FITNESS_MODEL_VERSION, target_mask
 from simulation_settings import (
-    ANGULAR_DAMPING,
-    BOUNDARY_TANGENT_MIN_GRADIENT,
     CHEM_CHANNELS,
+    CHEMICAL_CHANNEL_PROFILES,
     CHEMICAL_GRADIENT_INPUT_SCALE,
-    CHIRALITY,
+    CHEMICAL_VALUE_INPUT_MULTIPLIER,
     COMMUNICATION_SPEED,
     DAMPING_LOSS_FRACTION,
     DECAY,
-    DEPOSIT_DISTANCE,
     DEPOSIT_RATE,
-    DEPOSIT_SIGMA,
-    DIVISION_COOLDOWN,
-    DIVISION_DIRECTIONALITY,
+    NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
     ELASTIC_STRAIN_SCALE,
     ELASTIC_STRAIN_INPUTS_ENABLED,
     FIELD_N,
@@ -81,33 +65,32 @@ from simulation_settings import (
     GROWTH_COMPRESSION_START,
     GROWTH_COMPRESSION_STOP,
     GROWTH_ANISOTROPY_AUTHORITY,
-    GROWTH_MAX,
+    GROWTH_MODEL_VERSION,
     INTERNAL_STATE_SPEED,
-    MASS_RAMP_MACRO_STEPS,
     MORPHOLOGY_BLUR_SIGMA,
     MORPHOLOGY_DENSITY_REFERENCE,
     NEURAL_UPDATES_PER_MACRO,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
-    MATERIAL_FLUIDITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
-    MAX_ACCEL,
-    MAX_ANGULAR_ACCEL,
-    MAX_ANGULAR_VELOCITY,
     MAX_ENV_WRITE,
-    MAX_STRAFE,
     MPM_ENABLED,
     REPULSION_MAX_DELTA,
     REPULSION_STRENGTH,
     SPLAT_RADIUS,
-    SPLIT_DISPLACEMENT,
+    SAMPLE_SPACING,
 )
-from targets import TARGETS_DIR, load_target
+from targets import TargetShape, available_targets, load_target
 from update_rule import UpdateRule
 
 parser = build_arg_parser()
-parser.add_argument("--port", type=int, default=8003)
+parser.add_argument("--port", type=int, default=CONFIG["server"]["port"])
+parser.add_argument(
+    "--serve-only",
+    action="store_true",
+    help="serve the saved current run and archives without starting training or initializing a GPU",
+)
 
 # `args`/`wgpu_device`/`target`/`target_raster`/`target_distance_field`
 # are set by _setup() below, called only under `if __name__ ==
@@ -139,18 +122,21 @@ target = None
 target_raster = None
 target_distance_field = None
 
-
 def _setup() -> None:
     global args, wgpu_device, target, target_raster, target_distance_field
     args = parser.parse_args()
+
+    if args.serve_only:
+        _restore_current_run()
+        return
+
     finalize_policy_configuration(args)
 
-    if not 1 <= args.elites <= args.population:
-        raise SystemExit("--elites must be between 1 and --population")
     if args.seeds_per_candidate < 1:
         raise SystemExit("--seeds-per-candidate must be at least 1")
-    if not 1 <= args.initial_particles <= args.particles:
-        raise SystemExit("--initial-particles must be between 1 and --particles")
+    if not 1 <= args.initial_particles <= args.particles // 2:
+        raise SystemExit("--initial-particles seed cells must fit floor(--particles/2)")
+    validate_fitness_configuration(args)
     if args.growth_steps is not None and not 0 <= args.growth_steps <= args.macro_steps:
         raise SystemExit("--growth-steps must be between 0 and --macro-steps")
     finalize_density_configuration(args)
@@ -159,18 +145,10 @@ def _setup() -> None:
 
     # Fixed for this server's lifetime (no target-switching endpoint).
     target = load_target(args.target)
-    # Fixed for this server's lifetime too — precomputed once rather than
-    # recomputing the same thing on every rollout's own fitness-scoring
-    # call AND on every _save_generation_images() debug-raster build (see
-    # that function's own docstring). Passed to build_pool() below (baked
-    # into every worker's own globals — see parallel_workers.py) for the
-    # first use, and used directly, here in the main process, for the
-    # second.
-    target_raster = build_target_raster(
-        target.points, args.raster_resolution, RASTER_EXTENT, args.raster_sigma, half_size=target.texel_size() / 2.0
-    )
+    report_shape_capacity(args, target)
+    # Fixed target fields are shared with workers and preview rendering.
+    target_raster = target_mask(target, args.raster_resolution)
     target_distance_field = build_target_distance_field(target_raster)
-
 
 # Every generation's own message (stats + weights) is appended here as it
 # happens, so a browser tab that connects mid-run — or reconnects after a
@@ -214,7 +192,6 @@ RUNS_DIR = CHECKPOINTS_DIR / "runs"
 IMAGES_DIR = CHECKPOINTS_DIR / "generation_images"
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-
 def _archive_previous_run() -> None:
     """Moves the previous run's history.jsonl/best_meta.json/weight
     checkpoints (plus IMAGES_DIR, if it has anything in it) into a
@@ -254,63 +231,42 @@ def _archive_previous_run() -> None:
 
     print(f"[train_server] archived previous run to {archive_dir}")
 
-
-def _save_generation_images(
-    generation: int, winner_weights: np.ndarray, winner_seed: int, winner_density: float,
-    core: MpmCore, agents: AgentsGPU, environment: EnvironmentGPU
-) -> None:
-    """Three PNGs per generation — see debug_images.py's own module
-    docstring for what each one is and why: `..._grown.png` (raw,
-    un-aligned positions), `..._target.png` (the target's own raster,
-    fixed all run), and `..._agents.png` (this winner's own positions,
-    rotated to whichever pose raster.py's own rotation search actually
-    scored it under — literally the same raster training picked this
-    candidate on, meant to sit next to `..._target.png` for a direct
-    visual check). Re-runs the winner's rollout (same weights + seed
-    run_generation already scored it with, so this reproduces the
-    identical final snapshot — see rollout()'s own docstring on
-    reproducibility) since fitnesses from the population loop don't
-    carry final positions along with them."""
+def _save_generation_images(generation: int, snapshot: RolloutSnapshot) -> dict[str, object] | None:
+    """Save the worker's selected scoring pose without replay or rescoring."""
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-
-    _, positions = rollout(
-        winner_weights,
-        target,
-        target_raster,
-        target_distance_field,
-        args,
-        winner_seed,
-        core,
-        agents,
-        environment,
-        return_positions=True,
-        density_multiplier=winner_density,
-    )
-    _, agent_raster = training_raster_distance(
-        positions,
-        target.points,
-        target_raster,
-        target_distance_field,
-        args.raster_resolution,
-        RASTER_EXTENT,
-        args.raster_sigma,
-        outside_weight=args.outside_weight,
-        track_best_raster=True,
-        particle_weight=1.0 / winner_density,
-    )
+    evaluation = snapshot.evaluation
+    positions = snapshot.positions
+    agent_raster, breakdown = evaluation.raster, evaluation.breakdown
 
     prefix = f"gen_{generation:05d}"
-    save_grown_image(positions, target.points, IMAGES_DIR / f"{prefix}_grown.png")
-    save_raster_image(target_raster, IMAGES_DIR / f"{prefix}_target.png")
+    save_grown_image(positions, target.overlay_points(args.raster_resolution), IMAGES_DIR / f"{prefix}_grown.png")
+    target_rgb = evaluation.target_color_raster
+    if target_rgb is None:
+        target_rgb = target.color_raster(args.raster_resolution)
+    comparison_mask = evaluation.target_raster if evaluation.target_raster is not None else target_raster
+    save_raster_image(target_rgb if target_rgb is not None else comparison_mask, IMAGES_DIR / f"{prefix}_target.png")
     if agent_raster is not None:
-        save_raster_image(agent_raster, IMAGES_DIR / f"{prefix}_agents.png")
-
+        save_raster_image(evaluation.color_raster if evaluation.color_raster is not None else agent_raster, IMAGES_DIR / f"{prefix}_agents.png")
+    if target_rgb is not None and evaluation.color_raster is not None:
+        save_raster_image(np.abs(evaluation.color_raster-target_rgb), IMAGES_DIR / f"{prefix}_diff.png")
+    if breakdown is None:
+        return None
+    return {
+        "total": breakdown.total,
+        "coverage": breakdown.coverage,
+        "spill": breakdown.spill,
+        "boundary": breakdown.boundary,
+        "crowding": breakdown.crowding,
+        "color": breakdown.color,
+        "angle": breakdown.angle,
+        "rollout": snapshot.diagnostics,
+    }
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    asyncio.create_task(training_loop())
+    if not args.serve_only:
+        asyncio.create_task(training_loop())
     yield
-
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
@@ -328,6 +284,32 @@ latest_generation_message: Optional[dict] = None
 # until it has). GET /settings below serves this directly.
 settings: Optional[dict] = None
 
+def _restore_current_run() -> None:
+    """Restore read-only API state without mutating checkpoints or touching the GPU."""
+    global settings, latest_generation_message, target
+
+    if not SETTINGS_PATH.is_file():
+        print("[train_server] serve-only mode: no saved current run; serving archives")
+        return
+
+    try:
+        settings = json.loads(SETTINGS_PATH.read_text())
+    except (json.JSONDecodeError, OSError) as error:
+        raise SystemExit(f"cannot read saved run settings from {SETTINGS_PATH}: {error}") from error
+
+    embedded_target = settings.get("shapeTarget")
+    if embedded_target and "mask" in embedded_target:
+        target = TargetShape.from_wire(embedded_target)
+    else:
+        target_name = settings.get("target")
+        if target_name not in available_targets():
+            raise SystemExit(f"saved run refers to unavailable target {target_name!r}")
+        target = load_target(target_name)
+
+    generations = _history_payload(HISTORY_PATH)["generations"]
+    latest_generation_message = generations[-1] if generations else None
+    generation = latest_generation_message["generation"] if latest_generation_message else "none"
+    print(f"[train_server] serve-only mode: restored current run (latest generation: {generation})")
 
 async def broadcast(message: dict) -> None:
     dead = set()
@@ -337,7 +319,6 @@ async def broadcast(message: dict) -> None:
         except Exception:
             dead.add(ws)
     connections.difference_update(dead)
-
 
 async def training_loop() -> None:
     """Thin wrapper so a crash anywhere in the run is loud and visible
@@ -350,7 +331,6 @@ async def training_loop() -> None:
         print("[train_server] training_loop crashed — training has stopped:")
         traceback.print_exc()
 
-
 async def _training_loop_body() -> None:
     global latest_generation_message, settings
 
@@ -358,54 +338,14 @@ async def _training_loop_body() -> None:
     torch.manual_seed(args.seed)
     policy_hidden = policy_hidden_dim(args.policy_architecture)
 
-    # One MpmCore/AgentsGPU/EnvironmentGPU (wgpu pipeline compilation is
-    # real, avoidable overhead — see evolve.py's own module docstring),
-    # used ONLY for _save_generation_images()'s own single-candidate
-    # winner replay below — the hot per-generation path runs on `pool`
-    # instead (see parallel_workers.py's own module docstring for why a
-    # persistent multi-process pool replaced a single reused triple
-    # there). `update_rule` is a CPU-only scratch nn.Module used ONLY for
-    # random weight initialization (below) and checkpoint JSON export
-    # (below) — never a live forward pass, see training_sim.py's own
-    # module docstring.
-    core = MpmCore(wgpu_device)
-    environment = EnvironmentGPU(
-        wgpu_device, CHEM_CHANNELS, FIELD_N, FIELD_N, DECAY, DEPOSIT_RATE,
-        args.chemical_communication_architecture,
-    )
-    agents = AgentsGPU(
-        wgpu_device,
-        core,
-        environment,
-        CHEM_CHANNELS,
-        policy_hidden,
-        MAX_ACCEL,
-        MAX_STRAFE,
-        MAX_ENV_WRITE,
-        MAX_ANGULAR_ACCEL,
-        ANGULAR_DAMPING,
-        MAX_ANGULAR_VELOCITY,
-        CHIRALITY,
-        DEPOSIT_DISTANCE,
-        args.particle_capacity,
-        SPLIT_DISPLACEMENT,
-        DIVISION_COOLDOWN,
-        FRICTION,
-        DEPOSIT_SIGMA,
-        1.0,
-        args.spawn_x,
-        args.spawn_y,
-        policy_architecture=args.policy_architecture,
-        chemical_communication_architecture=args.chemical_communication_architecture,
-    )
     num_workers = args.workers if args.workers is not None else min(os.cpu_count() or 4, args.population)
     # log_device=False — _setup() already logged the "[device] adapter:
     # ..." confirmation once, above, for this process's own wgpu_device;
     # see build_pool()'s own docstring for why it would otherwise repeat
     # that exact line a second time.
+    population, optimizer = initialize_search(args, rng)
     pool = build_pool(num_workers, args.particle_capacity, target, target_raster, target_distance_field, args, log_device=False)
     update_rule = UpdateRule(CHEM_CHANNELS, args.policy_architecture)
-    population = [get_weights(UpdateRule(CHEM_CHANNELS, args.policy_architecture)) for _ in range(args.population)]
 
     CHECKPOINTS_DIR.mkdir(exist_ok=True)
     _archive_previous_run()
@@ -425,30 +365,31 @@ async def _training_loop_body() -> None:
         "target": args.target,
         "particles": args.particles,
         "initialParticleCount": args.initial_particles,
+        "initialCondition": args.initial_condition,
+        "initialConditionStrength": args.initial_condition_strength,
+        "initialConditionChannel": args.initial_condition_channel,
         "densityModelVersion": DENSITY_MODEL_VERSION,
         "trainingDensityMultipliers": args.particle_densities,
         "densityAggregation": args.density_aggregation,
         "particleCapacity": args.particle_capacity,
         "particleMass": PARTICLE_MASS,
         "particleVolume": VOL,
+        "chemicalValueInputMultiplier": CHEMICAL_VALUE_INPUT_MULTIPLIER,
         "chemicalGradientInputScale": CHEMICAL_GRADIENT_INPUT_SCALE,
-        "chemicalProjectionWeight": 1.0,
         "macroSteps": args.macro_steps,
         "growthSteps": args.growth_steps,
         "substepsPerMacro": args.substeps_per_macro,
         "gravity": args.gravity,
         "spawnX": args.spawn_x,
         "spawnY": args.spawn_y,
-        "spawnHalfWidth": args.spawn_half_width,
         "channels": CHEM_CHANNELS,
-        "fieldN": FIELD_N,
+        "baseResolution": FIELD_N,
+        "chemicalChannelProfiles": profiles_to_wire(CHEMICAL_CHANNEL_PROFILES),
         "morphologyBlurSigma": MORPHOLOGY_BLUR_SIGMA,
         "morphologyDensityReference": MORPHOLOGY_DENSITY_REFERENCE,
-        "boundaryTangentMinGradient": BOUNDARY_TANGENT_MIN_GRADIENT,
         "neuralUpdatesPerMacro": NEURAL_UPDATES_PER_MACRO,
         "communicationSpeed": COMMUNICATION_SPEED,
         "internalStateSpeed": INTERNAL_STATE_SPEED,
-        "divisionDirectionality": DIVISION_DIRECTIONALITY,
         "elasticStrainScale": ELASTIC_STRAIN_SCALE,
         "elasticStrainInputsEnabled": ELASTIC_STRAIN_INPUTS_ENABLED,
         "hiddenDim": policy_hidden,
@@ -458,23 +399,17 @@ async def _training_loop_body() -> None:
         "chemicalCommunicationArchitecture": args.chemical_communication_architecture,
         "decay": DECAY,
         "depositRate": DEPOSIT_RATE,
-        "maxAccel": MAX_ACCEL,
-        "maxStrafe": MAX_STRAFE,
+        "normalizeDepositsByLocalDensity": NORMALIZE_DEPOSITS_BY_LOCAL_DENSITY,
         "maxEnvWrite": MAX_ENV_WRITE,
-        "maxAngularAccel": MAX_ANGULAR_ACCEL,
-        "angularDamping": ANGULAR_DAMPING,
-        "maxAngularVelocity": MAX_ANGULAR_VELOCITY,
-        "depositDistance": DEPOSIT_DISTANCE,
-        "depositSigma": DEPOSIT_SIGMA,
-        "splitDisplacement": SPLIT_DISPLACEMENT,
-        "divisionCooldown": DIVISION_COOLDOWN,
+        "sampleSpacing": SAMPLE_SPACING,
         "friction": FRICTION,
-        "massRampMacroSteps": MASS_RAMP_MACRO_STEPS,
         "growthDuration": GROWTH_DURATION_MACRO_STEPS,
         "growthCompressionStart": GROWTH_COMPRESSION_START,
         "growthCompressionStop": GROWTH_COMPRESSION_STOP,
         "growthCompressionFeedback": GROWTH_COMPRESSION_FEEDBACK,
-        "growthMax": GROWTH_MAX,
+        "growthModelVersion": GROWTH_MODEL_VERSION,
+        "domainGeometry": "triangle-vertices",
+        **shape_settings(args, target),
         "growthAnisotropy": GROWTH_ANISOTROPY_AUTHORITY,
         # simulation_settings.py's own MPM_ENABLED (that constant's own
         # comment has the full "why" — a real testing/debug mode that
@@ -484,23 +419,35 @@ async def _training_loop_body() -> None:
         # viewer/src/gpu/types.ts's own RunSettings.mpmEnabled), still
         # live-flippable there afterward regardless of this constant.
         "mpmEnabled": MPM_ENABLED,
-        "chirality": CHIRALITY,
         "damping": DAMPING_LOSS_FRACTION,
         "materialE": MATERIAL_E,
         "materialNu": MATERIAL_NU,
         "materialHardening": MATERIAL_HARDENING,
         "materialElasticity": MATERIAL_ELASTICITY,
-        "materialFluidity": MATERIAL_FLUIDITY,
         "splatRadius": SPLAT_RADIUS,
         "repulsionStrength": REPULSION_STRENGTH,
         "repulsionMaxDelta": REPULSION_MAX_DELTA,
         "population": args.population,
+        "optimizer": args.optimizer,
+        "cmaCovariance": args.cma_covariance if args.optimizer == "cma-es" else None,
         "seedsPerCandidate": args.seeds_per_candidate,
-        "elites": args.elites,
+        "elites": args.elites if args.optimizer == "ga" else 0,
+        "referenceCandidates": 1 if args.optimizer == "cma-es" else 0,
         "mutationSigma": args.mutation_sigma,
+        "mutationFactors": list(getattr(args, "mutation_factors", [1.])),
+        "initialWeights": str(args.initial_weights) if getattr(args, "initial_weights", None) else None,
+        "fitnessAlignment": "svg" if target.svg_source is not None else getattr(args, "fitness_alignment", "raster"),
+        "deterministicReference": getattr(args, "deterministic_reference", False),
         "rasterResolution": args.raster_resolution,
-        "rasterSigma": args.raster_sigma,
         "outsideWeight": args.outside_weight,
+        "fitnessColorWeight": args.fitness_color_weight,
+        "fitnessCoverageWeight": args.fitness_coverage_weight,
+        "fitnessSpillWeight": args.fitness_spill_weight,
+        "fitnessBoundaryWeight": args.fitness_boundary_weight,
+        "fitnessCrowdingWeight": args.fitness_crowding_weight,
+        "fitnessTemporalAggregation": "min",
+        "fitnessCaptureFractions": [1-offset for offset in CAPTURE_OFFSETS],
+        "fitnessModelVersion": FITNESS_MODEL_VERSION,
         "runSeed": args.seed,
         "totalGenerations": args.generations,
         "checkpointEvery": args.checkpoint_every,
@@ -515,16 +462,19 @@ async def _training_loop_body() -> None:
     best_evaluation_seeds: list[int] = []
 
     for generation in range(args.generations):
+        generation_started = perf_counter()
         # Off the event loop thread — run_generation blocks for the whole
         # generation (waiting on pool.map() across every worker process,
         # see parallel_workers.py's own module docstring), and doing that
         # directly on the event loop thread would stall websocket message
         # flushing for as long as it takes.
-        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses = await asyncio.to_thread(
-            run_generation, population, args, rng, pool
+        result = await asyncio.to_thread(
+            run_generation, population, args, rng, pool, return_snapshot=True, optimizer=optimizer
         )
+        population, fitnesses, winner_seed, winner_density, evaluation_seeds, density_fitnesses = result[:6]
+        snapshot = result.snapshot
 
-        winner_weights = population[0]
+        winner_weights = result.winner_weights
         if fitnesses[0] < best_fitness:
             best_fitness = fitnesses[0]
             best_weights = winner_weights.copy()
@@ -533,15 +483,13 @@ async def _training_loop_body() -> None:
             best_density_fitnesses = dict(density_fitnesses)
             best_evaluation_seeds = list(evaluation_seeds)
 
-        # Also off the event loop thread — re-runs the winner's rollout
-        # once more (see _save_generation_images()'s own docstring) plus
-        # PNG encoding/disk I/O, neither of which should stall websocket
-        # message flushing either.
-        await asyncio.to_thread(
-            _save_generation_images, generation, winner_weights, winner_seed, winner_density,
-            core, agents, environment,
+        # Only PNG encoding and disk I/O remain; reuse the worker's scored state.
+        preview_started = perf_counter()
+        selected_snapshot_fitness = await asyncio.to_thread(
+            _save_generation_images, generation, snapshot,
         )
 
+        preview_seconds = perf_counter()-preview_started
         finite = [f for f in fitnesses if np.isfinite(f)]
         print(
             f"gen {generation:4d}  best {fitnesses[0]:.4f}  mean {np.mean(finite) if finite else float('inf'):.4f}  "
@@ -567,10 +515,16 @@ async def _training_loop_body() -> None:
             "seed": winner_seed,
             "particleDensityMultiplier": winner_density,
             "densityFitnesses": density_fitnesses,
+            # Terms for the representative rollout's minimum-loss pose.
+            # Candidate selection also aggregates across seeds/densities.
+            "selectedSnapshotFitness": selected_snapshot_fitness,
+            # Legacy wire alias retained for older consumers.
+            "finalSnapshotFitness": selected_snapshot_fitness,
             # Shared by every candidate in this generation. The batch rotates
             # on the next generation; `seed` above is the winning candidate's
             # worst member, used for the single-rollout browser replay.
             "evaluationSeeds": evaluation_seeds,
+            "optimizerState": optimizer.diagnostics() if optimizer is not None else None,
             "weights": update_rule.export_weights(),
             # Everything else a replay needs (particles/channels/decay/
             # target/population/...) is fixed for the whole run and lives
@@ -595,118 +549,55 @@ async def _training_loop_body() -> None:
             # currently viewing (net/images.ts's generationImageUrl()),
             # same as envnca/frontend's own net/images.ts already does.
         }
-        with HISTORY_PATH.open("a") as f:
-            f.write(json.dumps(latest_generation_message) + "\n")
-        await broadcast(latest_generation_message)
-
+        checkpoint_started = perf_counter()
         if (generation + 1) % args.checkpoint_every == 0 or generation == args.generations - 1:
             np.save(CHECKPOINTS_DIR / "best.npy", best_weights)
             set_weights(update_rule, best_weights)
             (CHECKPOINTS_DIR / "best_weights.json").write_text(json.dumps(update_rule.export_weights()))
             (CHECKPOINTS_DIR / "best_meta.json").write_text(
                 json.dumps(
-                    {
-                        "generation": generation,
-                        "fitness": best_fitness,
-                        "target": args.target,
-                        "particles": args.particles,
-                        "initial_particle_count": args.initial_particles,
-                        "density_model_version": DENSITY_MODEL_VERSION,
-                        "particle_density_multipliers": args.particle_densities,
-                        "density_aggregation": args.density_aggregation,
-                        "particle_capacity": args.particle_capacity,
-                        "particle_mass": PARTICLE_MASS,
-                        "particle_volume": VOL,
-                        "chemical_projection_weight": 1.0,
-                        "chemical_gradient_input_scale": CHEMICAL_GRADIENT_INPUT_SCALE,
-                        "winner_density_multiplier": best_winner_density,
-                        "density_fitnesses": best_density_fitnesses,
-                        "macro_steps": args.macro_steps,
-                        "growth_steps": args.growth_steps,
-                        "substeps_per_macro": args.substeps_per_macro,
-                        "gravity": args.gravity,
-                        "spawn_x": args.spawn_x,
-                        "spawn_y": args.spawn_y,
-                        "spawn_half_width": args.spawn_half_width,
-                        "channels": CHEM_CHANNELS,
-                        "field_n": FIELD_N,
-                        "population": args.population,
-                        "seeds_per_candidate": args.seeds_per_candidate,
-                        # These identify the evaluation that selected
-                        # best_weights; the current generation may be newer.
-                        "evaluation_seeds": best_evaluation_seeds,
-                        "elites": args.elites,
-                        "mutation_sigma": args.mutation_sigma,
-                        "policy_architecture": args.policy_architecture,
-                        "cell_memory": args.cell_memory,
-                        "hidden_layers": args.hidden_layers,
-                        "chemical_communication_architecture": args.chemical_communication_architecture,
-                        "hidden_dim": policy_hidden,
-                        "mutation_scales": mutation_scales(args.policy_architecture),
-                        "seed": args.seed,
-                        "winner_seed": best_winner_seed,
-                        # simulation_settings.py's own values this run
-                        # actually simulated under — see evolve.py's own
-                        # checkpoint metadata for why these ride along
-                        # even though every message already carries them.
-                        "decay": DECAY,
-                        "deposit_rate": DEPOSIT_RATE,
-                        "max_accel": MAX_ACCEL,
-                        "max_strafe": MAX_STRAFE,
-                        "max_env_write": MAX_ENV_WRITE,
-                        "max_angular_accel": MAX_ANGULAR_ACCEL,
-                        "angular_damping": ANGULAR_DAMPING,
-                        "max_angular_velocity": MAX_ANGULAR_VELOCITY,
-                        "deposit_distance": DEPOSIT_DISTANCE,
-                        "deposit_sigma": DEPOSIT_SIGMA,
-                        "split_displacement": SPLIT_DISPLACEMENT,
-                        "division_cooldown": DIVISION_COOLDOWN,
-                        "friction": FRICTION,
-                        "mass_ramp_macro_steps": MASS_RAMP_MACRO_STEPS,
-                        "growth_duration_macro_steps": GROWTH_DURATION_MACRO_STEPS,
-                        "growth_compression_start": GROWTH_COMPRESSION_START,
-                        "growth_compression_stop": GROWTH_COMPRESSION_STOP,
-                        "growth_compression_feedback": GROWTH_COMPRESSION_FEEDBACK,
-                        "morphology_blur_sigma": MORPHOLOGY_BLUR_SIGMA,
-                        "morphology_density_reference": MORPHOLOGY_DENSITY_REFERENCE,
-                        "neural_updates_per_macro": NEURAL_UPDATES_PER_MACRO,
-                        "communication_speed": COMMUNICATION_SPEED,
-                        "internal_state_speed": INTERNAL_STATE_SPEED,
-                        "division_directionality": DIVISION_DIRECTIONALITY,
-                        "elastic_strain_scale": ELASTIC_STRAIN_SCALE,
-                        "elastic_strain_inputs_enabled": ELASTIC_STRAIN_INPUTS_ENABLED,
-                        "growth_max": GROWTH_MAX,
-                        "growth_anisotropy_authority": GROWTH_ANISOTROPY_AUTHORITY,
-                        "chirality": CHIRALITY,
-                        "damping": DAMPING_LOSS_FRACTION,
-                        "material_e": MATERIAL_E,
-                        "material_nu": MATERIAL_NU,
-                        "material_hardening": MATERIAL_HARDENING,
-                        "material_elasticity": MATERIAL_ELASTICITY,
-                        "splat_radius": SPLAT_RADIUS,
-                        "repulsion_strength": REPULSION_STRENGTH,
-                        "repulsion_max_delta": REPULSION_MAX_DELTA,
-                    },
+                    checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed, best_winner_density, best_density_fitnesses, best_evaluation_seeds, optimizer),
                     indent=2,
                 )
             )
 
+        checkpoint_seconds = perf_counter()-checkpoint_started
+        elapsed = perf_counter()-generation_started
+        timing = dict(snapshot.generation_timings)
+        timing.update({"seconds": elapsed, "previewSeconds": preview_seconds,
+                       "checkpointSeconds": checkpoint_seconds,
+                       "otherSeconds": max(0., elapsed-timing["poolSeconds"]-timing["selectionSeconds"]-preview_seconds-checkpoint_seconds)})
+        latest_generation_message["timing"] = timing
+        print(f"[timing] generation {generation}: {elapsed:.2f}s; pool {timing['poolSeconds']:.2f}s; "
+              f"preview {preview_seconds:.3f}s; longest rollout {timing['rollouts']['maxSeconds']:.2f}s")
+        with HISTORY_PATH.open("a") as f:
+            f.write(json.dumps(latest_generation_message) + "\n")
+        await broadcast(latest_generation_message)
+
     pool.shutdown()
     print(f"done. best fitness: {best_fitness:.4f}. weights saved to {CHECKPOINTS_DIR / 'best.npy'}")
 
+def _history_payload(path: Path) -> dict:
+    """Keep all compact timing records, but cap expensive weight snapshots."""
+    generations = deque(maxlen=MAX_HISTORY)
+    timings = {}
+    if path.is_file():
+        with path.open() as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # A concurrent append can leave an incomplete last line.
+                generations.append(record)
+                if record.get("timing") is not None:
+                    timings[record["generation"]] = {"generation": record["generation"], "timing": record["timing"]}
+    return {"generations": list(generations), "timings": [timings[key] for key in sorted(timings)]}
 
 @app.get("/history")
 def history() -> dict:
-    """Every generation persisted so far — the frontend fetches this once
-    on mount to backfill its chart/gallery state before the live
-    websocket picks up from wherever the run currently is. Capped to
-    MAX_HISTORY so the response stays bounded regardless of how long the
-    on-disk log has grown."""
-    if not HISTORY_PATH.is_file():
-        return {"generations": []}
-    lines = [line for line in HISTORY_PATH.read_text().splitlines() if line]
-    return {"generations": [json.loads(line) for line in lines[-MAX_HISTORY:]]}
-
+    return _history_payload(HISTORY_PATH)
 
 @app.get("/settings")
 def get_settings() -> dict:
@@ -720,18 +611,9 @@ def get_settings() -> dict:
         raise HTTPException(503, "training hasn't started yet")
     return settings
 
-
 @app.get("/runs/{run_id}/settings")
 def run_settings(run_id: str) -> dict:
-    """Same shape as /settings, for one specific run — "current" is just
-    /settings itself; anything else reads that archived run's own copy
-    of settings.json (moved, not copied, by _archive_previous_run(),
-    same as history.jsonl). 404 (not the transient 503 /settings itself
-    can return) for an archived run with no settings.json at all — a run
-    archived before this endpoint existed, not a startup race, so
-    retrying wouldn't help; the frontend falls back to whatever that
-    generation's own history record still carries inline for such a
-    run — see net/trainingSocket.ts's own applyGeneration()."""
+    """Read the complete current-schema settings for a saved run."""
     if run_id == "current":
         return get_settings()
     run_dir = _run_dir_for_id(run_id)
@@ -739,15 +621,19 @@ def run_settings(run_id: str) -> dict:
         raise HTTPException(404, f"unknown run '{run_id}'")
     settings_path = run_dir / "settings.json"
     if not settings_path.is_file():
-        raise HTTPException(404, f"run '{run_id}' has no settings.json (archived before this existed)")
-    return json.loads(settings_path.read_text())
-
+        raise HTTPException(404, f"run '{run_id}' has no settings.json")
+    settings = json.loads(settings_path.read_text())
+    if settings["growthModelVersion"] != GROWTH_MODEL_VERSION:
+        raise HTTPException(422, "Run schema does not match the current simulation")
+    return settings
 
 @app.get("/target/points")
 def target_points() -> dict:
     """This server only ever has the one target it was launched with."""
-    return {"points": target.points.tolist()}
-
+    if target is None:
+        raise HTTPException(503, "no saved current run is available")
+    resolution = settings.get("rasterResolution", args.raster_resolution) if settings else args.raster_resolution
+    return {"points": target.overlay_points(resolution).tolist()}
 
 @app.get("/targets/{name}/points")
 def named_target_points(name: str) -> dict:
@@ -756,12 +642,10 @@ def named_target_points(name: str) -> dict:
     against a different --target than this server's own (args.target),
     so the frontend's "load run" picker can't always rely on the fixed
     /target/points response when browsing history."""
-    path = TARGETS_DIR / f"{name}.json"
-    if not path.is_file():
+    if name not in available_targets():
         raise HTTPException(404, f"unknown target '{name}'")
     loaded = load_target(name)
-    return {"points": loaded.points.tolist()}
-
+    return {"points": loaded.overlay_points(args.raster_resolution).tolist()}
 
 def _find_latest_preview_prefix(images_dir: Path) -> Optional[str]:
     """Zero-padded generation prefix (e.g. "gen_00042") of the highest-
@@ -793,7 +677,6 @@ def _find_latest_preview_prefix(images_dir: Path) -> Optional[str]:
             return candidates[-1].name.rsplit("_", 1)[0]
     return None
 
-
 def _run_dir_for_id(run_id: str) -> Optional[Path]:
     """Resolves an archived run id (an archive directory's own name — see
     _archive_previous_run()) to its path, rejecting anything that isn't
@@ -806,7 +689,6 @@ def _run_dir_for_id(run_id: str) -> Optional[Path]:
     if candidate.is_dir() and candidate.parent == RUNS_DIR:
         return candidate
     return None
-
 
 @app.get("/runs")
 def list_runs() -> dict:
@@ -865,7 +747,6 @@ def list_runs() -> dict:
 
     return {"runs": runs}
 
-
 @app.get("/runs/{run_id}/history")
 def run_history(run_id: str) -> dict:
     """Same shape as /history, for one specific run — "current" is just
@@ -878,11 +759,7 @@ def run_history(run_id: str) -> dict:
     if run_dir is None:
         raise HTTPException(404, f"unknown run '{run_id}'")
     history_path = run_dir / "history.jsonl"
-    if not history_path.is_file():
-        return {"generations": []}
-    lines = [line for line in history_path.read_text().splitlines() if line]
-    return {"generations": [json.loads(line) for line in lines[-MAX_HISTORY:]]}
-
+    return _history_payload(history_path)
 
 def _images_dir_for_run(run_id: str) -> Path:
     """Shared by run_preview() and run_image() below — "current" is the
@@ -895,7 +772,6 @@ def _images_dir_for_run(run_id: str) -> Path:
     if run_dir is None:
         raise HTTPException(404, f"unknown run '{run_id}'")
     return run_dir / "generation_images"
-
 
 @app.get("/runs/{run_id}/preview.png")
 def run_preview(run_id: str) -> FileResponse:
@@ -910,7 +786,6 @@ def run_preview(run_id: str) -> FileResponse:
     if not path.is_file():
         path = images_dir / f"{prefix}_grown.png"
     return FileResponse(path)
-
 
 @app.get("/runs/{run_id}/target-preview.png")
 def run_target_preview(run_id: str) -> FileResponse:
@@ -929,7 +804,6 @@ def run_target_preview(run_id: str) -> FileResponse:
         raise HTTPException(404, "no target preview image available yet")
     return FileResponse(path)
 
-
 @app.get("/runs/{run_id}/images/{filename}")
 def run_image(run_id: str, filename: str) -> FileResponse:
     """A specific gen_{N:05d}_{grown,aligned}.png from a specific run —
@@ -942,7 +816,6 @@ def run_image(run_id: str, filename: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(404)
     return FileResponse(path)
-
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket) -> None:
@@ -961,9 +834,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
     finally:
         connections.discard(websocket)
 
-
 if __name__ == "__main__":
     import uvicorn
 
     _setup()
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    uvicorn.run(app, host=CONFIG["server"]["bindHost"], port=args.port)

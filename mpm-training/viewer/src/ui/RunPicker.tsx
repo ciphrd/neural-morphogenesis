@@ -6,6 +6,7 @@ interface RunPickerProps {
   apiUrl: string;
   /** null = following the live/current run. */
   activeRunId: string | null;
+  serverConnected: boolean;
   onSelectRun: (runId: string | null) => void;
 }
 
@@ -22,7 +23,7 @@ interface RunPickerProps {
  * something that needs to track that in real time. Mirrors
  * envnca/frontend/src/ui/RunPicker.tsx near-verbatim (nothing about this
  * component is training-mechanism-specific). */
-export function RunPicker({ apiUrl, activeRunId, onSelectRun }: RunPickerProps) {
+export function RunPicker({ apiUrl, activeRunId, serverConnected, onSelectRun }: RunPickerProps) {
   const [open, setOpen] = useState(false);
   const [runs, setRuns] = useState<RunSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +46,11 @@ export function RunPicker({ apiUrl, activeRunId, onSelectRun }: RunPickerProps) 
   }, [open, apiUrl]);
 
   const activeLabel = (() => {
-    if (activeRunId === null) return <span className="run-picker-live">● Live</span>;
+    if (activeRunId === null) {
+      return serverConnected
+        ? <span className="run-picker-live">● Live</span>
+        : <span className="run-picker-offline">● Offline</span>;
+    }
     return runs?.find((r) => r.id === activeRunId)?.label ?? activeRunId;
   })();
 

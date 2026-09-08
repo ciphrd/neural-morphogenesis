@@ -10,16 +10,17 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Mapping
+from config import CONFIG
 
 CORE_DIR = Path(__file__).parent.parent / "core"
 
-
 def template_shader(source: str, template_vars: Mapping[str, object]) -> str:
     result = source
-    for key, value in template_vars.items():
+    if "__GROWTH_SAMPLING__" in result:
+        result = result.replace("__GROWTH_SAMPLING__", (CORE_DIR / "growthSampling.wgsl").read_text())
+    for key, value in {**CONFIG["simulation"], **template_vars}.items():
         result = result.replace(f"__{key}__", str(value))
     return result
-
 
 def load_core_shader(filename: str, template_vars: Mapping[str, object]) -> str:
     """Reads a .wgsl file straight out of ../core/ and applies

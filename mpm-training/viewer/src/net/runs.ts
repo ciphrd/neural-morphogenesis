@@ -1,10 +1,9 @@
 // REST calls against train_server.py's own /runs endpoints — mirrors
 // envnca/frontend/src/net/runs.ts.
 
-import type { GenerationRecord, RunSettings } from "../gpu/types";
-import { storeRunSettings } from "./settingsStorage";
+import type { TimingEntry, GenerationRecord, RunSettings } from "../gpu/types";
 import {
-  applyGeneration,
+  applyHistory,
   applySettings,
   deriveState,
   EMPTY_ACCUMULATOR,
@@ -39,18 +38,10 @@ export async function fetchRunState(apiUrl: string, runId: string): Promise<Trai
     fetch(`${apiUrl}/runs/${encodeURIComponent(runId)}/settings`),
     fetch(`${apiUrl}/runs/${encodeURIComponent(runId)}/history`),
   ]);
-  // A run archived before GET /runs/{id}/settings existed has no
-  // settings.json of its own (train_server.py's own run_settings() 404s
-  // on that, not the transient 503 the LIVE /settings can return) —
-  // degrades to history-only (configByGeneration/latest stay empty,
-  // same as deriveState()'s own "no settings yet" case), not a crash.
-  const settings: RunSettings | null = settingsRes.ok ? await settingsRes.json() : null;
-  const data: { generations: GenerationRecord[] } = await historyRes.json();
-  // A loaded session is authoritative for both this view and the defaults on
-  // the next startup, replacing whichever live/fallback settings were cached.
-  if (settings) storeRunSettings(settings);
-
-  let acc: Accumulator = settings ? applySettings(EMPTY_ACCUMULATOR, settings) : EMPTY_ACCUMULATOR;
-  acc = data.generations.reduce((a, message) => applyGeneration(a, message), acc);
+  if (!settingsRes.ok || !historyRes.ok) throw new Error("Run settings or history could not be loaded");
+  const settings: RunSettings = await settingsRes.json();
+  const data: { generations: GenerationRecord[]; timings?: TimingEntry[] } = await historyRes.json();
+  let acc: Accumulator = applySettings(EMPTY_ACCUMULATOR, settings);
+  acc = applyHistory(acc, data);
   return deriveState(acc);
 }

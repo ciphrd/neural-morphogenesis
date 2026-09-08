@@ -18,7 +18,6 @@ from mpm_core import PARTICLE_MASS, VOL, MpmCore, lame_params
 
 PERCENTILES = (50, 90, 95, 99)
 
-
 def policy_elastic_strain_input(
     deformation: np.ndarray,
     growth_f: np.ndarray,
@@ -56,7 +55,6 @@ def policy_elastic_strain_input(
         )
     return out
 
-
 @dataclass(frozen=True)
 class ElasticParticleState:
     elastic_f: np.ndarray
@@ -70,16 +68,13 @@ class ElasticParticleState:
     elastic_energy_density: np.ndarray
     elastic_energy: np.ndarray
     growth_area_ratio: np.ndarray
+    quadrature_weight: np.ndarray
     growth_f: np.ndarray
     growth_principal_stretch_max: np.ndarray
     growth_principal_stretch_min: np.ndarray
     growth_deviatoric_log_strain: np.ndarray
-    growth_direction: np.ndarray
-    growth_anisotropy: np.ndarray
-    division_bias: np.ndarray
+    growth_vector: np.ndarray
     plastic_jacobian: np.ndarray
-    cycle_active: np.ndarray
-
 
 def particle_elastic_state(
     deformation: np.ndarray,
@@ -100,7 +95,7 @@ def particle_elastic_state(
     Elastic energy density is the fixed-corotated potential whose derivative
     produces core/p2g.wgsl's stress:
     ``mu ||Fe-Re||² + lambda/2 (Je-1)²``. ``elastic_energy`` multiplies it by
-    the particle's grown rest area ``VOL*g``.
+    the sample's represented grown rest area ``VOL*q*g``.
     """
     f = np.asarray(deformation, dtype=np.float64)
     rest = np.asarray(rest_state, dtype=np.float64)
@@ -108,16 +103,19 @@ def particle_elastic_state(
         f = f.reshape(-1, 2, 2)
     if f.ndim != 3 or f.shape[1:] != (2, 2):
         raise ValueError(f"deformation must have shape (n,4) or (n,2,2), got {f.shape}")
-    if rest.ndim != 2 or rest.shape != (f.shape[0], 12):
-        raise ValueError(f"rest_state must have shape ({f.shape[0]},12), got {rest.shape}")
+    if rest.ndim != 2 or (rest.shape[0] != f.shape[0] or rest.shape[1] != 16):
+        raise ValueError(f"rest_state must have shape ({f.shape[0]},16), got {rest.shape}")
     if not np.isfinite(f).all() or not np.isfinite(rest).all():
         raise ValueError("deformation and rest_state must be finite")
 
     fg = rest[:, :4].reshape(-1, 2, 2)
     jp = rest[:, 4]
     growth = np.linalg.det(fg)
+    quadrature_weight = rest[:, 15]
     if np.any(growth <= 0.0):
         raise ValueError("growth area ratios must be strictly positive")
+    if np.any(quadrature_weight <= 0.0):
+        raise ValueError("quadrature weights must be strictly positive")
 
     fe = f @ np.linalg.inv(fg)
     growth_singular = np.linalg.svd(fg, compute_uv=False)
@@ -140,7 +138,7 @@ def particle_elastic_state(
     lam = lambda0 * hardening_scale
     pressure = -lam * (je - 1.0)
     energy_density = mu * corotated**2 + 0.5 * lam * (je - 1.0) ** 2
-    energy = particle_volume * growth * energy_density
+    energy = particle_volume * quadrature_weight * growth * energy_density
 
     return ElasticParticleState(
         elastic_f=fe,
@@ -154,20 +152,14 @@ def particle_elastic_state(
         elastic_energy_density=energy_density,
         elastic_energy=energy,
         growth_area_ratio=growth,
+        quadrature_weight=quadrature_weight,
         growth_f=fg,
         growth_principal_stretch_max=growth_s_max,
         growth_principal_stretch_min=growth_s_min,
         growth_deviatoric_log_strain=growth_dev_log,
-        growth_direction=np.column_stack((
-            np.cos(rest[:, 6] + rest[:, 9]),
-            np.sin(rest[:, 6] + rest[:, 9]),
-        )),
-        growth_anisotropy=rest[:, 7],
-        division_bias=rest[:, 8],
+        growth_vector=rest[:, 5:7],
         plastic_jacobian=jp,
-        cycle_active=rest[:, 5],
     )
-
 
 def _weighted_percentile(values: np.ndarray, weights: np.ndarray, percentile: float) -> float:
     order = np.argsort(values, kind="stable")
@@ -176,7 +168,6 @@ def _weighted_percentile(values: np.ndarray, weights: np.ndarray, percentile: fl
     cumulative = np.cumsum(sorted_weights)
     target = percentile / 100.0 * cumulative[-1]
     return float(sorted_values[min(np.searchsorted(cumulative, target, side="left"), len(values) - 1)])
-
 
 def distribution_summary(values: np.ndarray, weights: np.ndarray) -> dict[str, float]:
     """Stable grown-mass-weighted summary used in JSON baseline files."""
@@ -196,7 +187,6 @@ def distribution_summary(values: np.ndarray, weights: np.ndarray) -> dict[str, f
     out.update({f"p{p}": _weighted_percentile(values, weights, p) for p in PERCENTILES})
     return out
 
-
 def summarize_elastic_state(
     state: ElasticParticleState,
     *,
@@ -205,7 +195,8 @@ def summarize_elastic_state(
     particle_mass: float = PARTICLE_MASS,
     particle_volume: float = VOL,
 ) -> dict[str, Any]:
-    weights = particle_mass * state.growth_area_ratio
+    represented_area = state.quadrature_weight * state.growth_area_ratio
+    weights = particle_mass * represented_area
     metrics = {
         "elastic_volume_ratio": state.elastic_volume_ratio,
         "principal_stretch_max": state.principal_stretch_max,
@@ -217,12 +208,12 @@ def summarize_elastic_state(
         "absolute_pressure": np.abs(state.pressure),
         "elastic_energy_density": state.elastic_energy_density,
         "growth_area_ratio": state.growth_area_ratio,
+        "quadrature_weight": state.quadrature_weight,
+        "represented_area_ratio": represented_area,
         "growth_principal_stretch_max": state.growth_principal_stretch_max,
         "growth_principal_stretch_min": state.growth_principal_stretch_min,
         "growth_deviatoric_log_strain": state.growth_deviatoric_log_strain,
-        "growth_direction_magnitude": np.linalg.norm(state.growth_direction, axis=1),
-        "growth_anisotropy": state.growth_anisotropy,
-        "division_bias": state.division_bias,
+        "growth_vector_magnitude": np.linalg.norm(state.growth_vector, axis=1),
         "plastic_jacobian": state.plastic_jacobian,
     }
     kinetic_energy: float | None = None
@@ -260,8 +251,7 @@ def summarize_elastic_state(
 
     result = {
         "particle_count": int(weights.size),
-        "active_cycle_count": int(np.count_nonzero(state.cycle_active > 0.5)),
-        "total_rest_area": float(particle_volume * state.growth_area_ratio.sum()),
+        "total_rest_area": float(particle_volume * represented_area.sum()),
         "total_mass": float(weights.sum()),
         "total_elastic_energy": float(state.elastic_energy.sum()),
         "metrics": {name: distribution_summary(values, weights) for name, values in metrics.items()},
@@ -271,7 +261,6 @@ def summarize_elastic_state(
     if geometry is not None:
         result["geometry"] = geometry
     return result
-
 
 def measure_core(
     core: MpmCore,

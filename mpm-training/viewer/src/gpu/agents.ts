@@ -1,60 +1,23 @@
-// TS wrapper around agents.wgsl — owns the flattened NN weights buffer,
-// the AgentPhysics uniform (steeringStrength/maxStrafe/maxEnvWrite/
-// maxAngularAccel/angularDamping/maxAngularVelocity/depositDistance/
-// splitDisplacement/divisionCooldown/friction), and the persistent
-// per-particle ParticleMeta state buffer (owned here, not MpmCore, not
-// Environment — see agents.wgsl's own module docstring for why). Builds
-// the two parity-indexed bind group variants agentStep needs
-// (its gridCurrent/gradient bindings must track environment.ts's own
-// ping-pong parity exactly, since both classes read/write the same
-// physical buffers each macro step — see simulation.ts for how the two
-// stay in lockstep).
-//
-// Also owns growth's own atomic "next free slot" counter (byte 0 of
-// agentStateBuffer)
-// and the tiny mappable staging buffer readGrownCount() reads it back
-// through — see that method's own docstring, and gpu/simulation.ts's own
-// module docstring, for why WebGPU's own async-only buffer readback
-// (unlike the Python trainer's synchronous wgpu-py equivalent) makes
-// step() itself async now.
-//
-// Strafe drives MpmCore's own `velocities` buffer directly again (an
-// acceleration, damped by `friction`) — see agents.wgsl's own module
-// docstring for the full history (this has flipped between velocity and
-// a direct position nudge twice now). agentStateBuffer packs FOUR
-// per-particle state (rng, cooldown, heading, angularVelocity, neural RGB) into
-// ONE buffer, not four, to keep this shader's own storage buffer count
-// AT (not under — there's no headroom left) the 10-per-stage hardware
-// ceiling Chrome's own Dawn backend reports on real browser adapters —
-// see agents.wgsl's own module docstring for the confirmed
-// CreateComputePipeline validation-error history behind that constraint,
-// and for why mpmCore.F/mpmCore.Jp (bound here too, for growth's own
-// parent-state inheritance) needed those 2 slots freed to fit at all.
 
-import agentsSrc from "../../../core/agents.wgsl?raw";
 import randomCullSrc from "./randomCull.wgsl?raw";
-import coreConstants from "../../../core/constants.json";
-import densityModel from "../../../core/density.json";
+import agentsSrc from "../../../core/agents.wgsl?raw";
+import growthFieldSrc from "../../../core/growthField.wgsl?raw";
+import coreConstantsConfig from "../../../core/config.json";
+const coreConstants = coreConstantsConfig.simulation;
 import { templateShader } from "./shaderTemplate";
 import { ceilDiv, writeFloat32 } from "./gpuUtil";
 import type { Environment } from "./environment";
-import { MAX_PARTICLES, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
-import { spatialUniform01, spawnUniform01 } from "./rng";
+import { GROWTH_FIELD_CHANNELS, GRID_N, INV_DX, MAX_PARTICLES, NODE_COUNT, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { policyHasRecurrence, type ChemicalCommunicationArchitecture, type PolicyArchitecture, type UpdateRuleWeights } from "./types";
-import policyParameters from "../../../core/policy_parameters.json";
+import policyParametersConfig from "../../../core/config.json";
+const policyParameters = policyParametersConfig.policy;
 import { policyWeightsShapeError } from "./policyEval";
 
 const WORKGROUP = 64;
 
-// core/agents.wgsl's own ParticleMeta struct: four scalar state fields
-// followed by an aligned vec4 neural color. Only
-// rng/heading get their own named offset below — cooldown/
-// angularVelocity are only ever left at their zero-initialized default
-// by the TS side (see resetHeading()'s own comment), never written at a
-// specific offset the way rng/heading are.
-const particleMetaStride = (channels: number) => Math.ceil((72 + channels * 4) / 16) * 16;
-const PARTICLE_META_OFFSET_RNG = 0;
-const PARTICLE_META_OFFSET_HEADING = 8;
+// core/agents.wgsl's own ParticleMeta struct. The two-float alignment cache
+// occupies the former heading/turn-state bytes, preserving its packed ABI.
+const particleMetaStride = (channels: number) => Math.ceil((60 + channels * 4) / 16) * 16;
 // AgentState places its runtime ParticleMeta array after one atomic u32 and
 // 63 padding u32s. 256 is also a legal standalone storage-binding offset.
 export const PARTICLE_META_BUFFER_OFFSET = 256;
@@ -62,20 +25,10 @@ export const PARTICLE_META_BUFFER_OFFSET = 256;
 export interface AgentsConfig {
   channels: number;
   hiddenDim: number;
-  policyArchitecture?: PolicyArchitecture;
-  chemicalCommunicationArchitecture?: ChemicalCommunicationArchitecture;
-  maxAccel: number;
-  maxStrafe: number;
-  steeringStrength?: number;
+  policyArchitecture: PolicyArchitecture;
+  chemicalCommunicationArchitecture: ChemicalCommunicationArchitecture;
   maxEnvWrite: number;
-  maxAngularAccel: number;
-  angularDamping: number;
-  maxAngularVelocity: number;
-  chirality: boolean;
-  depositDistance: number;
-  depositSigma: number;
-  splitDisplacement: number;
-  divisionCooldown: number;
+  sampleSpacing: number;
   friction: number;
   growthEnabled: number;
   maxActiveParticles: number;
@@ -83,12 +36,8 @@ export interface AgentsConfig {
   spawnY: number;
   elasticStrainScale: number;
   elasticStrainInputsEnabled: boolean;
-  chemicalGradientInputScale?: number;
-  chemicalProjectionWeight?: number;
-  boundaryTangentMinGradient?: number;
-  growthCompressionStart?: number;
-  growthCompressionStop?: number;
-  growthCompressionFeedback?: number;
+  chemicalValueInputMultiplier: number;
+  chemicalGradientInputScale: number;
 }
 
 function weightLayout(channels: number, hiddenDim: number, architecture: PolicyArchitecture = "stateless-128") {
@@ -96,8 +45,9 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
   // gradient per channel, with no positional inputs.
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  // Existing architecture output followed by the appended steering XY head.
-  const outDim = channels + (stateful ? 24 : 11);
+  // Chemical deltas plus a two-component local growth vector and either
+  // private-state updates or RGB.
+  const outDim = channels + (stateful ? 21 : 5);
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -111,7 +61,7 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
  * the fc1w/fc1b/fc2w/fc2b order agents.wgsl's own FC1W_OFFSET/etc.
  * consts expect. */
 function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim: number, architecture: PolicyArchitecture): Float32Array {
-  const { totalFloats, outDim, fc2wOffset, fc2bOffset } = weightLayout(channels, hiddenDim, architecture);
+  const { totalFloats } = weightLayout(channels, hiddenDim, architecture);
   const shapeError = policyWeightsShapeError(weights, channels, hiddenDim, architecture);
   if (shapeError) throw new Error(shapeError);
   const out = new Float32Array(totalFloats);
@@ -119,28 +69,11 @@ function flattenWeights(weights: UpdateRuleWeights, channels: number, hiddenDim:
   for (const row of weights.fc1w) for (const v of row) out[i++] = v;
   for (const v of weights.fc1b) out[i++] = v;
   for (const row of weights.fc2w) for (const v of row) out[i++] = v;
-  if (weights.fc2w.length === outDim - 2) i += 2 * hiddenDim;
   for (const v of weights.fc2b) out[i++] = v;
-  if (weights.fc2w.length === outDim - 2) {
-    // Legacy brains predate the dedicated steering head. Reuse their learned
-    // local growth-direction logits as a deterministic compatibility head so
-    // enabling steering has an immediate, meaningful effect instead of
-    // multiplying two permanently-zero padded rows. Strength still defaults
-    // to zero, preserving legacy playback until the user enables it.
-    const legacyGrowthRow = channels + 4;
-    for (let axis = 0; axis < 2; axis++) {
-      const sourceRow = legacyGrowthRow + axis;
-      const targetRow = outDim - 2 + axis;
-      for (let column = 0; column < hiddenDim; column++) {
-        out[fc2wOffset + targetRow * hiddenDim + column] = weights.fc2w[sourceRow][column];
-      }
-      out[fc2bOffset + targetRow] = weights.fc2b[sourceRow];
-    }
-  }
   return out;
 }
 
-function policyRandom(seed?: number): () => number {
+function policyRandom(seed: number): () => number {
   if (seed === undefined) return Math.random;
   let state = ((seed >>> 0) ^ 0x9e3779b9) >>> 0;
   return () => {
@@ -150,6 +83,19 @@ function policyRandom(seed?: number): () => number {
     x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
     return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** Samples a fresh viewer-side policy seed. Passing the previous seed makes
+ * the caller's "random" action guarantee a different value even in the
+ * extremely unlikely event that the random source repeats itself. */
+export function randomPolicySeed(previous?: number): number {
+  const values = new Uint32Array(1);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(values);
+  } else {
+    values[0] = Math.floor(Math.random() * 0x100000000) >>> 0;
+  }
+  return values[0] === previous ? (values[0] + 1) >>> 0 : values[0];
 }
 
 function randomSymmetric(bound: number, random: () => number): number {
@@ -183,7 +129,7 @@ export function randomWeights(
   architecture: PolicyArchitecture = "stateless-128",
   seed?: number,
 ): UpdateRuleWeights {
-  const random = policyRandom(seed);
+  const random = policyRandom(seed ?? randomPolicySeed());
   const { inDim } = weightLayout(channels, hiddenDim, architecture);
   const trunk = policyParameters.trunk;
   const trunkBound = trunk.weightGain * Math.sqrt(6 / (inDim + hiddenDim));
@@ -193,14 +139,11 @@ export function randomWeights(
   const fc1b = Array.from({ length: hiddenDim }, () => randomSymmetric(trunk.biasJitter, random));
   const common = [
     [channels, policyParameters.heads.chemical],
-    [2, policyParameters.heads.heading],
-    [1, policyParameters.heads.anisotropy],
-    [1, policyParameters.heads.division],
-    [2, policyParameters.heads.growthDirection],
+    [2, policyParameters.heads.growthVector],
   ] as const;
   const specs = policyHasRecurrence(architecture)
-    ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const, [2, policyParameters.heads.steering] as const]
-    : [...common, [3, policyParameters.heads.color] as const, [2, policyParameters.heads.steering] as const];
+    ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const, [3, policyParameters.heads.color] as const]
+    : [...common, [3, policyParameters.heads.color] as const];
   const initialized = specs.map(([size, config]) => randomHead(size, hiddenDim, config, random));
   return {
     fc1w,
@@ -211,6 +154,9 @@ export function randomWeights(
 }
 
 export class Agents {
+  unresolvedSamples = 0;
+  capacityBlocked = false;
+  private refinementRounds = 0;
   private readonly device: GPUDevice;
   private readonly channels: number;
   private readonly hiddenDim: number;
@@ -219,7 +165,7 @@ export class Agents {
   private readonly weightsBuffer: GPUBuffer;
   private readonly physicsUniform: GPUBuffer;
   private readonly agentStateBuffer: GPUBuffer;
-  private readonly grownCountStaging: GPUBuffer;
+  private readonly sampleCountStaging: GPUBuffer;
   private readonly pipeline: GPUComputePipeline;
   private readonly splatPipeline: GPUComputePipeline;
   private readonly splatBindGroup: GPUBindGroup;
@@ -231,6 +177,13 @@ export class Agents {
   private readonly randomCullBindGroup: GPUBindGroup;
   private readonly randomCullVictims: GPUBuffer;
   private readonly randomCullParams: GPUBuffer;
+  private readonly growthField: GPUBuffer;
+  private readonly refinement: GPUBuffer;
+  private readonly growthEntries: readonly string[];
+  private readonly growthPipelines: readonly GPUComputePipeline[];
+  private readonly growthBindGroup: GPUBindGroup;
+  private readonly growthDispatches: readonly (number | null)[];
+  private forcedGrowthFieldOverride = false;
   // Assigned via setActiveCount() in the constructor (also growth's own
   // baseline write), not directly — `!` tells TS's definite-assignment
   // check that's fine, it just can't see through the method call itself.
@@ -240,88 +193,45 @@ export class Agents {
     this.device = device;
     this.channels = config.channels;
     this.hiddenDim = config.hiddenDim;
-    this.policyArchitecture = config.policyArchitecture ?? "stateless-128";
+    this.policyArchitecture = config.policyArchitecture;
     this.particleMetaStride = particleMetaStride(config.channels);
 
     const layout = weightLayout(config.channels, config.hiddenDim, this.policyArchitecture);
     const { totalFloats } = layout;
     this.weightsBuffer = device.createBuffer({ size: totalFloats * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    // 112 bytes — original layout plus density-resolved chemical-gradient
-    // normalization and the live boundary-tangent cutoff. The cutoff occupies
-    // what was previously the uniform struct's final alignment-padding word.
+    // 128 bytes — original layout plus runtime neural-input controls and
+    // trailing uniform-alignment padding.
     // The final spawnX/spawnY/maxActiveParticles fields are
     // NOT written by setPhysics() below; see setSpawnCenter()'s own
     // docstring for why those get a separate setter into this same
     // buffer instead.
-    this.physicsUniform = device.createBuffer({ size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.physicsUniform = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.setPhysics({
-      maxAccel: config.maxAccel,
-      steeringStrength: config.steeringStrength ?? 0,
-      maxStrafe: config.maxStrafe,
       maxEnvWrite: config.maxEnvWrite,
-      maxAngularAccel: config.maxAngularAccel,
-      angularDamping: config.angularDamping,
-      maxAngularVelocity: config.maxAngularVelocity,
-      depositDistance: config.depositDistance,
-      splitDisplacement: config.splitDisplacement,
-      divisionCooldown: config.divisionCooldown,
+      sampleSpacing: config.sampleSpacing,
       friction: config.friction,
-      depositSigma: config.depositSigma,
       growthEnabled: config.growthEnabled,
     });
     this.setSpawnCenter(config.spawnX, config.spawnY);
     this.setMaxActiveParticles(config.maxActiveParticles);
     this.setElasticStrainScale(config.elasticStrainScale);
-    this.setChemicalGradientInputScale(config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE);
-    this.setChemicalProjectionWeight(config.chemicalProjectionWeight ?? 1.0);
-    this.setRolloutSeed(0);
-    this.setBoundaryTangentMinGradient(
-      config.boundaryTangentMinGradient ?? coreConstants.BOUNDARY_TANGENT_MIN_GRADIENT,
-    );
-    this.setGrowthCompressionFeedback(
-      config.growthCompressionStart ?? 0.10,
-      config.growthCompressionStop ?? 0.10,
-      config.growthCompressionFeedback ?? 1.0,
-    );
-    this.setForcedDivisionControl(null, [1, 0], false);
+    this.setChemicalValueInputMultiplier(config.chemicalValueInputMultiplier);
 
-    // Persistent per-particle state — owned here (not MpmCore, not
-    // Environment), zeroed at creation and whenever resetHeading() is
-    // called (simulation.ts's own restartRollout()). Sized to
-    // MAX_PARTICLES up front, like every one of MpmCore's own per-
-    // particle buffers, NOT to config.particles (the growth cap this run
-    // actually uses) — both the "Add Particle" tool (gpu/interact.wgsl's
-    // own module docstring) AND growth (core/agents.wgsl's own
-    // agentStep() — see that file's own module docstring) can grow
-    // MpmCore's own activeCount past whatever this class was originally
-    // constructed with, at runtime, with no rebuild; undersizing this
-    // buffer would leave agentStep's own dispatch (sized off the SAME,
-    // now-larger activeCount — see setActiveCount() below) reading/
-    // writing past the end of it for every newly-added particle.
-    //
-    // rng(u32)+cooldown(f32)+heading(f32)+angularVelocity(f32) — ALL FOUR
-    // packed into one aligned per-particle buffer (112 bytes at C=8,
-    // matching core/agents.wgsl's ParticleMeta), not four separate buffers: this shader
-    // hit a REAL, confirmed CreateComputePipeline validation error the
-    // first time mpmCore.F/C/Jp tried to add 3 more bindings on top of
-    // heading/angularVelocity/growthState each having their own — see
-    // agents.wgsl's own module docstring for the full account. rng+
-    // cooldown were already packed together once before, for the exact
-    // same reason, when `velocities` was added; heading/angularVelocity
-    // joined them here to free the 2 slots mpmCore.F/mpmCore.Jp needed.
-    // resetHeading() writes the complete record via a DataView matching this
-    // exact layout.
-    // One allocation holds the growth counter at byte 0 and ParticleMeta
-    // records from byte 256. Packing them frees a shader binding for C.
+    this.setChemicalGradientInputScale(config.chemicalGradientInputScale);
+
+
+    this.setForcedGrowthControl(null, [1, 0], false);
+    this.setForcedGrowthFieldOverride(null);
+
     this.agentStateBuffer = device.createBuffer({
       size: PARTICLE_META_BUFFER_OFFSET + MAX_PARTICLES * this.particleMetaStride,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     // A separate, MAP_READ-capable buffer agentStateBuffer itself can't
     // be (STORAGE and MAP_READ are mutually exclusive usages in WebGPU)
-    // — encodeReadGrownCount() copies into this every macro step,
-    // readGrownCount() maps/reads/unmaps it asynchronously afterward.
-    this.grownCountStaging = device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    // — encodeReadSampleCount() copies into this every macro step,
+    // readSampleCount() maps/reads/unmaps it asynchronously afterward.
+    this.sampleCountStaging = device.createBuffer({ size: 12, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     // Rollouts start with their configured initial particle count and grow
     // via splitting from there (simulation.ts's own restartRollout()
     // sets that count every rollout — this is just
@@ -346,30 +256,23 @@ export class Agents {
         HIDDEN_DIM: config.hiddenDim,
         IN_DIM: layout.inDim,
         OUT_DIM: layout.outDim,
-        FIELD_WIDTH: environment.width,
-        FIELD_HEIGHT: environment.height,
+        ...environment.layout.shaderConstants,
         MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
-        SPATIAL_RANDOM_CELLS: densityModel.SPATIAL_RANDOM_CELLS,
-        CHEMICAL_VALUE_INPUT_SCALE: coreConstants.CHEMICAL_VALUE_INPUT_SCALE,
         MORPHOLOGY_GRADIENT_INPUT_SCALE: coreConstants.MORPHOLOGY_GRADIENT_INPUT_SCALE,
-        GROWTH_DIRECTION_RESPONSE_RATE: coreConstants.GROWTH_DIRECTION_RESPONSE_RATE,
-        GROWTH_ANISOTROPY_RESPONSE_RATE: coreConstants.GROWTH_ANISOTROPY_RESPONSE_RATE,
-        DIRECTION_CONFIDENCE_SCALE: coreConstants.DIRECTION_CONFIDENCE_SCALE,
         // WGSL wants lowercase `true`/`false` — a raw JS boolean would
         // template-substitute as "true"/"false" too via String(), so
         // this one actually works either way, but spelled out for
         // parity with agents_gpu.py's own version of this same
         // gotcha (Python's str(bool) gives "True"/"False", invalid
         // WGSL, so that side needs the explicit conversion).
-        CHIRALITY: config.chirality ? "true" : "false",
         STATEFUL: policyHasRecurrence(this.policyArchitecture) ? "true" : "false",
-        CELL_OWNED_CHEMISTRY: (config.chemicalCommunicationArchitecture ?? "cell-owned-projection") === "cell-owned-projection" ? "true" : "false",
+        CELL_OWNED_CHEMISTRY: (config.chemicalCommunicationArchitecture) === "cell-owned-projection" ? "true" : "false",
         PRIVATE_STATE_INPUTS: policyHasRecurrence(this.policyArchitecture)
           ? "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { inputVec[3u * CHANNELS + 6u + s] = tanh(agentState.particleMeta[pi].privateState[s]); }"
           : "",
         POLICY_TAIL_DECODE: policyHasRecurrence(this.policyArchitecture)
-          ? "out.color = vec3<f32>(0.5); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 6u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 6u + PRIVATE_STATE_DIM + s]); }"
-          : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 6u]), safeSigmoid(outVec[ENV_WRITE_DIM + 7u]), safeSigmoid(outVec[ENV_WRITE_DIM + 8u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
+          ? "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 18u]), safeSigmoid(outVec[ENV_WRITE_DIM + 19u]), safeSigmoid(outVec[ENV_WRITE_DIM + 20u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 2u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]); }"
+          : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 2u]), safeSigmoid(outVec[ENV_WRITE_DIM + 3u]), safeSigmoid(outVec[ENV_WRITE_DIM + 4u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
         ELASTIC_STRAIN_INPUTS_ENABLED: config.elasticStrainInputsEnabled ? "true" : "false",
         MORPHOLOGY_SAMPLER_DECLARATION: filterableMorphology
           ? "@group(0) @binding(14) var morphologySampler: sampler;"
@@ -398,11 +301,10 @@ export class Agents {
       writeFloat32(device, buffer, 4, new Float32Array([1.0]));
       writeFloat32(device, buffer, 8, new Float32Array([1.0]));
       writeFloat32(device, buffer, 12, new Float32Array([1.0]));
-      writeFloat32(device, buffer, 16, new Float32Array([0.5]));
       return buffer;
     }) as [GPUBuffer, GPUBuffer];
 
-    const bindGroups = (commitLifecycle: 0 | 1) => [0, 1].map((p) =>
+    const bindGroups = (commitGrowth: 0 | 1) => [0, 1].map((p) =>
       device.createBindGroup({
         layout: this.pipeline.getBindGroupLayout(0),
         entries: [
@@ -414,19 +316,18 @@ export class Agents {
           { binding: 5, resource: { buffer: environment.depositScratch } },
           { binding: 6, resource: { buffer: this.physicsUniform } },
           { binding: 7, resource: { buffer: this.agentStateBuffer } },
-          { binding: 8, resource: { buffer: mpmCore.C } },
           { binding: 9, resource: { buffer: mpmCore.velocities } },
           // mpmCore.F/rest — same buffers ../core/'s own p2g.wgsl/g2p.wgsl
           // already read/write every physics substep — see
           // ../../../core/agents.wgsl's own module docstring for why
           // agentStep() now needs them too (a freshly-claimed particle
           // inherits its parent's CURRENT deformation state at split
-          // time, not a fresh identity/zero rest state). mpmCore.C is
+          // time, rather than starting undeformed with zero rest history). mpmCore.C is
           // binding 8 so the split preserves the complete APIC state.
           { binding: 10, resource: { buffer: mpmCore.F } },
           { binding: 11, resource: { buffer: mpmCore.rest } },
           { binding: 12, resource: mpmCore.morphologyTexture.createView() },
-          { binding: 13, resource: { buffer: this.stepModeUniforms[commitLifecycle] } },
+          { binding: 13, resource: { buffer: this.stepModeUniforms[commitGrowth] } },
           ...(morphologySampler ? [{ binding: 14, resource: morphologySampler }] : []),
         ],
       })
@@ -462,6 +363,78 @@ export class Agents {
         { binding: 7, resource: { buffer: this.randomCullParams } },
       ],
     });
+    this.growthField = mpmCore.growthField;
+    const refineHashSize = 2 ** Math.ceil(Math.log2(6 * MAX_PARTICLES));
+    const refineWords = refineHashSize + 5 * MAX_PARTICLES + 2;
+    this.refinement = device.createBuffer({
+      label: "conforming refinement scratch", size: 4 * refineWords, usage: GPUBufferUsage.STORAGE,
+    });
+    const growthModule = device.createShaderModule({
+      code: templateShader(growthFieldSrc, {
+        CHANNELS: config.channels, GRID_N, INV_DX,
+        MORPHOLOGY_FIELD_N: REPULSION_FIELD_N,
+        REFINE_CAPACITY: MAX_PARTICLES, REFINE_HASH_SIZE: refineHashSize,
+      }),
+    });
+    const stages: [string, number | null][] = [
+      ["clearGrowthField", ceilDiv(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)],
+      ["clearRefinement", ceilDiv(refineWords, 256)],
+      ["indexRefinementEdges", null],
+      ["scatterGrowthIntent", null], ["scatterGrowthBoundary", null],
+      ["enforceGrowthField", ceilDiv(NODE_COUNT, 256)],
+      ["linkRefinementEdges", null],
+      ...Array.from({ length: Math.ceil(Math.log2(MAX_PARTICLES)) },
+        (): [string, null] => ["propagateRefinement", null]),
+      ["requestRefinement", null], ["reserveRefinement", null],
+      ["commitResample", null], ["classifyPruning", null], ["pruneMaterial", 1],
+      ["stopGrowthAtCapacity", ceilDiv(GROWTH_FIELD_CHANNELS * NODE_COUNT, 256)],
+    ];
+    // Keep one stable ABI for every growth pass. With `layout: "auto"`, WebGPU
+    // infers a different layout per entry point and removes bindings that an
+    // entry point does not reach. That made this host-side resource table
+    // brittle whenever the optimizer eliminated a formerly-used binding.
+    const growthBindGroupLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+      ],
+    });
+    const growthPipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [growthBindGroupLayout],
+    });
+    const pipelines = new Map(stages.map(([entry]) => [entry, null as GPUComputePipeline | null]));
+    for (const entryPoint of pipelines.keys()) {
+      pipelines.set(entryPoint, device.createComputePipeline({
+        layout: growthPipelineLayout, compute: { module: growthModule, entryPoint },
+      }));
+    }
+    this.growthEntries = stages.map(([entry]) => entry);
+    this.growthPipelines = stages.map(([entry]) => pipelines.get(entry)!);
+    const resources = new Map<number, GPUBindingResource>([
+      [0, { buffer: mpmCore.positions }],
+      [1, { buffer: mpmCore.activeCountUniform }],
+      [2, { buffer: mpmCore.rest }],
+      [3, { buffer: this.agentStateBuffer }],
+      [4, { buffer: mpmCore.C }],
+      [5, { buffer: mpmCore.velocities }],
+      [6, { buffer: mpmCore.F }],
+      [7, { buffer: this.refinement }],
+      [8, { buffer: this.growthField }],
+      [9, { buffer: this.physicsUniform }],
+    ]);
+    this.growthBindGroup = device.createBindGroup({
+      layout: growthBindGroupLayout,
+      entries: Array.from(resources, ([binding, resource]) => ({ binding, resource })),
+    });
+    this.growthDispatches = stages.map(([, dispatch]) => dispatch);
   }
 
   /** Exposed so Renderer's own triangle-shape pipeline can point each
@@ -472,6 +445,13 @@ export class Agents {
    * heading and neural color fields. */
   get particleMetaState(): GPUBuffer {
     return this.agentStateBuffer;
+  }
+
+  /** Viewer-only access to the spatially integrated growth decision field.
+   * The renderer reads it after the growth passes have completed; it never
+   * mutates the field or participates in admission. */
+  get integratedGrowthField(): GPUBuffer {
+    return this.growthField;
   }
 
   loadWeights(weights: UpdateRuleWeights): void {
@@ -491,18 +471,9 @@ export class Agents {
   }
 
   setPhysics(settings: {
-    maxAccel: number;
-    steeringStrength: number;
-    maxStrafe: number;
     maxEnvWrite: number;
-    maxAngularAccel: number;
-    angularDamping: number;
-    maxAngularVelocity: number;
-    depositDistance: number;
-    splitDisplacement: number;
-    divisionCooldown: number;
+    sampleSpacing: number;
     friction: number;
-    depositSigma: number;
     growthEnabled: number;
   }): void {
     writeFloat32(
@@ -510,17 +481,9 @@ export class Agents {
       this.physicsUniform,
       0,
       new Float32Array([
-        settings.steeringStrength,
-        settings.maxStrafe,
         settings.maxEnvWrite,
-        settings.maxAngularAccel,
-        settings.angularDamping,
-        settings.maxAngularVelocity,
-        settings.depositDistance,
-        settings.splitDisplacement,
-        settings.divisionCooldown,
+        settings.sampleSpacing,
         settings.friction,
-        settings.depositSigma,
         settings.growthEnabled,
       ])
     );
@@ -532,7 +495,7 @@ export class Agents {
     writeFloat32(
       this.device,
       this.physicsUniform,
-      44,
+      12,
       new Float32Array([enabled ? 1.0 : 0.0])
     );
   }
@@ -554,116 +517,62 @@ export class Agents {
   }
 
   /** Caps polarized daughter placement: 0 = symmetric, 1 = full policy. */
-  setDivisionDirectionality(strength: number): void {
-    const value = new Float32Array([Math.max(0, Math.min(1, strength))]);
-    for (const buffer of this.stepModeUniforms) {
-      writeFloat32(this.device, buffer, 12, value);
-    }
-  }
 
-  /** Master neural growth-probability bias: 0 off, 0.5 native, 1 forced. */
-  setGrowthDrive(drive: number): void {
-    const value = new Float32Array([Math.max(0, Math.min(1, drive))]);
-    for (const buffer of this.stepModeUniforms) {
-      writeFloat32(this.device, buffer, 16, value);
-    }
-  }
-
-  /** Writes the legacy AgentPhysics spawn slots at byte offset 48.
-   * Rollout initialization still uses spawn coordinates, but the policy no
-   * longer reads them; the slots remain to avoid an unrelated uniform ABI
-   * change while backend/frontend processes overlap. */
   setSpawnCenter(spawnX: number, spawnY: number): void {
-    writeFloat32(this.device, this.physicsUniform, 48, new Float32Array([spawnX, spawnY]));
+    writeFloat32(this.device, this.physicsUniform, 16, new Float32Array([spawnX, spawnY]));
   }
 
   /** Runtime growth cap at AgentPhysics byte offset 56. */
   setMaxActiveParticles(maxActiveParticles: number): void {
     const cap = Math.max(1, Math.floor(maxActiveParticles));
-    this.device.queue.writeBuffer(this.physicsUniform, 56, new Uint32Array([cap]));
+    this.device.queue.writeBuffer(this.physicsUniform, 24, new Uint32Array([cap]));
   }
 
   /** AgentPhysics.elasticStrainScale at byte offset 60. */
   setElasticStrainScale(scale: number): void {
-    writeFloat32(this.device, this.physicsUniform, 60, new Float32Array([Math.max(scale, 1e-6)]));
+    writeFloat32(this.device, this.physicsUniform, 28, new Float32Array([Math.max(scale, 1e-6)]));
   }
 
   setChemicalGradientInputScale(scale: number): void {
-    writeFloat32(this.device, this.physicsUniform, 64, new Float32Array([Math.max(scale, 1e-6)]));
+    writeFloat32(this.device, this.physicsUniform, 32, new Float32Array([Math.max(scale, 1e-6)]));
   }
 
-  setChemicalProjectionWeight(weight: number): void {
-    if (!(weight > 0)) throw new Error("chemical projection weight must be positive");
-    writeFloat32(this.device, this.physicsUniform, 68, new Float32Array([weight]));
+  /** Relative neural gain for chemical concentration values; zero ablates them. */
+  setChemicalValueInputMultiplier(multiplier: number): void {
+    writeFloat32(this.device, this.physicsUniform, 60, new Float32Array([Math.max(multiplier, 0)]));
   }
 
-  /** Common spatial-random-field seed at AgentPhysics byte offset 72. */
-  setRolloutSeed(seed: number): void {
-    this.device.queue.writeBuffer(this.physicsUniform, 72, new Uint32Array([seed >>> 0]));
-  }
-
-  /** Flat-interior morphology-gradient cutoff at AgentPhysics byte offset 76. */
-  setBoundaryTangentMinGradient(threshold: number): void {
-    writeFloat32(
-      this.device,
-      this.physicsUniform,
-      76,
-      new Float32Array([Math.max(0, threshold)]),
-    );
-  }
-
-  /** Contact inhibition from dimensionless elastic areal compression. */
-  setGrowthCompressionFeedback(start: number, stop: number, strength: number): void {
-    if (!(start >= 0) || !(stop >= start)) {
-      throw new Error("growth compression thresholds require 0 <= start <= stop");
-    }
-    if (!(strength >= 0 && strength <= 1)) {
-      throw new Error("growth compression feedback must be in [0, 1]");
-    }
-    writeFloat32(
-      this.device,
-      this.physicsUniform,
-      100,
-      new Float32Array([start, stop, strength]),
-    );
-  }
-
-  /** Viewer steering scale in AgentPhysics's legacy maxAccel slot. */
-  setSteeringStrength(strength: number): void {
-    writeFloat32(
-      this.device,
-      this.physicsUniform,
-      0,
-      new Float32Array([Math.max(0, Math.min(1, strength))]),
-    );
-  }
-
-  /** Controls deterministic lab admission/direction and packs the viewer-only
-   * death-replacement count into the unused upper bits of the admission word.
-   * Bit 0 remains the Lab admission flag, preserving the shared uniform ABI. */
-  setForcedDivisionControl(
+  /** Force growth along an explicit world-space direction for Lab scenarios. */
+  setForcedGrowthControl(
     index: number | null,
-    direction: readonly [number, number] | null,
-    admitCycle: boolean,
+    direction: readonly [number, number],
+    forceMagnitude: boolean,
     particleCount = 1,
-    deathReplacementCount = 0,
   ): void {
+    const x = direction[0];
+    const y = direction[1];
+    const length = Math.hypot(x, y);
+    if (!Number.isFinite(length) || length === 0) throw new Error("Forced growth requires a finite, nonzero direction");
     const value = index === null ? 0xffffffff : Math.max(0, Math.floor(index));
     const endValue = index === null
       ? 0xffffffff
       : value + Math.max(1, Math.floor(particleCount)) - 1;
-    this.device.queue.writeBuffer(this.physicsUniform, 80, new Uint32Array([value]));
-    const replacementCount = Math.min(0x7fffffff, Math.max(0, Math.floor(deathReplacementCount)));
-    const packedAdmission = (replacementCount * 2 + (admitCycle ? 1 : 0)) >>> 0;
-    this.device.queue.writeBuffer(this.physicsUniform, 84, new Uint32Array([packedAdmission]));
-    const x = direction?.[0] ?? 0;
-    const y = direction?.[1] ?? 0;
-    const length = Math.hypot(x, y) || 1;
-    writeFloat32(this.device, this.physicsUniform, 88, new Float32Array([
+    this.device.queue.writeBuffer(this.physicsUniform, 36, new Uint32Array([value]));
+    this.device.queue.writeBuffer(this.physicsUniform, 40, new Uint32Array([forceMagnitude ? 1 : 0]));
+    writeFloat32(this.device, this.physicsUniform, 48, new Float32Array([
       x / length,
       y / length,
     ]));
-    this.device.queue.writeBuffer(this.physicsUniform, 96, new Uint32Array([endValue]));
+    this.device.queue.writeBuffer(this.physicsUniform, 56, new Uint32Array([endValue]));
+  }
+
+  setForcedGrowthFieldOverride(mode: "radial-inward" | null): void {
+    this.forcedGrowthFieldOverride = mode === "radial-inward";
+    this.device.queue.writeBuffer(
+      this.physicsUniform,
+      64,
+      new Uint32Array([this.forcedGrowthFieldOverride ? 1 : 0]),
+    );
   }
 
   /** Updates this class's own agentStep() dispatch size AND growth's own
@@ -672,12 +581,13 @@ export class Agents {
    * activeCount — called once per rollout (simulation.ts's own
    * restartRollout()) and again every macro step growth actually changes
    * the count (that module's own step(), after awaiting
-   * readGrownCount()). Deliberately does NOT touch
+   * readSampleCount()). Deliberately does NOT touch
    * mpmCore.activeCountUniform itself — MpmCore.setActiveCount() (a
    * distinct method, on a distinct object) owns that, since it's shared
    * with p2g/gridUpdate-adjacent/g2p/repulsion too, not just this
    * class's own dispatch. */
   setActiveCount(activeCount: number): void {
+    this.refinementRounds = Math.ceil(Math.log2(Math.max(1, activeCount)));
     this.dispatch = ceilDiv(activeCount, WORKGROUP);
     writeFloat32(this.device, this.agentStateBuffer, 0, new Uint32Array([activeCount]));
   }
@@ -739,11 +649,11 @@ export class Agents {
    * submit (see gpu/simulation.ts's own step()), so the copied value
    * reflects whatever this macro step's own agentStep() pass just
    * claimed. Does not submit. */
-  encodeReadGrownCount(encoder: GPUCommandEncoder): void {
-    encoder.copyBufferToBuffer(this.agentStateBuffer, 0, this.grownCountStaging, 0, 4);
+  encodeReadSampleCount(encoder: GPUCommandEncoder): void {
+    encoder.copyBufferToBuffer(this.agentStateBuffer, 0, this.sampleCountStaging, 0, 12);
   }
 
-  /** Reads back growth's own atomic counter, via encodeReadGrownCount()'s
+  /** Reads back growth's own atomic counter, via encodeReadSampleCount()'s
    * own staging copy from THIS macro step's submit — a real, deliberate
    * host round-trip, once per macro step (gpu/simulation.ts's own step()
    * is the only caller), needed because dispatch sizing for EVERY pass
@@ -754,112 +664,62 @@ export class Agents {
    * read_buffer(), WebGPU's own buffer readback (mapAsync) has no
    * synchronous equivalent, which is why gpu/simulation.ts's own step()
    * is async too (see that module's own module docstring). */
-  async readGrownCount(): Promise<number> {
-    await this.grownCountStaging.mapAsync(GPUMapMode.READ);
-    const value = new Uint32Array(this.grownCountStaging.getMappedRange())[0];
-    this.grownCountStaging.unmap();
+  async readSampleCount(): Promise<number> {
+    await this.sampleCountStaging.mapAsync(GPUMapMode.READ);
+    const status = new Uint32Array(this.sampleCountStaging.getMappedRange());
+    const value = status[0];
+    this.unresolvedSamples = status[1];
+    this.capacityBlocked = status[2] !== 0;
+    this.sampleCountStaging.unmap();
     return value;
   }
 
-  /** Randomizes persistent heading state (uniform over [-pi, pi], one
-   * independent draw per particle slot, via rng.ts's own
-   * spawnUniform01(seed, 5+i) — index 5+, not 0: seedBlob()'s own 2
-   * particles' x/y jitter claims 0-3, simulation.ts's own theta draw
-   * claims 4, this is the next range over, bit-exact with
-   * agents_gpu.py's own reset_heading()), zeroes angularVelocity, and
-   * reseeds growth's own persistent per-particle rng (nonzero — see
-   * core/agents.wgsl's own xorshift32() for why, via rng.ts's own
-   * growthSeed() — a DELIBERATELY SEPARATE hash domain from heading's own
-   * spawnUniform01() above despite both being bit-exact now, see
-   * growthSeed()'s own comment for why) while zeroing cooldown ("not on
-   * cooldown," so a fresh rollout's own
-   * starting particle can split immediately, same as before cooldown
-   * existed) — called whenever a rollout restarts (simulation.ts's own
-   * restartRollout()). Bundled into this same method (despite the name)
-   * rather than a separate one since every caller already calls this
-   * once per rollout, at exactly the right time; matches this method's
-   * own existing "resetHeading also resets angularVelocity" precedent
-   * for outgrowing its own name slightly. Heading is randomized (not
-   * zeroed) so every particle doesn't start out facing an identical,
-   * seed-independent direction — see agents_gpu.py's own reset_heading()
-   * for the fuller reasoning, including why this was worth making bit-
-   * exact (not just plausible) even though every slot's own value here
-   * gets immediately overwritten either way (setHeadings() below for
-   * slots 0/1, or growth copying from its own parent's live heading the
-   * moment any other slot is actually claimed) — a standing "doesn't
-   * matter today" caveat on an un-reproducible PRNG stream was fragile,
-   * not a real savings. angularVelocity stays zeroed regardless — a
-   * random *turn rate* would just be an initial spin, not a meaningfully
-   * different starting condition the way a random facing direction is.
-   *
-   * Single `seed` param (the raw rollout seed) — heading's own
-   * spawnUniform01() domain and growth's own growthSeed() domain are
-   * both bit-exact and mutually uncorrelated by construction (distinct
-   * hash domains, not distinct seed VALUES), so there's no more need for
-   * the "offset the seed to decorrelate two draws off one shared
-   * mulberry32 stream" trick this used to need (see rng.ts's own
-   * spawnUniform01()/growthSeed() comments). */
-  resetHeading(seed: number, initialPositions?: Float32Array): void {
+  /** Clears all rollout-scoped agent state. Alignment is deliberately zero
+   * here and is reconstructed from channel index 3's gradient by agentStep. */
+  resetState(initial?: { chemistry: Float32Array; privateState: Float32Array }): void {
+    this.unresolvedSamples = 0;
+    this.capacityBlocked = false;
+    this.device.queue.writeBuffer(this.agentStateBuffer, 4, new Uint32Array(2));
     const count = (this.agentStateBuffer.size - PARTICLE_META_BUFFER_OFFSET) / this.particleMetaStride;
-    // One combined DataView write, matching core/agents.wgsl's own
-    // ParticleMeta struct exactly (four scalar fields, vec4 color, then the
-    // division hazard/threshold pair
-    // — see this class's own constructor comment for
-    // why the state is packed into one buffer). cooldown/angularVelocity/color
-    // are left at 0 (ArrayBuffer's own zero-initialized default) — "not
-    // on cooldown," "no spin."
     const buf = new ArrayBuffer(count * this.particleMetaStride);
     const view = new DataView(buf);
     for (let i = 0; i < count; i++) {
       const base = i * this.particleMetaStride;
       // Density model v3 uses this u32 as a lineage-generation counter.
-      view.setUint32(base + PARTICLE_META_OFFSET_RNG, 0, true);
-      view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, (spawnUniform01(seed, 5 + i) * 2 - 1) * Math.PI, true);
-    }
-    if (initialPositions) {
-      const initialCount = Math.min(initialPositions.length / 2, count);
-      for (let i = 0; i < initialCount; i++) {
-        const base = i * this.particleMetaStride;
-        const u = spatialUniform01(seed, initialPositions[i * 2], initialPositions[i * 2 + 1]);
-        view.setFloat32(base + PARTICLE_META_OFFSET_HEADING, (u * 2 - 1) * Math.PI, true);
+      if (initial && i < initial.privateState.length / 8) {
+        for (let k = 0; k < 8; k++) view.setFloat32(base + 28 + 4*k, initial.privateState[i*8+k], true);
+        for (let k = 0; k < this.channels; k++) view.setFloat32(base + 60 + 4*k, initial.chemistry[i*this.channels+k], true);
       }
     }
     this.device.queue.writeBuffer(this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET, buf);
-    this.setRolloutSeed(seed);
+    this.device.queue.writeBuffer(this.growthField, 0, new Uint32Array(this.growthField.size / 4));
+
   }
 
-  /** Overwrites the FIRST headings.length heading fields directly, a
-   * small follow-up write on top of whatever resetHeading() above just
-   * wrote there (every slot, independently randomized) — for callers
-   * that need a handful of slots' own heading coordinated with each
-   * other instead of independent (currently: simulation.ts's own
-   * restartRollout(), hardcoded 2-particle "back to back" start).
-   * Bit-exact with agents_gpu.py's own set_headings() (not just in
-   * spirit — resetHeading() above no longer has an accepted
-   * reproducibility gap for callers of this to inherit), not folded into
-   * resetHeading() itself, which stays a general, per-slot-independent
-   * utility. Individual per-index strided writes (heading is one f32
-   * field inside ParticleMeta's own aligned stride now, not a
-   * standalone tightly-packed array) so this touches ONLY the heading
-   * field, leaving rng/cooldown/angularVelocity exactly as
-   * resetHeading() just set them. */
-  setHeadings(headings: Float32Array): void {
-    headings.forEach((h, i) => {
-      writeFloat32(this.device, this.agentStateBuffer, PARTICLE_META_BUFFER_OFFSET + i * this.particleMetaStride + PARTICLE_META_OFFSET_HEADING, new Float32Array([h]));
-    });
-  }
-
-  /** Encodes the NN forward pass — reads the environment's current
-   * parity buffer (must match `parity`, see simulation.ts), writes the
-   * policy's growth direction into MpmCore's particle-rest buffer,
-   * optionally applies it to velocity through maxStrafe, and writes
-   * chemical deltas into cell-owned state. Does not submit. */
-  encodeStep(encoder: GPUCommandEncoder, parity: number, commitLifecycle = true): void {
+  encodeStep(encoder: GPUCommandEncoder, parity: number, commitGrowth = true): void {
     const pass = encoder.beginComputePass();
     pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, (commitLifecycle ? this.commitBindGroups : this.communicationBindGroups)[parity]);
+    pass.setBindGroup(0, (commitGrowth ? this.commitBindGroups : this.communicationBindGroups)[parity]);
     pass.dispatchWorkgroups(this.dispatch);
     pass.end();
+    if (commitGrowth) this.encodeGrowthField(encoder);
+  }
+
+  /** Spatially average policy intent, then conservatively refine any
+   * under-resolved grown or deformed material footprint. */
+  private encodeGrowthField(encoder: GPUCommandEncoder): void {
+    let propagationRound = 0;
+    for (let i = 0; i < this.growthPipelines.length; i++) {
+      // Limit pointer-jumping to the live sample count, independent of the
+      // number of field-projection passes before refinement.
+      if (this.growthEntries[i] === "propagateRefinement" &&
+          ++propagationRound > this.refinementRounds) continue;
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.growthPipelines[i]);
+      pass.setBindGroup(0, this.growthBindGroup);
+      pass.dispatchWorkgroups(this.growthDispatches[i] ?? this.dispatch);
+      pass.end();
+    }
   }
 
   /** Publishes each cell's persistent chemical state into the cleared,
@@ -873,12 +733,13 @@ export class Agents {
   }
 
   destroy(): void {
+    this.refinement.destroy();
     this.weightsBuffer.destroy();
     this.physicsUniform.destroy();
     this.randomCullVictims.destroy();
     this.randomCullParams.destroy();
     this.agentStateBuffer.destroy();
-    this.grownCountStaging.destroy();
+    this.sampleCountStaging.destroy();
     this.stepModeUniforms[0].destroy();
     this.stepModeUniforms[1].destroy();
   }

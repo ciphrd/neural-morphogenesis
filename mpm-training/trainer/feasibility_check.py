@@ -37,15 +37,12 @@ CROSS_CHECK_REFERENCE_PATH = Path(__file__).parent / "cross_check_reference.json
 
 RESULTS: list[tuple[str, str]] = []  # (name, verdict) — printed as a summary at the end
 
-
 def record(name: str, ok: bool | None, detail: str) -> None:
     verdict = "SKIP" if ok is None else ("PASS" if ok else "FAIL")
     RESULTS.append((name, verdict))
     print(f"[{verdict}] {name}: {detail}")
 
-
 # --- Check 1: atomics smoke test ---------------------------------------
-
 
 def check_atomics(device: wgpu.GPUDevice) -> bool:
     n = 10_000
@@ -82,9 +79,7 @@ def check_atomics(device: wgpu.GPUDevice) -> bool:
     record("atomics", ok, f"expected {n}, got {result}")
     return ok
 
-
 # --- Scene seeding (mirrors mls-mpm/src/worlds/util.ts's allocateScene/setRestState) ---
-
 
 def seed_blob(count: int, center: tuple[float, float], half_width: float, rng: np.random.Generator) -> tuple[np.ndarray, ...]:
     positions = center + rng.uniform(-half_width, half_width, size=(count, 2))
@@ -94,9 +89,7 @@ def seed_blob(count: int, center: tuple[float, float], half_width: float, rng: n
     Jp = np.ones((count,), dtype=np.float32)
     return positions.astype(np.float32), velocities, F, C, Jp
 
-
 # --- Check 2: no-op-gravity sanity --------------------------------------
-
 
 def check_no_gravity_drift(device: wgpu.GPUDevice) -> bool:
     core = MpmCore(device)
@@ -122,13 +115,20 @@ def check_no_gravity_drift(device: wgpu.GPUDevice) -> bool:
     )
     return ok
 
-
-# --- Check 3: settling under center gravity -----------------------------
-
+# --- Check 3: settling under gravity ------------------------------------
 
 def check_settle(device: wgpu.GPUDevice) -> bool:
-    # Start above center and verify the radial gravity field draws the blob
-    # inward, then remains bounded rather than drifting around the torus.
+    # KNOWN, EXPECTED TO NOW FAIL: this check's whole premise (a blob
+    # falling under gravity settles onto a floor and stays put) no
+    # longer holds — core/gridUpdate.wgsl's own domain is toroidal now,
+    # there is no floor, so a blob under nonzero gravity just falls
+    # forever, wrapping through the bottom edge and reappearing at the
+    # top on an endless cycle. `decreased`/`settled` below will very
+    # likely both fail at gravity=200.0 (mean_y cycles rather than
+    # settling) — left as-is rather than silently redesigned, since what
+    # this check *should* verify in a toroidal world (gravity=0 instead?
+    # a wraparound-specific scenario entirely?) is a real design decision,
+    # not one to make unilaterally while porting the physics itself.
     core = MpmCore(device)
     core.set_gravity(200.0)
     core.set_material(MATERIAL_E, MATERIAL_NU, MATERIAL_HARDENING, elasticity=0.0)
@@ -145,7 +145,7 @@ def check_settle(device: wgpu.GPUDevice) -> bool:
     batch = SUBSTEPS_PER_DAMPING_FRAME * 25  # 200 substeps/batch at SUBSTEPS_PER_DAMPING_FRAME=8
     batches = total_substeps // batch
 
-    mean_radii: list[float] = []
+    mean_ys: list[float] = []
     positions_by_batch: list[np.ndarray] = []
     all_finite = True
     all_in_bounds = True
@@ -158,14 +158,14 @@ def check_settle(device: wgpu.GPUDevice) -> bool:
         vel = core.read_velocities()
         all_finite = all_finite and bool(np.isfinite(pos).all()) and bool(np.isfinite(vel).all())
         all_in_bounds = all_in_bounds and bool(np.all((pos >= min_pos - 1e-6) & (pos <= max_pos + 1e-6)))
-        mean_radius = float(np.mean(np.linalg.norm(pos - 0.5, axis=1)))
-        mean_radii.append(mean_radius)
+        mean_y = float(np.mean(pos[:, 1]))
+        mean_ys.append(mean_y)
         positions_by_batch.append(pos)
         if i % 4 == 0 or i == batches - 1:
-            print(f"    step {(i + 1) * batch:5d}  mean_radius={mean_radius:.4f}  mean_speed={float(np.mean(np.linalg.norm(vel, axis=1))):.5f}")
+            print(f"    step {(i + 1) * batch:5d}  mean_y={mean_y:.4f}  mean_speed={float(np.mean(np.linalg.norm(vel, axis=1))):.5f}")
 
     # NOTE on the criterion below: raw velocity magnitude does NOT settle
-    # to near-zero here even once the blob is visibly center-bounded —
+    # to near-zero here even once the blob has visibly stopped falling —
     # confirmed by direct investigation (see mpm_core.py's own repulsion
     # comment): repulsion.wgsl's direct-position-write push has no decay
     # mechanism, so it keeps nudging already-settled particles back and
@@ -176,28 +176,26 @@ def check_settle(device: wgpu.GPUDevice) -> bool:
     # a trailing window — checked directly below — not an absolute
     # low-velocity threshold, which would be the wrong signal here and
     # was confirmed to be by testing (an earlier version of this check
-    # used speed < 0.01 and failed despite position being flat to
+    # used speed < 0.01 and failed despite mean_y being flat to
     # within 0.002 over the same window).
     tail_disp = np.linalg.norm(positions_by_batch[-1] - positions_by_batch[-5], axis=1)
     mean_tail_disp = float(np.mean(tail_disp))
     max_speed = float(np.max(np.linalg.norm(core.read_velocities(), axis=1)))
 
-    decreased = mean_radii[-1] < mean_radii[0]
+    decreased = mean_ys[-1] < mean_ys[0]
     settled = mean_tail_disp < 0.02  # over the last 4 batches (800 substeps)
     not_exploding = max_speed < 20.0  # loose sanity bound, not a "calm" threshold — see note above
 
     ok = all_finite and all_in_bounds and decreased and settled and not_exploding
     record(
-        "settle_under_center_gravity",
+        "settle_under_gravity",
         ok,
-        f"finite={all_finite} in_bounds={all_in_bounds} radius_decreased={decreased} "
+        f"finite={all_finite} in_bounds={all_in_bounds} y_decreased={decreased} "
         f"mean_tail_displacement={mean_tail_disp:.5f} (threshold 0.02) max_speed={max_speed:.3f} (sanity bound 20.0)",
     )
     return ok
 
-
 # --- Check 4: cross-check against the browser sandbox (manual) ---------
-
 
 def check_cross_reference(device: wgpu.GPUDevice) -> bool | None:
     if not CROSS_CHECK_REFERENCE_PATH.exists():
@@ -257,7 +255,6 @@ def check_cross_reference(device: wgpu.GPUDevice) -> bool | None:
     )
     return ok
 
-
 def main() -> int:
     device = pick_device()
 
@@ -280,12 +277,10 @@ def main() -> int:
     print_summary()
     return 0 if all(v != "FAIL" for _, v in RESULTS) else 1
 
-
 def print_summary() -> None:
     print("\n=== Summary ===")
     for name, verdict in RESULTS:
         print(f"  {verdict:5s}  {name}")
-
 
 if __name__ == "__main__":
     sys.exit(main())

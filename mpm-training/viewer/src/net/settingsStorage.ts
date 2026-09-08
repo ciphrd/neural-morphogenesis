@@ -1,119 +1,33 @@
-import { cellMemoryFromConfig, chemicalCommunicationArchitectureFromConfig, type RunSettings } from "../gpu/types";
+import type { RunSettings } from "../gpu/types"
+import { defaultChemicalChannelProfiles } from "../gpu/chemicalChannels"
+import sharedDefaultRunSettingsConfig from "../../../core/config.json";
+// Retained in the shared config for the trainer's legacy CLI flag only;
+// current run exports use fitnessTemporalAggregation instead.
+const { fitnessTemporalWorstWeight: _legacyTemporalWorstWeight, ...sharedDefaultRunSettings } = sharedDefaultRunSettingsConfig.run;
+const chemistry = sharedDefaultRunSettingsConfig.chemistry;
 
-const STORAGE_KEY = "mpm-training:last-run-settings:v1";
+// Offline/first-visit configuration. This JSON is part of the trainer's
+// canonical configuration too, so keeping the random-brain playground usable
+// does not require a second set of values maintained in TypeScript.
+export const DEFAULT_RUN_SETTINGS = {
+  ...sharedDefaultRunSettings,
+  fitnessTemporalAggregation: "min",
+  baseResolution: chemistry.baseResolution,
+  chemicalCommunicationArchitecture: chemistry.chemicalCommunicationArchitecture,
+  decay: chemistry.decay,
+  depositRate: chemistry.depositRate,
+  normalizeDepositsByLocalDensity: chemistry.normalizeDepositsByLocalDensity,
+  maxEnvWrite: chemistry.maxEnvWrite,
+  chemicalValueInputMultiplier: chemistry.chemicalValueInputMultiplier,
+  chemicalGradientInputScale: chemistry.chemicalGradientInputScale,
+  communicationSpeed: chemistry.communicationSpeed,
+  neuralUpdatesPerMacro: chemistry.neuralUpdatesPerMacro,
+  initialConditionChannel: chemistry.initialConditionChannel,
+  channels: chemistry.channels.length,
+  chemicalChannelProfiles: defaultChemicalChannelProfiles(chemistry.channels.length),
+} as RunSettings
 
-// First-ever offline visits have no browser cache to restore. These mirror the
-// trainer's ordinary CLI/simulation defaults closely enough to build a valid
-// randomized rollout; once any backend settings response arrives it replaces
-// them in localStorage and becomes the next startup default.
-export const DEFAULT_RUN_SETTINGS: RunSettings = {
-  target: "circle",
-  particles: 400,
-  initialParticleCount: 5,
-  macroSteps: 160,
-  growthSteps: null,
-  substepsPerMacro: 16,
-  gravity: 200,
-  spawnX: 0.5,
-  spawnY: 0.5,
-  spawnHalfWidth: 0.08,
-  channels: 8,
-  fieldN: 256,
-  morphologyBlurSigma: 0.01,
-  morphologyDensityReference: 1,
-  neuralUpdatesPerMacro: 4,
-  communicationSpeed: 1,
-  internalStateSpeed: 1,
-  divisionDirectionality: 1,
-  elasticStrainScale: 0.15,
-  elasticStrainInputsEnabled: true,
-  hiddenDim: 128,
-  hiddenLayers: [128],
-  cellMemory: "recurrent",
-  policyArchitecture: "stateful-128",
-  chemicalCommunicationArchitecture: "cell-owned-projection",
-  decay: 0.91,
-  depositRate: 1,
-  maxAccel: 0,
-  maxStrafe: 0,
-  maxEnvWrite: 1,
-  maxAngularAccel: 1.4,
-  angularDamping: 0.8,
-  maxAngularVelocity: 0.1,
-  depositDistance: 0,
-  depositSigma: 0.4,
-  splitDisplacement: 0.0027,
-  divisionCooldown: 1,
-  friction: 0.9,
-  massRampMacroSteps: 1,
-  growthDuration: 48,
-  growthMax: 2,
-  growthAnisotropy: 1,
-  growthCompressionStart: 0.10,
-  growthCompressionStop: 0.10,
-  growthCompressionFeedback: 1,
-  mpmEnabled: true,
-  chirality: true,
-  damping: 0.039306956424563166,
-  materialE: 10_000,
-  materialNu: 0.2,
-  materialHardening: 3,
-  materialElasticity: 0.2,
-  splatRadius: 0.004,
-  repulsionStrength: 0,
-  repulsionMaxDelta: 40,
-  population: 16,
-  elites: 3,
-  mutationSigma: 0.05,
-  runSeed: 0,
-  totalGenerations: 50,
-  checkpointEvery: 5,
-};
-
-function looksLikeSettings(value: unknown): value is Partial<RunSettings> {
-  if (!value || typeof value !== "object") return false;
-  const settings = value as Record<string, unknown>;
-  return (
-    typeof settings.target === "string" &&
-    typeof settings.particles === "number" && settings.particles > 0 &&
-    typeof settings.channels === "number" && settings.channels > 0 &&
-    typeof settings.hiddenDim === "number" && settings.hiddenDim > 0 &&
-    typeof settings.fieldN === "number" && settings.fieldN > 0
-  );
-}
-
-/** Returns the last backend-provided settings, or a valid first-run fallback.
- * Merging over the fallback lets caches from older frontend versions acquire
- * newly-added settings fields without making an offline startup invalid. */
-export function loadDefaultRunSettings(): RunSettings {
-  try {
-    const serialized = window.localStorage.getItem(STORAGE_KEY);
-    if (!serialized) return DEFAULT_RUN_SETTINGS;
-    const cached: unknown = JSON.parse(serialized);
-    if (!looksLikeSettings(cached)) return DEFAULT_RUN_SETTINGS;
-    const merged = { ...DEFAULT_RUN_SETTINGS, ...cached };
-    if (!("chemicalCommunicationArchitecture" in cached)) {
-      merged.chemicalCommunicationArchitecture = chemicalCommunicationArchitectureFromConfig({
-        decay: typeof cached.decay === "number" ? cached.decay : 0,
-      });
-    }
-    if (!("hiddenLayers" in cached)) merged.hiddenLayers = [cached.hiddenDim ?? merged.hiddenDim];
-    if (!("cellMemory" in cached)) {
-      merged.cellMemory = cellMemoryFromConfig({ policyArchitecture: cached.policyArchitecture });
-    }
-    return merged;
-  } catch {
-    // localStorage may be unavailable (privacy/security policy) or corrupt.
-    return DEFAULT_RUN_SETTINGS;
-  }
-}
-
-/** Best-effort by design: browser storage policy must never stop a live
- * backend response from loading into the viewer. */
-export function storeRunSettings(settings: RunSettings): void {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-  } catch {
-    // Continue with in-memory settings when storage is unavailable/full.
-  }
+/** Returns canonical defaults until a live server supplies run settings. */
+export function loadInitialRunSettings(): RunSettings {
+  return DEFAULT_RUN_SETTINGS
 }

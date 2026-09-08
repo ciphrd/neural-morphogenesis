@@ -63,7 +63,6 @@ app = FastAPI()
 # MpmCore's own fixed [0,1]^2 domain — matches evolve.py's own RASTER_EXTENT.
 EXTENT = (0.0, 1.0, 0.0, 1.0)
 
-
 def _raster_to_data_uri(raster: np.ndarray) -> str:
     """Same pixel conversion as debug_images.save_raster_image() (row-
     flip for this project's y-up domain, clip to [0,1] since a sum-
@@ -75,7 +74,6 @@ def _raster_to_data_uri(raster: np.ndarray) -> str:
     Image.fromarray((img * 255.0).astype(np.uint8), mode="L").save(buf, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
-
 def _finite(v: float) -> float | None:
     """chamfer_distance()/best_alignment()/training_raster_distance() all
     return float('inf') for an empty point cloud (e.g. before any
@@ -86,24 +84,19 @@ def _finite(v: float) -> float | None:
     fmt() already treats anything that fails Number.isFinite() as "∞"."""
     return v if np.isfinite(v) else None
 
-
 class ScoreRequest(BaseModel):
     target: str
     points: list[list[float]]
     raster_resolution: int = 128
-    raster_sigma: float = 1.5
     outside_weight: float = 1.0
-
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return (Path(__file__).parent / "distance_playground.html").read_text()
 
-
 @app.get("/targets")
 def list_targets() -> dict:
     return {"targets": available_targets()}
-
 
 @app.get("/target/{name}")
 def get_target(name: str) -> dict:
@@ -111,8 +104,7 @@ def get_target(name: str) -> dict:
         shape = load_target(name)
     except SystemExit as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    return {"points": shape.points.tolist(), "texelSize": shape.texel_size()}
-
+    return {"points": shape.overlay_points().tolist(), "texelSize": shape.texel_size()}
 
 @app.post("/score")
 def score(req: ScoreRequest) -> JSONResponse:
@@ -122,11 +114,9 @@ def score(req: ScoreRequest) -> JSONResponse:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
     points = np.array(req.points, dtype=np.float64).reshape(-1, 2)
-    target_points = target_shape.points.astype(np.float64)
+    target_points = target_shape.overlay_points(req.raster_resolution).astype(np.float64)
 
-    target_raster = build_target_raster(
-        target_points, req.raster_resolution, EXTENT, req.raster_sigma, half_size=target_shape.texel_size() / 2.0
-    )
+    target_raster = target_shape.mask(req.raster_resolution)
     target_distance_field = build_target_distance_field(target_raster)
 
     # --- Raw: points exactly as placed, no pose search. ---
@@ -139,7 +129,7 @@ def score(req: ScoreRequest) -> JSONResponse:
     # target's-centroid form production code already uses (see this
     # module's own module docstring).
     chamfer_aligned, aligned_points = best_alignment(points, target_points)
-    raster_aligned, candidate_aligned = training_raster_distance(
+    raster_aligned, candidate_aligned, breakdown = training_raster_distance(
         points,
         target_points,
         target_raster,
@@ -148,7 +138,7 @@ def score(req: ScoreRequest) -> JSONResponse:
         EXTENT,
         req.raster_sigma,
         outside_weight=req.outside_weight,
-        track_best_raster=True,
+        return_breakdown=True,
     )
 
     return JSONResponse(
@@ -160,7 +150,14 @@ def score(req: ScoreRequest) -> JSONResponse:
                     "coverage": _finite(coverage_raw),
                     "penalty": _finite(penalty_raw),
                 },
-                "aligned": {"distance": _finite(raster_aligned)},
+                "aligned": {
+                    "distance": _finite(raster_aligned),
+                    "coverage": _finite(breakdown.coverage) if breakdown else None,
+                    "spill": _finite(breakdown.spill) if breakdown else None,
+                    "boundary": _finite(breakdown.boundary) if breakdown else None,
+                    "crowding": _finite(breakdown.crowding) if breakdown else None,
+                    "angle": _finite(breakdown.angle) if breakdown else None,
+                },
             },
             "images": {
                 "target": _raster_to_data_uri(target_raster),
@@ -170,7 +167,6 @@ def score(req: ScoreRequest) -> JSONResponse:
             "alignedPoints": aligned_points.tolist(),
         }
     )
-
 
 if __name__ == "__main__":
     import uvicorn

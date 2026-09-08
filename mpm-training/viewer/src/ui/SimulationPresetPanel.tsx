@@ -1,3 +1,4 @@
+import { compatibleValues } from "../performance/migrateSnapshot"
 import { useEffect, useState } from "react"
 import type {
   CellMemory,
@@ -5,7 +6,7 @@ import type {
   PhysicsSettings,
 } from "../gpu/types"
 
-const STORAGE_KEY = "mpm-training-simulation-presets-v1"
+const STORAGE_KEY = "mpm-training-simulation-presets-v2"
 
 export interface SimulationPresetValue {
   physics: PhysicsSettings
@@ -13,12 +14,11 @@ export interface SimulationPresetValue {
   initialParticleCount: number
   noiseDisplacementStrength: number
   particleDensityMultiplier: number
-  chirality: boolean
   chemicalArchitecture: ChemicalCommunicationArchitecture
   policyExploration: {
     cellMemory: CellMemory
     hiddenWidth: number
-    variant: number
+    seed: number
   } | null
 }
 
@@ -33,10 +33,20 @@ interface SimulationPresetPanelProps {
   onLoad: (value: SimulationPresetValue) => void
 }
 
-function loadPresets(): SimulationPreset[] {
+function loadPresets(defaults: SimulationPresetValue | null): SimulationPreset[] {
   try {
-    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]")
-    return Array.isArray(parsed) ? parsed as SimulationPreset[] : []
+    const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem("mpm-training-simulation-presets-v1") ?? "[]")
+    return Array.isArray(parsed) && defaults ? parsed
+      .filter((preset) => preset?.value?.physics && typeof preset.id === "string" && typeof preset.name === "string")
+      .map((preset) => ({ ...preset, value: {
+        ...compatibleValues(defaults, preset.value),
+        physics: compatibleValues(defaults.physics, preset.value.physics),
+        policyExploration: preset.value.policyExploration ? {
+          cellMemory: preset.value.policyExploration.cellMemory,
+          hiddenWidth: preset.value.policyExploration.hiddenWidth,
+          seed: preset.value.policyExploration.seed ?? 0,
+        } : null,
+      } })) : []
   } catch {
     return []
   }
@@ -44,7 +54,7 @@ function loadPresets(): SimulationPreset[] {
 
 export function SimulationPresetPanel({ value, onLoad }: SimulationPresetPanelProps) {
   const [name, setName] = useState("")
-  const [presets, setPresets] = useState<SimulationPreset[]>(loadPresets)
+  const [presets, setPresets] = useState<SimulationPreset[]>(() => loadPresets(value))
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(presets))

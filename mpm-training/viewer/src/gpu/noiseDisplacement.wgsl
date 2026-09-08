@@ -5,6 +5,19 @@
 @group(0) @binding(0) var<storage, read_write> particlePos: array<vec2<f32>>;
 @group(0) @binding(1) var<uniform> activeCount: u32;
 
+struct ParticleRest {
+  growthF: vec4<f32>,
+  jp: f32,
+  growthVectorX: f32,
+  growthVectorY: f32,
+  verticesAB: vec4<f32>,
+  vertexC: vec2<f32>,
+  originalArea: f32,
+  quadratureWeight: f32,
+}
+@group(0) @binding(3) var<storage, read_write> particleRest: array<ParticleRest>;
+@group(0) @binding(4) var<storage, read_write> particleF: array<vec4<f32>>;
+
 struct NoiseParams {
   strength: f32,
   time: f32,
@@ -79,19 +92,45 @@ fn simplexNoise(point: vec2<f32>) -> f32 {
   return 130.0 * dot(attenuation, contribution);
 }
 
-@compute @workgroup_size(64)
-fn displaceWithNoise(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let particleIndex = gid.x;
-  if (particleIndex >= activeCount || params.strength <= 0.0) { return; }
-
-  let position = particlePos[particleIndex];
+fn displace(position: vec2<f32>) -> vec2<f32> {
   let domain = position * params.spatialScale;
   let animatedTime = params.time * TEMPORAL_SPEED;
   let first = simplexNoise(domain + vec2<f32>(animatedTime, -animatedTime * 0.65));
-  let second = simplexNoise(
-    domain + vec2<f32>(31.416, 17.903)
-      + vec2<f32>(-animatedTime * 0.76, animatedTime * 1.12),
-  );
-  let displacement = vec2<f32>(first, second) * params.strength * 0.00075;
-  particlePos[particleIndex] = fract(position + displacement);
+  let second = simplexNoise(domain + vec2<f32>(31.416, 17.903)
+    + vec2<f32>(-animatedTime * 0.76, animatedTime * 1.12));
+  return fract(position + vec2<f32>(first, second) * params.strength * 0.00075);
+}
+
+fn edge(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+  let delta = b - a;
+  return delta - floor(delta + vec2<f32>(0.5));
+}
+
+@compute @workgroup_size(64)
+fn displaceWithNoise(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= activeCount || params.strength <= 0.0) { return; }
+  let rest = particleRest[i];
+  if (rest.originalArea <= 0.0) {
+    particlePos[i] = displace(particlePos[i]);
+    return;
+  }
+  // Evaluate at shared vertex positions so neighboring domains stay joined.
+  let a = displace(rest.verticesAB.xy);
+  let b = displace(rest.verticesAB.zw);
+  let c = displace(rest.vertexC);
+  let oldU = edge(rest.verticesAB.xy, rest.verticesAB.zw);
+  let oldV = edge(rest.verticesAB.xy, rest.vertexC);
+  let newU = edge(a, b);
+  let newV = edge(a, c);
+  let determinant = oldU.x * oldV.y - oldV.x * oldU.y;
+  if (abs(determinant) > 1e-12) {
+    let inverseOld = mat2x2<f32>(vec2<f32>(oldV.y, -oldU.y), vec2<f32>(-oldV.x, oldU.x)) * (1.0 / determinant);
+    let f = particleF[i];
+    let nextF = mat2x2<f32>(newU, newV) * inverseOld * mat2x2<f32>(f.xz, f.yw);
+    particleF[i] = vec4<f32>(nextF[0].x, nextF[1].x, nextF[0].y, nextF[1].y);
+  }
+  particleRest[i].verticesAB = vec4<f32>(a, b);
+  particleRest[i].vertexC = c;
+  particlePos[i] = fract(a + (newU + newV) / 3.0);
 }

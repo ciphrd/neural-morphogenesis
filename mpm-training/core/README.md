@@ -1,69 +1,49 @@
-# core
+# Shared simulation core
 
-Shared WGSL, byte-for-byte identical between `../trainer/` (headless,
-via Python `wgpu`) and `../viewer/` (browser WebGPU) — the physics
-compute shaders below, plus `agents.wgsl`/`environment.wgsl` (the
-evolved policy's forward pass and its GPU-resident chemical field),
-which moved in here for the same single-source-of-truth reason once the
-Python trainer's own hot training loop needed to run them on its own
-wgpu device too, not just the browser — see `../trainer/training_sim.py`'s
-own module docstring.
+Python and the browser compile these same WGSL sources. `config.json` supplies default settings and shader template constants. Shader loaders resolve template parameters; run-specific channel layouts and material overrides remain explicit.
 
-## What's here
+| Shader | Responsibility |
+| --- | --- |
+| `agents.wgsl` | Chemical/morphology/strain sensing, policy evaluation, private state, growth output and friction |
+| `environment.wgsl` | Triangle-area chemical transfer, persistent environment or cell-owned projection, diffusion, advection and gradients |
+| `morphology.wgsl` | Smoothed material density used for morphology sensing |
+| `growthField.wgsl` | Floating domain projection, signed boundary growth and conforming refinement |
+| `clearGrid.wgsl` | Clear MPM accumulators |
+| `p2g.wgsl` | APIC/MLS-MPM momentum and fixed-corotated stress transfer |
+| `gridUpdate.wgsl` | Grid velocities, gravity and damping |
+| `g2p.wgsl` | Velocity gather, vertex transport, plasticity and continuous stress-free growth |
+| `repulsion.wgsl` | Optional density-based repulsion |
+| `policyInputProbe.wgsl` | Diagnostic policy-input capture |
 
-- `clearGrid.wgsl` — zeroes the per-substep grid accumulator.
-- `p2g.wgsl` — particle-to-grid transfer (APIC + MLS-MPM stress, corotated
-  elasticity).
-- `gridUpdate.wgsl` — momentum → velocity, gravity, damping, sticky
-  boundary.
-- `g2p.wgsl` — grid-to-particle transfer, F/Jp update, SVD-based
-  plasticity clamp.
-- `repulsion.wgsl` — particle-particle repulsion via a density field
-  (`clearDensity`/`splatDensity`/`densityToTexture`/`applyRepulsion`),
-  **always on, every substep** — a real, standard part of the simulation
-  here, not an optional extra. It's what keeps particles from overlapping
-  when new ones get placed right next to existing ones.
-- `agents.wgsl` — the evolved policy's forward pass
-  (specialized as stateless `Dense(128)` or eight-state `Dense(64)`, followed
-  by concatenated logical heads), local/heading-frame sensing +
-  action, the persistent per-particle heading/angularVelocity integrator.
-  Not part of the physics passes above — a training-loop concern, not
-  MLS-MPM itself — but shares this directory so both consumers load the
-  exact same shader.
-- `environment.wgsl` — the GPU-resident chemical field `agents.wgsl`
-  senses/writes. It contains both selectable lifecycles: transient
-  materialization from cell-owned chemistry, and persistent ping-pong
-  blur/decay plus direct policy deposits. Both use the same Sobel sensing and
-  toroidal domain.
-- `constants.json` — the numeric constants (`GRID_N`, `DX`, `INV_DX`,
-  `DT`, `PARTICLE_MASS`, `VOL`, `MAX_PARTICLES`, `FIELD_N`,
-  `DEFAULT_SPLAT_RADIUS`, `DEFAULT_REPULSION_STRENGTH`) every consumer
-  needs for template substitution and buffer sizing.
-- `policy_parameters.json` — shared logical-head initialization priors,
-  Xavier gains, and mutation-scale buckets used by Python training and browser
-  randomization. The GPU ABI remains one concatenated output matrix.
+## Shared layouts
 
-## Uniform surface
+`ParticleRest` is **64 bytes / 16 floats**, in this order:
 
-Reduced from the sandbox's own: `Material` (mu0, lambda0, hardening,
-yieldLow, yieldHigh), `activeCount`, `gravity`, `damping`, `SplatParams`
-(sigma), `RepulsionParams` (strength). **No `Mouse` uniform** — there is
-no interactive tool here, `gridUpdate.wgsl` only ever applies gravity +
-damping + the sticky boundary.
+| Float offset | Field |
+| --- | --- |
+| 0–3 | `growthF`: stress-free 2×2 growth tensor |
+| 4 | `jp`: plastic Jacobian |
+| 5–6 | `growthVectorX/Y`: world-space growth vector |
+| 7 | alignment padding |
+| 8–13 | `verticesAB`, `vertexC`: transported triangle vertices |
+| 14 | `originalArea`: original geometric area |
+| 15 | `quadratureWeight`: represented numerical material weight |
 
-## Relationship to `mls-mpm/`
+`ParticleMeta` starts with color (bytes 0–15), alignment (16–23), growth magnitude (24–27), eight private-state floats (28–59), then chemical state (byte 60 onward). Its stride rounds up to 16 bytes: 96 bytes with nine channels. The combined agent-state buffer reserves a 256-byte header for storage-binding alignment; its first three unsigned integers hold sample count, unresolved samples and capacity-blocked status.
 
-This is an **independent copy-and-strip**, not a shared/refactored source
-— `mls-mpm/src/gpu/*.wgsl` is untouched by this project and keeps its own
-mouse-interaction (Move/Force/Attract-to-Point) and field-visualization
-diagnostic channels, which this core has no use for. WGSL has no
-`#include`; small duplication across self-contained shader files is this
-project's own established convention (see `mls-mpm/src/gpu/p2g.wgsl` and
-`g2p.wgsl`'s own header comments), not an oversight here either.
+`AgentPhysics` occupies an 80-byte aligned buffer. It contains chemical write scale, sample spacing, friction, growth enable, spawn center, numerical capacity, strain/gradient scales, diagnostic forced-growth controls and chemical input multiplier. `StepMode` contains commit-growth, communication dt, and private-state update speed. There are no lifecycle clocks, direction lotteries or motion outputs.
 
-**Kept in sync by hand.** `constants.json`'s values, and every WGSL edit
-made relative to the sandbox's own shaders, are derived from
-`mls-mpm/src/gpu/mpm.ts` — that file is the numeric source of truth. If
-`mls-mpm`'s own `GRID_N`/`DT`/`DEFAULT_SPLAT_RADIUS`/etc. ever change,
-this folder needs a matching manual update; nothing here detects drift
-automatically.
+The shared layout must agree in all shader declarations, Python structured arrays/readback code and TypeScript upload code. GPU diagnostics and render checks exercise this boundary.
+
+`density_cases.json` is a set of cross-language test cases, not a default configuration file.
+
+Growth model 18 projects the field over triangle domains with the shared
+`growthSampling.wgsl` quadrature, then gathers once at each triangle centroid
+using the velocity stencil. Exposed edges define outward normals; inward
+commands contract rest material instead of losing their sign. The growth grid
+uses 12 words per node: scatter accumulates fixed-point integers with native
+atomic additions, and finalization converts them to f32 bits (including signed
+tensors) for G2P and rendering. Vector/weight scale is 8192; geometric boundary
+scale is 16777216. Small contributions can round to zero. Compression feedback gates expansion. See
+`../GROWTH_MODEL.md` for the law, mass coupling and resolution limits, and run
+`trainer/.venv/bin/python trainer/signed_growth_check.py` from the project root.

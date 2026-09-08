@@ -1,7 +1,9 @@
+import type { InitialConditionPreset } from "./initialConditions";
+import type { ShapeStopSettings } from "./shapeMatch";
 export interface UpdateRuleWeights {
   fc1w: number[][]; // (HIDDEN_DIM, 3*channels+6 [+ 8 private state])
   fc1b: number[]; // (HIDDEN_DIM,)
-  fc2w: number[][]; // stateless: channels+11; stateful: channels+24
+  fc2w: number[][]; // stateless: channels+10; stateful: channels+23
   fc2b: number[];
 }
 export type PolicyArchitecture = "stateless-128" | "stateful-64" | "stateful-128";
@@ -23,132 +25,88 @@ export type ChemicalCommunicationArchitecture = "persistent-environment" | "cell
 // that might still be minutes away — see gpu/agents.ts's own
 // randomWeights() for how that gap gets filled with a placeholder
 // rollout in the meantime).
-export interface RunSettings {
+export interface RunSettings extends ShapeStopSettings {
+  rasterResolution: number;
+  estimatedSampleCapacity?: number;
   // The growth CAP, not the starting count — rollouts start with
-  // initialParticleCount agents (see gpu/simulation.ts's own
+  // two half-weight triangles per initialParticleCount seed cell (see
   // restartRollout()) and grow via splitting from there. This is the
   // trained/default ceiling; the viewer may apply a different playback-only
   // cap through AgentPhysics.maxActiveParticles without changing it.
   particles: number;
-  initialParticleCount?: number;
-  densityModelVersion?: number;
-  trainingDensityMultipliers?: number[];
-  densityAggregation?: "worst" | "mean";
-  particleCapacity?: number;
-  particleMass?: number;
-  particleVolume?: number;
-  chemicalGradientInputScale?: number;
-  chemicalProjectionWeight?: number;
+  initialParticleCount: number;
+  initialCondition: InitialConditionPreset;
+  initialConditionStrength: number;
+  initialConditionChannel: number;
+  densityModelVersion: number;
+  trainingDensityMultipliers: number[];
+  densityAggregation: "worst" | "mean";
+  particleCapacity: number;
+  particleMass: number;
+  particleVolume: number;
+  chemicalValueInputMultiplier: number;
+  chemicalGradientInputScale: number;
   macroSteps: number;
   // Optional time cutoff for starting new cycles. null/absent means
   // growth remains chemically controlled for the whole replay.
-  growthSteps?: number | null;
+  growthSteps: number | null;
   substepsPerMacro: number;
   gravity: number;
   spawnX: number;
   spawnY: number;
-  spawnHalfWidth: number;
   channels: number;
-  fieldN: number;
-  morphologyBlurSigma?: number;
-  morphologyDensityReference?: number;
-  boundaryTangentMinGradient?: number;
-  neuralUpdatesPerMacro?: number;
-  communicationSpeed?: number;
-  internalStateSpeed?: number;
+  baseResolution: number;
+  /** Per-channel spatial/temporal transport profile, packed into shared buffers. */
+  chemicalChannelProfiles: ChemicalChannelProfile[];
+  morphologyBlurSigma: number;
+  morphologyDensityReference: number;
+  neuralUpdatesPerMacro: number;
+  communicationSpeed: number;
+  internalStateSpeed: number;
   /** Cap on policy-polarized daughter placement: 0 symmetric, 1 full. */
-  divisionDirectionality?: number;
-  elasticStrainScale?: number;
-  elasticStrainInputsEnabled?: boolean;
+
+  elasticStrainScale: number;
+  elasticStrainInputsEnabled: boolean;
   hiddenDim: number;
-  /** Ordered hidden-layer widths. Currently one layer; hiddenDim is its legacy alias. */
-  hiddenLayers?: number[];
+
+  hiddenLayers: number[];
   /** Behavioral memory selection, independent from network capacity. */
-  cellMemory?: CellMemory;
-  policyArchitecture?: PolicyArchitecture;
+  cellMemory: CellMemory;
+  policyArchitecture: PolicyArchitecture;
   /** Where chemical memory lives and how the policy's chemical head is used. */
-  chemicalCommunicationArchitecture?: ChemicalCommunicationArchitecture;
+  chemicalCommunicationArchitecture: ChemicalCommunicationArchitecture;
   /** Used by persistent-environment; ignored by cell-owned-projection. */
   decay: number;
   /** Used by persistent-environment; ignored by cell-owned-projection. */
   depositRate: number;
-  maxAccel: number;
-  maxStrafe: number;
-  /** Strength of the NN's signed local XY steering output. */
-  steeringStrength?: number;
+  normalizeDepositsByLocalDensity: boolean;
+  /** Represented-material density at which overcrowding normalization begins. */
+  /** Gain on the unbounded linear chemical delta rate (legacy name). */
   maxEnvWrite: number;
-  maxAngularAccel: number;
-  angularDamping: number;
-  maxAngularVelocity: number;
-  /** Legacy ABI field; centered deposits do not use an offset. */
-  depositDistance: number;
-  // Gaussian splat radius (sigma), field-pixel units — same convention as
-  // core/agents.wgsl's own depositGaussian() reads this, replacing that
-  // shader's old flat 4-corner bilinear deposit scatter. Live-tunable,
-  // added specifically for testing this splat's own shape/spread via
-  // PhysicsPanel.
-  depositSigma: number;
-  splitDisplacement: number;
-  divisionCooldown: number;
-  /** Playback mortality fraction per macro step. Absent in legacy runs. */
-  deathRate?: number;
+
+  // Gaussian splat sigma in normalized [0,1] world-domain units. The shader
+  // projects it onto each channel's native grid without changing its physical
+  // footprint as channel resolution changes.
+  sampleSpacing: number;
   friction: number;
-  // Legacy ABI/configuration field. Split mass is immediately conservative;
-  // the newborn's visual size instead follows growthDuration.
-  massRampMacroSteps: number;
-  // Kinematic growth (the multiplicative decomposition F = Fe*Fg) — see
-  // core/g2p.wgsl's own Material struct for what each of these does, and
-  // core/agents.wgsl's own ParticleRest.growthF for what they accumulate
-  // into. Duration is measured in neural/chemical controller ticks and is
-  // independent of substepsPerMacro. 0 disables growth.
-  growthDuration?: number;
-  /** Legacy run field, converted to a duration when growthDuration is absent. */
-  growthRate?: number;
-  growthMax: number;
-  /** Cap on policy-directed rest-growth anisotropy. */
-  growthAnisotropy?: number;
+  growthDuration: number;
+
+  growthModelVersion: number;
+  domainGeometry: "triangle-vertices";
+  /** Blend integrated tensor growth from isotropic (0) to directional (1). */
+  growthAnisotropy: number;
   /** Elastic areal-compression interval that smoothly suppresses growth. */
-  growthCompressionStart?: number;
-  growthCompressionStop?: number;
+  growthCompressionStart: number;
+  growthCompressionStop: number;
   /** 0 disables mechanical feedback; 1 applies the full compression gate. */
-  growthCompressionFeedback?: number;
-  /** Playback master growth bias: 0 off, 0.5 native policy, 1 forced. */
-  growthDrive?: number;
-  // Debug/testing toggle — off skips MpmCore's own physics substeps
-  // entirely each macro step (gpu/simulation.ts's own step(), see that
-  // method's own comment for exactly what stays running regardless:
-  // sensing/deposit/growth/chirality), freezing positions in place
-  // except where growth itself writes a brand-new child's own spawn
-  // position. Broadcast value is trainer/simulation_settings.py's own
-  // MPM_ENABLED constant (that constant's own comment has the full
-  // "why," including the fitness-scoring caveat — with real physics
-  // off, the ACTUAL worker-pool population evaluation this constant
-  // also applies to would train against a close-to-meaningless shape-
-  // matching fitness, so it's a real testing/debug run mode, not just a
-  // cosmetic replay toggle) — only the STARTING value here, still
-  // live-flippable in PhysicsPanel
-  // afterward regardless of what the run itself was started with (that
-  // live override never touches the actual training in progress, same
-  // "playback-only" reasoning every other PhysicsSettings field has).
+  growthCompressionFeedback: number;
   mpmEnabled: boolean;
-  // Compile-time (core/agents.wgsl's own CHIRALITY template const, not a
-  // live uniform) — changes how many times the NN forward pass runs per
-  // agent, not a physics knob, so it lives here (with channels/fieldN/
-  // hiddenDim, all of which force a rebuild on change) rather than in
-  // PhysicsSettings below.
-  chirality: boolean;
-  // MPM material (corotated elasticity, trainer/simulation_settings.py's
-  // own MATERIAL_*) and damping/repulsion — never CLI-varied per run, but
-  // broadcast here anyway (not just hardcoded to match on this side) so
-  // the two can never silently drift apart the way they used to before
-  // simulation_settings.py consolidated them.
   damping: number;
   materialE: number;
   materialNu: number;
   materialHardening: number;
   materialElasticity: number;
-  /** Per-substep elastic-shear relaxation; 0 is the legacy solid response. */
-  materialFluidity?: number;
+
   splatRadius: number;
   repulsionStrength: number;
   // Hard cap on the magnitude of one physics substep's own repulsion
@@ -161,23 +119,32 @@ export interface RunSettings {
   repulsionMaxDelta: number;
   target: string;
   population: number;
+  /** Missing in older archives, which used the mutation-only GA. */
+  optimizer?: "ga" | "cma-es";
+  cmaCovariance?: "diagonal" | "full" | null;
   /** Shared rollout-seed batch size used for candidate evaluation. */
-  seedsPerCandidate?: number;
+  seedsPerCandidate: number;
   elites: number;
+  /** Additional unchanged incumbent evaluated alongside CMA samples. */
+  referenceCandidates?: number;
   mutationSigma: number;
+  mutationFactors?: number[];
+  initialWeights?: string | null;
+  /** Training pose scorer; omitted archived runs use raster alignment. */
+  fitnessAlignment?: "raster" | "geometry" | "svg";
+  fitnessTemporalAggregation?: "min";
+  fitnessCaptureFractions?: number[];
+  /** Native training diagnostic; browser kernels retain parallel reductions. */
+  deterministicReference?: boolean;
   runSeed: number;
   totalGenerations: number;
   checkpointEvery: number;
 }
 
-/** Resolve untagged legacy runs without changing the explicit modern default.
- * The pre-cell-owned runtime always had a decaying persistent field, whereas
- * the first cell-owned records disabled decay entirely. */
 export function chemicalCommunicationArchitectureFromConfig(
   config: Pick<RunSettings, "chemicalCommunicationArchitecture" | "decay">,
 ): ChemicalCommunicationArchitecture {
-  return config.chemicalCommunicationArchitecture
-    ?? (config.decay > 0 ? "persistent-environment" : "cell-owned-projection");
+  return config.chemicalCommunicationArchitecture;
 }
 
 export function policyHasRecurrence(architecture: PolicyArchitecture): boolean {
@@ -191,14 +158,13 @@ export function policyArchitectureForCellMemory(cellMemory: CellMemory): PolicyA
 export function cellMemoryFromConfig(
   config: Pick<RunSettings, "cellMemory" | "policyArchitecture">,
 ): CellMemory {
-  if (config.cellMemory) return config.cellMemory;
-  return policyHasRecurrence(config.policyArchitecture ?? "stateless-128") ? "recurrent" : "none";
+  return config.cellMemory;
 }
 
 export function hiddenLayersFromConfig(
   config: Pick<RunSettings, "hiddenLayers" | "hiddenDim">,
 ): number[] {
-  return config.hiddenLayers?.length ? [...config.hiddenLayers] : [config.hiddenDim];
+  return [...config.hiddenLayers];
 }
 
 // Mirrors train_server.py's own trimmed "generation" broadcast message —
@@ -208,7 +174,53 @@ export function hiddenLayersFromConfig(
 // that manufactures a GenerationRecord without a server message at all
 // is useTrainingSocket()'s own placeholder (see that hook's own
 // comment): random init, before generation 0 exists.
+export interface TimingStage {
+  seconds: number;
+  count: number;
+  maxSeconds: number;
+}
+export interface GpuTiming {
+  supported: boolean;
+  samples: number;
+  seconds: number;
+  stages: Record<string, TimingStage>;
+  droppedIntervals?: number;
+  interval?: number;
+}
+export interface RolloutTiming {
+  gpu?: GpuTiming;
+  seconds: number;
+  stages: Record<string, TimingStage>;
+}
+export interface GenerationTiming {
+  seconds: number;
+  poolSeconds: number;
+  selectionSeconds: number;
+  previewSeconds: number;
+  checkpointSeconds: number;
+  otherSeconds: number;
+  rollouts: RolloutTiming & { count: number; meanSeconds: number; maxSeconds: number };
+  winner?: RolloutTiming;
+}
+
+export interface TimingEntry {
+  generation: number;
+  timing: GenerationTiming;
+}
+
 export interface GenerationRecord {
+  /** Search diagnostics after this generation's update; absent in older runs. */
+  optimizerState?: {
+    name: "cma-es";
+    sigma: number;
+    covariance: "diagonal" | "full";
+    libraryVersion: string;
+    parents?: number;
+    restarts: number;
+    restartReasons: string[];
+    generation: number;
+  } | null;
+  timing?: GenerationTiming;
   generation: number;
   best: number;
   mean: number;
@@ -235,7 +247,7 @@ export interface GenerationRecord {
 export type SimulationConfig = RunSettings & GenerationRecord;
 
 // The live-adjustable subset of SimulationConfig — everything else
-// (particles/macroSteps/channels/fieldN/hiddenDim/target/...) is baked
+// (particles/macroSteps/channels/baseResolution/hiddenDim/target/...) is baked
 // into GPU buffer sizes or WGSL compile-time consts, and changing it
 // mid-replay would need a full rebuild, not a live uniform write. Backed
 // by uniform buffers in the GPU layer (MpmCore's own set*() methods,
@@ -248,59 +260,40 @@ export interface PhysicsSettings {
   materialNu: number;
   materialHardening: number;
   materialElasticity: number;
-  materialFluidity: number;
   particleMass: number;
   particleVolume: number;
+  chemicalValueInputMultiplier: number;
   chemicalGradientInputScale: number;
-  chemicalProjectionWeight: number;
   decay: number;
   depositRate: number;
-  maxAccel: number;
-  maxStrafe: number;
-  /** Strength of the NN's signed local XY steering output. */
-  steeringStrength: number;
+  normalizeDepositsByLocalDensity: boolean;
+
   maxEnvWrite: number;
-  maxAngularAccel: number;
-  angularDamping: number;
-  maxAngularVelocity: number;
-  depositDistance: number;
-  depositSigma: number;
-  splitDisplacement: number;
-  divisionCooldown: number;
-  /** Fraction of the live population retired before each macro step. */
-  deathRate: number;
+  sampleSpacing: number;
   friction: number;
-  massRampMacroSteps: number;
   growthDuration: number;
+  /** Playback multiplier on the configured material-growth rate. */
+  growthSpeedMultiplier: number;
   neuralUpdatesPerMacro: number;
   communicationSpeed: number;
   internalStateSpeed: number;
-  divisionDirectionality: number;
-  growthMax: number;
   // Global cap on the neural per-particle anisotropy output.
   growthAnisotropy: number;
   growthCompressionStart: number;
   growthCompressionStop: number;
   growthCompressionFeedback: number;
-  /** Master growth-probability bias: 0 off, 0.5 native, 1 forced. */
-  growthDrive: number;
   /** Gaussian sigma of the raw particle-density splat, in domain units. */
   splatRadius: number;
   /** Gaussian sigma of the policy morphology blur, in domain units. */
   morphologyBlurSigma: number;
   /** Half-saturation density used by rho/(rho + reference). */
   morphologyDensityReference: number;
-  /** Gradient magnitude below which tangent division falls back to the policy. */
-  boundaryTangentMinGradient: number;
   repulsionStrength: number;
   repulsionMaxDelta: number;
   mpmEnabled: boolean;
 }
 
 export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSettings {
-  const legacyDuration = (config.growthRate ?? 0) > 0
-    ? Math.log(2) / ((config.growthRate ?? 0) * coreConstants.DT * Math.max(config.substepsPerMacro, 1))
-    : 0;
   return {
     gravity: config.gravity,
     damping: config.damping,
@@ -308,81 +301,40 @@ export function physicsSettingsFromConfig(config: SimulationConfig): PhysicsSett
     materialNu: config.materialNu,
     materialHardening: config.materialHardening,
     materialElasticity: config.materialElasticity,
-    materialFluidity: Math.max(0, Math.min(1, config.materialFluidity ?? 0)),
-    particleMass: config.particleMass ?? coreConstants.PARTICLE_MASS,
-    particleVolume: config.particleVolume ?? coreConstants.VOL,
-    chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
-    chemicalProjectionWeight: config.chemicalProjectionWeight ?? 1.0,
+    particleMass: config.particleMass,
+    particleVolume: config.particleVolume,
+    chemicalValueInputMultiplier: config.chemicalValueInputMultiplier,
+    chemicalGradientInputScale: config.chemicalGradientInputScale,
     decay: config.decay,
-    // Falls back to 1.0 (= unchanged, matching this project's own
-    // pre-depositRate behavior — see simulation_settings.py's own
-    // DEPOSIT_RATE comment) for a `generation` message from a
-    // train_server.py process still running pre-depositRate code, so the
-    // PhysicsPanel slider doesn't crash on `undefined.toFixed()` before a
-    // restart picks up the new field.
-    depositRate: config.depositRate ?? 1.0,
-    maxAccel: config.maxAccel,
-    maxStrafe: config.maxStrafe,
-    steeringStrength: Math.max(0, Math.min(1, config.steeringStrength ?? 0)),
+    depositRate: config.depositRate,
+    normalizeDepositsByLocalDensity: config.normalizeDepositsByLocalDensity,
     maxEnvWrite: config.maxEnvWrite,
-    maxAngularAccel: config.maxAngularAccel,
-    angularDamping: config.angularDamping,
-    maxAngularVelocity: config.maxAngularVelocity,
-    depositDistance: config.depositDistance,
-    // Falls back to 0.6 (trainer/simulation_settings.py's own
-    // DEPOSIT_SIGMA default) for a `generation` message from a
-    // train_server.py process still running pre-depositSigma code, same
-    // "don't crash on `undefined.toFixed()` before a restart picks up
-    // the new field" reasoning depositRate's own fallback above gives.
-    depositSigma: config.depositSigma ?? 0.6,
-    splitDisplacement: config.splitDisplacement,
-    divisionCooldown: config.divisionCooldown,
-    deathRate: Math.max(0, Math.min(1, config.deathRate ?? 0)),
+    sampleSpacing: config.sampleSpacing,
     friction: config.friction,
-    // Falls back to 1.0 (= disabled, this project's own behavior before
-    // this knob existed) for a `generation` message from a
-    // train_server.py process still running pre-growth code,
-    // same reasoning depositRate's/depositSigma's own fallbacks above
-    // give.
-    massRampMacroSteps: config.massRampMacroSteps ?? 20.0,
-    growthDuration: config.growthDuration ?? legacyDuration,
-    neuralUpdatesPerMacro: Math.max(1, Math.round(config.neuralUpdatesPerMacro ?? 1)),
-    communicationSpeed: Math.max(0, config.communicationSpeed ?? 1.0),
-    internalStateSpeed: Math.max(0, config.internalStateSpeed ?? 1.0),
-    divisionDirectionality: Math.max(0, Math.min(1, config.divisionDirectionality ?? 1.0)),
-    growthMax: config.growthMax ?? 2.0,
-    growthAnisotropy: Math.max(0, Math.min(1, config.growthAnisotropy ?? 1.0)),
-    growthCompressionStart: Math.max(0, config.growthCompressionStart ?? 0.10),
-    growthCompressionStop: Math.max(
-      Math.max(0, config.growthCompressionStart ?? 0.10),
-      config.growthCompressionStop ?? 0.10,
-    ),
-    growthCompressionFeedback: Math.max(
-      0, Math.min(1, config.growthCompressionFeedback ?? 0.0),
-    ),
-    growthDrive: Math.max(0, Math.min(1, config.growthDrive ?? 1.0)),
+    growthDuration: config.growthDuration,
+    growthSpeedMultiplier: 1,
+    neuralUpdatesPerMacro: config.neuralUpdatesPerMacro,
+    communicationSpeed: config.communicationSpeed,
+    internalStateSpeed: config.internalStateSpeed,
+    growthAnisotropy: config.growthAnisotropy,
+    growthCompressionStart: config.growthCompressionStart,
+    growthCompressionStop: config.growthCompressionStop,
+    growthCompressionFeedback: config.growthCompressionFeedback,
     splatRadius: config.splatRadius,
-    morphologyBlurSigma: config.morphologyBlurSigma ?? 0.01,
-    morphologyDensityReference: config.morphologyDensityReference ?? 1.0,
-    boundaryTangentMinGradient: config.boundaryTangentMinGradient
-      ?? coreConstants.BOUNDARY_TANGENT_MIN_GRADIENT,
+    morphologyBlurSigma: config.morphologyBlurSigma,
+    morphologyDensityReference: config.morphologyDensityReference,
     repulsionStrength: config.repulsionStrength,
-    // Falls back to 40.0 (trainer/simulation_settings.py's own
-    // REPULSION_MAX_DELTA default) for a `generation` message from a
-    // train_server.py process still running pre-repulsionMaxDelta code,
-    // same reasoning depositSigma's own fallback above gives.
-    repulsionMaxDelta: config.repulsionMaxDelta ?? 40.0,
-    // Falls back to true (= normal physics, this project's own behavior
-    // before this knob existed) for a `generation` message from a
-    // train_server.py process still running pre-mpmEnabled code, same
-    // reasoning depositRate's/depositSigma's own fallbacks above give.
-    mpmEnabled: config.mpmEnabled ?? true,
+    repulsionMaxDelta: config.repulsionMaxDelta,
+    mpmEnabled: config.mpmEnabled,
   };
 }
 
 // One scene's worth of particle state to seed MpmCore with — mirrors
 // trainer/training_sim.py's own seed_blob() output shape.
 export interface SceneData {
+  domainGeometry?: "triangle-vertices";
+  domain?: Float32Array;
+  quadratureWeights?: Float32Array;
   count: number;
   positions: Float32Array; // (count,2)
   velocities: Float32Array; // (count,2), zero
@@ -390,4 +342,4 @@ export interface SceneData {
   C: Float32Array; // (count,4), zero
   Jp: Float32Array; // (count,), ones
 }
-import coreConstants from "../../../core/constants.json";
+import type { ChemicalChannelProfile } from "./chemicalChannels";

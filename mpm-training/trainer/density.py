@@ -13,16 +13,16 @@ import math
 from pathlib import Path
 from typing import Any, Mapping
 
-_MODEL = json.loads((Path(__file__).parent.parent / "core" / "density.json").read_text())
+from config import CONFIG
+_MODEL = CONFIG["density"]
 
 DENSITY_MODEL_VERSION: int = int(_MODEL["MODEL_VERSION"])
-REFERENCE_SPACING: float = float(_MODEL["REFERENCE_SPACING"])
+REFERENCE_SPACING: float = float(CONFIG["run"]["sampleSpacing"])
 INITIAL_PACKING_SPACING_SCALE: float = float(_MODEL["INITIAL_PACKING_SPACING_SCALE"])
-SPATIAL_RANDOM_CELLS: int = int(_MODEL["SPATIAL_RANDOM_CELLS"])
+INITIAL_SPACING_IN_SAMPLE_SPACINGS: float = float(_MODEL["INITIAL_SPACING_IN_SAMPLE_SPACINGS"])
 REPULSION_RADIUS_IN_CELLS: float = float(_MODEL["REPULSION_RADIUS_IN_CELLS"])
 MIN_SUPPORTED_MULTIPLIER: float = float(_MODEL["MIN_SUPPORTED_MULTIPLIER"])
 MAX_SUPPORTED_MULTIPLIER: float = float(_MODEL["MAX_SUPPORTED_MULTIPLIER"])
-
 
 @dataclass(frozen=True)
 class DensityReference:
@@ -31,11 +31,9 @@ class DensityReference:
     chemical_field_n: int
     particle_mass: float
     particle_volume: float
-    deposit_sigma: float
     chemical_gradient_input_scale: float
     repulsion_strength: float
     repulsion_max_delta: float
-
 
 @dataclass(frozen=True)
 class ResolvedDensity:
@@ -43,12 +41,11 @@ class ResolvedDensity:
     multiplier: float
     spacing_scale: float
     spacing: float
+    initial_spacing: float
     initial_particles: int
     particle_cap: int
     particle_mass: float
     particle_volume: float
-    deposit_sigma: float
-    chemical_projection_weight: float
     splat_radius: float
     chemical_gradient_input_scale: float
     repulsion_strength: float
@@ -58,24 +55,21 @@ class ResolvedDensity:
         return {
             "density_model_version": self.model_version,
             "particle_density_multiplier": self.multiplier,
-            "split_displacement": self.spacing,
+            "sample_spacing": self.spacing,
+            "initial_spacing": self.initial_spacing,
             "initial_particle_count": self.initial_particles,
             "particles": self.particle_cap,
             "particle_mass": self.particle_mass,
             "particle_volume": self.particle_volume,
-            "deposit_sigma": self.deposit_sigma,
-            "chemical_projection_weight": self.chemical_projection_weight,
             "splat_radius": self.splat_radius,
             "chemical_gradient_input_scale": self.chemical_gradient_input_scale,
             "repulsion_strength": self.repulsion_strength,
             "repulsion_max_delta": self.repulsion_max_delta,
         }
 
-
 def _round_positive(value: float) -> int:
     """Round non-negative values half-up, identically to TypeScript."""
     return math.floor(value + 0.5)
-
 
 def validate_multiplier(multiplier: float, *, allow_unsafe: bool = False) -> float:
     q = float(multiplier)
@@ -87,7 +81,6 @@ def validate_multiplier(multiplier: float, *, allow_unsafe: bool = False) -> flo
             f"[{MIN_SUPPORTED_MULTIPLIER:g}, {MAX_SUPPORTED_MULTIPLIER:g}]"
         )
     return q
-
 
 def resolve_density(
     reference: DensityReference,
@@ -110,6 +103,10 @@ def resolve_density(
         multiplier=q,
         spacing_scale=spacing_scale,
         spacing=spacing,
+        # Seed triangles start near the steady-state post-split scale.  This is
+        # derived from the density-resolved refinement spacing, never tuned as
+        # an independent physical-size control.
+        initial_spacing=INITIAL_SPACING_IN_SAMPLE_SPACINGS * spacing,
         initial_particles=max(1, _round_positive(reference.initial_particles * q)),
         particle_cap=max(1, _round_positive(reference.particle_cap * q)),
         particle_mass=reference.particle_mass / q,
@@ -118,14 +115,11 @@ def resolve_density(
         # the already-sub-texel q=1 kernel made higher-density particles alias
         # onto the same texels.  Keep its grid-space support fixed and weight
         # each particle by the represented material area instead.
-        deposit_sigma=reference.deposit_sigma,
-        chemical_projection_weight=1.0 / q,
         splat_radius=REPULSION_RADIUS_IN_CELLS * spacing,
         chemical_gradient_input_scale=reference.chemical_gradient_input_scale,
         repulsion_strength=reference.repulsion_strength * spacing_scale * spacing_scale,
         repulsion_max_delta=reference.repulsion_max_delta * spacing_scale,
     )
-
 
 def parse_multipliers(values: list[float] | tuple[float, ...], *, allow_unsafe: bool = False) -> tuple[float, ...]:
     if not values:
@@ -135,42 +129,11 @@ def parse_multipliers(values: list[float] | tuple[float, ...], *, allow_unsafe: 
         raise ValueError("particle density multipliers must be unique")
     return resolved
 
-
-def resolve_checkpoint_density(
-    metadata: Mapping[str, Any],
-    reference: DensityReference,
-    *,
-    legacy_split_displacement: float,
-    legacy_deposit_sigma: float,
-    legacy_splat_radius: float,
-) -> ResolvedDensity:
-    """Resolve modern reference metadata while preserving legacy actual values."""
-    density = resolve_density(
-        reference,
-        float(metadata.get("winner_density_multiplier", 1.0)),
-        allow_unsafe=True,
-    )
-    # v3 changes stochastic forcing only; its resolved physical/chemical
-    # scaling is identical to v2, so v2 checkpoints remain modern here.
-    if int(metadata.get("density_model_version", 0)) in (2, DENSITY_MODEL_VERSION):
-        return density
-    return replace(
-        density,
-        multiplier=float(metadata.get("winner_density_multiplier", metadata.get("particle_density_multiplier", 1.0))),
-        spacing_scale=1.0 / math.sqrt(float(metadata.get(
-            "winner_density_multiplier", metadata.get("particle_density_multiplier", 1.0)
-        ))),
-        spacing=float(metadata.get("split_displacement", legacy_split_displacement)),
-        initial_particles=int(metadata.get("initial_particle_count", reference.initial_particles)),
-        particle_cap=int(metadata.get("particles", reference.particle_cap)),
-        particle_mass=float(metadata.get("particle_mass", reference.particle_mass)),
-        particle_volume=float(metadata.get("particle_volume", reference.particle_volume)),
-        deposit_sigma=float(metadata.get("deposit_sigma", legacy_deposit_sigma)),
-        chemical_projection_weight=float(metadata.get("chemical_projection_weight", 1.0)),
-        splat_radius=float(metadata.get("splat_radius", legacy_splat_radius)),
-        chemical_gradient_input_scale=float(metadata.get(
-            "chemical_gradient_input_scale", reference.chemical_gradient_input_scale
-        )),
-        repulsion_strength=float(metadata.get("repulsion_strength", reference.repulsion_strength)),
-        repulsion_max_delta=float(metadata.get("repulsion_max_delta", reference.repulsion_max_delta)),
-    )
+def resolve_checkpoint_density(metadata: Mapping[str, Any], reference: DensityReference) -> ResolvedDensity:
+    if metadata["growth_model_version"] != CONFIG["run"]["growthModelVersion"]:
+        raise ValueError("Checkpoint schema does not match the current simulation; start a new run")
+    resolved = resolve_density(reference, float(metadata["winner_density_multiplier"]), allow_unsafe=True)
+    return replace(resolved,
+        spacing=float(metadata["sample_spacing"]) * resolved.spacing_scale,
+        initial_spacing=INITIAL_SPACING_IN_SAMPLE_SPACINGS * float(metadata["sample_spacing"]) * resolved.spacing_scale,
+        splat_radius=float(metadata["splat_radius"]) * resolved.spacing_scale)

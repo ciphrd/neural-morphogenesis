@@ -1,0 +1,106 @@
+{
+  "settings": {
+    "output": "/tmp/pressure-burst-damped",
+    "densities": [
+      4
+    ],
+    "divisors": [
+      1,
+      2,
+      4
+    ],
+    "macros": 120,
+    "capacity": 4096,
+    "sample_ticks": 4,
+    "damping": 0.039306956424563166
+  },
+  "reference_dt": 1.5625e-05,
+  "material": {
+    "E": 10000,
+    "nu": 0.2,
+    "hardening": 3,
+    "elasticity": 0.5,
+    "fluidity": 0,
+    "growth_rate": 120,
+    "growth_axis": [
+      1,
+      0
+    ]
+  },
+  "runs": [
+    {
+      "name": "density-4_dt-1",
+      "density": 4,
+      "dt": 1.5625e-05,
+      "first_inversion_time": 0.0451875,
+      "first_capacity_time": null,
+      "checkpoint_time": 0.0346875,
+      "max_kinetic_jump_before_inversion": 947.7681974180219,
+      "peak_speed": 20.98268298366468,
+      "samples": 12441,
+      "elapsed_seconds": 62.00985525001306
+    },
+    {
+      "name": "density-4_dt-2",
+      "density": 4,
+      "dt": 7.8125e-06,
+      "first_inversion_time": 0.0500625,
+      "first_capacity_time": 0.0520625,
+      "checkpoint_time": 0.034625,
+      "max_kinetic_jump_before_inversion": 941.8117952798457,
+      "peak_speed": 21.14100456748412,
+      "samples": 16384,
+      "elapsed_seconds": 76.50890350004192
+    },
+    {
+      "name": "density-4_dt-4",
+      "density": 4,
+      "dt": 3.90625e-06,
+      "first_inversion_time": 0.0489375,
+      "first_capacity_time": null,
+      "checkpoint_time": 0.0345625,
+      "max_kinetic_jump_before_inversion": 939.5095820422014,
+      "peak_speed": 21.09592895539765,
+      "samples": 14436,
+      "elapsed_seconds": 26.473172625002917
+    }
+  ],
+  "replays": [
+    {
+      "density": 4,
+      "divisor": 1,
+      "relative_energy_change": 0.0008891492302403048,
+      "max_relative_energy": 0.0008891492302403048,
+      "kinetic_change": 12189.141741763195,
+      "elastic_change": -12107.062976568095,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 4,
+      "divisor": 2,
+      "relative_energy_change": 0.00031480130778582804,
+      "max_relative_energy": 0.00031480130778582804,
+      "kinetic_change": 12128.929343203801,
+      "elastic_change": -12099.869538903147,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 4,
+      "divisor": 4,
+      "relative_energy_change": -2.7559926838005566e-05,
+      "max_relative_energy": 1.6980650708875444e-05,
+      "kinetic_change": 12092.307427339101,
+      "elastic_change": -12094.85152757199,
+      "inverted_triangles": 0
+    },
+    {
+      "density": 4,
+      "divisor": 8,
+      "relative_energy_change": -0.000281572450722245,
+      "max_relative_energy": 0.0,
+      "kinetic_change": 12064.239210209742,
+      "elastic_change": -12090.231606404011,
+      "inverted_triangles": 0
+    }
+  ]
+}

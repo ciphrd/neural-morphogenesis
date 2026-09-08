@@ -3,12 +3,6 @@ import type { PhysicsSettings } from "../gpu/types"
 import { Slider } from "./Slider"
 
 interface GrowthPanelProps {
-  /** This generation's own trained values — the reset target, same
-   * contract PhysicsPanel has. Growth knobs live in PhysicsSettings
-   * alongside every other live-adjustable setting rather than in a
-   * parallel state object, so this panel reuses that whole
-   * value/onChange/isOverridden/onReset plumbing untouched. */
-  trained: PhysicsSettings
   value: PhysicsSettings
   onChange: (next: PhysicsSettings) => void
   isOverridden: boolean
@@ -17,18 +11,7 @@ interface GrowthPanelProps {
 
 export type GrowthKey = Extract<
   keyof PhysicsSettings,
-  | "growthDuration"
-  | "growthAnisotropy"
-  | "growthCompressionStart"
-  | "growthCompressionStop"
-  | "growthCompressionFeedback"
-  | "divisionDirectionality"
-  | "boundaryTangentMinGradient"
-  | "neuralUpdatesPerMacro"
-  | "communicationSpeed"
-  | "internalStateSpeed"
-  | "deathRate"
-  | "growthDrive"
+  "growthDuration" | "growthSpeedMultiplier" | "growthCompressionStart" | "growthCompressionStop" | "growthCompressionFeedback" | "neuralUpdatesPerMacro" | "communicationSpeed" | "internalStateSpeed"
 >
 
 export interface GrowthSliderSpec {
@@ -47,39 +30,18 @@ export interface GrowthSliderSpec {
 // run happened to be trained with.
 export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
   {
-    key: "growthDrive",
-    label: "Growth drive",
-    hint: "Master growth control. 0 pauses growth, 0.5 preserves the native neural and mechanical behavior, and 1 forces every eligible particle to grow while bypassing contact inhibition.",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    format: (v) => v.toFixed(2),
-  },
-  {
-    key: "deathRate",
-    label: "Death rate",
-    hint: "Fraction of live particles replaced per mechanical tick. Every death immediately forces one surviving particle to split, preserving the live population while continually renewing it.",
-    min: 0,
-    max: 0.2,
-    step: 0.0001,
-    format: (v) => `${(100 * v).toFixed(1)}% / tick`,
-  },
-  {
     key: "neuralUpdatesPerMacro",
-    label: "Neural updates / tick",
-    hint: "Neural evaluations before one MLS-MPM update. Chemical and turning dynamics are timestep-scaled, so this raises temporal resolution rather than raw speed. Lifecycle and division commit only on the final round.",
+    label: "Communication ticks / frame",
+    hint: "Each tick evaluates the neural policy and updates chemistry. Persistent substrate diffuses and decays between evaluations. Total communication time stays fixed; growth commits on the final tick.",
     min: 1,
     max: 16,
     step: 1,
-    format: (v) => {
-      const rounds = Math.round(v)
-      return `${rounds} ${rounds === 1 ? "round" : "rounds"}`
-    },
+    format: (v) => `${Math.round(v)} rounds`,
   },
   {
     key: "communicationSpeed",
     label: "Communication speed",
-    hint: "Cell-chemical updates and orientation time per mechanical tick. Neural updates control resolution; this controls elapsed communication time.",
+    hint: "Chemical and memory time per mechanical frame, divided across communication ticks. Increase this to let communication evolve further before the shape moves.",
     min: 0,
     max: 4,
     step: 0.05,
@@ -95,22 +57,22 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
     format: (v) => `${v.toFixed(2)}×`,
   },
   {
+    key: "growthSpeedMultiplier",
+    label: "Growth speed",
+    hint: "Live multiplier on material growth. 2× halves the time needed to add the same rest area; 0× pauses growth without changing the policy output.",
+    min: 0,
+    max: 8,
+    step: 0.1,
+    format: (v) => `${v.toFixed(1)}×`,
+  },
+  {
     key: "growthDuration",
-    label: "Growth duration",
-    hint: "Approximate mechanical ticks required to double stress-free area. Larger values give agents more communication rounds before division. 0 = growth off.",
+    label: "Growth timescale",
+    hint: "Mechanical ticks for a unit-magnitude field to double stress-free material area. Subdivision itself does not grow material.",
     min: 0,
     max: 160,
     step: 1,
     format: (v) => `${v.toFixed(0)} ticks`,
-  },
-  {
-    key: "growthAnisotropy",
-    label: "Growth anisotropy",
-    hint: "Caps policy-directed rest-growth elongation. 1× grants full policy authority; 0 makes mechanical growth isotropic.",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    format: (v) => `${v.toFixed(2)}×`,
   },
   {
     key: "growthCompressionFeedback",
@@ -139,53 +101,16 @@ export const GROWTH_SLIDER_SPECS: GrowthSliderSpec[] = [
     step: 0.002,
     format: (v) => `${(100 * v).toFixed(1)}%`,
   },
-  {
-    key: "divisionDirectionality",
-    label: "Division directionality",
-    hint: "Caps one-sided daughter placement. 1× grants full policy authority; 0 keeps every split center-preserving and symmetric.",
-    min: 0,
-    max: 1,
-    step: 0.01,
-    format: (v) => `${v.toFixed(2)}×`,
-  },
-  {
-    key: "boundaryTangentMinGradient",
-    label: "Tangent flat-gradient threshold",
-    hint: "Morphology-gradient magnitudes at or below this value are treated as flat interiors and fall back to the neural division direction. 0 uses the tangent for every nonzero gradient.",
-    min: 0,
-    max: 0.05,
-    step: 0.000001,
-    format: (v) => v.toExponential(2),
-  },
 ]
 
-/** Collapsible "Growth" section (default closed), sibling to
- * PhysicsPanel — the knobs behind this project's own kinematic growth
- * model (the multiplicative decomposition F = Fe*Fg, see
- * ../../../core/g2p.wgsl's own substrate-driven growth block and
- * ../../../core/agents.wgsl's own ParticleRest.growthF field).
- *
- * Split into its own section rather than appended to PhysicsPanel's own
- * flat list because these controls behave as a group:
- * neuralUpdatesPerMacro controls communication cadence relative to mechanics;
- * growthDuration controls the substrate-driven cell cycle;
- * growthAnisotropy and divisionDirectionality cap directional authority;
- * boundaryTangentMinGradient controls where the hardcoded tangent rule yields
- * back to neural division orientation.
- * Same live-uniform-write path as every
- * PhysicsPanel knob (gpu/simulation.ts's own applyPhysics()), so moving
- * any of these never disturbs the rollout in flight and never affects
- * training itself — playback only. */
+/** Live controls for continuous material growth and communication cadence. */
 export function GrowthPanel({
-  trained,
   value,
   onChange,
   isOverridden,
   onReset,
 }: GrowthPanelProps) {
   const [open, setOpen] = useState(false)
-  void trained
-
   return (
     <section>
       <div className="physics-panel-header">
@@ -213,16 +138,10 @@ export function GrowthPanel({
           {GROWTH_SLIDER_SPECS.map((spec) => (
             <label key={spec.key} className="slider-row" title={spec.hint}>
               <span>{spec.label}</span>
-              <Slider
-                min={spec.min}
-                max={spec.max}
-                step={spec.step}
+              <Slider min={spec.min} max={spec.max} step={spec.step}
                 value={value[spec.key]}
-                onChange={(v) => onChange({ ...value, [spec.key]: v })}
-              />
-              <span className="slider-value">
-                {spec.format(value[spec.key])}
-              </span>
+                onChange={(v) => onChange({ ...value, [spec.key]: v })} />
+              <span className="slider-value">{spec.format(value[spec.key])}</span>
             </label>
           ))}
         </div>

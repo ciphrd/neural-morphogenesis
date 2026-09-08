@@ -5,19 +5,15 @@
 // the compact live prefix. Victims already in the tail need no GPU copy.
 
 struct ParticleMeta {
-  rng: u32,
-  cooldown: f32,
-  heading: f32,
-  angularVelocity: f32,
   color: vec4<f32>,
-  divisionHazard: f32,
-  divisionThreshold: f32,
+  alignment: vec2<f32>,
+  growthMagnitude: f32,
   privateState: array<f32, 8>,
   chemicalState: array<f32, __CHANNELS__>,
 }
 
 struct AgentState {
-  growthCount: atomic<u32>,
+  sampleCount: atomic<u32>,
   _padding: array<u32, 63>,
   particleMeta: array<ParticleMeta>,
 }
@@ -25,13 +21,12 @@ struct AgentState {
 struct ParticleRest {
   growthF: vec4<f32>,
   jp: f32,
-  cycleActive: f32,
-  growthAngle: f32,
-  growthAnisotropy: f32,
-  divisionBias: f32,
-  growthFrameHeading: f32,
-  appearanceScale: f32,
-  _padding: f32,
+  growthVectorX: f32,
+  growthVectorY: f32,
+  verticesAB: vec4<f32>,
+  vertexC: vec2<f32>,
+  originalArea: f32,
+  quadratureWeight: f32,
 }
 
 struct CullParams {

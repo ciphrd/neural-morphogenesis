@@ -27,7 +27,7 @@ function prepareCanvas(canvas: HTMLCanvasElement): CanvasRenderingContext2D | nu
 }
 
 function drawGrid(context: CanvasRenderingContext2D, width: number, height: number) {
-  context.fillStyle = "#080d11"
+  context.fillStyle = "#000000"
   context.fillRect(0, 0, width, height)
   context.strokeStyle = "rgba(91, 166, 183, 0.12)"
   context.lineWidth = 1

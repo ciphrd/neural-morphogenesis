@@ -19,7 +19,6 @@ from __future__ import annotations
 import numpy as np
 from scipy.spatial import cKDTree
 
-
 def chamfer_distance(a: np.ndarray, b: np.ndarray) -> float:
     if a.shape[0] == 0 or b.shape[0] == 0:
         return float("inf")

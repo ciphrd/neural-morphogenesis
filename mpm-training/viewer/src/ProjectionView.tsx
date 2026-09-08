@@ -30,10 +30,6 @@ export function ProjectionView() {
   const autoPruneDelayMsRef = useRef(30_000)
   const autoPruneArmedRef = useRef(true)
   const autoPruneReachedCapAtRef = useRef<number | null>(null)
-  const autoRandomizeIntervalMsRef = useRef<number | null>(null)
-  const autoRandomizeNextAtRef = useRef<number | null>(null)
-  const autoResetIntervalMsRef = useRef<number | null>(null)
-  const autoResetNextAtRef = useRef<number | null>(null)
   const [config, setConfig] = useState<SimulationConfig | null>(null)
   const [snapshot, setSnapshot] = useState<PerformanceSnapshot | null>(null)
   const [connected, setConnected] = useState(false)
@@ -59,18 +55,9 @@ export function ProjectionView() {
         autoPruneDelayMsRef.current = Math.max(0, message.delayMs)
         autoPruneArmedRef.current = true
         autoPruneReachedCapAtRef.current = null
-      } else if (message.type === "auto-randomize") {
-        autoRandomizeIntervalMsRef.current = message.intervalMs
-        autoRandomizeNextAtRef.current = message.intervalMs === null
-          ? null
-          : performance.now() + Math.max(0, message.intervalMs)
-      } else if (message.type === "auto-reset") {
-        autoResetIntervalMsRef.current = message.intervalMs
-        autoResetNextAtRef.current = message.intervalMs === null
-          ? null
-          : performance.now() + Math.max(0, message.intervalMs)
       } else if (message.type === "command") {
-        if (message.command === "restart") canvasRef.current?.restart()
+        if (message.command === "prune") canvasRef.current?.killFraction(0.995)
+        else if (message.command === "restart") canvasRef.current?.restart()
         else if (message.command === "randomize") canvasRef.current?.randomizeWeights(false)
         else if (message.command === "randomize-and-restart") canvasRef.current?.randomizeWeights(true)
         else if (message.command === "kill-20-percent") canvasRef.current?.killFraction(0.2)
@@ -116,26 +103,6 @@ export function ProjectionView() {
     } else {
       autoPruneReachedCapAtRef.current = null
     }
-    const autoRandomizeIntervalMs = autoRandomizeIntervalMsRef.current
-    const autoRandomizeNextAt = autoRandomizeNextAtRef.current
-    if (
-      autoRandomizeIntervalMs !== null &&
-      autoRandomizeNextAt !== null &&
-      now >= autoRandomizeNextAt
-    ) {
-      canvasRef.current?.randomizeWeights(false)
-      autoRandomizeNextAtRef.current = now + autoRandomizeIntervalMs
-    }
-    const autoResetIntervalMs = autoResetIntervalMsRef.current
-    const autoResetNextAt = autoResetNextAtRef.current
-    if (
-      autoResetIntervalMs !== null &&
-      autoResetNextAt !== null &&
-      now >= autoResetNextAt
-    ) {
-      canvasRef.current?.restart()
-      autoResetNextAtRef.current = now + autoResetIntervalMs
-    }
     const elapsed = now - telemetryRef.current.lastFrameAt
     telemetryRef.current.lastFrameAt = now
     const instantaneousFps = elapsed > 0 ? 1000 / elapsed : 0
@@ -172,19 +139,21 @@ export function ProjectionView() {
           morphologyDensityVisible={snapshot.render.morphologyDensityVisible}
           blur={snapshot.render.blur}
           gradientExponent={snapshot.render.gradientExponent}
-          particleRenderMode={snapshot.render.particleRenderMode}
+          particleShape={snapshot.render.particleShape}
+          particleColorMode={snapshot.render.particleColorMode}
+          particleAlpha={snapshot.render.particleAlpha}
+          directionalLineVisible={snapshot.render.directionalLineVisible}
+          domainVisible={snapshot.render.domainVisible}
+          growthLineVisible={snapshot.render.growthLineVisible}
+          substrateZeroIsBlack={snapshot.render.substrateZeroIsBlack}
+          boundaryGradientZeroIsBlack={snapshot.render.boundaryGradientZeroIsBlack}
           zoom={snapshot.render.zoom}
           autoZoom={snapshot.render.autoZoom}
           bloom={snapshot.render.bloom}
           particleRadiusPx={snapshot.render.particleRadiusPx}
-          whiteDotsAlpha={snapshot.render.whiteDotsAlpha}
-          activationAlpha={snapshot.render.activationAlpha}
-          neuralColorAlpha={snapshot.render.neuralColorAlpha}
-          internalStateAlpha={snapshot.render.internalStateAlpha}
           boundaryGradientScale={snapshot.render.boundaryGradientScale}
           internalStateChannelStart={snapshot.render.internalStateChannelStart}
           chemicalMemoryOpponentSubtraction={snapshot.render.chemicalMemoryOpponentSubtraction}
-          growthAxisLengthPx={snapshot.render.growthAxisLengthPx}
           deformSettings={DEFAULT_DEFORM_SETTINGS}
           onStep={onStep}
           loopAtTrainedSteps={snapshot.loopAtTrainedSteps}

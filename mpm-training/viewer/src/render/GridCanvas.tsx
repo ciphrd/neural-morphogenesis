@@ -1,8 +1,9 @@
+import { VIEWER_DEFAULTS } from "../viewerConfig";
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { DeformDirection, DeformMode } from "../gpu/deform";
 import type { BloomSettings } from "../gpu/bloom";
 import { acquireGpuDevice, watchDeviceLoss, watchUncapturedErrors } from "../gpu/device";
-import type { FieldMode, ParticleRenderMode } from "../gpu/render";
+import { MAX_ZOOM, type FieldMode, type ParticleColorMode, type ParticleShape } from "../gpu/render";
 import { GpuSimulation, type SimulationScenario } from "../gpu/simulation";
 import { policyWeightsShapeError } from "../gpu/policyEval";
 import type { PhysicsSettings, SimulationConfig, UpdateRuleWeights } from "../gpu/types";
@@ -51,12 +52,6 @@ interface GridCanvasProps {
   targetPoints: Float32Array | null;
   /** Rendering-only visibility of the training-target overlay. */
   targetVisible?: boolean;
-  // Live gravity/decay/maxAccel/maxStrafe/maxEnvWrite for the Physics
-  // panel's sliders — the caller (TrainingView) always resolves this to
-  // a concrete value once a config is loaded (either the config's own
-  // trained values, or the user's in-progress override); null only means
-  // nothing has loaded yet. Applied via a plain uniform-buffer write
-  // (GpuSimulation.setPhysics()), never a rebuild.
   physics: PhysicsSettings | null;
   /** Playback-only growth/interaction cap; does not alter training. */
   particleCap?: number;
@@ -68,20 +63,23 @@ interface GridCanvasProps {
   fieldMode?: FieldMode;
   /** First of three contiguous chemical channels mapped to substrate RGB. */
   substrateChannelStart?: number;
-  particleRenderMode?: ParticleRenderMode;
+  substrateZeroIsBlack?: boolean;
+  boundaryGradientZeroIsBlack?: boolean;
+  particleShape?: ParticleShape;
+  particleColorMode?: ParticleColorMode;
+  particleAlpha?: number;
+  directionalLineVisible?: boolean;
+  growthLineVisible?: boolean;
+  domainVisible?: boolean;
   particleRadiusPx?: number;
-  whiteDotsAlpha?: number;
-  activationAlpha?: number;
-  neuralColorAlpha?: number;
-  internalStateAlpha?: number;
+  /** Visualization-only multiplier for growth-vector magnitude. */
+  growthMagnitudeBoost?: number;
   /** Boundary diagnostic half-activation gradient g0. */
   boundaryGradientScale?: number;
   /** First of three contiguous private-state channels mapped to cell RGB. */
   internalStateChannelStart?: number;
   /** Amount of the wrapped next three private-state channels subtracted from particle RGB. */
   chemicalMemoryOpponentSubtraction?: number;
-  /** Full-strength axis length in device pixels. */
-  growthAxisLengthPx?: number;
   /** [-2,2] — negative suppresses background-field contrast, 0 is
    * identity, positive accentuates faint values. */
   accent?: number;
@@ -120,7 +118,7 @@ interface GridCanvasProps {
    * see GpuSimulation's own particleCount getter). Both ride the same
    * callback rather than getting their own, since they're read from the
    * same sim at the same instant and always displayed together. */
-  onStep?: (step: number, particleCount: number) => void;
+  onStep?: (step: number, particleCount: number, shapeStatus: GpuSimulation["shapeStatus"]) => void;
   // Default (true): restart with a fresh rollout (same seed) once
   // currentStep reaches config.macroSteps — the rollout was only ever
   // *trained* for that many macro steps, so this keeps a long-idle
@@ -172,6 +170,7 @@ export interface GridCanvasHandle {
    * the rendered final frame of each settings combination as a PNG. */
   collectSamples(
     samples: Array<{
+      config: SimulationConfig;
       physics: PhysicsSettings;
       particleCap: number;
       initialParticleCount: number;
@@ -295,40 +294,44 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     config,
     scenario = null,
     targetPoints,
-    targetVisible = true,
+    targetVisible = VIEWER_DEFAULTS.rendering.targetVisible,
     physics,
     particleCap,
     initialParticleCount,
-    fieldMode = "none",
-    substrateChannelStart = 0,
-    particleRenderMode = "dots-white",
+    fieldMode = VIEWER_DEFAULTS.rendering.fieldMode,
+    substrateChannelStart = VIEWER_DEFAULTS.rendering.substrateChannelStart,
+    substrateZeroIsBlack = VIEWER_DEFAULTS.rendering.substrateZeroIsBlack,
+    boundaryGradientZeroIsBlack = VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack,
+    particleShape = VIEWER_DEFAULTS.rendering.particleShape,
+    particleColorMode = VIEWER_DEFAULTS.rendering.particleColorMode,
+    particleAlpha = VIEWER_DEFAULTS.rendering.particleAlpha,
+    directionalLineVisible = VIEWER_DEFAULTS.rendering.directionalLineVisible,
+    growthLineVisible = VIEWER_DEFAULTS.rendering.growthLineVisible,
+    domainVisible = VIEWER_DEFAULTS.rendering.domainVisible,
     particleRadiusPx,
-    whiteDotsAlpha = 1,
-    activationAlpha = 0.2,
-    neuralColorAlpha = 1,
-    internalStateAlpha = 1,
-    boundaryGradientScale = 0.01,
-    internalStateChannelStart = 0,
-    chemicalMemoryOpponentSubtraction = 0,
-    growthAxisLengthPx = 24,
-    accent = 0,
-    morphologyGradientVisible = true,
-    morphologyDensityVisible = true,
-    blur = 0,
-    gradientExponent = 1,
+    growthMagnitudeBoost = VIEWER_DEFAULTS.rendering.growthMagnitudeBoost,
+    boundaryGradientScale = VIEWER_DEFAULTS.rendering.boundaryGradientScale,
+    internalStateChannelStart = VIEWER_DEFAULTS.rendering.internalStateChannelStart,
+    chemicalMemoryOpponentSubtraction = VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction,
+    accent = VIEWER_DEFAULTS.rendering.accent,
+    morphologyGradientVisible = VIEWER_DEFAULTS.rendering.morphologyGradientVisible,
+    morphologyDensityVisible = VIEWER_DEFAULTS.rendering.morphologyDensityVisible,
+    blur = VIEWER_DEFAULTS.rendering.blur,
+    gradientExponent = VIEWER_DEFAULTS.rendering.gradientExponent,
     bloom,
-    zoom = 1,
+    zoom = VIEWER_DEFAULTS.rendering.zoom,
     noiseDisplacementStrength = 0,
     autoZoom,
     onEffectiveZoomChange,
-    tool = "none",
+    tool = VIEWER_DEFAULTS.tools.selected,
     deformSettings,
     onStep,
-    loopAtTrainedSteps = true,
-    paused = false,
+    loopAtTrainedSteps = VIEWER_DEFAULTS.playback.loopAtTrainedSteps,
+    paused = VIEWER_DEFAULTS.playback.paused,
   },
   ref
 ) {
+  const [samplingMessage, setSamplingMessage] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simulationRef = useRef<GpuSimulation | null>(null);
   const contextRef = useRef<GPUCanvasContext | null>(null);
@@ -340,16 +343,19 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const initialParticleCountRef = useRef(initialParticleCount);
   const fieldModeRef = useRef(fieldMode);
   const substrateChannelStartRef = useRef(substrateChannelStart);
-  const particleRenderModeRef = useRef(particleRenderMode);
+  const substrateZeroIsBlackRef = useRef(substrateZeroIsBlack);
+  const boundaryGradientZeroIsBlackRef = useRef(boundaryGradientZeroIsBlack);
+  const particleShapeRef = useRef(particleShape);
+  const particleColorModeRef = useRef(particleColorMode);
+  const particleAlphaRef = useRef(particleAlpha);
+  const directionalLineVisibleRef = useRef(directionalLineVisible);
+  const growthLineVisibleRef = useRef(growthLineVisible);
+  const domainVisibleRef = useRef(domainVisible);
   const particleRadiusPxRef = useRef(particleRadiusPx);
-  const whiteDotsAlphaRef = useRef(whiteDotsAlpha);
-  const activationAlphaRef = useRef(activationAlpha);
-  const neuralColorAlphaRef = useRef(neuralColorAlpha);
-  const internalStateAlphaRef = useRef(internalStateAlpha);
+  const growthMagnitudeBoostRef = useRef(growthMagnitudeBoost);
   const boundaryGradientScaleRef = useRef(boundaryGradientScale);
   const internalStateChannelStartRef = useRef(internalStateChannelStart);
   const chemicalMemoryOpponentSubtractionRef = useRef(chemicalMemoryOpponentSubtraction);
-  const growthAxisLengthPxRef = useRef(growthAxisLengthPx);
   const accentRef = useRef(accent);
   const morphologyGradientVisibleRef = useRef(morphologyGradientVisible);
   const morphologyDensityVisibleRef = useRef(morphologyDensityVisible);
@@ -486,16 +492,19 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   initialParticleCountRef.current = initialParticleCount;
   fieldModeRef.current = fieldMode;
   substrateChannelStartRef.current = substrateChannelStart;
-  particleRenderModeRef.current = particleRenderMode;
+  substrateZeroIsBlackRef.current = substrateZeroIsBlack;
+  boundaryGradientZeroIsBlackRef.current = boundaryGradientZeroIsBlack;
+  particleShapeRef.current = particleShape;
+  particleColorModeRef.current = particleColorMode;
+  particleAlphaRef.current = particleAlpha;
+  directionalLineVisibleRef.current = directionalLineVisible;
+  growthLineVisibleRef.current = growthLineVisible;
+  domainVisibleRef.current = domainVisible;
   particleRadiusPxRef.current = particleRadiusPx;
-  whiteDotsAlphaRef.current = whiteDotsAlpha;
-  activationAlphaRef.current = activationAlpha;
-  neuralColorAlphaRef.current = neuralColorAlpha;
-  internalStateAlphaRef.current = internalStateAlpha;
+  growthMagnitudeBoostRef.current = growthMagnitudeBoost;
   boundaryGradientScaleRef.current = boundaryGradientScale;
   internalStateChannelStartRef.current = internalStateChannelStart;
   chemicalMemoryOpponentSubtractionRef.current = chemicalMemoryOpponentSubtraction;
-  growthAxisLengthPxRef.current = growthAxisLengthPx;
   accentRef.current = accent;
   morphologyGradientVisibleRef.current = morphologyGradientVisible;
   morphologyDensityVisibleRef.current = morphologyDensityVisible;
@@ -552,6 +561,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       if (!sim?.ready || !context || !canvas || !device) {
         throw new Error("The simulation is not ready yet.");
       }
+      const restoreConfig = configRef.current;
+      if (!restoreConfig) throw new Error("No simulation configuration is loaded.");
       batchRunningRef.current = true;
       const captures: Array<{ filename: string; blob: Blob }> = [];
       try {
@@ -561,6 +572,10 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += 1) {
           const sample = samples[sampleIndex];
           if (signal.aborted) throw new DOMException("Sample collection cancelled", "AbortError");
+          // Substrate resolution is baked into buffer sizes and shader
+          // constants, so a resolution sweep must go through loadGeneration
+          // rather than the live-uniform physics path.
+          sim.loadGeneration(sample.config);
           sim.setPhysics(sample.physics);
           sim.setParticleCap(sample.particleCap);
           sim.setInitialParticleCount(sample.initialParticleCount);
@@ -583,6 +598,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
             const spatial = spatialMetrics(positions);
             const metadata = {
               particleDensityMultiplier: sample.particleDensityMultiplier,
+              substrateResolution: sample.config.baseResolution,
               particleCap: sample.particleCap,
               initialParticleCount: sample.initialParticleCount,
               finalParticleCount: sim.particleCount,
@@ -601,6 +617,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
         }
         return captures;
       } finally {
+        sim.loadGeneration(restoreConfig);
         sim.setPhysics(restorePhysics);
         sim.setParticleCap(restoreParticleCap);
         sim.setInitialParticleCount(restoreInitialParticleCount);
@@ -668,16 +685,19 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setTargetVisible(targetVisible);
       simulation.setFieldMode(fieldModeRef.current);
       simulation.setSubstrateChannelStart(substrateChannelStartRef.current);
-      simulation.setParticleRenderMode(particleRenderModeRef.current);
-      simulation.setWhiteDotsAlpha(whiteDotsAlphaRef.current);
-      simulation.setActivationAlpha(activationAlphaRef.current);
-      simulation.setNeuralColorAlpha(neuralColorAlphaRef.current);
-      simulation.setInternalStateAlpha(internalStateAlphaRef.current);
+      simulation.setSubstrateZeroIsBlack(substrateZeroIsBlackRef.current);
+      simulation.setBoundaryGradientZeroIsBlack(boundaryGradientZeroIsBlackRef.current);
+      simulation.setParticleShape(particleShapeRef.current);
+      simulation.setParticleColorMode(particleColorModeRef.current);
+      simulation.setParticleAlpha(particleAlphaRef.current);
+      simulation.setDirectionalLineVisible(directionalLineVisibleRef.current);
+      simulation.setGrowthLineVisible(growthLineVisibleRef.current);
+      simulation.setDomainVisible(domainVisibleRef.current);
+      simulation.setGrowthMagnitudeBoost(growthMagnitudeBoostRef.current);
       simulation.setBoundaryGradientScale(boundaryGradientScaleRef.current);
       simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
       simulation.setChemicalMemoryOpponentSubtraction(chemicalMemoryOpponentSubtractionRef.current);
       if (particleRadiusPxRef.current !== undefined) simulation.setPointRadiusPx(particleRadiusPxRef.current);
-      simulation.setGrowthAxisLengthPx(growthAxisLengthPxRef.current);
       simulation.setAccent(accentRef.current);
       simulation.setMorphologyDisplay(morphologyGradientVisibleRef.current, morphologyDensityVisibleRef.current);
       simulation.setBlur(blurRef.current);
@@ -981,24 +1001,40 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [substrateChannelStart]);
 
   useEffect(() => {
-    simulationRef.current?.setParticleRenderMode(particleRenderMode);
-  }, [particleRenderMode]);
+    simulationRef.current?.setSubstrateZeroIsBlack(substrateZeroIsBlack);
+  }, [substrateZeroIsBlack]);
 
   useEffect(() => {
-    simulationRef.current?.setWhiteDotsAlpha(whiteDotsAlpha);
-  }, [whiteDotsAlpha]);
+    simulationRef.current?.setBoundaryGradientZeroIsBlack(boundaryGradientZeroIsBlack);
+  }, [boundaryGradientZeroIsBlack]);
 
   useEffect(() => {
-    simulationRef.current?.setActivationAlpha(activationAlpha);
-  }, [activationAlpha]);
+    simulationRef.current?.setParticleShape(particleShape);
+  }, [particleShape]);
 
   useEffect(() => {
-    simulationRef.current?.setNeuralColorAlpha(neuralColorAlpha);
-  }, [neuralColorAlpha]);
+    simulationRef.current?.setParticleColorMode(particleColorMode);
+  }, [particleColorMode]);
 
   useEffect(() => {
-    simulationRef.current?.setInternalStateAlpha(internalStateAlpha);
-  }, [internalStateAlpha]);
+    simulationRef.current?.setParticleAlpha(particleAlpha);
+  }, [particleAlpha]);
+
+  useEffect(() => {
+    simulationRef.current?.setDirectionalLineVisible(directionalLineVisible);
+  }, [directionalLineVisible]);
+
+  useEffect(() => {
+    simulationRef.current?.setGrowthLineVisible(growthLineVisible);
+  }, [growthLineVisible]);
+
+  useEffect(() => {
+    simulationRef.current?.setDomainVisible(domainVisible);
+  }, [domainVisible]);
+
+  useEffect(() => {
+    simulationRef.current?.setGrowthMagnitudeBoost(growthMagnitudeBoost);
+  }, [growthMagnitudeBoost]);
 
   useEffect(() => {
     simulationRef.current?.setBoundaryGradientScale(boundaryGradientScale);
@@ -1015,10 +1051,6 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   useEffect(() => {
     if (particleRadiusPx !== undefined) simulationRef.current?.setPointRadiusPx(particleRadiusPx);
   }, [particleRadiusPx]);
-
-  useEffect(() => {
-    simulationRef.current?.setGrowthAxisLengthPx(growthAxisLengthPx);
-  }, [growthAxisLengthPx]);
 
   useEffect(() => {
     simulationRef.current?.setAccent(accent);
@@ -1099,7 +1131,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     // this creates: if this component unmounts WHILE a frame() call is
     // suspended awaiting step(), sim.destroy() (a DIFFERENT effect's own
     // cleanup, not this one — see this component's own device-acquisition
-    // effect) can destroy the very buffers readGrownCount()'s own
+    // effect) can destroy the very buffers readSampleCount()'s own
     // mapAsync() is waiting on, which WebGPU rejects rather than silently
     // ignores; `cancelled` (this effect's own flag) tells the two apart
     // from a real bug, which still surfaces via console.error rather than
@@ -1120,7 +1152,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
             return;
           }
           if (cancelled) return;
-          if (loopAtTrainedStepsRef.current && sim.currentStep >= sim.steps) {
+          if (loopAtTrainedStepsRef.current && sim.currentStep >= sim.steps && !sim.shapeStatus.complete) {
             sim.restartRollout();
             autoZoomFrameRef.current = Number.MAX_SAFE_INTEGER;
             autoZoomTargetRef.current = effectiveZoomRef.current;
@@ -1137,15 +1169,25 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
               const positions = await sim.readPositionSamples(auto.maxSamples);
               if (cancelled) return;
               if (positions.length >= 2) {
-                let minX = positions[0];
-                let maxX = positions[0];
-                let minY = positions[1];
-                let maxY = positions[1];
-                for (let i = 2; i < positions.length; i += 2) {
+                let minX = Infinity;
+                let maxX = -Infinity;
+                let minY = Infinity;
+                let maxY = -Infinity;
+                let invalidPositions = 0;
+                for (let i = 0; i + 1 < positions.length; i += 2) {
+                  // An invalid simulation sample must not poison the camera
+                  // transform and hide every otherwise valid particle.
+                  if (!Number.isFinite(positions[i]) || !Number.isFinite(positions[i + 1])) {
+                    invalidPositions += 1;
+                    continue;
+                  }
                   minX = Math.min(minX, positions[i]);
                   maxX = Math.max(maxX, positions[i]);
                   minY = Math.min(minY, positions[i + 1]);
                   maxY = Math.max(maxY, positions[i + 1]);
+                }
+                if (invalidPositions > 0) {
+                  throw new Error(`${invalidPositions} non-finite particle position samples`);
                 }
                 // The existing camera is fixed on world center, so asymmetric
                 // drift must count toward the centered fitting square too.
@@ -1159,11 +1201,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
                 const fitFraction = Math.min(1, Math.max(0.05, auto.fitFraction));
                 const padding = Math.max(1, auto.padding);
                 const target = Math.min(
-                  8,
+                  MAX_ZOOM,
                   Math.max(1, fitFraction / (centeredExtent * padding)),
                 );
-                autoZoomTargetRef.current = target;
-                if (autoZoomHardResetRef.current) {
+                if (Number.isFinite(minX)) autoZoomTargetRef.current = target;
+                if (Number.isFinite(minX) && autoZoomHardResetRef.current) {
                   autoZoomHardResetRef.current = false;
                   effectiveZoomRef.current = target;
                   sim.setZoom(target);
@@ -1178,13 +1220,13 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
               }
             }
           }
-          const current = effectiveZoomRef.current;
-          const target = autoZoomTargetRef.current;
+          const current = Number.isFinite(effectiveZoomRef.current) ? effectiveZoomRef.current : 1;
+          const target = Number.isFinite(autoZoomTargetRef.current) ? autoZoomTargetRef.current : current;
           const smoothing = Math.min(1, Math.max(0.001, auto.smoothing));
           const next = Math.abs(target - current) < 1e-4
             ? target
             : current + (target - current) * smoothing;
-          const moved = next !== current;
+          const moved = next !== effectiveZoomRef.current;
           if (moved) {
             effectiveZoomRef.current = next;
             sim.setZoom(next);
@@ -1224,7 +1266,11 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
           );
         }
         sim.render(context);
-        onStepRef.current?.(sim.currentStep, sim.particleCount);
+        const sampling = sim.samplingStatus;
+        setSamplingMessage(sampling.atCapacity || sampling.capacityBlocked
+          ? `Sampling limit reached; growth paused${sampling.unresolvedSamples ? ` (${sampling.unresolvedSamples} unresolved patches)` : ""}.`
+          : "");
+        onStepRef.current?.(sim.currentStep, sim.particleCount, sim.shapeStatus);
       }
       if (!cancelled) raf = requestAnimationFrame(frame);
     };
@@ -1246,6 +1292,9 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
        * this needs to update on every pointermove, which would be a lot
        * of wasted React re-renders for a pure style mutation. */}
       <div ref={deformPreviewRef} className="deform-preview" style={{ display: "none" }} />
+      {status === "ready" && samplingMessage && (
+        <div className="sampling-status" role="status">{samplingMessage}</div>
+      )}
       {status === "loading" && <div className="webgpu-banner hint">Acquiring WebGPU device…</div>}
       {status === "unsupported" && (
         <div className="webgpu-banner">

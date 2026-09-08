@@ -31,6 +31,8 @@ export class NoiseDisplacement {
         { binding: 0, resource: { buffer: mpmCore.positions } },
         { binding: 1, resource: { buffer: mpmCore.activeCountUniform } },
         { binding: 2, resource: { buffer: this.paramsUniform } },
+        { binding: 3, resource: { buffer: mpmCore.rest } },
+        { binding: 4, resource: { buffer: mpmCore.F } },
       ],
     })
   }

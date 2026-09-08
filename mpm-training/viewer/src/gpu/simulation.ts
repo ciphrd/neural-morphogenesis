@@ -1,48 +1,9 @@
-// Ties MpmCore + Environment + Agents + Renderer into one autonomous
-// macro step — the browser analogue of trainer/training_sim.py's own
-// TrainingRollout.macro_step(). GPU-resident for every data-related
-// buffer (positions, velocities, F/C/ParticleRest, the chemical field, weights),
-// matching envnca/frontend/src/gpu/simulation.ts's own "GPU-resident is
-// the whole point" design — with ONE exception: step() is now async and
-// reads back a 4-byte grown-particle count every macro step (see its own
-// docstring, and agents.ts's own readGrownCount()), because growth
-// (core/agents.wgsl's own agentStep() — see that file's own module
-// docstring) can change activeCount purely on the GPU, and nothing else
-// (P2G/gridUpdate/G2P/repulsion dispatch sizing, agents' own next
-// dispatch) would ever find out otherwise. Unlike the Python trainer
-// (trainer/agents_gpu.py's own read_grown_count(), a synchronous wgpu-py
-// call), WebGPU's own buffer readback (mapAsync) has no synchronous
-// equivalent — that's the one real architectural difference this class
-// has from training_sim.py's own macro_step(), not a design choice.
-//
-// Per macro step, in order:
-//   1. Clear the round's deposit scratch. Cell-owned mode then publishes each
-//      cell's chemistry; persistent mode leaves it ready for direct NN writes.
-//   2. environment.encodeSense() — materialize cell splats when applicable and
-//      compute the shared gradient over the architecture's current field.
-//   3. agents.encodeStep() — NN forward pass: reads that field and either
-//      updates cell-owned chemistry or deposits directly into the environment.
-//      It also writes the
-//      desired growth vector into persistent ParticleRest.growthAngle and
-//      relaxes the persistent anisotropy toward its sigmoid target
-//      (optionally also physical acceleration through maxStrafe) —
-//      may also grow activeCount (agents.wgsl's own agentStep()). Persistent
-//      mode then diffuses/decays the old field and merges the fresh writes.
-//   4. agents.encodeReadGrownCount()/readGrownCount() — copies growth's
-//      own atomic counter out and awaits it (submit happens between
-//      encode and await, see step()'s own body), propagating any change
-//      to mpmCore/agents' own dispatch sizing before physics runs.
-//   5. mpmCore.encodeSteps()          — substepsPerMacro physics
-//      substeps, integrating the nudged velocity into position, using
-//      the updated activeCount if growth changed it this step.
-//
-// loadGeneration()/rebuild() mirrors envnca/frontend/src/gpu/simulation.ts's
-// own resetKey diff-check: only particles (the growth CAP now, not a
-// starting count — see types.ts's own SimulationConfig.particles
-// docstring)/channels/fieldN/hiddenDim force a full rebuild (they're
-// baked into GPU buffer sizes and WGSL compile-time consts) — a new
-// generation with the same
-// shape is just a cheap loadWeights() call.
+import { VIEWER_DEFAULTS } from "../viewerConfig";
+import { InitialCondition } from "./initialConditions";
+import seedDensityModelConfig from "../../../core/config.json";
+const seedDensityModel = seedDensityModelConfig.density;
+import { cellMemoryFromConfig } from "./types";
+import { StableMatchStop, targetMask, matchDomains } from "./shapeMatch";
 
 import { Agents } from "./agents";
 import type { BloomSettings } from "./bloom";
@@ -51,23 +12,28 @@ import { NoiseDisplacement } from "./noiseDisplacement";
 import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
-import { Renderer, type FieldMode, type ParticleRenderMode } from "./render";
+import { MAX_ZOOM, Renderer, type FieldMode, type ParticleColorMode, type ParticleShape } from "./render";
 import { seedBlob, seedRows } from "./rng";
 import { chemicalCommunicationArchitectureFromConfig, physicsSettingsFromConfig, type PhysicsSettings, type SimulationConfig, type UpdateRuleWeights } from "./types";
-import coreConstants from "../../../core/constants.json";
+import coreConstantsConfig from "../../../core/config.json";
+const coreConstants = coreConstantsConfig.simulation;
 
 export interface SimulationScenario {
-  initialLayout: { kind: "rows"; rows: number; columns: number };
+  initialLayout:
+    | { kind: "rows"; rows: number; columns: number }
+    | { kind: "blob"; count: number };
   events: Array<{
     step: number;
-    type: "split";
+    type: "grow";
     particleIndex: number;
     /** Number of contiguous particle slots participating in this event. */
     particleCount?: number;
-    /** Fixed world axis. Omit to follow the local boundary tangent. */
-    direction?: readonly [number, number];
+    /** Required, nonzero world-space growth axis. */
+    direction: readonly [number, number];
   }>;
   suppressNaturalGrowth?: boolean;
+  /** Lab-only analytic override applied at every MPM growth-grid node. */
+  growthFieldOverride?: "radial-inward";
 }
 
 export class GpuSimulation {
@@ -95,42 +61,42 @@ export class GpuSimulation {
   // generation with a different particle/channel/field/hidden-dim shape
   // gets a brand-new Renderer instance; the user's own render-option
   // choices shouldn't reset just because that happened).
-  private pendingFieldMode: FieldMode = "none";
-  private pendingSubstrateChannelStart = 0;
-  private pendingParticleRenderMode: ParticleRenderMode = "dots-white";
-  private pendingWhiteDotsAlpha = 1.0;
-  private pendingActivationAlpha = 0.2;
-  private pendingNeuralColorAlpha = 1.0;
-  private pendingInternalStateAlpha = 1.0;
-  private pendingInternalStateChannelStart = 0;
-  private pendingChemicalMemoryOpponentSubtraction = 0;
-  private pendingBoundaryGradientScale = 0.01;
+  private pendingFieldMode: FieldMode = VIEWER_DEFAULTS.rendering.fieldMode;
+  private pendingSubstrateChannelStart = VIEWER_DEFAULTS.rendering.substrateChannelStart;
+  private pendingSubstrateZeroIsBlack = VIEWER_DEFAULTS.rendering.substrateZeroIsBlack;
+  private pendingBoundaryGradientZeroIsBlack = VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack;
+  private pendingParticleShape: ParticleShape = VIEWER_DEFAULTS.rendering.particleShape;
+  private pendingParticleColorMode: ParticleColorMode = VIEWER_DEFAULTS.rendering.particleColorMode;
+  private pendingParticleAlpha = VIEWER_DEFAULTS.rendering.particleAlpha;
+  private pendingDirectionalLineVisible = VIEWER_DEFAULTS.rendering.directionalLineVisible;
+  private pendingGrowthLineVisible = VIEWER_DEFAULTS.rendering.growthLineVisible;
+  private pendingDomainVisible = VIEWER_DEFAULTS.rendering.domainVisible;
+  private pendingGrowthMagnitudeBoost = VIEWER_DEFAULTS.rendering.growthMagnitudeBoost;
+  private pendingInternalStateChannelStart = VIEWER_DEFAULTS.rendering.internalStateChannelStart;
+  private pendingChemicalMemoryOpponentSubtraction = VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction;
+  private pendingBoundaryGradientScale = VIEWER_DEFAULTS.rendering.boundaryGradientScale;
   private pendingPointRadiusPx: number | null = null;
-  private pendingGrowthAxisLengthPx = 24;
   // 0 = identity — see gpu/render.ts's own setAccent()/field.wgsl's own
   // accent uniform comment. Same "view-only, survives rebuild()" reasoning
   // pendingFieldMode above already has.
-  private pendingAccent = 0;
-  private pendingMorphologyGradientVisible = true;
-  private pendingMorphologyDensityVisible = true;
+  private pendingAccent = VIEWER_DEFAULTS.rendering.accent;
+  private pendingMorphologyGradientVisible = VIEWER_DEFAULTS.rendering.morphologyGradientVisible;
+  private pendingMorphologyDensityVisible = VIEWER_DEFAULTS.rendering.morphologyDensityVisible;
   // 0 = no blur — see gpu/render.ts's own setBlur()/field.wgsl's own
   // blurDensity() comment. Same "view-only, survives rebuild()" reasoning
   // pendingAccent above already has.
-  private pendingBlur = 0;
+  private pendingBlur = VIEWER_DEFAULTS.rendering.blur;
   // 1 = identity — see gpu/render.ts's own setGradientExponent()/
   // field.wgsl's own colorizeGradient() comment. Same "view-only,
   // survives rebuild()" reasoning pendingAccent above already has.
-  private pendingGradientExponent = 1;
+  private pendingGradientExponent = VIEWER_DEFAULTS.rendering.gradientExponent;
   private pendingParticleCap: number | null = null;
   private pendingInitialParticleCount: number | null = null;
   private particleCap = 2;
-  private pendingTargetVisible = true;
+  private pendingTargetVisible = VIEWER_DEFAULTS.rendering.targetVisible;
   private neuralUpdatesPerMacro = 1;
   private growthDuration = 0;
-  // Low rates still retire particles predictably: fractional expected deaths
-  // carry across macro steps until they add up to one whole particle.
-  private deathRate = 0;
-  private deathAccumulator = 0;
+
   private scenario: SimulationScenario | null = null;
   // The canvas's own backing-store size in DEVICE pixels, as last
   // reported by GridCanvas's own applySquareSize()/ResizeObserver.
@@ -149,21 +115,14 @@ export class GpuSimulation {
   // realSize/512 — the "everything is drawn twice as big until
   // something jogs a resize" bug. null until the first report.
   private pendingCanvasSizePx: [number, number] | null = null;
-  private pendingZoom = 1;
-  private pendingBloom: BloomSettings = {
-    enabled: true,
-    intensity: 0.8,
-    threshold: 0.65,
-    radiusPx: 2.5,
-    scatter: 0.8,
-    levels: 6,
-  };
+  private pendingZoom = VIEWER_DEFAULTS.rendering.zoom;
+  private pendingBloom: BloomSettings = VIEWER_DEFAULTS.rendering.bloom;
 
   // Bumped by anything that invalidates in-flight GPU state (rebuild(),
   // restartRollout(), destroy()) — step() captures this at its own start
   // and checks it again after its own await (see that method's own
   // docstring for the exact race this guards against: growth's own
-  // async readGrownCount() can resolve AFTER a user-triggered restart
+  // async readSampleCount() can resolve AFTER a user-triggered restart
   // (GridCanvas.tsx's own imperative restart() — NOT the RAF loop's own
   // sequential step()/restartRollout() calls, which can't race each
   // other) already reset activeCount back to 1, and blindly reapplying
@@ -190,6 +149,12 @@ export class GpuSimulation {
   private mpmEnabled = true;
 
   private _currentStep = 0;
+  private shapeStop = new StableMatchStop({});
+  private shapeMask: Float64Array | null = null;
+  get shapeStatus() {
+    return { complete: this.shapeStop.complete, settling: this.shapeStop.settlingSince !== null && !this.shapeStop.complete,
+      match: this.shapeStop.match, ...this.samplingStatus };
+  }
   get currentStep(): number {
     return this._currentStep;
   }
@@ -200,6 +165,12 @@ export class GpuSimulation {
    * (core/agents.wgsl's own agentStep()), so this changes every macro
    * step, unlike config.particles which is only the CAP. 0 before the
    * first rebuild(). */
+  get samplingStatus(): { atCapacity: boolean; capacityBlocked: boolean; unresolvedSamples: number } {
+    return { atCapacity: this.particleCount >= this.particleCap,
+      capacityBlocked: this.agents?.capacityBlocked ?? false,
+      unresolvedSamples: this.agents?.unresolvedSamples ?? 0 };
+  }
+
   get particleCount(): number {
     return this.mpmCore?.activeCount ?? 0;
   }
@@ -217,7 +188,7 @@ export class GpuSimulation {
     // field and population cap are the only controls. A finite cutoff is
     // an explicit per-run choice supplied by --growth-steps.
     const cutoff = this.config.growthSteps;
-    return cutoff == null || this._currentStep < cutoff;
+    return this.shapeStop.growthEnabled && (cutoff == null || this._currentStep < cutoff);
   }
   get ready(): boolean {
     return this.mpmCore !== null;
@@ -232,13 +203,13 @@ export class GpuSimulation {
     return [
       config.particles,
       config.channels,
-      config.fieldN,
+      config.baseResolution,
+      JSON.stringify(config.chemicalChannelProfiles),
       config.hiddenDim,
-      config.policyArchitecture ?? "stateless-128",
+      config.policyArchitecture,
       chemicalCommunicationArchitectureFromConfig(config),
-      config.chirality,
-      config.elasticStrainScale ?? 0.15,
-      config.elasticStrainInputsEnabled ?? false,
+      config.elasticStrainScale,
+      config.elasticStrainInputsEnabled,
     ].join(":");
   }
 
@@ -264,74 +235,65 @@ export class GpuSimulation {
 
     const environment = new Environment(this.device, {
       channels: config.channels,
-      width: config.fieldN,
-      height: config.fieldN,
+      width: config.baseResolution,
+      height: config.baseResolution,
       decay: config.decay,
       // ?? 1.0 (= unchanged) guards a `generation` message from a
       // train_server.py process still running pre-depositRate code —
       // see types.ts's own physicsSettingsFromConfig() for the matching
       // guard on the PhysicsPanel's own read of this same field.
-      depositRate: config.depositRate ?? 1.0,
+      depositRate: config.depositRate,
+      normalizeDepositsByLocalDensity: config.normalizeDepositsByLocalDensity,
+      advectionDt: config.substepsPerMacro * coreConstants.DT,
       chemicalCommunicationArchitecture: chemicalCommunicationArchitectureFromConfig(config),
-    });
+      channelProfiles: config.chemicalChannelProfiles,
+    }, mpmCore.gridVel);
 
     const agents = new Agents(this.device, mpmCore, environment, {
       channels: config.channels,
       hiddenDim: config.hiddenDim,
-      policyArchitecture: config.policyArchitecture ?? "stateless-128",
+      policyArchitecture: config.policyArchitecture,
       chemicalCommunicationArchitecture: chemicalCommunicationArchitectureFromConfig(config),
-      maxAccel: config.maxAccel,
-      maxStrafe: config.maxStrafe,
-      steeringStrength: config.steeringStrength ?? 0,
       maxEnvWrite: config.maxEnvWrite,
-      maxAngularAccel: config.maxAngularAccel,
-      angularDamping: config.angularDamping,
-      maxAngularVelocity: config.maxAngularVelocity,
-      chirality: config.chirality,
-      depositDistance: config.depositDistance,
-      // ?? 0.6 (trainer/simulation_settings.py's own DEPOSIT_SIGMA
-      // default) guards a `generation` message from a train_server.py
-      // process still running pre-depositSigma code — same reasoning
-      // depositRate's own ?? 1.0 guard above gives (see that guard's own
-      // comment): an unguarded `undefined` here would write NaN into
-      // this uniform and silently corrupt every deposit from step one.
-      depositSigma: config.depositSigma ?? 0.6,
-      splitDisplacement: config.splitDisplacement,
-      divisionCooldown: config.divisionCooldown,
+      sampleSpacing: config.sampleSpacing,
       friction: config.friction,
       growthEnabled: 1.0,
       maxActiveParticles: this.particleCap,
       spawnX: config.spawnX,
       spawnY: config.spawnY,
-      elasticStrainScale: config.elasticStrainScale ?? 0.15,
-      elasticStrainInputsEnabled: config.elasticStrainInputsEnabled ?? false,
-      chemicalGradientInputScale: config.chemicalGradientInputScale ?? coreConstants.CHEMICAL_GRADIENT_INPUT_SCALE,
-      chemicalProjectionWeight: config.chemicalProjectionWeight ?? 1.0,
-      boundaryTangentMinGradient: config.boundaryTangentMinGradient
-        ?? coreConstants.BOUNDARY_TANGENT_MIN_GRADIENT,
-      growthCompressionStart: config.growthCompressionStart ?? 0.10,
-      growthCompressionStop: config.growthCompressionStop ?? 0.10,
-      growthCompressionFeedback: config.growthCompressionFeedback ?? 0.0,
+      elasticStrainScale: config.elasticStrainScale,
+      elasticStrainInputsEnabled: config.elasticStrainInputsEnabled,
+      chemicalValueInputMultiplier: config.chemicalValueInputMultiplier,
+      chemicalGradientInputScale: config.chemicalGradientInputScale,
     });
-    mpmCore.setChemicalStateBuffer(agents.particleMetaState);
     agents.loadWeights(config.weights);
 
-    const renderer = new Renderer(this.device, this.format, mpmCore, environment, agents.particleMetaState);
+    const renderer = new Renderer(
+      this.device,
+      this.format,
+      mpmCore,
+      environment,
+      agents.particleMetaState,
+      mpmCore.growthField,
+    );
     if (this.pendingCanvasSizePx) renderer.setCanvasSizePx(...this.pendingCanvasSizePx);
     if (this.pendingTargetPoints) renderer.setTargetPoints(this.pendingTargetPoints);
     renderer.setTargetVisible(this.pendingTargetVisible);
     renderer.setFieldMode(this.pendingFieldMode);
     renderer.setSubstrateChannelStart(this.pendingSubstrateChannelStart);
-    renderer.setParticleRenderMode(this.pendingParticleRenderMode);
-    renderer.setWhiteDotsAlpha(this.pendingWhiteDotsAlpha);
-    renderer.setActivationAlpha(this.pendingActivationAlpha);
-    renderer.setNeuralColorAlpha(this.pendingNeuralColorAlpha);
-    renderer.setInternalStateAlpha(this.pendingInternalStateAlpha);
+    renderer.setSubstrateZeroIsBlack(this.pendingSubstrateZeroIsBlack);
+    renderer.setBoundaryGradientZeroIsBlack(this.pendingBoundaryGradientZeroIsBlack);
+    renderer.setParticleShape(this.pendingParticleShape);
+    renderer.setParticleColorMode(this.pendingParticleColorMode);
+    renderer.setParticleAlpha(this.pendingParticleAlpha);
+    renderer.setDirectionalLineVisible(this.pendingDirectionalLineVisible);
+    renderer.setGrowthLineVisible(this.pendingGrowthLineVisible);
+    renderer.setDomainVisible(this.pendingDomainVisible);
+    renderer.setGrowthMagnitudeBoost(this.pendingGrowthMagnitudeBoost);
     renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart);
     renderer.setChemicalMemoryOpponentSubtraction(this.pendingChemicalMemoryOpponentSubtraction);
     renderer.setBoundaryGradientScale(this.pendingBoundaryGradientScale);
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
-    renderer.setGrowthAxisLengthPx(this.pendingGrowthAxisLengthPx);
     renderer.setAccent(this.pendingAccent);
     renderer.setMorphologyDisplay(this.pendingMorphologyGradientVisible, this.pendingMorphologyDensityVisible);
     renderer.setBlur(this.pendingBlur);
@@ -362,12 +324,13 @@ export class GpuSimulation {
   restartRollout(): void {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     this.epoch++;
+    const initialSpacing = seedDensityModel.INITIAL_SPACING_IN_SAMPLE_SPACINGS * this.config.sampleSpacing;
     const initialCount = Math.min(
-      this.particleCap,
+      Math.floor(this.particleCap / 2),
       Math.max(1, Math.floor(
         this.pendingInitialParticleCount
         ?? this.config.initialParticleCount
-        ?? coreConstants.INITIAL_PARTICLE_COUNT
+        ?? coreConstantsConfig.run.initialParticleCount
       ))
     );
     const scene = this.scenario?.initialLayout.kind === "rows"
@@ -376,15 +339,31 @@ export class GpuSimulation {
           columns: this.scenario.initialLayout.columns,
           centerX: this.config.spawnX,
           centerY: this.config.spawnY,
-          spacing: this.config.splitDisplacement,
+          spacing: initialSpacing,
         })
       : seedBlob({
-          count: initialCount,
+          count: this.scenario?.initialLayout.kind === "blob"
+            ? this.scenario.initialLayout.count
+            : initialCount,
           centerX: this.config.spawnX,
           centerY: this.config.spawnY,
-          spacing: this.config.splitDisplacement,
+          spacing: initialSpacing,
           seed: this.config.seed,
         });
+    if (scene.count > this.particleCap) {
+      throw new Error(`Triangle seed needs ${scene.count} sample slots; capacity is ${this.particleCap}`);
+    }
+    const preset = this.config.initialCondition;
+    if (preset === "internal-state" && cellMemoryFromConfig(this.config) !== "recurrent") {
+      throw new Error("Internal-state initial condition requires recurrent cell memory");
+    }
+    const radius = Math.sqrt((scene.count/2)*(initialSpacing*seedDensityModel.INITIAL_PACKING_SPACING_SCALE)**2*Math.sqrt(3)/(2*Math.PI));
+    const perturbation = new InitialCondition(preset,
+      this.config.initialConditionStrength,
+      this.config.initialConditionChannel,
+      this.config.seed, [this.config.spawnX, this.config.spawnY], radius);
+    perturbation.deform(scene);
+    this.mpmCore.resetGrowthBuffers(this.particleCap);
     this.mpmCore.loadScene(scene);
     // Every slot beyond the genuinely seeded particles is destined to become
     // a real particle via growth, at some unknown point in this rollout
@@ -392,24 +371,20 @@ export class GpuSimulation {
     // has to run every rollout (not just once, ever) despite seedBlob()
     // already giving genuinely-seeded particles these exact same fresh
     // defaults.
-    this.mpmCore.resetGrowthBuffers(this.particleCap);
     this.environment.reset();
-    // Every rollout — same "run-constant in practice today, but a
-    // rollout-scoped setter regardless" convention this method's own
-    // seedBlob()/setActiveCount() calls already follow. See
-    // The Agents uniform retains legacy spawn slots for wire compatibility,
-    // although position is no longer a policy input.
     this.agents.setSpawnCenter(this.config.spawnX, this.config.spawnY);
     this.agents.setMaxActiveParticles(this.particleCap);
     this.agents.setActiveCount(scene.count);
-    // Heading's own per-slot fill and growth's own seed are both bit-
-    // exact via rng.ts's own spawnUniform01()/growthSeed() respectively
-    // (two DIFFERENT hash domains, see spawnUniform01()'s own comment
-    // for why they're safe to derive from the identical raw seed
-    // without correlating) — see Agents.resetHeading()'s own docstring.
-    this.agents.resetHeading(this.config.seed, scene.positions);
-    this.deathAccumulator = 0;
+    // Clear rollout-scoped policy state. The first agent evaluation derives
+    // alignment from chemical channel index 3's freshly sensed gradient.
+    this.agents.resetState( perturbation.states(scene.positions, this.config.channels));
+    if (this.environment.chemicalCommunicationArchitecture === "persistent-environment") {
+      perturbation.seedEnvironment(this.device, this.environment);
+    }
     this._currentStep = 0;
+    this.shapeStop = new StableMatchStop(this.scenario ? {} : this.config);
+    this.shapeMask = this.shapeStop.enabled && this.config.shapeTarget
+      ? targetMask(this.config.shapeTarget, this.config.rasterResolution) : null;
   }
 
   /** Installs an isolated, deterministic lab scenario and restarts it. */
@@ -418,48 +393,30 @@ export class GpuSimulation {
     if (this.mpmCore) this.restartRollout();
   }
 
-  /** Live-adjustable knobs only — see types.ts's own PhysicsSettings
-   * docstring for why this is a strict subset of SimulationConfig. No
-   * rebuild, just uniform writes — every field here has a live setter on
-   * MpmCore/Environment/Agents, so this is safe to call on every
-   * PhysicsPanel slider tick without disturbing the rollout in flight.
-   * Run configs are normalized through physicsSettingsFromConfig() before
-   * reaching this method, including legacy growth-rate conversion. Damping's
-   * own substep count comes from
-   * `this.config` (not `physics`), matching evolve.py's own rollout()
-   * (which converts a run's damping loss-fraction using its own
-   * --substeps-per-macro, not a fixed constant) — this.config must
-   * already be set before this runs. */
   private applyPhysics(physics: PhysicsSettings): void {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
     this.mpmCore.setGravity(physics.gravity);
     this.neuralUpdatesPerMacro = Math.max(1, Math.round(physics.neuralUpdatesPerMacro));
-    const communicationDt = Math.max(0, physics.communicationSpeed ?? 1.0) / this.neuralUpdatesPerMacro;
+    const communicationDt = Math.max(0, physics.communicationSpeed) / this.neuralUpdatesPerMacro;
     this.environment.setPhysics(
       physics.decay,
       physics.depositRate,
       this.neuralUpdatesPerMacro,
-      physics.communicationSpeed ?? 1.0,
+      physics.communicationSpeed,
+      physics.normalizeDepositsByLocalDensity,
     );
-    const growthCompressionStart = Math.max(0, physics.growthCompressionStart ?? 0.10);
+    const growthCompressionStart = Math.max(0, physics.growthCompressionStart);
     const growthCompressionStop = Math.max(
       growthCompressionStart,
-      physics.growthCompressionStop ?? 0.10,
+      physics.growthCompressionStop,
     );
     const growthCompressionFeedback = Math.max(
-      0, Math.min(1, physics.growthCompressionFeedback ?? 1.0),
+      0, Math.min(1, physics.growthCompressionFeedback),
     );
-    const growthDrive = Math.max(0, Math.min(1, physics.growthDrive ?? 0.5));
-    // 0 pauses even already-active morphoelastic cycles; 0.5 preserves the
-    // configured rate. Values above the midpoint keep the native mechanical
-    // rate while progressively bypassing compression feedback, matching the
-    // admission-side override in agents.wgsl.
-    const nativeGrowthWeight = Math.min(1, growthDrive * 2);
-    const drivenGrowthDuration = nativeGrowthWeight > 0
-      ? physics.growthDuration / nativeGrowthWeight
+    const growthSpeedMultiplier = Math.max(0, physics.growthSpeedMultiplier);
+    const effectiveGrowthDuration = growthSpeedMultiplier > 0
+      ? physics.growthDuration / growthSpeedMultiplier
       : 0;
-    const forcedGrowthBias = Math.max(0, (growthDrive - 0.5) * 2);
-    const drivenCompressionFeedback = growthCompressionFeedback * (1 - forcedGrowthBias);
     this.mpmCore.setMaterial(
       physics.materialE,
       physics.materialNu,
@@ -467,20 +424,18 @@ export class GpuSimulation {
       physics.materialElasticity,
       // Controller ticks per uncompressed area doubling. MpmCore derives
       // the shader's internal per-substep rate from this and the run cadence.
-      drivenGrowthDuration,
-      physics.growthMax ?? 2.0,
-      physics.growthAnisotropy ?? 1.0,
+      effectiveGrowthDuration,
+      physics.growthAnisotropy,
       this.config.substepsPerMacro,
       physics.particleMass,
       physics.particleVolume,
       growthCompressionStart,
       growthCompressionStop,
-      drivenCompressionFeedback,
-      physics.materialFluidity,
+      growthCompressionFeedback,
     );
-    this.growthDuration = physics.growthDuration;
-    this.deathRate = Math.max(0, Math.min(1, physics.deathRate ?? 0));
-    if (this.deathRate === 0) this.deathAccumulator = 0;
+    // Lab event admission and newborn fade must follow the same effective
+    // timescale as the material-rate uniform, not the unscaled run setting.
+    this.growthDuration = effectiveGrowthDuration;
     this.mpmCore.setDamping(physics.damping, this.config.substepsPerMacro);
     this.mpmCore.setSplatRadius(physics.splatRadius);
     this.mpmCore.setMorphology(
@@ -493,34 +448,18 @@ export class GpuSimulation {
     // same reasoning depositRate's own guard below gives.
     this.mpmCore.setRepulsionStrength(
       physics.repulsionStrength,
-      physics.repulsionMaxDelta ?? 40.0,
+      physics.repulsionMaxDelta,
     );
     this.agents.setCommunicationTimestep(communicationDt);
-    this.agents.setInternalStateSpeed(physics.internalStateSpeed ?? 1.0);
-    this.agents.setDivisionDirectionality(physics.divisionDirectionality ?? 1.0);
-    this.agents.setGrowthDrive(growthDrive);
+    this.agents.setInternalStateSpeed(physics.internalStateSpeed);
+
+    this.agents.setChemicalValueInputMultiplier(physics.chemicalValueInputMultiplier);
     this.agents.setChemicalGradientInputScale(physics.chemicalGradientInputScale);
-    this.agents.setChemicalProjectionWeight(physics.chemicalProjectionWeight);
-    this.agents.setBoundaryTangentMinGradient(physics.boundaryTangentMinGradient);
-    this.agents.setGrowthCompressionFeedback(
-      growthCompressionStart,
-      growthCompressionStop,
-      drivenCompressionFeedback,
-    );
+
+
     this.agents.setPhysics({
-      maxAccel: physics.maxAccel,
-      steeringStrength: physics.steeringStrength ?? 0,
-      maxStrafe: physics.maxStrafe,
       maxEnvWrite: physics.maxEnvWrite,
-      maxAngularAccel: physics.maxAngularAccel,
-      angularDamping: physics.angularDamping,
-      maxAngularVelocity: physics.maxAngularVelocity,
-      depositDistance: physics.depositDistance,
-      // ?? 0.6 — same pre-depositSigma-broadcast guard reasoning
-      // depositRate's own ?? 1.0 guard above gives.
-      depositSigma: physics.depositSigma ?? 0.6,
-      splitDisplacement: physics.splitDisplacement,
-      divisionCooldown: physics.divisionCooldown,
+      sampleSpacing: physics.sampleSpacing,
       friction: physics.friction,
       growthEnabled: this.growthIsEnabled() ? 1.0 : 0.0,
     });
@@ -530,38 +469,14 @@ export class GpuSimulation {
     // setting above) — a plain JS field step() reads to decide whether
     // to skip mpmCore.encodeSteps() at all (see that method's own
     // comment).
-    this.mpmEnabled = physics.mpmEnabled ?? true;
+    this.mpmEnabled = physics.mpmEnabled;
+    this.environment.setAdvectionTimestep(
+      this.mpmEnabled ? this.config.substepsPerMacro * coreConstants.DT : 0,
+    );
   }
 
   setPhysics(physics: PhysicsSettings): void {
     this.applyPhysics(physics);
-  }
-
-  /** Retires tail slots and returns the number of same-frame replacement
-   * divisions to force. The temporary growth ceiling is the pre-death count,
-   * so natural and forced divisions together can refill, but never exceed,
-   * the population that entered this macro step. */
-  private applyDeaths(): number {
-    if (!this.mpmCore || !this.agents || this.deathRate <= 0) return 0;
-    const availableToRetire = Math.max(0, this.mpmCore.activeCount - 1);
-    if (availableToRetire === 0) {
-      this.deathAccumulator = 0;
-      return 0;
-    }
-    this.deathAccumulator += this.mpmCore.activeCount * this.deathRate;
-    // One surviving invocation can create one replacement in this pass.
-    // Capping turnover at half guarantees there are enough parents; any
-    // fractional remainder stays queued for a later macro step.
-    const maxReplaceable = Math.floor(this.mpmCore.activeCount / 2);
-    const deaths = Math.min(availableToRetire, maxReplaceable, Math.floor(this.deathAccumulator));
-    if (deaths === 0) return 0;
-    this.deathAccumulator -= deaths;
-    const populationBeforeDeaths = this.mpmCore.activeCount;
-    const survivors = populationBeforeDeaths - deaths;
-    this.agents.setMaxActiveParticles(populationBeforeDeaths);
-    this.mpmCore.setActiveCount(survivors);
-    this.agents.setActiveCount(survivors);
-    return deaths;
   }
 
   /** Playback-only live growth cap. Lowering it below the current count
@@ -591,12 +506,11 @@ export class GpuSimulation {
   /** Randomly retires a fraction of the live population. Agents compacts
    * randomly-selected victim holes with complete tail-agent copies before
    * this lowers the live prefix, so the newest agents are preserved rather
-   * than being systematically discarded. Unlike deathRate this does not
-   * issue replacement splits; vacated slots remain available to growth. */
+   * than being systematically discarded. Vacated slots remain available to growth. */
   killFraction(fraction: number): number {
     if (!this.mpmCore || !this.agents) return 0;
     const activeCount = this.mpmCore.activeCount;
-    if (activeCount <= 1) return 0;
+    if (activeCount <= 1 || !Number.isFinite(fraction) || fraction <= 0) return 0;
     const clampedFraction = Math.max(0, Math.min(1, fraction));
     const killed = Math.min(
       activeCount - 1,
@@ -631,8 +545,8 @@ export class GpuSimulation {
    * own buffer readback, needed for growth's own grown-count propagation,
    * has no synchronous equivalent the way trainer/training_sim.py's own
    * macro_step() gets from wgpu-py). Two submits, not one: sense/act/
-   * deposit (+ the copy encodeReadGrownCount() adds) first, then —
-   * *after* awaiting readGrownCount(), so the result is actually known —
+   * deposit (+ the copy encodeReadSampleCount() adds) first, then —
+   * *after* awaiting readSampleCount(), so the result is actually known —
    * mpmCore.encodeSteps()'s own physics substeps, sized off whatever
    * activeCount now is. Splitting into two submits like this costs
    * nothing extra beyond the readback itself already costs: WebGPU's
@@ -642,36 +556,40 @@ export class GpuSimulation {
    *
    * Captures `this.epoch` before the await and bails out (no activeCount
    * write, no physics submit, no currentStep bump) if it's changed by
-   * the time readGrownCount() resolves — see that field's own comment
+   * the time readSampleCount() resolves — see that field's own comment
    * for the exact restart-vs-in-flight-step race this prevents. */
   async step(): Promise<void> {
     if (!this.mpmCore || !this.environment || !this.agents || !this.config) return;
-    const deathReplacements = this.applyDeaths();
-    const populationCeiling = deathReplacements > 0
-      ? this.mpmCore.activeCount + deathReplacements
-      : this.particleCap;
+    if (this.shapeStop.complete) return;
     const stepEpoch = this.epoch;
     const nextStep = this._currentStep + 1;
-    const forcedLifecycle = this.scenario?.events.find((event) => {
-      const admissionStep = Math.max(1, event.step - Math.ceil(this.growthDuration));
-      return event.type === "split" && nextStep >= admissionStep && nextStep <= event.step;
+    const forcedGrowth = this.scenario?.events.find((event) => {
+      const growthStartStep = Math.max(1, event.step - Math.ceil(this.growthDuration));
+      return event.type === "grow" && nextStep >= growthStartStep && nextStep <= event.step;
     });
-    const admissionStep = forcedLifecycle
-      ? Math.max(1, forcedLifecycle.step - Math.ceil(this.growthDuration))
+    const growthStartStep = forcedGrowth
+      ? Math.max(1, forcedGrowth.step - Math.ceil(this.growthDuration))
       : -1;
-    this.agents.setForcedDivisionControl(
-      forcedLifecycle?.particleIndex ?? null,
-      forcedLifecycle?.direction ?? null,
-      nextStep === admissionStep,
-      forcedLifecycle?.particleCount ?? 1,
-      deathReplacements,
+    this.agents.setForcedGrowthControl(
+      forcedGrowth?.particleIndex ?? null,
+      forcedGrowth?.direction ?? [1, 0],
+      nextStep === growthStartStep,
+      forcedGrowth?.particleCount ?? 1,
+    );
+    this.agents.setForcedGrowthFieldOverride(
+      this.scenario?.growthFieldOverride ?? null,
     );
     this.agents.setGrowthEnabled(
       !this.scenario?.suppressNaturalGrowth && this.growthIsEnabled(),
     );
     const encoder = this.device.createCommandEncoder();
     this.mpmCore.encodeMorphology(encoder);
+    // Carry the persistent substrate through the preceding MPM motion before
+    // this tick's first policy read. Divergent growth flow therefore expands
+    // the substrate together with the material rather than leaving it behind.
     for (let communicationRound = 0; communicationRound < this.neuralUpdatesPerMacro; communicationRound++) {
+      const finalRound = communicationRound === this.neuralUpdatesPerMacro - 1;
+      this.environment.encodePreparePersistent(encoder, communicationRound === 0);
       this.environment.encodeClear(encoder);
       if (this.environment.chemicalCommunicationArchitecture === "cell-owned-projection") {
         this.agents.encodeSplatChemicalState(encoder);
@@ -680,11 +598,11 @@ export class GpuSimulation {
       this.agents.encodeStep(
         encoder,
         this.environment.parity,
-        communicationRound === this.neuralUpdatesPerMacro - 1
+        finalRound
       );
-      this.environment.encodeAdvancePersistent(encoder);
+      this.environment.encodeMergePersistent(encoder);
     }
-    this.agents.encodeReadGrownCount(encoder);
+    this.agents.encodeReadSampleCount(encoder);
     this.device.queue.submit([encoder.finish()]);
 
     // min(...) — growth's own atomic counter can overshoot particleCap
@@ -696,9 +614,7 @@ export class GpuSimulation {
     // slot past that either way. A plain != check below, not
     // unconditional writes, so a macro step where nothing actually split
     // costs one 4-byte readback and nothing else.
-    const grown = Math.min(await this.agents.readGrownCount(), populationCeiling);
-    // Death replacement only narrows the cap for this one policy pass.
-    this.agents.setMaxActiveParticles(this.particleCap);
+    const grown = Math.min(await this.agents.readSampleCount(), this.particleCap);
     if (this.epoch !== stepEpoch) return;
     if (!this.mpmCore || !this.agents || !this.config) return;
     if (grown !== this.mpmCore.activeCount) {
@@ -706,25 +622,19 @@ export class GpuSimulation {
       this.agents.setActiveCount(grown);
     }
 
-    // Skippable via PhysicsSettings.mpmEnabled (applyPhysics() sets
-    // this.mpmEnabled — see that method's own comment) — a debug/testing
-    // toggle to isolate sensing/deposit/growth/chirality (everything
-    // above, still fully run every step regardless) from MpmCore's own
-    // elastic material response, gravity, and repulsion: with this off,
-    // positions never advance except where growth itself writes a brand
-    // new child's own spawn position (core/agents.wgsl's own
-    // agentStep()), so a rollout effectively freezes in place otherwise.
-    // Frontend-only — the Python trainer has no equivalent, since
-    // disabling real physics during actual evolutionary training would
-    // break fitness scoring entirely; this is purely a live-replay
-    // viewing aid, same reasoning every other PhysicsSettings field
-    // being "playback-only, doesn't affect training" already carries.
     if (this.mpmEnabled) {
       const physicsEncoder = this.device.createCommandEncoder();
       this.mpmCore.encodeSteps(physicsEncoder, this.config.substepsPerMacro);
       this.device.queue.submit([physicsEncoder.finish()]);
     }
     this._currentStep += 1;
+    if (this.shapeMask && this.config.shapeTarget && this.shapeStop.due(this._currentStep)) {
+      const triangles = await this.mpmCore.readTriangles();
+      if (this.epoch !== stepEpoch || !this.config?.shapeTarget) return;
+      const match = matchDomains(triangles, this.config.shapeTarget, this.shapeMask);
+      this.shapeStop.observe(this._currentStep, match,
+        this.samplingStatus.atCapacity || this.agents.capacityBlocked || this.agents.unresolvedSamples > 0);
+    }
   }
 
   render(context: GPUCanvasContext): void {
@@ -751,29 +661,49 @@ export class GpuSimulation {
     this.renderer?.setSubstrateChannelStart(start);
   }
 
-  setParticleRenderMode(mode: ParticleRenderMode): void {
-    this.pendingParticleRenderMode = mode;
-    this.renderer?.setParticleRenderMode(mode);
+  setSubstrateZeroIsBlack(enabled: boolean): void {
+    this.pendingSubstrateZeroIsBlack = enabled;
+    this.renderer?.setSubstrateZeroIsBlack(enabled);
   }
 
-  setActivationAlpha(alpha: number): void {
-    this.pendingActivationAlpha = alpha;
-    this.renderer?.setActivationAlpha(alpha);
+  setBoundaryGradientZeroIsBlack(enabled: boolean): void {
+    this.pendingBoundaryGradientZeroIsBlack = enabled;
+    this.renderer?.setBoundaryGradientZeroIsBlack(enabled);
   }
 
-  setWhiteDotsAlpha(alpha: number): void {
-    this.pendingWhiteDotsAlpha = alpha;
-    this.renderer?.setWhiteDotsAlpha(alpha);
+  setParticleShape(shape: ParticleShape): void {
+    this.pendingParticleShape = shape;
+    this.renderer?.setParticleShape(shape);
   }
 
-  setNeuralColorAlpha(alpha: number): void {
-    this.pendingNeuralColorAlpha = alpha;
-    this.renderer?.setNeuralColorAlpha(alpha);
+  setParticleColorMode(mode: ParticleColorMode): void {
+    this.pendingParticleColorMode = mode;
+    this.renderer?.setParticleColorMode(mode);
   }
 
-  setInternalStateAlpha(alpha: number): void {
-    this.pendingInternalStateAlpha = alpha;
-    this.renderer?.setInternalStateAlpha(alpha);
+  setParticleAlpha(alpha: number): void {
+    this.pendingParticleAlpha = alpha;
+    this.renderer?.setParticleAlpha(alpha);
+  }
+
+  setDirectionalLineVisible(visible: boolean): void {
+    this.pendingDirectionalLineVisible = visible;
+    this.renderer?.setDirectionalLineVisible(visible);
+  }
+
+  setDomainVisible(visible: boolean): void {
+    this.pendingDomainVisible = visible;
+    this.renderer?.setDomainVisible(visible);
+  }
+
+  setGrowthLineVisible(visible: boolean): void {
+    this.pendingGrowthLineVisible = visible;
+    this.renderer?.setGrowthLineVisible(visible);
+  }
+
+  setGrowthMagnitudeBoost(boost: number): void {
+    this.pendingGrowthMagnitudeBoost = boost;
+    this.renderer?.setGrowthMagnitudeBoost(boost);
   }
 
   setInternalStateChannelStart(start: number): void {
@@ -789,11 +719,6 @@ export class GpuSimulation {
   setBoundaryGradientScale(g0: number): void {
     this.pendingBoundaryGradientScale = g0;
     this.renderer?.setBoundaryGradientScale(g0);
-  }
-
-  setGrowthAxisLengthPx(px: number): void {
-    this.pendingGrowthAxisLengthPx = px;
-    this.renderer?.setGrowthAxisLengthPx(px);
   }
 
   setPointRadiusPx(px: number): void {
@@ -833,7 +758,7 @@ export class GpuSimulation {
   }
 
   setZoom(zoom: number): void {
-    this.pendingZoom = Math.min(8, Math.max(1, zoom));
+    this.pendingZoom = Math.min(MAX_ZOOM, Math.max(1, zoom));
     this.renderer?.setZoom(this.pendingZoom);
   }
 

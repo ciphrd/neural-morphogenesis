@@ -9,14 +9,14 @@ suite compares it checkpoint-by-checkpoint with the scalar file. The scalar
 file must remain unchanged as historical evidence.
 
 `tensor_growth_directional_strafe.json` uses the same saturated-growth
-scenario but sets the former local-forward strafe bias to 1. The physical
+scenario but sets the former strafe output to local-forward. The physical
 strafe scale remains zero: the output controls tensor anisotropy and signed
 division polarity. The child and the positional center of its daughter pair
 are biased toward `+n`, in proportion to the independent division-bias output. This is the
 directional-growth comparison trajectory.
 
-The capture is intentionally independent of evolved policy weights. A zero
-policy runs under a uniformly saturated growth channel, growth admission is
+The capture is intentionally independent of evolved policy weights. A fixed
+policy saturates the dedicated division-drive output, growth admission is
 disabled after macro step 32, already-active cycles finish, and the material
 settles through macro step 80. Nine checkpoints retain both transient and
 residual measurements.

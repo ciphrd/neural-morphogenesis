@@ -1,4 +1,4 @@
-import type { FieldMode, ParticleRenderMode } from "../gpu/render"
+import type { FieldMode, ParticleShape, ParticleColorMode } from "../gpu/render"
 import type { PhysicsSettings, SimulationConfig } from "../gpu/types"
 
 export interface PerformanceAutoZoomSettings {
@@ -22,20 +22,22 @@ export interface PerformanceBloomSettings {
 export interface PerformanceRenderSettings {
   zoom: number
   particleRadiusPx: number
-  particleRenderMode: ParticleRenderMode
+  particleShape: ParticleShape
+  particleColorMode: ParticleColorMode
+  particleAlpha: number
+  directionalLineVisible: boolean
+  domainVisible: boolean
+  growthLineVisible: boolean
+  substrateZeroIsBlack: boolean
+  boundaryGradientZeroIsBlack: boolean
   fieldMode: FieldMode
   substrateChannelStart: number
   accent: number
   blur: number
   gradientExponent: number
-  whiteDotsAlpha: number
-  activationAlpha: number
-  neuralColorAlpha: number
-  internalStateAlpha: number
   internalStateChannelStart: number
   boundaryGradientScale: number
   chemicalMemoryOpponentSubtraction: number
-  growthAxisLengthPx: number
   morphologyGradientVisible: boolean
   morphologyDensityVisible: boolean
   autoZoom: PerformanceAutoZoomSettings
@@ -70,11 +72,9 @@ export type ControllerToProjectionMessage =
   | { type: "config"; config: SimulationConfig | null }
   | { type: "snapshot"; snapshot: PerformanceSnapshot }
   | { type: "auto-prune"; fraction: number | null; delayMs: number }
-  | { type: "auto-randomize"; intervalMs: number | null }
-  | { type: "auto-reset"; intervalMs: number | null }
   | {
       type: "command"
-      command: "restart" | "randomize" | "randomize-and-restart" | "kill-20-percent" | "kill-80-percent"
+      command: "restart" | "randomize" | "randomize-and-restart" | "kill-20-percent" | "kill-80-percent" | "prune"
     }
 
 export type ProjectionToControllerMessage =

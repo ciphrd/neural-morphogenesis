@@ -17,23 +17,10 @@ export async function acquireGpuDevice(): Promise<GpuAcquireResult> {
   if (!adapter) return { ok: false, reason: "No WebGPU adapter available on this system." };
   let device: GPUDevice;
   try {
-    // WebGPU's own spec-default maxStorageBuffersPerShaderStage is only
-    // 8 — core/agents.wgsl's own bind group (weights/positions/
-    // gridCurrent/gradient/depositScratch/heading/angularVelocity/
-    // growthCount/rngState) is at 9 as of growth (see that file's own
-    // module docstring), so requestDevice() needs an explicit
-    // requiredLimits bump or Chrome/Dawn's own CreateComputePipeline
-    // rejects the bind group layout outright. Requesting the adapter's
-    // OWN reported max (not a hardcoded higher number) is what the
-    // WebGPU spec itself recommends here — some adapters may not have
-    // headroom past 8 at all, in which case this just requests exactly
-    // what's already the default and changes nothing. The Python trainer
-    // (trainer/device.py's own pick_device()) never hit this: wgpu-native's
-    // own default device limits are already higher out of the box on
-    // this project's own dev machine, unlike Dawn's spec-minimum default.
     const requiredFeatures: GPUFeatureName[] = adapter.features.has("float32-filterable")
       ? ["float32-filterable"]
       : [];
+    if (adapter.features.has("float32-blendable")) requiredFeatures.push("float32-blendable");
     device = await adapter.requestDevice({
       requiredFeatures,
       requiredLimits: { maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage },

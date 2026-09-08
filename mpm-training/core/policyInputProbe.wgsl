@@ -1,39 +1,40 @@
-// Diagnostic-only sampler for both raw sensors and the exact normalized vector
-// consumed by agents.wgsl. It is dispatched for a small stable list of
-// particle-slot indices and used by trainer/capture_policy_inputs.py; it never
-// participates in training.
+
 
 const CHANNELS: u32 = __CHANNELS__u;
-const FIELD_WIDTH: u32 = __FIELD_WIDTH__u;
-const FIELD_HEIGHT: u32 = __FIELD_HEIGHT__u;
-const FIELD_PLANE: u32 = FIELD_WIDTH * FIELD_HEIGHT;
-const FIELD_TOTAL: u32 = FIELD_PLANE * CHANNELS;
+const FIELD_WIDTHS: array<u32, CHANNELS> = __FIELD_WIDTHS__;
+const FIELD_HEIGHTS: array<u32, CHANNELS> = __FIELD_HEIGHTS__;
+const FIELD_OFFSETS: array<u32, CHANNELS> = __FIELD_OFFSETS__;
+const FIELD_TOTAL: u32 = __FIELD_TOTAL__u;
+const FIELD_MAX_WIDTH: u32 = __FIELD_MAX_WIDTH__u;
+const FIELD_MAX_HEIGHT: u32 = __FIELD_MAX_HEIGHT__u;
 const MORPHOLOGY_FIELD_N: u32 = __MORPHOLOGY_FIELD_N__u;
 const TRACKED: u32 = __TRACKED__u;
 const ELASTIC_SCALE: f32 = __ELASTIC_SCALE__;
 const ELASTIC_ENABLED: bool = __ELASTIC_ENABLED__;
 const IN_DIM: u32 = __IN_DIM__u;
-const META_DIM: u32 = 12u;
+const META_DIM: u32 = 9u;
 const OUT_STRIDE: u32 = META_DIM + 2u * IN_DIM;
-const CHEMICAL_VALUE_INPUT_SCALE: f32 = __CHEMICAL_VALUE_INPUT_SCALE__;
+const CHEMICAL_VALUE_INPUT_MULTIPLIER: f32 = __CHEMICAL_VALUE_INPUT_MULTIPLIER__;
 const CHEMICAL_GRADIENT_INPUT_SCALE: f32 = __CHEMICAL_GRADIENT_INPUT_SCALE__;
 const MORPHOLOGY_GRADIENT_INPUT_SCALE: f32 = __MORPHOLOGY_GRADIENT_INPUT_SCALE__;
 
 struct ParticleRest {
-  growthF: vec4<f32>, jp: f32, cycleActive: f32,
-  growthAngle: f32, growthAnisotropy: f32,
-  divisionBias: f32, growthFrameHeading: f32, appearanceScale: f32, _padding: f32,
+  growthF: vec4<f32>,
+  jp: f32,
+  growthVectorX: f32,
+  growthVectorY: f32,
+  verticesAB: vec4<f32>,
+  vertexC: vec2<f32>,
+  originalArea: f32,
+  quadratureWeight: f32,
 }
 struct ParticleMeta {
-  rng: u32, cooldown: f32, heading: f32, angularVelocity: f32,
-  color: vec4<f32>, divisionHazard: f32, divisionThreshold: f32,
-  privateState: array<f32, 8>, chemicalState: array<f32, CHANNELS>,
+  color: vec4<f32>,
+  alignment: vec2<f32>,
+  growthMagnitude: f32,
+  privateState: array<f32, 8>,
+  chemicalState: array<f32, __CHANNELS__>,
 }
-struct Corners {
-  x0: u32, x1: u32, y0: u32, y1: u32,
-  wx0: f32, wx1: f32, wy0: f32, wy1: f32,
-}
-
 @group(0) @binding(0) var<storage, read> positions: array<vec2<f32>>;
 @group(0) @binding(1) var<uniform> activeCount: u32;
 @group(0) @binding(2) var<storage, read> gridCurrent: array<f32>;
@@ -46,37 +47,56 @@ struct Corners {
 @group(0) @binding(9) var<storage, read_write> output: array<f32>;
 
 fn fieldIndex(c: u32, y: u32, x: u32) -> u32 {
-  return c * FIELD_PLANE + y * FIELD_WIDTH + x;
+  return FIELD_OFFSETS[c] + y * FIELD_WIDTHS[c] + x;
 }
-fn wrapCoord(v: f32, size: f32) -> f32 {
-  let m = v % size;
-  return select(m, m + size, m < 0.0);
+
+struct Corners {
+  xs: array<u32, 3>,
+  ys: array<u32, 3>,
+  weights: array<vec2<f32>, 3>,
 }
-fn corners(posIn: vec2<f32>) -> Corners {
-  let p = vec2<f32>(wrapCoord(posIn.x, f32(FIELD_WIDTH)), wrapCoord(posIn.y, f32(FIELD_HEIGHT)));
-  let x0f = floor(p.x);
-  let y0f = floor(p.y);
+
+fn wrapDepositIndex(i: i32, size: u32) -> u32 {
+  let n = i32(size);
+  return u32(((i % n) + n) % n);
+}
+
+fn corners(c: u32, posIn: vec2<f32>) -> Corners {
+  let base = vec2<i32>(floor(posIn - vec2<f32>(0.5)));
+  let f = posIn - vec2<f32>(base);
   var out: Corners;
-  out.wx1 = p.x - x0f; out.wx0 = 1.0 - out.wx1;
-  out.wy1 = p.y - y0f; out.wy0 = 1.0 - out.wy1;
-  out.x0 = u32(x0f) % FIELD_WIDTH; out.x1 = (out.x0 + 1u) % FIELD_WIDTH;
-  out.y0 = u32(y0f) % FIELD_HEIGHT; out.y1 = (out.y0 + 1u) % FIELD_HEIGHT;
+  out.weights[0] = 0.5 * (vec2<f32>(1.5) - f) * (vec2<f32>(1.5) - f);
+  out.weights[1] = vec2<f32>(0.75) - (f - vec2<f32>(1.0)) * (f - vec2<f32>(1.0));
+  out.weights[2] = 0.5 * (f - vec2<f32>(0.5)) * (f - vec2<f32>(0.5));
+  for (var j = 0u; j < 3u; j = j + 1u) {
+    out.xs[j] = wrapDepositIndex(base.x + i32(j), FIELD_WIDTHS[c]);
+    out.ys[j] = wrapDepositIndex(base.y + i32(j), FIELD_HEIGHTS[c]);
+  }
   return out;
 }
+
 fn sampleValue(c: u32, k: Corners) -> f32 {
-  let v00 = gridCurrent[fieldIndex(c, k.y0, k.x0)];
-  let v10 = gridCurrent[fieldIndex(c, k.y0, k.x1)];
-  let v01 = gridCurrent[fieldIndex(c, k.y1, k.x0)];
-  let v11 = gridCurrent[fieldIndex(c, k.y1, k.x1)];
-  return v00*k.wx0*k.wy0 + v10*k.wx1*k.wy0 + v01*k.wx0*k.wy1 + v11*k.wx1*k.wy1;
+  var value = 0.0;
+  for (var x = 0u; x < 3u; x = x + 1u) {
+    for (var y = 0u; y < 3u; y = y + 1u) {
+      value = value + gridCurrent[fieldIndex(c, k.ys[y], k.xs[x])]
+        * k.weights[x].x * k.weights[y].y;
+    }
+  }
+  return value;
 }
-fn sampleGrad(offset: u32, c: u32, k: Corners) -> f32 {
-  let v00 = gradient[offset + fieldIndex(c, k.y0, k.x0)];
-  let v10 = gradient[offset + fieldIndex(c, k.y0, k.x1)];
-  let v01 = gradient[offset + fieldIndex(c, k.y1, k.x0)];
-  let v11 = gradient[offset + fieldIndex(c, k.y1, k.x1)];
-  return v00*k.wx0*k.wy0 + v10*k.wx1*k.wy0 + v01*k.wx0*k.wy1 + v11*k.wx1*k.wy1;
+
+fn sampleGrad(planeOffset: u32, c: u32, k: Corners) -> f32 {
+  var value = 0.0;
+  for (var x = 0u; x < 3u; x = x + 1u) {
+    for (var y = 0u; y < 3u; y = y + 1u) {
+      value = value + gradient[planeOffset + fieldIndex(c, k.ys[y], k.xs[x])]
+        * k.weights[x].x * k.weights[y].y;
+    }
+  }
+  return value;
 }
+
 fn morphologyLoad(p: vec2<i32>) -> f32 {
   let n = i32(MORPHOLOGY_FIELD_N);
   let q = ((p % vec2<i32>(n)) + vec2<i32>(n)) % vec2<i32>(n);
@@ -90,7 +110,9 @@ fn sampleMorphology(p: vec2<f32>) -> f32 {
   return mix(a, b, f.y);
 }
 fn safeTanh(x: f32) -> f32 { return tanh(clamp(x, -20.0, 20.0)); }
-fn normalizeChemicalValue(raw: f32) -> f32 { return safeTanh(raw/max(CHEMICAL_VALUE_INPUT_SCALE,1e-6)); }
+fn normalizeChemicalValue(raw: f32) -> f32 {
+  return safeTanh(raw * max(CHEMICAL_VALUE_INPUT_MULTIPLIER, 0.0));
+}
 fn normalizeChemicalGradient(raw: f32) -> f32 { return safeTanh(raw/max(CHEMICAL_GRADIENT_INPUT_SCALE,1e-6)); }
 fn normalizeMorphologyGradient(raw: f32) -> f32 { return safeTanh(raw/max(MORPHOLOGY_GRADIENT_INPUT_SCALE,1e-6)); }
 fn matMul(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
@@ -106,11 +128,14 @@ fn elasticStrainInput(F: vec4<f32>, Fg: vec4<f32>, forward: vec2<f32>, lateral: 
   let bxx = Fe.x*Fe.x + Fe.y*Fe.y;
   let bxy = Fe.x*Fe.z + Fe.y*Fe.w;
   let byy = Fe.z*Fe.z + Fe.w*Fe.w;
-  let bf = vec2<f32>(bxx*forward.x+bxy*forward.y, bxy*forward.x+byy*forward.y);
-  let bl = vec2<f32>(bxx*lateral.x+bxy*lateral.y, bxy*lateral.x+byy*lateral.y);
-  let a = dot(forward, bf);
-  let b = dot(forward, bl);
-  let d = dot(lateral, bl);
+  let frameStrength = length(forward);
+  let unitForward = select(vec2<f32>(1.0,0.0), forward/max(frameStrength,1e-10), frameStrength>1e-10);
+  let unitLateral = vec2<f32>(-unitForward.y,unitForward.x);
+  let bf = vec2<f32>(bxx*unitForward.x+bxy*unitForward.y, bxy*unitForward.x+byy*unitForward.y);
+  let bl = vec2<f32>(bxx*unitLateral.x+bxy*unitLateral.y, bxy*unitLateral.x+byy*unitLateral.y);
+  let a = dot(unitForward, bf);
+  let b = dot(unitForward, bl);
+  let d = dot(unitLateral, bl);
   let midpoint = 0.5*(a+d);
   let radius = sqrt(max(0.25*(a-d)*(a-d)+b*b, 0.0));
   let e1 = 0.5*log(max(midpoint+radius, 1e-8));
@@ -122,7 +147,7 @@ fn elasticStrainInput(F: vec4<f32>, Fg: vec4<f32>, forward: vec2<f32>, lateral: 
     h00 = average + factor*(a-d); h11 = average - factor*(a-d); h01 = factor*2.0*b;
   }
   let invScale = 1.0/max(ELASTIC_SCALE, 1e-6);
-  return vec3<f32>(safeTanh((h00+h11)*invScale), safeTanh((h00-h11)*invScale), safeTanh(2.0*h01*invScale));
+  return vec3<f32>(safeTanh((h00+h11)*invScale), safeTanh((h00-h11)*invScale)*frameStrength, safeTanh(2.0*h01*invScale)*frameStrength);
 }
 
 @compute @workgroup_size(8)
@@ -140,25 +165,32 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
   let rest = particleRest[pi];
   let growthArea = rest.growthF.x*rest.growthF.w - rest.growthF.y*rest.growthF.z;
   output[baseOut+0u]=1.0; output[baseOut+1u]=pos.x; output[baseOut+2u]=pos.y;
-  output[baseOut+3u]=agentState.heading; output[baseOut+4u]=agentState.cooldown;
-  output[baseOut+5u]=agentState.divisionHazard; output[baseOut+6u]=agentState.divisionThreshold;
-  output[baseOut+7u]=rest.cycleActive; output[baseOut+8u]=growthArea;
-  output[baseOut+9u]=rest.growthAngle;
-  output[baseOut+10u]=rest.growthAnisotropy;
-  output[baseOut+11u]=rest.divisionBias;
+  let alignmentStrength = length(agentState.alignment);
+  let heading = select(0.0, atan2(agentState.alignment.y, agentState.alignment.x), alignmentStrength > 1e-10);
+  output[baseOut+3u]=heading;
+  output[baseOut+4u]=rest.growthVectorX;
+  output[baseOut+5u]=rest.growthVectorY;
+  output[baseOut+6u]=growthArea;
+  output[baseOut+7u]=0.0;
+  output[baseOut+8u]=rest.originalArea;
 
-  let cosH = cos(agentState.heading); let sinH = sin(agentState.heading);
-  let forward = vec2<f32>(cosH, sinH); let lateral = vec2<f32>(-sinH, cosH);
-  let k = corners(fract(pos) * vec2<f32>(f32(FIELD_WIDTH), f32(FIELD_HEIGHT)));
+  let forward = agentState.alignment;
+  let lateral = vec2<f32>(-forward.y, forward.x);
   let rawBase = baseOut + META_DIM;
   let inputBase = rawBase + IN_DIM;
   for (var c=0u; c<CHANNELS; c = c + 1u) {
+    let k = corners(
+      c,
+      fract(pos) * vec2<f32>(f32(FIELD_WIDTHS[c]), f32(FIELD_HEIGHTS[c]))
+        - vec2<f32>(0.5),
+    );
     let rawValue = sampleValue(c, k);
     output[rawBase+c] = rawValue;
     output[inputBase+c] = normalizeChemicalValue(rawValue);
-    let gx = sampleGrad(0u, c, k); let gy = sampleGrad(FIELD_TOTAL, c, k);
-    let rawForward = gx*cosH + gy*sinH;
-    let rawLateral = -gx*sinH + gy*cosH;
+    let gx = sampleGrad(0u, c, k) * f32(FIELD_WIDTHS[c]) / f32(FIELD_MAX_WIDTH);
+    let gy = sampleGrad(FIELD_TOTAL, c, k) * f32(FIELD_HEIGHTS[c]) / f32(FIELD_MAX_HEIGHT);
+    let rawForward = dot(vec2<f32>(gx, gy), forward);
+    let rawLateral = dot(vec2<f32>(gx, gy), lateral);
     output[rawBase+CHANNELS+c] = rawForward;
     output[rawBase+2u*CHANNELS+c] = rawLateral;
     output[inputBase+CHANNELS+c] = normalizeChemicalGradient(rawForward);
@@ -168,8 +200,8 @@ fn probe(@builtin(global_invocation_id) gid: vec3<u32>) {
   let mgx = 0.5*(sampleMorphology(mp+vec2<f32>(1.0,0.0))-sampleMorphology(mp-vec2<f32>(1.0,0.0)));
   let mgy = 0.5*(sampleMorphology(mp+vec2<f32>(0.0,1.0))-sampleMorphology(mp-vec2<f32>(0.0,1.0)));
   let rawOccupancy = sampleMorphology(mp);
-  let rawMorphForward = mgx*cosH + mgy*sinH;
-  let rawMorphLateral = -mgx*sinH + mgy*cosH;
+  let rawMorphForward = dot(vec2<f32>(mgx, mgy), forward);
+  let rawMorphLateral = dot(vec2<f32>(mgx, mgy), lateral);
   output[rawBase+3u*CHANNELS] = rawOccupancy;
   output[rawBase+3u*CHANNELS+1u] = rawMorphForward;
   output[rawBase+3u*CHANNELS+2u] = rawMorphLateral;

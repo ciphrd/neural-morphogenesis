@@ -1,3 +1,4 @@
+import { ToggleButton } from "./ToggleButton"
 import { useEffect, useMemo, useState } from "react"
 import {
   applyAudioMappings,
@@ -125,14 +126,7 @@ export function AudioReactivityPanel({
           <span className={"physics-panel-chevron" + (open ? " is-open" : "")}>▸</span>
           <h2>Audio reactivity</h2>
         </button>
-        <label className="audio-enable" title="Enable audio input">
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(event) => setEnabled(event.target.checked)}
-          />
-          On
-        </label>
+        <ToggleButton label="Audio input" hideLabel checked={enabled} onChange={setEnabled} title="Enable audio input" />
       </div>
       {open && (
         <div className="physics-panel-body audio-panel-body">
@@ -190,15 +184,8 @@ export function AudioReactivityPanel({
           {mappings.map((mapping) => (
             <div className={"audio-mapping" + (mapping.enabled === false ? " is-disabled" : "")} key={mapping.id}>
               <div className="audio-mapping-top-row">
-                <label className="audio-mapping-enable" title="Enable or disable this mapping">
-                  <input
-                    type="checkbox"
-                    checked={mapping.enabled !== false}
-                    aria-label="Enable audio mapping"
-                    onChange={(event) => updateMapping(mapping.id, { enabled: event.target.checked })}
-                  />
-                  <span>{mapping.enabled === false ? "Off" : "On"}</span>
-                </label>
+                <ToggleButton label={`Audio mapping ${mapping.id}`} hideLabel checked={mapping.enabled !== false}
+                  onChange={(enabled) => updateMapping(mapping.id, { enabled })} title="Enable or disable this mapping" />
                 <select
                   className="select"
                   value={mapping.target}

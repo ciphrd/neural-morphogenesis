@@ -1,28 +1,4 @@
-"""Headless MLS-MPM simulation — the MpmSimulation-equivalent for this
-project's Python trainer, scoped to exactly core/'s passes (clearDensity,
-splatDensity, densityToTexture, applyRepulsion, clearGrid, p2g,
-gridUpdate, g2p). Mirrors mls-mpm/src/gpu/mpm.ts's own MpmSimulation
-class structure (buffer layout, bind groups, step() ordering) as closely
-as possible so the two stay easy to compare by eye, minus everything
-sandbox-only (Mouse uniform, attract-to-point, field-visualize
-diagnostic channels — see ../core/README.md).
-
-Repulsion (clearDensity/splatDensity/densityToTexture/applyRepulsion,
-all from core/repulsion.wgsl) runs FIRST each substep, before
-clearGrid/p2g/gridUpdate/g2p — applyRepulsion nudges particleVel from
-THIS substep's own freshly-built density field, at each particle's own
-exact position, so the push reaches the grid through the very same
-substep's own P2G->gridUpdate->G2P transfer immediately rather than
-sitting stale for one substep. See core/repulsion.wgsl's own module
-docstring for the full 3-revision history of this mechanism, including
-why a 4th revision (moving the push into gridUpdate.wgsl as a per-node
-acceleration, to fully eliminate P2G's own momentum-cancellation for
-overlapping particles) was tried and reverted: it traded that partial
-cancellation for a worse problem, capping the push's effective spatial
-resolution at the physics grid's own cell size — coarser than
-core/agents.wgsl's own growth-spawn displacement — confirmed empirically
-to leave freshly-spawned overlapping particles barely separated at all.
-"""
+"""Headless MLS-MPM/APIC mechanics with explicit advected triangle geometry. ParticleRest uses 16 floats: growthF, Jp, growth vector, alignment padding, six vertex coordinates, original area, and quadrature weight."""
 from __future__ import annotations
 
 import json
@@ -41,10 +17,8 @@ from simulation_settings import (
     GROWTH_COMPRESSION_STOP,
     GROWTH_DURATION_MACRO_STEPS,
     GROWTH_ANISOTROPY_AUTHORITY,
-    GROWTH_MAX,
     MATERIAL_E,
     MATERIAL_ELASTICITY,
-    MATERIAL_FLUIDITY,
     MATERIAL_HARDENING,
     MATERIAL_NU,
     CHEM_CHANNELS,
@@ -57,20 +31,21 @@ from simulation_settings import (
 )
 
 CORE_DIR = Path(__file__).parent.parent / "core"
-CONSTANTS = json.loads((CORE_DIR / "constants.json").read_text())
+from config import CONFIG
+CONSTANTS = CONFIG["simulation"]
 
+GROWTH_FIELD_CHANNELS: int = CONSTANTS["GROWTH_FIELD_CHANNELS"]
 GRID_N: int = CONSTANTS["GRID_N"]
 DX: float = CONSTANTS["DX"]
 INV_DX: int = CONSTANTS["INV_DX"]
 DT: float = CONSTANTS["DT"]
-PARTICLE_MASS: float = CONSTANTS["PARTICLE_MASS"]
-VOL: float = CONSTANTS["VOL"]
+PARTICLE_MASS: float = CONFIG["run"]["particleMass"]
+VOL: float = CONFIG["run"]["particleVolume"]
 MAX_PARTICLES: int = CONSTANTS["MAX_PARTICLES"]
-# core/constants.json's own FIELD_N is the repulsion density texture's
+# core/config.json's own FIELD_N is the repulsion density texture's
 # resolution — renamed on import to avoid any ambiguity with the
 # chemical field's own (unrelated) FIELD_N in simulation_settings.py.
-REPULSION_FIELD_N: int = CONSTANTS["FIELD_N"]
-
+REPULSION_FIELD_N: int = CONSTANTS["MORPHOLOGY_FIELD_N"]
 
 def growth_rate_for_duration(duration_macro_steps: float, substeps_per_macro: int) -> float:
     """Return the internal continuous rate for a controller-tick duration.
@@ -88,42 +63,45 @@ NODE_COUNT = (GRID_N + 1) * (GRID_N + 1)
 WORKGROUP = 64
 FIELD_WORKGROUP = 16
 GRID_ACCUM_CHANNELS = 3  # mom_x, mom_y, mass
-# growthF(4), jp, cycleActive, growthAngle, growthAnisotropy, divisionBias,
-# growthFrameHeading, appearanceScale, padding — 48 bytes.
-REST_FIELDS = 12
+REST_FIELDS = 16
 REST_GROWTH_F = slice(0, 4)
 REST_JP = 4
-REST_CYCLE_ACTIVE = 5
-REST_APPEARANCE_SCALE = 10
-
+REST_GROWTH_VECTOR_X = 5
+REST_QUADRATURE_WEIGHT = 15
 
 def _pack_rest(jp: np.ndarray) -> np.ndarray:
-    """Expands a flat (count,) Jp array into ParticleRest's own
-    (count, 12) tensor-rest layout, defaulting growthF=I (baseline rest
-    configuration), cycleActive=0, direction/controls=0, and padding=0.
-
-    Exists so load_scene()/reset_growth_buffers() can keep their original
-    scalar-Jp signatures — every scene seeder in this project
-    (training_sim.py's seed_blob(), feasibility_check.py, render_check.py,
-    and the viewer's own rng.ts) still hands over a plain (count,) ones
-    array, unaware that the underlying buffer grew two siblings."""
     count = jp.shape[0]
     packed = np.zeros((count, REST_FIELDS), dtype=np.float32)
     packed[:, 0] = 1.0
     packed[:, 3] = 1.0
     packed[:, REST_JP] = jp
-    packed[:, REST_APPEARANCE_SCALE] = 1.0
+    packed[:, REST_QUADRATURE_WEIGHT] = 1.0
     return packed
 
-SNOW_YIELD_LOW = 1.0 - 2.5e-2
-SNOW_YIELD_HIGH = 1.0 + 7.5e-3
-WIDE_YIELD_LOW = 0.5
-WIDE_YIELD_HIGH = 2.0
-
+SNOW_YIELD_LOW = CONSTANTS["SNOW_YIELD_LOW"]
+SNOW_YIELD_HIGH = CONSTANTS["SNOW_YIELD_HIGH"]
+WIDE_YIELD_LOW = CONSTANTS["WIDE_YIELD_LOW"]
+WIDE_YIELD_HIGH = CONSTANTS["WIDE_YIELD_HIGH"]
 
 def ceil_div(a: int, b: int) -> int:
     return -(-a // b)
 
+def flat_dispatch_2d(
+    total_threads: int,
+    workgroup_size: int,
+    max_dimension: int = 65535,
+) -> tuple[int, int]:
+    """Map a flat workload onto a legal one- or two-dimensional dispatch."""
+    groups = ceil_div(total_threads, workgroup_size)
+    if groups <= max_dimension:
+        return groups, 1
+    x = min(max_dimension, math.ceil(math.sqrt(groups)))
+    y = ceil_div(groups, x)
+    if y > max_dimension:
+        raise ValueError(
+            f"workload requires {groups} workgroups, exceeding 2D dispatch capacity"
+        )
+    return x, y
 
 def per_substep_damping(loss_fraction: float, substeps: int) -> float:
     """Port of mpm.ts's perSubstepDamping() — verbatim, not
@@ -133,13 +111,11 @@ def per_substep_damping(loss_fraction: float, substeps: int) -> float:
     clamped = min(max(loss_fraction, 0.0), 0.999)
     return (1 - clamped) ** (1 / max(substeps, 1))
 
-
 def lame_params(e: float, nu: float) -> tuple[float, float]:
     """Port of mpm.ts's lameParams() — verbatim: (mu0, lambda0)."""
     mu0 = e / (2 * (1 + nu))
     lambda0 = (e * nu) / ((1 + nu) * (1 - 2 * nu))
     return mu0, lambda0
-
 
 def yield_bounds(elasticity: float) -> tuple[float, float]:
     """Port of mpm.ts's yieldBounds() — verbatim: (yieldLow, yieldHigh)."""
@@ -148,24 +124,15 @@ def yield_bounds(elasticity: float) -> tuple[float, float]:
     yield_high = SNOW_YIELD_HIGH + t * (WIDE_YIELD_HIGH - SNOW_YIELD_HIGH)
     return yield_low, yield_high
 
-
 class MpmCore:
-    """Owns every GPU resource for the core MLS-MPM simulation and the
-    one step(substeps) entry point — runs `substeps` full advance()
-    iterations (clearDensity -> splatDensity -> densityToTexture ->
-    applyRepulsion -> clearGrid -> p2g -> gridUpdate -> g2p) in a single
-    submitted command buffer, each pass its own begin/end compute pass
-    (WebGPU gives no cross-dispatch visibility guarantee *within* one
-    pass, only across pass boundaries — same reasoning mpm.ts's own class
-    docstring documents).
 
-    Particle buffers are sized to MAX_PARTICLES (fixed capacity); load_scene()
-    writes into the head of each buffer and updates the small activeCount
-    uniform p2g/g2p gate their per-particle work on."""
-
-    def __init__(self, device: wgpu.GPUDevice) -> None:
+    def __init__(self, device: wgpu.GPUDevice, *, physics_dt: float = DT) -> None:
+        if not np.isfinite(physics_dt) or physics_dt <= 0:
+            raise ValueError("physics_dt must be finite and positive")
+        self.dt = float(physics_dt)
         self.device = device
         self._active_count = 0
+        self._repulsion_enabled = False
 
         f32 = 4
         self.positions = device.create_buffer(
@@ -176,7 +143,7 @@ class MpmCore:
         )
         self.F = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC)
         self.C = device.create_buffer(size=MAX_PARTICLES * 4 * f32, usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC)
-        # Per-particle rest state — growthF(4), jp, cycleActive, direction(2), see
+        # Per-particle rest state — growthF(4), jp, growthVectorX, direction(2), see
         # core/agents.wgsl's own ParticleRest struct. Was a bare
         # array<f32> of Jp alone; widened rather than adding sibling
         # buffers because core/agents.wgsl is at the hard
@@ -186,18 +153,21 @@ class MpmCore:
             size=MAX_PARTICLES * REST_FIELDS * f32,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
         )
-        # Neutral fallback for g2p's packed cell-chemistry view. Training's
-        # default fluidity is zero, so this is an exact legacy no-op.
-        self.chemical_state_fallback = device.create_buffer(
-            size=256 + MAX_PARTICLES * 112, usage=wgpu.BufferUsage.STORAGE
-        )
+
         # COPY_SRC supports the focused stability/headroom regressions; it
         # does not add a transfer to the hot path unless a check reads it.
         self.grid_accum = device.create_buffer(
             size=NODE_COUNT * GRID_ACCUM_CHANNELS * f32,
             usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_SRC,
         )
-        self.grid_vel = device.create_buffer(size=NODE_COUNT * 2 * f32, usage=wgpu.BufferUsage.STORAGE)
+        self.grid_vel = device.create_buffer(
+            size=NODE_COUNT * 2 * f32,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
+        )
+        self.growth_field = device.create_buffer(
+            size=NODE_COUNT * GROWTH_FIELD_CHANNELS * f32,
+            usage=wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST | wgpu.BufferUsage.COPY_SRC,
+        )
 
         # Purely a GPU-sync barrier for step()'s own chunking — see
         # _MAX_SUBSTEPS_PER_SUBMIT's docstring. STORAGE|COPY_SRC (not
@@ -218,7 +188,6 @@ class MpmCore:
             MATERIAL_NU,
             MATERIAL_HARDENING,
             MATERIAL_ELASTICITY,
-            growth_max=GROWTH_MAX,
             growth_duration_macro_steps=GROWTH_DURATION_MACRO_STEPS,
             substeps_per_macro=DEFAULT_SUBSTEPS_PER_MACRO,
             growth_compression_start=GROWTH_COMPRESSION_START,
@@ -230,7 +199,7 @@ class MpmCore:
         self.damping_uniform = device.create_buffer(size=4, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
         self.set_damping(DAMPING_LOSS_FRACTION, SUBSTEPS_PER_DAMPING_FRAME)
 
-        template_vars = {"GRID_N": GRID_N, "DX": DX, "INV_DX": INV_DX, "DT": DT, "CHEMICAL_CHANNELS": CHEM_CHANNELS}
+        template_vars = {"GRID_N": GRID_N, "DX": DX, "INV_DX": INV_DX, "DT": self.dt, "CHEMICAL_CHANNELS": CHEM_CHANNELS}
 
         clear_grid_module = device.create_shader_module(code=load_core_shader("clearGrid.wgsl", {"GRID_N": GRID_N}))
         self.clear_grid_pipeline = device.create_compute_pipeline(
@@ -257,7 +226,7 @@ class MpmCore:
             ],
         )
 
-        grid_update_module = device.create_shader_module(code=load_core_shader("gridUpdate.wgsl", {"GRID_N": GRID_N, "DT": DT}))
+        grid_update_module = device.create_shader_module(code=load_core_shader("gridUpdate.wgsl", {"GRID_N": GRID_N, "DT": self.dt}))
         self.grid_update_pipeline = device.create_compute_pipeline(
             layout=wgpu.AutoLayoutMode.auto, compute={"module": grid_update_module, "entry_point": "gridUpdate"}
         )
@@ -274,7 +243,7 @@ class MpmCore:
         g2p_module = device.create_shader_module(
             code=load_core_shader(
                 "g2p.wgsl",
-                {"GRID_N": GRID_N, "INV_DX": INV_DX, "DT": DT, "CHEMICAL_CHANNELS": CHEM_CHANNELS},
+                {"GRID_N": GRID_N, "INV_DX": INV_DX, "DT": self.dt, "CHEMICAL_CHANNELS": CHEM_CHANNELS},
             )
         )
         self.g2p_pipeline = device.create_compute_pipeline(layout=wgpu.AutoLayoutMode.auto, compute={"module": g2p_module, "entry_point": "g2p"})
@@ -289,7 +258,7 @@ class MpmCore:
                 {"binding": 5, "resource": {"buffer": self.grid_vel, "offset": 0, "size": self.grid_vel.size}},
                 {"binding": 6, "resource": {"buffer": self.active_count_uniform, "offset": 0, "size": self.active_count_uniform.size}},
                 {"binding": 7, "resource": {"buffer": self.material_uniform, "offset": 0, "size": self.material_uniform.size}},
-                {"binding": 8, "resource": {"buffer": self.chemical_state_fallback, "offset": 0, "size": self.chemical_state_fallback.size}},
+                {"binding": 9, "resource": {"buffer": self.growth_field, "offset": 0, "size": self.growth_field.size}},
             ],
         )
 
@@ -301,7 +270,7 @@ class MpmCore:
         self.density_texture = device.create_texture(
             size=(REPULSION_FIELD_N, REPULSION_FIELD_N, 1),
             format=wgpu.TextureFormat.r32float,
-            usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC,
+            usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC | wgpu.TextureUsage.RENDER_ATTACHMENT,
         )
         density_texture_view = self.density_texture.create_view()
         self.morphology_texture = device.create_texture(
@@ -315,7 +284,7 @@ class MpmCore:
             usage=wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING,
         )
         self.morphology_params_uniform = device.create_buffer(
-            size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
+            size=16 + 16*((2*CONSTANTS["MORPHOLOGY_MAX_RADIUS"]+4)//4), usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST
         )
         self.set_morphology(MORPHOLOGY_BLUR_SIGMA, MORPHOLOGY_DENSITY_REFERENCE)
         self.splat_params_uniform = device.create_buffer(size=16, usage=wgpu.BufferUsage.UNIFORM | wgpu.BufferUsage.COPY_DST)
@@ -324,7 +293,7 @@ class MpmCore:
         self.set_repulsion_strength(REPULSION_STRENGTH, REPULSION_MAX_DELTA)
 
         repulsion_module = device.create_shader_module(
-            code=load_core_shader("repulsion.wgsl", {"FIELD_N": REPULSION_FIELD_N, "DT": DT})
+            code=load_core_shader("repulsion.wgsl", {"FIELD_N": REPULSION_FIELD_N, "DT": self.dt})
         )
 
         self.clear_density_pipeline = device.create_compute_pipeline(
@@ -347,6 +316,7 @@ class MpmCore:
                 {"binding": 1, "resource": {"buffer": self.positions, "offset": 0, "size": self.positions.size}},
                 {"binding": 2, "resource": {"buffer": self.active_count_uniform, "offset": 0, "size": self.active_count_uniform.size}},
                 {"binding": 3, "resource": {"buffer": self.splat_params_uniform, "offset": 0, "size": self.splat_params_uniform.size}},
+                {"binding": 8, "resource": {"buffer": self.rest, "offset": 0, "size": self.rest.size}},
             ],
         )
 
@@ -375,11 +345,11 @@ class MpmCore:
             ],
         )
 
-        self.density_clear_dispatch = ceil_div(texel_count, WORKGROUP)
+        self.density_clear_dispatch = flat_dispatch_2d(texel_count, WORKGROUP)
         self.density_texture_dispatch = (ceil_div(REPULSION_FIELD_N, FIELD_WORKGROUP), ceil_div(REPULSION_FIELD_N, FIELD_WORKGROUP))
 
         morphology_module = device.create_shader_module(
-            code=load_core_shader("morphology.wgsl", {"FIELD_N": REPULSION_FIELD_N})
+            code=load_core_shader("morphology.wgsl", {"FIELD_N": REPULSION_FIELD_N, "MORPHOLOGY_WEIGHT_VECTORS": (2*CONSTANTS["MORPHOLOGY_MAX_RADIUS"]+4)//4})
         )
         self.morphology_horizontal_pipeline = device.create_compute_pipeline(
             layout=wgpu.AutoLayoutMode.auto,
@@ -394,7 +364,7 @@ class MpmCore:
             entries=[
                 {"binding": 0, "resource": density_texture_view},
                 {"binding": 1, "resource": self.morphology_blur_texture.create_view()},
-                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": 16}},
+                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": self.morphology_params_uniform.size}},
             ],
         )
         self.morphology_vertical_bind_group = device.create_bind_group(
@@ -402,36 +372,66 @@ class MpmCore:
             entries=[
                 {"binding": 0, "resource": self.morphology_blur_texture.create_view()},
                 {"binding": 1, "resource": self.morphology_texture.create_view()},
-                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": 16}},
+                {"binding": 2, "resource": {"buffer": self.morphology_params_uniform, "offset": 0, "size": self.morphology_params_uniform.size}},
             ],
         )
+
+        self.density_render_enabled = "float32-blendable" in device.features
+        if self.density_render_enabled:
+            module = device.create_shader_module(code=load_core_shader("densityQuads.wgsl", {"FIELD_N": REPULSION_FIELD_N}))
+            blend = {"src_factor": "one", "dst_factor": "one", "operation": "add"}
+            self.density_render_pipeline = device.create_render_pipeline(
+                layout=wgpu.AutoLayoutMode.auto,
+                vertex={"module": module, "entry_point": "vertexMain"},
+                fragment={"module": module, "entry_point": "fragmentMain", "targets": [
+                    {"format": "r32float", "blend": {"color": blend, "alpha": blend}, "write_mask": wgpu.ColorWrite.RED}]},
+                primitive={"topology": "triangle-list"},
+            )
+            self.density_render_bind_group = device.create_bind_group(
+                layout=self.density_render_pipeline.get_bind_group_layout(0), entries=[
+                    {"binding": 0, "resource": {"buffer": self.positions}},
+                    {"binding": 1, "resource": {"buffer": self.rest}},
+                    {"binding": 2, "resource": {"buffer": self.splat_params_uniform}},
+                ])
 
     @property
     def active_count(self) -> int:
         return self._active_count
 
     def set_morphology(self, sigma_domain: float, density_reference: float) -> None:
-        self.device.queue.write_buffer(
-            self.morphology_params_uniform,
-            0,
-            np.asarray([sigma_domain, density_reference, 0.0, 0.0], dtype=np.float32),
-        )
+        radius_max = CONSTANTS["MORPHOLOGY_MAX_RADIUS"]
+        data = np.zeros(self.morphology_params_uniform.size//4, dtype=np.float32)
+        sigma = max(sigma_domain * REPULSION_FIELD_N, 0.0)
+        radius = min(int(np.ceil(3*sigma)), radius_max)
+        data[:2] = [radius, density_reference]
+        offsets = np.arange(-radius, radius+1)
+        weights = np.exp(-.5*offsets**2/max(sigma*sigma, 1e-8)) if sigma > 1e-5 else (offsets == 0).astype(float)
+        data[4+radius_max-radius:4+radius_max+radius+1] = weights / weights.sum()
+        self.device.queue.write_buffer(self.morphology_params_uniform, 0, data)
 
     def encode_morphology(self, encoder: wgpu.GPUCommandEncoder) -> None:
-        """Rebuild the blurred occupancy field from current particle positions.
-
-        Called once per controller tick, immediately before policy sensing.
-        Physics may rebuild the raw density again per substep for repulsion.
-        """
-        particle_dispatch = ceil_div(self._active_count, WORKGROUP)
-        for pipeline, bind_group, dispatch in (
-            (self.clear_density_pipeline, self.clear_density_bind_group, (self.density_clear_dispatch,)),
-            (self.splat_density_pipeline, self.splat_density_bind_group, (particle_dispatch,)),
-            (self.density_to_texture_pipeline, self.density_to_texture_bind_group, self.density_texture_dispatch),
-            (self.morphology_horizontal_pipeline, self.morphology_horizontal_bind_group, self.density_texture_dispatch),
-            (self.morphology_vertical_pipeline, self.morphology_vertical_bind_group, self.density_texture_dispatch),
+        """Build occupancy using additive quads when supported, otherwise compute."""
+        gpu = self.__dict__.get("gpu_timings")
+        if self.density_render_enabled:
+            descriptor = {"color_attachments": [{"view": self.density_texture.create_view(),
+                "resolve_target": None, "load_op": "clear", "store_op": "store", "clear_value": (0,0,0,0)}]}
+            p = gpu.begin_render_pass(encoder, "gpuMorphologyDepositQuads", **descriptor) if gpu is not None else encoder.begin_render_pass(**descriptor)
+            p.set_pipeline(self.density_render_pipeline)
+            p.set_bind_group(0, self.density_render_bind_group)
+            p.draw(6, self._active_count*9)
+            p.end()
+            density_passes = ()
+        else:
+            density_passes = (
+                ("gpuMorphologyClear", self.clear_density_pipeline, self.clear_density_bind_group, self.density_clear_dispatch),
+                ("gpuMorphologyDepositCompute", self.splat_density_pipeline, self.splat_density_bind_group, (ceil_div(self._active_count, WORKGROUP),)),
+                ("gpuMorphologyTexture", self.density_to_texture_pipeline, self.density_to_texture_bind_group, self.density_texture_dispatch),
+            )
+        for name, pipeline, bind_group, dispatch in (*density_passes,
+            ("gpuMorphologyBlurHorizontal", self.morphology_horizontal_pipeline, self.morphology_horizontal_bind_group, self.density_texture_dispatch),
+            ("gpuMorphologyBlurVertical", self.morphology_vertical_pipeline, self.morphology_vertical_bind_group, self.density_texture_dispatch),
         ):
-            p = encoder.begin_compute_pass()
+            p = gpu.begin_compute_pass(encoder, name) if gpu is not None else encoder.begin_compute_pass()
             p.set_pipeline(pipeline)
             p.set_bind_group(0, bind_group)
             p.dispatch_workgroups(*dispatch)
@@ -461,21 +461,43 @@ class MpmCore:
         F: np.ndarray,
         C: np.ndarray,
         Jp: np.ndarray,
+        domain: np.ndarray | None = None,
+        quadrature_weights: np.ndarray | None = None,
+        domain_geometry: str | None = None,
     ) -> None:
         """Writes a scene into the head of every particle buffer and
         updates activeCount — mirrors mpm.ts's own loadScene()."""
         count = positions.shape[0]
         assert count <= MAX_PARTICLES
+        if domain is not None and domain_geometry != 'triangle-vertices':
+            raise ValueError('Explicit domains require domain_geometry="triangle-vertices"')
+        packed = _pack_rest(np.asarray(Jp, dtype=np.float32))
+        if quadrature_weights is not None:
+            weights = np.asarray(quadrature_weights, dtype=np.float32).reshape(count)
+            if not np.all(np.isfinite(weights)) or np.any(weights <= 0):
+                raise ValueError('Scene quadrature weights must be finite and positive')
+            packed[:, REST_QUADRATURE_WEIGHT] = weights
+        if domain is not None:
+            vertices = np.asarray(domain,dtype=np.float32).reshape(count,3,2)
+            if not np.all(np.isfinite(vertices)) or np.any(vertices < 0) or np.any(vertices >= 1):
+                raise ValueError('Explicit vertices must be finite canonical positions in [0,1)')
+            offsets = (vertices.astype(float)-vertices[:,0:1]+.5)%1-.5
+            edges = offsets[:,1:].transpose(0,2,1)
+            determinant = np.linalg.det(edges)
+            f_det = np.linalg.det(np.asarray(F).reshape(count, 2, 2))
+            if (not np.all(np.isfinite(edges)) or not np.all(np.isfinite(f_det))
+                    or not np.all(np.isfinite(determinant))
+                    or np.any(determinant <= 0) or np.any(f_det <= 0)):
+                raise ValueError('Scene triangles and deformation must have finite positive determinants')
+            packed[:, 8:14] = vertices.reshape(count, 6)
+            packed[:, 14] = .5 * determinant / f_det
+            if not np.all(np.isfinite(packed[:, 14])) or np.any(packed[:, 14] <= 0):
+                raise ValueError('Scene rest areas must be finite and positive')
         self.device.queue.write_buffer(self.positions, 0, positions.astype(np.float32))
         self.device.queue.write_buffer(self.velocities, 0, velocities.astype(np.float32))
         self.device.queue.write_buffer(self.F, 0, F.astype(np.float32))
         self.device.queue.write_buffer(self.C, 0, C.astype(np.float32))
-        # Scene API deliberately unchanged: callers still hand over a
-        # flat (count,) Jp array. Expanded here into ParticleRest's own
-        # tensor layout — growthF=I and cycleActive=0 for
-        # genuinely-seeded particles, which unlike growth-spawned
-        # children have no ramp to serve.
-        self.device.queue.write_buffer(self.rest, 0, _pack_rest(np.asarray(Jp, dtype=np.float32)))
+        self.device.queue.write_buffer(self.rest, 0, packed)
         self.set_active_count(count)
 
     def set_active_count(self, count: int) -> None:
@@ -495,28 +517,16 @@ class MpmCore:
         self.device.queue.write_buffer(self.active_count_uniform, 0, np.array([count], dtype=np.uint32))
 
     def reset_growth_buffers(self, max_active: int) -> None:
-        """Zero/identity-fills velocities/F/C/ParticleRest for [0, max_active) —
-        call once per rollout, after load_scene(). Every rollout starts
-        with its configured number of real particles (see training_sim.py's own module
-        docstring for why --particles is a growth CAP now, not a fixed
-        starting count) — every slot beyond those particles is destined to
-        become a real particle via growth (core/agents.wgsl's own
-        agentStep() may claim any slot, so every per-particle physics/rest
-        buffer must be initialized before that happens; division then
-        overwrites the claimed slot with its inherited live state), and needs
-        to start from the
-        exact same fresh MPM state seed_blob() already gives that one
-        genuinely-seeded particle — WITHOUT this, a slot THIS rollout's
-        own growth later claims could inherit a PREVIOUS rollout's stale,
-        possibly heavily-deformed state instead (MpmCore/AgentsGPU/
-        EnvironmentGPU are reused across rollouts within a worker process
-        — see evolve.py's own module docstring — load_scene() only ever
-        writes the HEAD of each buffer, never the tail a previous
-        rollout's growth may have touched). Safe (idempotent) to run over
-        the one index load_scene() ALSO just wrote — seed_blob()'s own
-        velocity/F/C/ParticleRest defaults are identical to these — so this can
-        unconditionally cover the whole [0, max_active) range rather than
-        needing to carefully skip the one already-real particle."""
+        """Reset all claimable slots before loading a new scene.
+
+        This clears stale state from previous rollouts. Always call BEFORE
+        load_scene: seeded triangles have explicit domains and half weights
+        that these generic defaults would erase.
+        """
+        # The first persistent-chemistry transport reads the preceding grid
+        # velocity before any physics pass. A new rollout has no preceding
+        # motion, including when worker buffers are reused.
+        self.device.queue.write_buffer(self.grid_vel, 0, np.zeros((NODE_COUNT, 2), dtype=np.float32))
         zeros2 = np.zeros((max_active, 2), dtype=np.float32)
         identity_f = np.tile(np.array([1, 0, 0, 1], dtype=np.float32), (max_active, 1))
         zeros4 = np.zeros((max_active, 4), dtype=np.float32)
@@ -530,7 +540,9 @@ class MpmCore:
         self.device.queue.write_buffer(self.gravity_uniform, 0, np.array([gravity], dtype=np.float32))
 
     def set_damping(self, loss_fraction: float, substeps: int) -> None:
-        self.device.queue.write_buffer(self.damping_uniform, 0, np.array([per_substep_damping(loss_fraction, substeps)], dtype=np.float32))
+        # The requested loss refers to substeps at the reference DT; retain
+        # the same decay per physical second during timestep comparisons.
+        self.device.queue.write_buffer(self.damping_uniform, 0, np.array([per_substep_damping(loss_fraction, substeps) ** (self.dt / DT)], dtype=np.float32))
 
     def set_material(
         self,
@@ -539,7 +551,6 @@ class MpmCore:
         hardening: float,
         elasticity: float,
         growth_rate: float | None = None,
-        growth_max: float = GROWTH_MAX,
         growth_anisotropy: float = GROWTH_ANISOTROPY_AUTHORITY,
         growth_duration_macro_steps: float = GROWTH_DURATION_MACRO_STEPS,
         substeps_per_macro: int = DEFAULT_SUBSTEPS_PER_MACRO,
@@ -548,21 +559,13 @@ class MpmCore:
         growth_compression_start: float = GROWTH_COMPRESSION_START,
         growth_compression_stop: float = GROWTH_COMPRESSION_STOP,
         growth_compression_feedback: float = GROWTH_COMPRESSION_FEEDBACK,
-        fluidity: float = MATERIAL_FLUIDITY,
     ) -> None:
-        """Write elastic material and the derived internal growth rate.
-
-        Production callers specify a controller-tick duration and their real
-        substep count. ``growth_rate`` remains as an explicit low-level escape
-        hatch for analytical tests and legacy checkpoints that recorded the
-        old rate directly; when supplied it takes precedence.
-        """
         mu0, lambda0 = lame_params(e, nu)
         yield_low, yield_high = yield_bounds(elasticity)
         effective_growth_rate = (
             growth_rate
             if growth_rate is not None
-            else growth_rate_for_duration(growth_duration_macro_steps, substeps_per_macro)
+            else growth_rate_for_duration(growth_duration_macro_steps, substeps_per_macro) * DT / self.dt
         )
         if particle_mass <= 0.0 or particle_volume <= 0.0:
             raise ValueError("particle mass and volume must be positive")
@@ -570,8 +573,6 @@ class MpmCore:
             raise ValueError("growth compression feedback must be in [0, 1]")
         if growth_compression_start < 0.0 or growth_compression_stop < growth_compression_start:
             raise ValueError("growth compression thresholds require 0 <= start <= stop")
-        if not 0.0 <= fluidity <= 1.0:
-            raise ValueError("fluidity must be in [0, 1]")
         self.particle_mass = float(particle_mass)
         self.particle_volume = float(particle_volume)
         self.device.queue.write_buffer(
@@ -585,14 +586,12 @@ class MpmCore:
                     yield_low,
                     yield_high,
                     effective_growth_rate,
-                    growth_max,
                     growth_anisotropy,
                     self.particle_mass,
                     self.particle_volume,
                     growth_compression_start,
                     growth_compression_stop,
                     growth_compression_feedback,
-                    fluidity,
                 ],
                 dtype=np.float32,
             ),
@@ -608,6 +607,7 @@ class MpmCore:
     ) -> None:
         """`max_delta` is core/repulsion.wgsl's own RepulsionParams.maxDelta
         — see that field's own comment for what it bounds and why."""
+        self._repulsion_enabled = bool(np.isfinite(strength) and strength != 0.0)
         self.device.queue.write_buffer(
             self.repulsion_params_uniform, 0,
             np.array([strength, max_delta, 0.0, 0.0], dtype=np.float32),
@@ -625,9 +625,9 @@ class MpmCore:
     # the limit of 4096" and killed the device; chunking into smaller
     # encoders alone was NOT enough to fix it either — the count is
     # cumulative ACROSS submits too when nothing makes the host wait for
-    # the GPU to catch up, so step() also blocks on
-    # on_submitted_work_done_sync() after each chunk (see below) to force
-    # that catch-up. Both confirmed live, not hypothetical. This is a
+    # the GPU to catch up, so step() blocks between chunks to force
+    # that catch-up. Training defers only the final wait to its next
+    # required readback. Both confirmed live, not hypothetical. This is a
     # genuine difference from the browser sandbox's own Dawn/tint
     # backend, which doesn't hit this at the substep counts mls-mpm's own
     # step() calls per rendered frame. 128 substeps/chunk (1152 passes)
@@ -640,10 +640,10 @@ class MpmCore:
     # confirmed crash from under-counting this exact budget.)
     _MAX_SUBSTEPS_PER_SUBMIT = 128
 
-    def step(self, substeps: int) -> None:
+    def step(self, substeps: int, *, wait_for_completion: bool = True) -> None:
         """Runs `substeps` full advance() iterations — same pass ordering
-        as mpm.ts's own step(): clearDensity -> splatDensity ->
-        densityToTexture -> applyRepulsion -> clearGrid -> p2g ->
+        as mpm.ts's own step(): optional clearDensity -> splatDensity ->
+        densityToTexture -> applyRepulsion, then clearGrid -> p2g ->
         gridUpdate -> g2p, each its own begin/end compute pass. Repulsion
         runs FIRST (not after g2p) so applyRepulsion's own velocity nudge
         — computed from THIS substep's own freshly-built density field,
@@ -652,7 +652,9 @@ class MpmCore:
         sitting stale in particleVel for one substep. See
         core/repulsion.wgsl's own module docstring for the full
         revision history of this mechanism and why it stays a
-        per-particle pass rather than a per-grid-node one. Internally
+        per-particle pass rather than a per-grid-node one. A zero strength
+        skips all four repulsion passes because their result cannot affect
+        particle state. Internally
         chunked into multiple command encoders/submits, each followed by
         an explicit GPU sync, when `substeps` exceeds
         _MAX_SUBSTEPS_PER_SUBMIT (see that constant's own docstring) —
@@ -662,57 +664,65 @@ class MpmCore:
         fire-and-forget step()) — acceptable for this feasibility spike
         and for a future ES training loop's own per-episode cadence, but
         worth knowing about before assuming step() is as cheap here as it
-        is in the browser."""
+        is in the browser.
+
+        Training may set wait_for_completion=False: intermediate chunks still
+        synchronize, but the final chunk relies on the next required readback.
+        Such callers must read back before accumulating another long submission.
+        Other callers keep synchronous completion by default.
+        """
         particle_dispatch = ceil_div(self._active_count, WORKGROUP)
         remaining = substeps
         while remaining > 0:
             chunk = min(remaining, self._MAX_SUBSTEPS_PER_SUBMIT)
             remaining -= chunk
             encoder = self.device.create_command_encoder()
+            gpu = self.__dict__.get("gpu_timings")
             for _ in range(chunk):
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.clear_density_pipeline)
-                p.set_bind_group(0, self.clear_density_bind_group)
-                p.dispatch_workgroups(self.density_clear_dispatch)
-                p.end()
+                if self._repulsion_enabled:
+                    p = gpu.begin_compute_pass(encoder, "gpuPhysicsRepulsionClear") if gpu is not None else encoder.begin_compute_pass()
+                    p.set_pipeline(self.clear_density_pipeline)
+                    p.set_bind_group(0, self.clear_density_bind_group)
+                    p.dispatch_workgroups(*self.density_clear_dispatch)
+                    p.end()
 
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.splat_density_pipeline)
-                p.set_bind_group(0, self.splat_density_bind_group)
-                p.dispatch_workgroups(particle_dispatch)
-                p.end()
+                    p = gpu.begin_compute_pass(encoder, "gpuPhysicsRepulsionSplat") if gpu is not None else encoder.begin_compute_pass()
+                    p.set_pipeline(self.splat_density_pipeline)
+                    p.set_bind_group(0, self.splat_density_bind_group)
+                    p.dispatch_workgroups(particle_dispatch)
+                    p.end()
 
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.density_to_texture_pipeline)
-                p.set_bind_group(0, self.density_to_texture_bind_group)
-                p.dispatch_workgroups(*self.density_texture_dispatch)
-                p.end()
+                    p = gpu.begin_compute_pass(encoder, "gpuPhysicsRepulsionTexture") if gpu is not None else encoder.begin_compute_pass()
+                    p.set_pipeline(self.density_to_texture_pipeline)
+                    p.set_bind_group(0, self.density_to_texture_bind_group)
+                    p.dispatch_workgroups(*self.density_texture_dispatch)
+                    p.end()
 
-                p = encoder.begin_compute_pass()
-                p.set_pipeline(self.apply_repulsion_pipeline)
-                p.set_bind_group(0, self.apply_repulsion_bind_group)
-                p.dispatch_workgroups(particle_dispatch)
-                p.end()
+                    p = gpu.begin_compute_pass(encoder, "gpuPhysicsRepulsionApply") if gpu is not None else encoder.begin_compute_pass()
+                    p.set_pipeline(self.apply_repulsion_pipeline)
+                    p.set_bind_group(0, self.apply_repulsion_bind_group)
+                    p.dispatch_workgroups(particle_dispatch)
+                    p.end()
 
-                p = encoder.begin_compute_pass()
+                p = gpu.begin_compute_pass(encoder, "gpuPhysicsGridClear") if gpu is not None else encoder.begin_compute_pass()
                 p.set_pipeline(self.clear_grid_pipeline)
                 p.set_bind_group(0, self.clear_grid_bind_group)
                 p.dispatch_workgroups(self.grid_dispatch)
                 p.end()
 
-                p = encoder.begin_compute_pass()
+                p = gpu.begin_compute_pass(encoder, "gpuPhysicsP2G") if gpu is not None else encoder.begin_compute_pass()
                 p.set_pipeline(self.p2g_pipeline)
                 p.set_bind_group(0, self.p2g_bind_group)
                 p.dispatch_workgroups(particle_dispatch)
                 p.end()
 
-                p = encoder.begin_compute_pass()
+                p = gpu.begin_compute_pass(encoder, "gpuPhysicsGridUpdate") if gpu is not None else encoder.begin_compute_pass()
                 p.set_pipeline(self.grid_update_pipeline)
                 p.set_bind_group(0, self.grid_update_bind_group)
                 p.dispatch_workgroups(self.grid_dispatch)
                 p.end()
 
-                p = encoder.begin_compute_pass()
+                p = gpu.begin_compute_pass(encoder, "gpuPhysicsG2P") if gpu is not None else encoder.begin_compute_pass()
                 p.set_pipeline(self.g2p_pipeline)
                 p.set_bind_group(0, self.g2p_bind_group)
                 p.dispatch_workgroups(particle_dispatch)
@@ -732,7 +742,8 @@ class MpmCore:
             # single in-order timeline, so reading anything back
             # necessarily blocks until every submission issued before it
             # has been processed) as a working substitute.
-            self.device.queue.read_buffer(self._sync_buffer, 0, 4)
+            if remaining > 0 or wait_for_completion:
+                self.device.queue.read_buffer(self._sync_buffer, 0, 4)
 
     def read_positions(self) -> np.ndarray:
         raw = self.device.queue.read_buffer(self.positions, 0, self._active_count * 2 * 4)
@@ -751,15 +762,5 @@ class MpmCore:
         return np.frombuffer(raw, dtype=np.float32).reshape(-1, 4).copy()
 
     def read_rest_state(self) -> np.ndarray:
-        """Returns active particles' raw tensor-growth rest-state rows.
-
-        Rows are ``[Fg00,Fg01,Fg10,Fg11,jp,cycleActive,growthAngle,
-        growthAnisotropy,divisionBias,growthFrameHeading,appearanceScale,
-        padding]``.
-        This is diagnostic-only: COPY_SRC is present on the buffer, but the
-        normal simulation path performs no readback. Keeping the raw layout
-        visible here also makes scalar-vs-tensor growth snapshots explicit
-        when ParticleRest is upgraded later.
-        """
         raw = self.device.queue.read_buffer(self.rest, 0, self._active_count * REST_FIELDS * 4)
         return np.frombuffer(raw, dtype=np.float32).reshape(-1, REST_FIELDS).copy()
