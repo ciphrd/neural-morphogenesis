@@ -1,5 +1,6 @@
+import { SineWaveEditor, type SineWave } from "./SineWaveEditor"
 import { useState } from "react"
-import { MAX_WAVE_SPEED, POST_EFFECT_DEFAULTS } from "../gpu/postEffects"
+import { POST_EFFECT_DEFAULTS } from "../gpu/postEffects"
 import type { PerformanceRenderSettings } from "../performance/types"
 import { RenderSlider } from "./RenderSlider"
 import { ToggleButton } from "./ToggleButton"
@@ -14,6 +15,19 @@ export function PostProcessingPanel({ value, onChange }: Props) {
   const fx = { ...POST_EFFECT_DEFAULTS, ...value.bloom }
   const patch = (key: "bloom", next: PerformanceRenderSettings["bloom"]) => onChange({ ...value, [key]: next })
   const patchFx = (next: Partial<typeof POST_EFFECT_DEFAULTS>) => patch("bloom", { ...fx, ...next })
+  const channels = ["red", "green", "blue"] as const
+  const parameterKey = (channel: string, parameter: string, strobe: boolean) =>
+    `${strobe ? `strobe${channel[0].toUpperCase()}${channel.slice(1)}` : channel}${parameter[0].toUpperCase()}${parameter.slice(1)}` as keyof typeof POST_EFFECT_DEFAULTS
+  const waves = (strobe: boolean): SineWave[] => channels.map((channel, index) => ({
+    id: channel, label: channel[0].toUpperCase() + channel.slice(1), color: ["#ff6b75", "#6cdb91", "#709eff"][index],
+    frequency: fx[parameterKey(channel, "frequency", strobe)] as number,
+    exponent: fx[parameterKey(channel, "exponent", strobe)] as number,
+    period: fx[parameterKey(channel, "period", strobe)] as number,
+    speed: fx[parameterKey(channel, "speed", strobe)] as number,
+    targets: Object.fromEntries(["frequency", "exponent", "period", "speed"].map(parameter => [parameter, `render.bloom.${parameterKey(channel, parameter, strobe)}`])) as SineWave["targets"],
+  }))
+  const patchWave = (channel: string, next: Partial<Pick<SineWave, "frequency" | "exponent" | "period" | "speed">>, strobe: boolean) =>
+    patchFx(Object.fromEntries(Object.entries(next).map(([parameter, value]) => [parameterKey(channel, parameter, strobe), value])))
   return (
     <section>
       <div className="physics-panel-header">
@@ -43,22 +57,12 @@ export function PostProcessingPanel({ value, onChange }: Props) {
             {fx.rgbEnabled && <>
               <RenderSlider audioTarget="render.bloom.rgbMix" label="RGB mix" min={0} max={1} step={0.01} value={fx.rgbMix} display={fx.rgbMix.toFixed(2)} onChange={rgbMix => patchFx({ rgbMix })} />
               <RenderSlider audioTarget="render.bloom.rgbAngle" label="Slice angle" min={0} max={360} step={1} value={fx.rgbAngle} display={`${fx.rgbAngle.toFixed(0)}°`} onChange={rgbAngle => patchFx({ rgbAngle })} />
-              {(["red", "green", "blue"] as const).map(channel => <div key={channel}>
-                {([['Frequency', 0, 40, 0.1], ['Exponent', 0.1, 8, 0.1], ['Period', 0.1, 60, 0.1], ['Speed', -MAX_WAVE_SPEED, MAX_WAVE_SPEED, 0.05]] as const).map(([suffix, min, max, step]) => {
-                  const key = `${channel}${suffix}` as const
-                  return <RenderSlider key={key} audioTarget={`render.bloom.${key}`} label={`${channel[0].toUpperCase() + channel.slice(1)} ${suffix.toLowerCase()}`} min={min} max={max} step={step} value={fx[key]} display={`${fx[key].toFixed(1)}${suffix === 'Period' ? 's' : suffix === 'Speed' ? '×' : ''}`} onChange={v => patchFx({ [key]: v })} />
-                })}
-              </div>)}
+              <SineWaveEditor label="RGB slicer" domain="space" waves={waves(false)} onChange={(channel, next) => patchWave(channel, next, false)} />
             </>}
             <ToggleButton className="toggle-row" label="Stroboscope" checked={fx.strobeEnabled} onChange={strobeEnabled => patchFx({ strobeEnabled })} />
             {fx.strobeEnabled && <>
               <RenderSlider audioTarget="render.bloom.strobeMix" label="Strobe mix" min={0} max={1} step={0.01} value={fx.strobeMix} display={fx.strobeMix.toFixed(2)} onChange={strobeMix => patchFx({ strobeMix })} />
-              {(["Red", "Green", "Blue"] as const).map(channel => <div key={channel}>
-                {([['Frequency', 0, 40, 0.1], ['Exponent', 0.1, 64, 0.1], ['Period', 0.01, 60, 0.005], ['Speed', -MAX_WAVE_SPEED, MAX_WAVE_SPEED, 0.05]] as const).map(([suffix, min, max, step]) => {
-                  const key = `strobe${channel}${suffix}` as const
-                  return <RenderSlider key={key} audioTarget={`render.bloom.${key}`} label={`${channel} ${suffix.toLowerCase()}`} min={min} max={max} step={step} value={fx[key]} display={`${fx[key].toFixed(suffix === 'Period' ? 3 : 1)}${suffix === 'Period' ? 's' : suffix === 'Speed' ? '×' : ''}`} onChange={v => patchFx({ [key]: v })} />
-                })}
-              </div>)}
+              <SineWaveEditor label="Stroboscope" domain="time" waves={waves(true)} onChange={(channel, next) => patchWave(channel, next, true)} />
             </>}
       </div>}
     </section>

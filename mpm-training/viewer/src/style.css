@@ -2384,3 +2384,15 @@ body.is-audio-picking [data-audio-target] input[type="range"] { pointer-events: 
 
 .performance-tool[aria-pressed="true"] { color: #9ce8b9; border-color: #438c65; background: #082014; }
 .performance-tool[aria-pressed="true"]:hover { border-color: #9ce8b9; background: #103822; }
+
+.sine-wave-editor { min-width: 0; margin: 8px 0 12px; }
+.sine-wave-tools { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.sine-wave-channels { display: flex; gap: 3px; margin-right: auto; }
+.sine-wave-tools button, .sine-wave-tools select { background: #131616; border: 1px solid #343939; border-radius: 4px; padding: 4px 8px; color: #c0c8c8; font: inherit; }
+.sine-wave-tools button { cursor: pointer; min-width: 28px; }
+.sine-wave-tools button[aria-pressed="true"] { background: #303636; border-color: currentColor; }
+.sine-wave-plot { display: block; width: 100%; background: #080a0a; border: 1px solid #303535; border-radius: 5px; touch-action: none; cursor: crosshair; user-select: none; }
+.sine-wave-grid { stroke: #ffffff; stroke-opacity: 0.08; stroke-width: 1; }
+.sine-wave-plot text { fill: #8a9696; font: 10px sans-serif; }
+.sine-wave-editor .hint { margin: 6px 0 8px; font-size: 10px; }
+.sine-wave-values { display: grid; gap: 5px; }
