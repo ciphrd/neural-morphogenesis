@@ -15,6 +15,14 @@ not rotate or modify checkpoint files.
 
 `evolve.py` evaluates and mutates policy populations. `parallel_workers.py` owns worker-local GPU systems. `training_sim.py` seeds and advances rollouts. `mpm_core.py`, `agents_gpu.py`, and `environment_gpu.py` allocate buffers and schedule the shared shaders. `domain_fitness.py` scores the transported material geometry and computes shape/color losses. `train_server.py` publishes run settings, generation records, weights and diagnostic images.
 
+The policy uses a ReLU hidden layer and linear chemical, growth-vector, and
+private-memory residual outputs. Growth vectors are capped by magnitude in the
+growth-field scatter; memory retains sigmoid gates and a state clamp of [-4, 4].
+RGB uses sigmoid. Input normalization still uses tanh. This changes the behavior
+of existing tanh-trained weights even though their layout still loads; start a
+fresh run to evaluate this activation change. Trainer GPU inference and browser
+replay share the same shader.
+
 New CLI and server runs default to **CMA-ES**, using pinned `cma==4.4.4` and
 diagonal covariance (separable CMA-ES). Install the updated requirements into
 the trainer environment before starting a run. The existing population default

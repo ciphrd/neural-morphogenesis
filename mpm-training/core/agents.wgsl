@@ -313,7 +313,7 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
       acc = acc + inputVec[i] * weights[FC1W_OFFSET + j * IN_DIM + i];
     }
 
-    hidden[j] = safeTanh(acc);
+    hidden[j] = max(acc, 0.0);
   }
 
   var outVec: array<f32, OUT_DIM>;
@@ -330,9 +330,8 @@ fn evalPolicy(inputVec: array<f32, IN_DIM>) -> PolicyOutput {
     // Linear chemical residual, as in Growing NCA. maxEnvWrite is a gain.
     out.envWrite[c] = outVec[c] * physics.maxEnvWrite;
   }
-  out.growthVectorLocal = vec2<f32>(
-    safeTanh(outVec[ENV_WRITE_DIM]), safeTanh(outVec[ENV_WRITE_DIM + 1u])
-  );
+  // Preserve direction; growthField.wgsl caps vector magnitude before scatter.
+  out.growthVectorLocal = vec2<f32>(outVec[ENV_WRITE_DIM], outVec[ENV_WRITE_DIM + 1u]);
   __POLICY_TAIL_DECODE__
   return out;
 }

@@ -1,13 +1,14 @@
 // REST calls against train_server.py's own /runs endpoints — mirrors
 // envnca/frontend/src/net/runs.ts.
 
-import type { TimingEntry, GenerationRecord, RunSettings } from "../gpu/types";
+import type { GenerationRecord, RunSettings } from "../gpu/types";
 import {
   applyHistory,
   applySettings,
   deriveState,
   EMPTY_ACCUMULATOR,
   type Accumulator,
+  type HistoryPayload,
   type TrainingSocketState,
 } from "./trainingSocket";
 
@@ -33,15 +34,21 @@ export async function fetchRuns(apiUrl: string): Promise<RunSummary[]> {
   return data.runs;
 }
 
-export async function fetchRunState(apiUrl: string, runId: string): Promise<TrainingSocketState> {
+export async function fetchRunState(apiUrl: string, runId: string, signal?: AbortSignal): Promise<TrainingSocketState> {
   const [settingsRes, historyRes] = await Promise.all([
-    fetch(`${apiUrl}/runs/${encodeURIComponent(runId)}/settings`),
-    fetch(`${apiUrl}/runs/${encodeURIComponent(runId)}/history`),
+    fetch(`${apiUrl}/runs/${encodeURIComponent(runId)}/settings`, { signal }),
+    fetch(`${apiUrl}/runs/${encodeURIComponent(runId)}/history?compact=true`, { signal }),
   ]);
   if (!settingsRes.ok || !historyRes.ok) throw new Error("Run settings or history could not be loaded");
   const settings: RunSettings = await settingsRes.json();
-  const data: { generations: GenerationRecord[]; timings?: TimingEntry[] } = await historyRes.json();
+  const data: HistoryPayload = await historyRes.json();
   let acc: Accumulator = applySettings(EMPTY_ACCUMULATOR, settings);
   acc = applyHistory(acc, data);
   return deriveState(acc);
+}
+
+export async function fetchGeneration(apiUrl: string, runId: string, generation: number, signal?: AbortSignal): Promise<GenerationRecord> {
+  const response = await fetch(`${apiUrl}/runs/${encodeURIComponent(runId)}/generations/${generation}`, { signal });
+  if (!response.ok) throw new Error(`Generation ${generation} could not be loaded (${response.status})`);
+  return response.json();
 }

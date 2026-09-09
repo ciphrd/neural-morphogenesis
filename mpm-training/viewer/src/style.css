@@ -481,9 +481,7 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-/* A real range input spans this grid invisibly; the cells and three-channel
-   outline are only its custom paint, so pointer/touch/keyboard behavior stays
-   identical to an ordinary slider. */
+/* A native range input moves the selection; the edge handles resize it. */
 .channel-window-slider {
   position: relative;
   display: grid;
@@ -1609,3 +1607,33 @@ body {
 .training-timeline .timing-note { font-size: 11px; color: #999; margin: 6px 0; }
 .training-timeline .timing-chart-inspect { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 .training-timeline .timing-chart-inspect .stat-row { gap: 8px; margin: 0; }
+
+.channel-window-handle {
+  grid-row: 1;
+  z-index: 3;
+  align-self: center;
+  width: 10px;
+  height: 24px;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid #b9e6fc;
+  border-radius: 4px;
+  background: #397b9b;
+  box-shadow: 0 0 0 1px #0d0d0d;
+  cursor: ew-resize;
+  touch-action: none;
+}
+.channel-window-handle::after {
+  content: "";
+  display: block;
+  width: 2px;
+  height: 10px;
+  margin: auto;
+  border-radius: 1px;
+  background: #e0f2fe;
+}
+.channel-window-handle.is-left { justify-self: start; margin-left: -5px; }
+.channel-window-handle.is-right { justify-self: end; margin-right: -5px; }
+.channel-window-handle:hover,
+.channel-window-handle:active { background: #509abf; }
+.channel-window-handle:focus-visible { outline: 2px solid white; outline-offset: 2px; }

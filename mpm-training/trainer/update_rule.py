@@ -1,4 +1,4 @@
-"""Tanh policy reference, initialization and checkpoint export. Live rollout inference uses core/agents.wgsl."""
+"""ReLU policy reference, initialization and checkpoint export. Live rollout inference uses core/agents.wgsl."""
 from __future__ import annotations
 
 from config import CONFIG
@@ -23,11 +23,10 @@ class UpdateRule(nn.Module):
         self.architecture = normalize_architecture(architecture)
         self.hidden_dim = policy_hidden_dim(self.architecture)
         input_dim = policy_input_dim(num_channels, self.architecture)
-        # Bounded, monotonic, zero-centered hidden response. This controller
-        # is evolved, so smooth local behavior under mutation is preferable
-        # to the periodic phase wrapping of the earlier sine experiment.
+        # ReLU hidden features with linear residual/vector heads. Output
+        # constraints are applied by the simulation according to each head.
         self.input_layer = nn.Linear(input_dim, self.hidden_dim)
-        self.activation = nn.Tanh()
+        self.activation = nn.ReLU()
         self.heads = nn.ModuleDict(
             {head.name: nn.Linear(self.hidden_dim, head.size) for head in policy_heads(num_channels, self.architecture)}
         )
@@ -70,7 +69,7 @@ class UpdateRule(nn.Module):
         (env_write, growth_vector, tail), all raw/un-squashed;
         tail is RGB for stateless policies or concatenated state residual/gate/RGB for recurrent policies
         and still in LOCAL frame — chemical deltas remain linear; scaling them,
-        squashing other heads, and rotating the growth vector to world frame are training_sim.py's/core/agents.wgsl's
+        decoding gates/colors, and rotating the growth vector to world frame are training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
         not transient spatial splat geometry), same division of responsibility
         envnca's own UpdateRule/Simulation split."""

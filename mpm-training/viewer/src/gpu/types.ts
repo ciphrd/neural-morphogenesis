@@ -131,7 +131,8 @@ export interface RunSettings extends ShapeStopSettings {
   mutationFactors?: number[];
   initialWeights?: string | null;
   /** Training pose scorer; omitted archived runs use raster alignment. */
-  fitnessAlignment?: "raster" | "geometry" | "svg";
+  fitnessAlignment?: "raster" | "geometry" | "svg" | "polar";
+  fitnessFunction?: "polar" | "multiscale";
   fitnessTemporalAggregation?: "min";
   fitnessCaptureFractions?: number[];
   /** Native training diagnostic; browser kernels retain parallel reductions. */
@@ -208,7 +209,21 @@ export interface TimingEntry {
   timing: GenerationTiming;
 }
 
+export interface PolarFitnessInfo {
+  angle: number;
+  reflected: boolean;
+  shift: number;
+  radialSamples: number;
+  angularSamples: number;
+  channels: number;
+  radius: number;
+  losses: [number[], number[]];
+  displayRange: [number, number];
+  differenceRange: [number, number];
+}
+
 export interface GenerationRecord {
+  selectedSnapshotFitness?: { polar?: PolarFitnessInfo | null };
   /** Search diagnostics after this generation's update; absent in older runs. */
   optimizerState?: {
     name: "cma-es";

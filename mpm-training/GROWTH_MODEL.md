@@ -100,6 +100,11 @@ inward = r max(-dot(d,n), 0)
 T = r d d^T - 2 inward n n^T
 ```
 
+`INWARD_BOUNDARY_GROWTH_ENABLED = true` in `core/growthField.wgsl` enables
+inward boundary contraction and its mechanical opposition to interior growth.
+Setting it to `false` makes inward-facing boundary commands passive (zero
+growth tensor), while retaining their displayed vectors.
+
 A purely outward command produces normal expansion `+r n n^T`; a purely inward
 command produces normal contraction `-r n n^T`. Tangential commands retain
 tangential expansion. Oblique inward commands can combine tangential growth

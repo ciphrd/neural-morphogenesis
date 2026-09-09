@@ -181,10 +181,12 @@ export function LabView() {
   const [domainVisible, setDomainVisible] = useState(VIEWER_DEFAULTS.rendering.domainVisible)
   const [growthLineVisible, setGrowthLineVisible] = useState(VIEWER_DEFAULTS.rendering.growthLineVisible)
   const [growthMagnitudeBoost, setGrowthMagnitudeBoost] = useState(VIEWER_DEFAULTS.rendering.growthMagnitudeBoost)
+  const [internalStateChannelSize, setInternalStateChannelSize] = useState(3)
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(VIEWER_DEFAULTS.rendering.internalStateChannelStart)
   const [chemicalMemoryOpponentSubtraction, setChemicalMemoryOpponentSubtraction] = useState(VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction)
   const [boundaryGradientScale, setBoundaryGradientScale] = useState(VIEWER_DEFAULTS.rendering.boundaryGradientScale)
   const [fieldMode, setFieldMode] = useState<FieldMode>(VIEWER_DEFAULTS.rendering.fieldMode)
+  const [substrateChannelSize, setSubstrateChannelSize] = useState(3)
   const [substrateChannelStart, setSubstrateChannelStart] = useState(VIEWER_DEFAULTS.rendering.substrateChannelStart)
   const [substrateZeroIsBlack, setSubstrateZeroIsBlack] = useState(VIEWER_DEFAULTS.rendering.substrateZeroIsBlack)
   const [boundaryGradientZeroIsBlack, setBoundaryGradientZeroIsBlack] = useState(VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack)
@@ -207,11 +209,16 @@ export function LabView() {
     }
   }
 
+  useEffect(() => {
+    const maxStart = Math.max(0, (config?.channels ?? 3) - substrateChannelSize)
+    setSubstrateChannelStart((start) => Math.min(start, maxStart))
+  }, [config?.channels, substrateChannelSize])
+
   const particleStateChannelCount = particleColorMode === "neural-memory"
     ? 8
     : (config?.channels ?? 1)
   const particleStateChannelStart = Math.min(
-    Math.max(0, particleStateChannelCount - 3),
+    Math.max(0, particleStateChannelCount - Math.min(internalStateChannelSize, particleStateChannelCount)),
     internalStateChannelStart,
   )
   const neuralMemoryControlsInactive =
@@ -405,8 +412,8 @@ export function LabView() {
           {(particleColorMode === "neural-memory" || particleColorMode === "chemical-memory") && (
             <>
               <div className={`channel-window-control${neuralMemoryControlsInactive ? " is-inactive" : ""}`}>
-                <div className="channel-window-label"><span>Channels</span><span>{particleStateChannelStart}–{particleStateChannelStart + 2}</span></div>
-                <ChannelWindowSlider channels={particleStateChannelCount} value={particleStateChannelStart} onChange={setInternalStateChannelStart} />
+                <div className="channel-window-label"><span>Channels</span><span>{particleStateChannelStart}–{particleStateChannelStart + Math.min(internalStateChannelSize, particleStateChannelCount) - 1}</span></div>
+                <ChannelWindowSlider channels={particleStateChannelCount} value={particleStateChannelStart} size={internalStateChannelSize} onChange={(start, size) => { setInternalStateChannelStart(start); setInternalStateChannelSize(size) }} />
               </div>
               {particleColorMode === "neural-memory" && (
                 <label className={`slider-row${neuralMemoryControlsInactive ? " is-inactive" : ""}`}><span>Opponent subtraction</span><Slider min={0} max={1} step={0.01} value={chemicalMemoryOpponentSubtraction} onChange={setChemicalMemoryOpponentSubtraction} /><span className="slider-value">{chemicalMemoryOpponentSubtraction.toFixed(2)}</span></label>
@@ -419,7 +426,7 @@ export function LabView() {
           <label className="slider-row">
             <span>Background</span>
             <select className="select" value={fieldMode} onChange={(event) => setFieldMode(event.target.value as FieldMode)}>
-              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="growth">Integrated growth</option><option value="substrate">Substrate</option><option value="orientation">Orientation substrate (ch3)</option><option value="gradient">Boundary gradient</option>
+              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="growth">Integrated growth</option><option value="substrate">Substrate</option><option value="orientation">Orientation substrate (ch3)</option><option value="policy-orientation">Policy orientation</option><option value="gradient">Boundary gradient</option>
             </select>
           </label>
           {fieldMode === "growth" && <p className="hint">Brightness shows regional drive or accumulated admission credit. Direction cycles right=red, up=yellow, left=cyan, down=violet; green is broad or ambiguous.</p>}
@@ -427,8 +434,8 @@ export function LabView() {
             <label className="checkbox-row"><input type="checkbox" checked={morphologyGradientVisible} onChange={(event) => setMorphologyGradientVisible(event.target.checked)} />Show morphology gradient (R/G)</label>
             <label className="checkbox-row"><input type="checkbox" checked={morphologyDensityVisible} onChange={(event) => setMorphologyDensityVisible(event.target.checked)} />Show morphology density (B)</label>
           </>}
-          {fieldMode === "substrate" && config && <><div className="channel-window-control"><div className="channel-window-label"><span>RGB channels</span><span>{substrateChannelStart}–{Math.min(config.channels - 1, substrateChannelStart + 2)}</span></div><ChannelWindowSlider channels={config.channels} value={substrateChannelStart} onChange={setSubstrateChannelStart} /></div><label className="checkbox-row"><input type="checkbox" checked={substrateZeroIsBlack} onChange={(event) => setSubstrateZeroIsBlack(event.target.checked)} />Zero is black</label></>}
-          {fieldMode === "orientation" && <label className="checkbox-row"><input type="checkbox" checked={substrateZeroIsBlack} onChange={(event) => setSubstrateZeroIsBlack(event.target.checked)} />Zero is black</label>}
+          {fieldMode === "substrate" && config && <><div className="channel-window-control"><div className="channel-window-label"><span>RGB channels</span><span>{substrateChannelStart}–{Math.min(config.channels - 1, substrateChannelStart + substrateChannelSize - 1)}</span></div><ChannelWindowSlider channels={config.channels} value={substrateChannelStart} size={substrateChannelSize} onChange={(start, size) => { setSubstrateChannelStart(start); setSubstrateChannelSize(size) }} /></div><label className="checkbox-row"><input type="checkbox" checked={substrateZeroIsBlack} onChange={(event) => setSubstrateZeroIsBlack(event.target.checked)} />Zero is black</label></>}
+          {(fieldMode === "orientation" || fieldMode === "policy-orientation") && <label className="checkbox-row"><input type="checkbox" checked={substrateZeroIsBlack} onChange={(event) => setSubstrateZeroIsBlack(event.target.checked)} />Zero is black</label>}
           <label className="slider-row"><span>Accent</span><Slider min={-2} max={2} step={0.01} value={accent} onChange={setAccent} /><span className="slider-value">{accent.toFixed(2)}</span></label>
           {fieldMode === "gradient" && <>
             <label className="checkbox-row"><input type="checkbox" checked={boundaryGradientZeroIsBlack} onChange={(event) => setBoundaryGradientZeroIsBlack(event.target.checked)} />Zero is black</label>
@@ -491,11 +498,11 @@ export function LabView() {
             growthLineVisible={growthLineVisible}
             domainVisible={domainVisible}
             growthMagnitudeBoost={growthMagnitudeBoost}
-            internalStateChannelStart={internalStateChannelStart}
+            internalStateChannelStart={internalStateChannelStart} internalStateChannelSize={internalStateChannelSize}
             chemicalMemoryOpponentSubtraction={chemicalMemoryOpponentSubtraction}
             boundaryGradientScale={boundaryGradientScale}
             fieldMode={fieldMode}
-            substrateChannelStart={substrateChannelStart}
+            substrateChannelStart={substrateChannelStart} substrateChannelSize={substrateChannelSize}
             substrateZeroIsBlack={substrateZeroIsBlack}
             boundaryGradientZeroIsBlack={boundaryGradientZeroIsBlack}
             morphologyGradientVisible={morphologyGradientVisible}

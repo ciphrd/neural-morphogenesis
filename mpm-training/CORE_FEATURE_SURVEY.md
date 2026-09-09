@@ -47,7 +47,7 @@ Sources: [p2g.wgsl](core/p2g.wgsl), [g2p.wgsl](core/g2p.wgsl), [gridUpdate.wgsl]
 
 | Feature | Status | Actual behavior / controlling settings |
 |---|---|---|
-| Continuous neural growth vector | Active | Two tanh outputs define a local vector; its magnitude requests growth. Rotated into world space and published once per macro step. No separate division probability head. |
+| Continuous neural growth vector | Active | Two linear outputs define a local vector; its magnitude requests growth and is capped at one before growth-field scatter. Rotated into world space and published once per macro step. No separate division probability head. |
 | Vector-first field integration | Active | Volume-weighted signed vectors are averaged on the MPM grid before construction of the expansion tensor. Opposing proposals cancel. |
 | Tensor rest growth | Active | G2P exponentiates the sampled tensor into `Fg`, transformed through the elastic rotation. `growthDuration=12` sets the base rate; duration zero disables material growth. |
 | Anisotropy control | Active | `growthAnisotropy=1`; interpolates between isotropic and directional tensors without changing trace. The former temporal anisotropy relaxation is absent. |
@@ -67,7 +67,7 @@ Sources: [growthField.wgsl](core/growthField.wgsl), [g2p.wgsl](core/g2p.wgsl), [
 
 | Feature | Status | Actual behavior / controlling settings |
 |---|---|---|
-| Stateless policy | Default | `stateless-128`: one 128-wide tanh hidden layer. With 9 channels: 33 inputs and 14 outputs (9 chemical + 2 growth + 3 RGB). |
+| Stateless policy | Default | `stateless-128`: one 128-wide ReLU hidden layer. With 9 channels: 33 inputs and 14 outputs (9 chemical + 2 growth + 3 RGB). |
 | Recurrent policy | Optional | `stateful-64` and `stateful-128`, with 8 private state values and residual/gate heads. Normal `cellMemory="recurrent"` selection maps to stateful-128; stateful-64 remains an explicit comparison option. |
 | Chemical perception | Active | Nine values plus forward/lateral gradients. Value multiplier 1; gradient normalization scale 0.045. |
 | Morphology perception | Active | Occupancy and two local gradients. Blur sigma 0.01, density reference 1, gradient input scale 0.018. Separate from renderer blur. |
@@ -75,8 +75,8 @@ Sources: [growthField.wgsl](core/growthField.wgsl), [g2p.wgsl](core/g2p.wgsl), [
 | Chemical-derived local frame | Active | Chemical channel index 3 defines orientation using an L2-clipped gradient. Weak gradients suppress directional perception. Growth rotation retains a deterministic world-X fallback when orientation is undefined. |
 | Reflection averaging | Optional, off | `chirality=false`. Enabling evaluates the policy on original and reflected input and averages corrected outputs; the setting enforces reflection symmetry despite its name. |
 | Color head | Active, visual only | Stateless RGB logits become sigmoid colors. These colors are not physical actions or inputs to current domain fitness. Recurrent color comes from private state instead. |
-| Chemical and growth output activations | Active | Overflow-safe tanh. Recurrent gates and display colors use sigmoid; private state is clamped after gated residual integration. |
-| Sine hidden activation | Superseded | Current implementations use tanh; no runtime activation selector. |
+| Chemical and growth output activations | Active | Linear chemical, growth-vector, and memory residual outputs. Growth scatter caps vector magnitude. Recurrent gates and display colors use sigmoid; private state is clamped after gated residual integration. |
+| Sine hidden activation | Superseded | Current implementations use ReLU; no runtime activation selector. |
 | Learned heading / angular dynamics | Superseded | No learned heading head or persistent angular velocity. Angular controls remain in the settings/layout surface. |
 | Absolute/spawn-relative position inputs | Absent | Spawn coordinates control initialization, not the production policy input vector. |
 | Physical motility from growth vector | Optional, off | `maxStrafe=0`. Nonzero applies world growth vector to velocity; this scale does not set material growth rate. |

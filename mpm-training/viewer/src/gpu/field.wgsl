@@ -247,6 +247,8 @@ fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   let g = substrateValue(min(channelStart + 1u, SUBSTRATE_CHANNELS - 1u), x, y);
   let b = substrateValue(min(channelStart + 2u, SUBSTRATE_CHANNELS - 1u), x, y);
   var color = vec3<f32>(substrateDisplayValue(r), substrateDisplayValue(g), substrateDisplayValue(b));
+  if (substrateDisplay.z < 3u) { color.b = 0.0; }
+  if (substrateDisplay.z < 2u) { color.g = 0.0; }
   if (substrateDisplay.y != 0u) {
 
     let orientationChannel = min(3u, SUBSTRATE_CHANNELS - 1u);
@@ -483,4 +485,64 @@ fn growthVectorVertex(
 @fragment
 fn growthVectorFragment(in: GrowthVectorOut) -> @location(0) vec4<f32> {
   return vec4<f32>(vec3<f32>(0.60, 1.0, 0.66), 0.95);
+}
+
+@group(0) @binding(26) var<storage, read> policyGradient: array<f32>;
+
+// Match core/agents.wgsl: periodic quadratic sampling of the cached gradient,
+// including the per-channel resolution correction used by agentStep.
+fn policyOrientationAt(uv: vec2<f32>) -> vec2<f32> {
+  let c = min(3u, SUBSTRATE_CHANNELS - 1u);
+  let size = vec2<u32>(SUBSTRATE_WIDTHS[c], SUBSTRATE_HEIGHTS[c]);
+  let pos = fract(uv) * vec2<f32>(size) - vec2<f32>(0.5);
+  let base = vec2<i32>(floor(pos - vec2<f32>(0.5)));
+  let f = pos - vec2<f32>(base);
+  let weights = array<vec2<f32>, 3>(
+    0.5 * (vec2<f32>(1.5) - f) * (vec2<f32>(1.5) - f),
+    vec2<f32>(0.75) - (f - vec2<f32>(1.0)) * (f - vec2<f32>(1.0)),
+    0.5 * (f - vec2<f32>(0.5)) * (f - vec2<f32>(0.5)),
+  );
+  var gradient = vec2<f32>(0.0);
+  for (var x = 0u; x < 3u; x++) {
+    for (var y = 0u; y < 3u; y++) {
+      let cell = ((base + vec2<i32>(i32(x), i32(y))) % vec2<i32>(size) + vec2<i32>(size)) % vec2<i32>(size);
+      let index = substrateIndex(c, u32(cell.y), u32(cell.x));
+      gradient += vec2<f32>(policyGradient[index], policyGradient[__FIELD_TOTAL__u + index]) * weights[x].x * weights[y].y;
+    }
+  }
+  return gradient * vec2<f32>(size) / vec2<f32>(f32(SUBSTRATE_WIDTH), f32(SUBSTRATE_HEIGHT));
+}
+
+@vertex
+fn policyOrientationVertex(
+  @builtin(vertex_index) vertexIndex: u32,
+  @builtin(instance_index) instanceIndex: u32,
+) -> GrowthVectorOut {
+  let uv = (vec2<f32>(f32(instanceIndex % 32u), f32(instanceIndex / 32u)) + vec2<f32>(0.5)) / 32.0;
+  let gradient = policyOrientationAt(uv);
+  let magnitude = length(gradient);
+  let direction = gradient / max(magnitude, 1e-10);
+  // Constant-length glyphs expose direction even where alignment is weak.
+  // A flat field has no defined direction and therefore no arrow.
+  let center = uv * 2.0 - vec2<f32>(1.0);
+  let tail = center - direction * 0.018;
+  let tip = center + direction * 0.018;
+  let headBase = tip - direction * 0.011;
+  let normal = vec2<f32>(-direction.y, direction.x);
+  var p: vec2<f32>;
+  if (vertexIndex < 6u) {
+    p = arrowSegmentVertex(vertexIndex, tail, headBase, 0.0012);
+  } else {
+    let head = array<vec2<f32>, 3>(headBase + normal * 0.006, headBase - normal * 0.006, tip);
+    p = head[vertexIndex - 6u];
+  }
+  var out: GrowthVectorOut;
+  out.position = vec4<f32>(select(vec2<f32>(2.0), p, magnitude > 1e-10) * max(fieldViewZoom, 1.0), 0.0, 1.0);
+  out.strength = min(magnitude, 1.0);
+  return out;
+}
+
+@fragment
+fn policyOrientationFragment(in: GrowthVectorOut) -> @location(0) vec4<f32> {
+  return vec4<f32>(1.0, 0.12, 0.05, 0.95);
 }

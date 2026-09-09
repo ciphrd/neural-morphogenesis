@@ -87,3 +87,7 @@ Training can evaluate each candidate at several multipliers and aggregate fitnes
 Run Python checks from `trainer/` with `.venv/bin/python <check>.py`. Focused suites include `continuous_growth_check.py`, `conforming_refinement_check.py`, `vertex_transport_check.py`, `split_weight_check.py`, `growth_check.py`, `chemical_transfer_check.py`, `chemical_channels_check.py`, `density_check.py`, `density_gpu_check.py`, `initial_conditions_check.py`, `seed_blob_check.py`, `elastic_diagnostics_check.py`, `domain_render_check.py`, `policy_parameters_check.py`, and `rollout_control_check.py`. GPU checks require a native GPU adapter. Build the viewer with `npm run build --prefix viewer` from the repository root.
 
 Other design notes and saved research snapshots describe experiments at their capture time; use the source and this README for the current model.
+
+New training runs use the [IsoNCA polar pixel fitness](trainer/POLAR_FITNESS.md),
+with rotation/reflection matching and server-generated polar previews in the
+viewer. `--fitness-function multiscale` selects the previous objective.

@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from chemical_channels import profiles_to_wire
-from debug_images import save_grown_image, save_raster_image
+from debug_images import save_grown_image, save_raster_image, save_polar_images
 from density import DENSITY_MODEL_VERSION
 from device import pick_device
 from evolve import (
@@ -43,6 +43,7 @@ from evolve import (
 from mpm_core import PARTICLE_MASS, VOL
 from parallel_workers import build_pool
 from rollout_snapshot import RolloutSnapshot
+from history_index import compact_history, generation_record
 from policy_parameters import mutation_scales, policy_hidden_dim
 from raster import build_target_distance_field
 from domain_fitness import FITNESS_MODEL_VERSION, target_mask
@@ -241,7 +242,7 @@ def _save_generation_images(generation: int, snapshot: RolloutSnapshot) -> dict[
     prefix = f"gen_{generation:05d}"
     save_grown_image(positions, target.overlay_points(args.raster_resolution), IMAGES_DIR / f"{prefix}_grown.png")
     target_rgb = evaluation.target_color_raster
-    if target_rgb is None:
+    if target_rgb is None and evaluation.target_raster is None:
         target_rgb = target.color_raster(args.raster_resolution)
     comparison_mask = evaluation.target_raster if evaluation.target_raster is not None else target_raster
     save_raster_image(target_rgb if target_rgb is not None else comparison_mask, IMAGES_DIR / f"{prefix}_target.png")
@@ -249,9 +250,11 @@ def _save_generation_images(generation: int, snapshot: RolloutSnapshot) -> dict[
         save_raster_image(evaluation.color_raster if evaluation.color_raster is not None else agent_raster, IMAGES_DIR / f"{prefix}_agents.png")
     if target_rgb is not None and evaluation.color_raster is not None:
         save_raster_image(np.abs(evaluation.color_raster-target_rgb), IMAGES_DIR / f"{prefix}_diff.png")
+    polar_info = save_polar_images(evaluation.polar, IMAGES_DIR, prefix) if evaluation.polar is not None else None
     if breakdown is None:
         return None
     return {
+        "polar": polar_info,
         "total": breakdown.total,
         "coverage": breakdown.coverage,
         "spill": breakdown.spill,
@@ -306,8 +309,7 @@ def _restore_current_run() -> None:
             raise SystemExit(f"saved run refers to unavailable target {target_name!r}")
         target = load_target(target_name)
 
-    generations = _history_payload(HISTORY_PATH)["generations"]
-    latest_generation_message = generations[-1] if generations else None
+    latest_generation_message = compact_history(HISTORY_PATH)["latestGeneration"]
     generation = latest_generation_message["generation"] if latest_generation_message else "none"
     print(f"[train_server] serve-only mode: restored current run (latest generation: {generation})")
 
@@ -436,7 +438,8 @@ async def _training_loop_body() -> None:
         "mutationSigma": args.mutation_sigma,
         "mutationFactors": list(getattr(args, "mutation_factors", [1.])),
         "initialWeights": str(args.initial_weights) if getattr(args, "initial_weights", None) else None,
-        "fitnessAlignment": "svg" if target.svg_source is not None else getattr(args, "fitness_alignment", "raster"),
+        "fitnessFunction": getattr(args, "fitness_function", "multiscale"),
+        "fitnessAlignment": "polar" if getattr(args, "fitness_function", "multiscale") == "polar" else ("svg" if target.svg_source is not None else getattr(args, "fitness_alignment", "raster")),
         "deterministicReference": getattr(args, "deterministic_reference", False),
         "rasterResolution": args.raster_resolution,
         "outsideWeight": args.outside_weight,
@@ -596,8 +599,8 @@ def _history_payload(path: Path) -> dict:
     return {"generations": list(generations), "timings": [timings[key] for key in sorted(timings)]}
 
 @app.get("/history")
-def history() -> dict:
-    return _history_payload(HISTORY_PATH)
+def history(compact: bool = True) -> dict:
+    return compact_history(HISTORY_PATH) if compact else _history_payload(HISTORY_PATH)
 
 @app.get("/settings")
 def get_settings() -> dict:
@@ -748,18 +751,29 @@ def list_runs() -> dict:
     return {"runs": runs}
 
 @app.get("/runs/{run_id}/history")
-def run_history(run_id: str) -> dict:
+def run_history(run_id: str, compact: bool = True) -> dict:
     """Same shape as /history, for one specific run — "current" is just
     /history itself (the live, in-progress run); anything else reads
     that archived run's own copy of checkpoints/history.jsonl (moved, not
     copied, by _archive_previous_run())."""
     if run_id == "current":
-        return history()
+        return history(compact)
     run_dir = _run_dir_for_id(run_id)
     if run_dir is None:
         raise HTTPException(404, f"unknown run '{run_id}'")
     history_path = run_dir / "history.jsonl"
-    return _history_payload(history_path)
+    return compact_history(history_path) if compact else _history_payload(history_path)
+
+@app.get("/runs/{run_id}/generations/{generation}")
+def run_generation_record(run_id: str, generation: int) -> dict:
+    run_dir = CHECKPOINTS_DIR if run_id == "current" else _run_dir_for_id(run_id)
+    if run_dir is None:
+        raise HTTPException(404, "unknown run")
+    record = generation_record(run_dir / "history.jsonl", generation)
+    if record is None:
+        raise HTTPException(404, "unknown generation")
+    return record
+
 
 def _images_dir_for_run(run_id: str) -> Path:
     """Shared by run_preview() and run_image() below — "current" is the

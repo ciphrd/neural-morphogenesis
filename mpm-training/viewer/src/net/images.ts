@@ -11,7 +11,7 @@
 // "grown" is the raw scatter and "agents" is the aligned raster instead
 // — same three concepts, just not a 1:1 name mapping across projects.
 
-export type GenerationImageKind = "grown" | "target" | "agents";
+export type GenerationImageKind = "grown" | "target" | "agents" | "polar_target" | "polar_candidate" | "polar_aligned" | "polar_diff" | "polar_target_alpha" | "polar_candidate_alpha" | "polar_aligned_alpha";
 
 export function generationImageUrl(apiUrl: string, runId: string, generation: number, kind: GenerationImageKind): string {
   return `${apiUrl}/runs/${encodeURIComponent(runId)}/images/gen_${String(generation).padStart(5, "0")}_${kind}.png`;

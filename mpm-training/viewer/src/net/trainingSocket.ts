@@ -1,18 +1,5 @@
-// Live training state — the core state-management hook, mirroring
-// envnca/frontend/src/net/trainingSocket.ts's own shape almost exactly
-// (same reducer-over-both-REST-and-WS design, same MAX_HISTORY eviction),
-// PLUS a settings/generation split train_server.py's own SETTINGS_PATH
-// global explains the "why" of: a run's SETTINGS (target/particles/
-// channels/decay/population/...) are fetched ONCE via GET /settings
-// (and cached locally as the next offline-start default),
-// separately from each generation's own record (best/mean/worst/
-// allTimeBest/seed/weights) — so applySettings()/applyGeneration() below
-// are two independent, mechanical reducers over a raw Accumulator, and
-// deriveState() is the ONE place that merges the two into the
-// TrainingSocketState shape GridCanvas/TrainingView actually consume
-// (unchanged from before the split — see gpu/types.ts's own
-// SimulationConfig docstring). Reused by net/runs.ts's own
-// fetchRunState() for archived-run history, same as before.
+// Compact chart history plus a bounded cache of full replay policies.
+// Live and archived runs share the same bulk history merge.
 
 import { useEffect, useMemo, useState } from "react";
 import { randomWeights } from "../gpu/agents";
@@ -42,7 +29,21 @@ export interface LiveTrainingSocketState extends TrainingSocketState {
 }
 
 export const EMPTY_STATE: TrainingSocketState = { history: [], timingHistory: [], latest: null, configByGeneration: new Map() };
-const MAX_HISTORY = 500;
+const MAX_WEIGHT_SNAPSHOTS = 8;
+export type HistoryRecord = Omit<GenerationRecord, "weights"> & { weights?: GenerationRecord["weights"] };
+export interface HistoryPayload {
+  generations: HistoryRecord[];
+  timings?: TimingEntry[];
+  latestGeneration?: GenerationRecord | null;
+}
+
+function trimWeights(records: Map<number, HistoryRecord>): void {
+  const full = [...records.values()].filter(r => r.weights).sort((a, b) => b.generation - a.generation);
+  for (const r of full.slice(MAX_WEIGHT_SNAPSHOTS)) {
+    records.set(r.generation, { generation: r.generation, seed: r.seed, best: r.best,
+      mean: r.mean, worst: r.worst, allTimeBest: r.allTimeBest, optimizerState: r.optimizerState });
+  }
+}
 
 // Never a real generation number (train_server.py's own counter starts
 // at 0) — see deriveState()'s own comment for what this placeholder is
@@ -61,15 +62,10 @@ function placeholderRecord(settings: RunSettings): GenerationRecord {
   };
 }
 
-// Raw accumulator both useTrainingSocket() (live) and net/runs.ts's own
-// fetchRunState() (archived) build up before deriving the public
-// TrainingSocketState shape above. `records` carries a full weights
-// export per generation, so it's capped to MAX_HISTORY in lockstep with
-// `history` used to be — same unbounded-memory reasoning, just moved
-// here now that settings live separately.
+// Chart summaries stay available; only the latest eight policies retain weights.
 export interface Accumulator {
   settings: RunSettings | null;
-  records: Map<number, GenerationRecord>;
+  records: Map<number, HistoryRecord>;
   timings?: Map<number, GenerationTiming>;
 }
 export const EMPTY_ACCUMULATOR: Accumulator = { settings: null, records: new Map() };
@@ -92,31 +88,29 @@ export function applySettings(prev: Accumulator, settings: RunSettings): Accumul
 export function applyGeneration(prev: Accumulator, message: GenerationRecord): Accumulator {
   const records = new Map(prev.records);
   records.set(message.generation, message);
-  if (records.size > MAX_HISTORY) {
-    // Only ever one over at a time in practice (applyGeneration is
-    // called once per new message, live or during backfill) — dropping
-    // the single oldest key is enough, no need for envnca's own
-    // multi-drop slice dance.
-    records.delete(Math.min(...records.keys()));
-  }
+  trimWeights(records);
   const timings = new Map(prev.timings);
   if (message.timing) timings.set(message.generation, message.timing);
   return { ...prev, records, timings };
 }
 
-export function applyHistory(prev: Accumulator, data: { generations: GenerationRecord[]; timings?: TimingEntry[] }): Accumulator {
+export function applyHistory(prev: Accumulator, data: HistoryPayload): Accumulator {
+  // One copy per collection, not one copy per generation during backfill.
+  const records = new Map(prev.records);
   const timings = new Map(prev.timings);
   for (const entry of data.timings ?? []) {
     if (!timings.has(entry.generation)) timings.set(entry.generation, entry.timing);
   }
-  return data.generations.reduce<Accumulator>((acc, message) => applyGeneration(acc, message), { ...prev, timings });
+  for (const record of data.generations) {
+    if (!records.get(record.generation)?.weights) records.set(record.generation, record);
+    if (record.timing && !timings.has(record.generation)) timings.set(record.generation, record.timing);
+  }
+  if (data.latestGeneration) records.set(data.latestGeneration.generation, data.latestGeneration);
+  trimWeights(records);
+  return { ...prev, records, timings };
 }
 
-/** The one place settings + every known generation record get merged
- * into what GridCanvas/TrainingView actually consume — recomputed
- * (cheap, at most MAX_HISTORY entries) whenever the accumulator changes
- * rather than maintained incrementally, so applySettings()/
- * applyGeneration() above can stay plain, mechanical reducers. */
+/** Merge settings with cached policies, without materializing configs for summaries. */
 export function deriveState(acc: Accumulator): TrainingSocketState {
   const history: GenerationStat[] = Array.from(acc.records.values())
     .map((r) => ({ generation: r.generation, best: r.best, mean: r.mean, worst: r.worst, allTimeBest: r.allTimeBest, timing: r.timing, optimizerState: r.optimizerState }))
@@ -127,12 +121,12 @@ export function deriveState(acc: Accumulator): TrainingSocketState {
 
   const configByGeneration = new Map<number, SimulationConfig>();
   for (const record of acc.records.values()) {
-    configByGeneration.set(record.generation, { ...acc.settings, ...record });
+    if (record.weights) configByGeneration.set(record.generation, { ...acc.settings, ...record, weights: record.weights });
   }
 
   const latest: SimulationConfig =
-    history.length > 0
-      ? (configByGeneration.get(history[history.length - 1].generation) as SimulationConfig)
+    configByGeneration.size > 0
+      ? configByGeneration.get(Math.max(...configByGeneration.keys()))!
       : // Settings exist but generation 0 hasn't finished evaluating yet
         // (population x workers can take real time) — render a LIVE
         // rollout under freshly random-initialized weights (same
@@ -193,15 +187,17 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): LiveTrainingSo
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${apiUrl}/history`)
+    const controller = new AbortController();
+    fetch(`${apiUrl}/history?compact=true`, { signal: controller.signal })
       .then((res) => res.json())
-      .then((data: { generations: GenerationRecord[]; timings?: TimingEntry[] }) => {
+      .then((data: HistoryPayload) => {
         if (cancelled) return;
         setAcc((prev) => applyHistory(prev, data));
       })
-      .catch((err) => console.error("[trainingSocket] history backfill failed:", err));
+      .catch((err) => { if (!cancelled) console.error("[trainingSocket] history backfill failed:", err); });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [apiUrl]);
 
@@ -217,7 +213,7 @@ export function useTrainingSocket(wsUrl: string, apiUrl: string): LiveTrainingSo
         if (!cancelled) {
           setServerConnected(true);
           if (hadConnection) {
-            fetch(`${apiUrl}/history`).then(res => res.json()).then(data => {
+            fetch(`${apiUrl}/history?compact=true`).then(res => res.json()).then(data => {
               if (!cancelled) setAcc(prev => applyHistory(prev, data));
             }).catch(err => console.error("[trainingSocket] timing/history reconnect failed:", err));
           }

@@ -282,7 +282,7 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     for head in policy_heads(1, STATEFUL_128_ARCHITECTURE):
         head_offsets[head.name] = offset
         offset += head.size
-    weights[layout["fc2b_offset"] + head_offsets["stateDelta"]] = 1.0
+    weights[layout["fc2b_offset"] + head_offsets["stateDelta"]] = -2.0
     weights[layout["fc2b_offset"] + head_offsets["stateGate"]] = 20.0
     color_offset = layout["fc2b_offset"] + head_offsets["color"]
     color_logits = np.array([-20.0, 0.7, 20.0], dtype=np.float32)
@@ -299,7 +299,7 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
         agents._agent_state_buffer, PARTICLE_META_BUFFER_OFFSET, agents._particle_meta_dtype.itemsize
     )
     meta = np.frombuffer(raw, dtype=agents._particle_meta_dtype, count=1)[0]
-    expected_state = np.tanh(1.0) * 0.25
+    expected_state = -2.0 * 0.25
     assert np.isclose(meta["privateState"][0], expected_state, atol=2e-6), meta
     assert np.allclose(meta["privateState"][1:], 0.0, atol=1e-7), meta
     expected_color = 1.0 / (1.0 + np.exp(-color_logits))
@@ -337,6 +337,31 @@ def check_stateful_private_memory(device: wgpu.GPUDevice) -> None:
     np.testing.assert_allclose(samples[0]["privateState"], samples[1]["privateState"], atol=1e-7)
     print("[PASS] recurrent-128 policy emits bounded RGB independently of memory and new material samples inherit private state")
 
+def check_relu_linear_growth(device):
+    """Check shared GPU inference against the Python reference and a known vector."""
+    import torch
+    from update_rule import UpdateRule
+    from continuous_growth_check import make_system, load_samples, read_rest
+    from policy_parameters import STATELESS_ARCHITECTURE
+    core, agents = make_system(device)
+    load_samples(core, agents, [[.5, .5]], [[0, 0]])
+    model = UpdateRule(1, STATELESS_ARCHITECTURE)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+        model.input_layer.bias[:2] = torch.tensor([-2., 3.])
+        model.heads["growthVector"].weight[:, :2] = torch.tensor([[1., 1.], [1., -1.]])
+        model.heads["growthVector"].bias[:] = torch.tensor([0., -1.])
+    zero = torch.zeros((1, 1))
+    _, vector, _ = model(zero, zero, zero, torch.zeros((1, 3)), torch.zeros((1, 3)))
+    np.testing.assert_allclose(vector.detach().numpy()[0], [3., -4.], atol=1e-6)
+    agents.load_weights(model.flat_parameters().detach().numpy())
+    encoder = device.create_command_encoder()
+    agents.encode_step(encoder, 0, commit_growth=True)
+    device.queue.submit([encoder.finish()])
+    np.testing.assert_allclose(read_rest(core, 1)[0, 5:7], [3., -4.], atol=1e-6)
+    print("[PASS] Python/GPU ReLU agree; signed growth outputs retain magnitude and direction")
+
 def check_forced_growth_direction(device):
     """Exercise the shared uniform offsets for retained explicit Lab directions."""
     from continuous_growth_check import make_system, load_samples, read_rest
@@ -360,6 +385,7 @@ def check_forced_growth_direction(device):
 
 def main() -> None:
     device = pick_device()
+    check_relu_linear_growth(device)
     check_forced_growth_direction(device)
     check_morphology_occupancy(device)
     check_single_cell_rollout_seed(device)

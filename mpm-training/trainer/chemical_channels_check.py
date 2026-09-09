@@ -31,7 +31,8 @@ from training_sim import TrainingRollout
 def check_layout() -> None:
     profiles = default_channel_profiles(CHEM_CHANNELS)
     assert [profile.scale for profile in profiles] == [
-        "global", "global", "global", "regional", "regional", "regional", "local", "local", "local"
+        "global", "global", "global", "regional", "regional", "regional", "local", "local", "local",
+        "global", "regional", "local"
     ]
     assert all(profile.role is None for profile in profiles)
     widths, heights = resolved_dimensions(FIELD_N, FIELD_N, profiles)
@@ -53,7 +54,7 @@ def check_layout() -> None:
     constants = channel_shader_constants(FIELD_N, FIELD_N, profiles)
     assert constants["FIELD_TOTAL"] == total
     assert constants["FIELD_MAX_WIDTH"] == FIELD_N
-    print("[PASS] 3/3/3 profiles resolve and round-trip through run metadata")
+    print("[PASS] 4/4/4 profiles resolve and round-trip through run metadata")
 
 def check_gpu_pipelines() -> None:
     device = pick_device()

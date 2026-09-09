@@ -63,6 +63,7 @@ interface GridCanvasProps {
   fieldMode?: FieldMode;
   /** First of three contiguous chemical channels mapped to substrate RGB. */
   substrateChannelStart?: number;
+  substrateChannelSize?: number;
   substrateZeroIsBlack?: boolean;
   boundaryGradientZeroIsBlack?: boolean;
   particleShape?: ParticleShape;
@@ -78,6 +79,7 @@ interface GridCanvasProps {
   boundaryGradientScale?: number;
   /** First of three contiguous private-state channels mapped to cell RGB. */
   internalStateChannelStart?: number;
+  internalStateChannelSize?: number;
   /** Amount of the wrapped next three private-state channels subtracted from particle RGB. */
   chemicalMemoryOpponentSubtraction?: number;
   /** [-2,2] — negative suppresses background-field contrast, 0 is
@@ -292,6 +294,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     particleCap,
     initialParticleCount,
     fieldMode = VIEWER_DEFAULTS.rendering.fieldMode,
+    substrateChannelSize = 3,
     substrateChannelStart = VIEWER_DEFAULTS.rendering.substrateChannelStart,
     substrateZeroIsBlack = VIEWER_DEFAULTS.rendering.substrateZeroIsBlack,
     boundaryGradientZeroIsBlack = VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack,
@@ -304,6 +307,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
     particleRadiusPx,
     growthMagnitudeBoost = VIEWER_DEFAULTS.rendering.growthMagnitudeBoost,
     boundaryGradientScale = VIEWER_DEFAULTS.rendering.boundaryGradientScale,
+    internalStateChannelSize = 3,
     internalStateChannelStart = VIEWER_DEFAULTS.rendering.internalStateChannelStart,
     chemicalMemoryOpponentSubtraction = VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction,
     accent = VIEWER_DEFAULTS.rendering.accent,
@@ -334,6 +338,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const particleCapRef = useRef(particleCap);
   const initialParticleCountRef = useRef(initialParticleCount);
   const fieldModeRef = useRef(fieldMode);
+  const substrateChannelSizeRef = useRef(substrateChannelSize);
   const substrateChannelStartRef = useRef(substrateChannelStart);
   const substrateZeroIsBlackRef = useRef(substrateZeroIsBlack);
   const boundaryGradientZeroIsBlackRef = useRef(boundaryGradientZeroIsBlack);
@@ -346,6 +351,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   const particleRadiusPxRef = useRef(particleRadiusPx);
   const growthMagnitudeBoostRef = useRef(growthMagnitudeBoost);
   const boundaryGradientScaleRef = useRef(boundaryGradientScale);
+  const internalStateChannelSizeRef = useRef(internalStateChannelSize);
   const internalStateChannelStartRef = useRef(internalStateChannelStart);
   const chemicalMemoryOpponentSubtractionRef = useRef(chemicalMemoryOpponentSubtraction);
   const accentRef = useRef(accent);
@@ -482,6 +488,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   particleCapRef.current = particleCap;
   initialParticleCountRef.current = initialParticleCount;
   fieldModeRef.current = fieldMode;
+  substrateChannelSizeRef.current = substrateChannelSize;
   substrateChannelStartRef.current = substrateChannelStart;
   substrateZeroIsBlackRef.current = substrateZeroIsBlack;
   boundaryGradientZeroIsBlackRef.current = boundaryGradientZeroIsBlack;
@@ -494,6 +501,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   particleRadiusPxRef.current = particleRadiusPx;
   growthMagnitudeBoostRef.current = growthMagnitudeBoost;
   boundaryGradientScaleRef.current = boundaryGradientScale;
+  internalStateChannelSizeRef.current = internalStateChannelSize;
   internalStateChannelStartRef.current = internalStateChannelStart;
   chemicalMemoryOpponentSubtractionRef.current = chemicalMemoryOpponentSubtraction;
   accentRef.current = accent;
@@ -669,7 +677,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       if (targetPoints) simulation.setTargetPoints(targetPoints);
       simulation.setTargetVisible(targetVisible);
       simulation.setFieldMode(fieldModeRef.current);
-      simulation.setSubstrateChannelStart(substrateChannelStartRef.current);
+      simulation.setSubstrateChannelStart(substrateChannelStartRef.current, substrateChannelSizeRef.current);
       simulation.setSubstrateZeroIsBlack(substrateZeroIsBlackRef.current);
       simulation.setBoundaryGradientZeroIsBlack(boundaryGradientZeroIsBlackRef.current);
       simulation.setParticleShape(particleShapeRef.current);
@@ -680,7 +688,7 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
       simulation.setDomainVisible(domainVisibleRef.current);
       simulation.setGrowthMagnitudeBoost(growthMagnitudeBoostRef.current);
       simulation.setBoundaryGradientScale(boundaryGradientScaleRef.current);
-      simulation.setInternalStateChannelStart(internalStateChannelStartRef.current);
+      simulation.setInternalStateChannelStart(internalStateChannelStartRef.current, internalStateChannelSizeRef.current);
       simulation.setChemicalMemoryOpponentSubtraction(chemicalMemoryOpponentSubtractionRef.current);
       if (particleRadiusPxRef.current !== undefined) simulation.setPointRadiusPx(particleRadiusPxRef.current);
       simulation.setAccent(accentRef.current);
@@ -982,8 +990,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [fieldMode]);
 
   useEffect(() => {
-    simulationRef.current?.setSubstrateChannelStart(substrateChannelStart);
-  }, [substrateChannelStart]);
+    simulationRef.current?.setSubstrateChannelStart(substrateChannelStart, substrateChannelSize);
+  }, [substrateChannelStart, substrateChannelSize]);
 
   useEffect(() => {
     simulationRef.current?.setSubstrateZeroIsBlack(substrateZeroIsBlack);
@@ -1026,8 +1034,8 @@ export const GridCanvas = forwardRef<GridCanvasHandle, GridCanvasProps>(function
   }, [boundaryGradientScale]);
 
   useEffect(() => {
-    simulationRef.current?.setInternalStateChannelStart(internalStateChannelStart);
-  }, [internalStateChannelStart]);
+    simulationRef.current?.setInternalStateChannelStart(internalStateChannelStart, internalStateChannelSize);
+  }, [internalStateChannelStart, internalStateChannelSize]);
 
   useEffect(() => {
     simulationRef.current?.setChemicalMemoryOpponentSubtraction(chemicalMemoryOpponentSubtraction);

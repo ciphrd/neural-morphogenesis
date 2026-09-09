@@ -7,7 +7,7 @@ import { VIEWER_DEFAULTS } from "../viewerConfig";
 // translucent activation dots, and signed directional-growth arrows.
 //
 // Field modes: "none" | "density" | "speed" | "deformation" | "pressure"
-// | "shear" | "repulsion" | "morphology" | "substrate" | "orientation"
+// | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "policy-orientation"
 // | "gradient" | "growth".
 // This extends the set mls-mpm/src/gpu/render.ts exposes with chemical field
 // views and "gradient" (this project's own chemical field/repulsion density; mls-
@@ -36,12 +36,12 @@ import type { Environment } from "./environment";
 import { DX, GRID_N, INV_DX, NODE_COUNT, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
-export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "gradient" | "growth";
+export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "policy-orientation" | "gradient" | "growth";
 export type ParticleShape = "dot" | "triangle" | "domain";
 export type ParticleColorMode = "white" | "neural-color" | "growth-magnitude" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
 export const MAX_ZOOM = 32;
 
-const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "orientation" | "gradient" | "growth">, number> = {
+const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "orientation" | "policy-orientation" | "gradient" | "growth">, number> = {
   none: 0,
   density: 1,
   speed: 2,
@@ -126,6 +126,7 @@ export class Renderer {
   private directionalLineVisible = VIEWER_DEFAULTS.rendering.directionalLineVisible;
   private growthLineVisible = VIEWER_DEFAULTS.rendering.growthLineVisible;
   private growthMagnitudeBoost = VIEWER_DEFAULTS.rendering.growthMagnitudeBoost;
+  private internalStateChannelSize = 3;
   private internalStateChannelStart = VIEWER_DEFAULTS.rendering.internalStateChannelStart;
   private particleRadiusPx = VIEWER_DEFAULTS.rendering.particleRadiusPx;
   private canvasMinDimPx = 512;
@@ -217,6 +218,8 @@ export class Renderer {
   private readonly growthColorizePipeline: GPUComputePipeline;
   private readonly growthColorizeBindGroup: GPUBindGroup;
   private readonly growthPresentBindGroup: GPUBindGroup;
+  private readonly policyOrientationPipeline: GPURenderPipeline;
+  private readonly policyOrientationBindGroup: GPUBindGroup;
   private readonly growthVectorPipeline: GPURenderPipeline;
   private readonly growthVectorBindGroup: GPUBindGroup;
   private readonly growthDispatch: [number, number];
@@ -389,7 +392,7 @@ export class Renderer {
       size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
-    writeFloat32(device, this.internalStateStyleUniform, 0, new Uint32Array([0, 1, 2, 0]));
+    writeFloat32(device, this.internalStateStyleUniform, 0, new Uint32Array([0, 1, 2, 3]));
     writeFloat32(device, this.internalStateStyleUniform, 16, new Float32Array([1]));
     this.internalStateParticleBindGroup = device.createBindGroup({
       layout: internalStateLayout,
@@ -672,6 +675,20 @@ export class Renderer {
       ],
     });
 
+    this.policyOrientationPipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: fieldModule, entryPoint: "policyOrientationVertex" },
+      fragment: { module: fieldModule, entryPoint: "policyOrientationFragment", targets: [{ format: BLOOM_SCENE_FORMAT, blend: alphaBlend() }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.policyOrientationBindGroup = device.createBindGroup({
+      layout: this.policyOrientationPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 22, resource: { buffer: this.viewUniform } },
+        { binding: 26, resource: { buffer: environment.gradient } },
+      ],
+    });
+
     // --- gradient background ---
     this.blurredDensityTexture = device.createTexture({
       size: [REPULSION_FIELD_N, REPULSION_FIELD_N, 1],
@@ -787,20 +804,22 @@ export class Renderer {
       this.device,
       this.substrateChannelStartUniform,
       4,
-      new Uint32Array([mode === "orientation" ? 1 : 0]),
+      new Uint32Array([(mode === "orientation" || mode === "policy-orientation") ? 1 : 0]),
     );
-    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "orientation" && mode !== "gradient" && mode !== "growth") {
+    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "orientation" && mode !== "policy-orientation" && mode !== "gradient" && mode !== "growth") {
       writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode]]));
     }
   }
 
-  /** Selects the first of the three contiguous chemical channels displayed
+  /** Selects one to three contiguous chemical channels displayed
    * as R/G/B. Clamped here as well as in the UI because Renderer is the
    * buffer-safety boundary for callers and restored preferences. */
-  setSubstrateChannelStart(start: number): void {
-    const maxStart = Math.max(0, this.environment.channels - 3);
+  setSubstrateChannelStart(start: number, size = 3): void {
+    const count = Math.min(this.environment.channels, Math.max(1, Math.min(3, Math.floor(size))));
+    const maxStart = Math.max(0, this.environment.channels - count);
     const clamped = Math.min(maxStart, Math.max(0, Math.floor(start)));
     writeFloat32(this.device, this.substrateChannelStartUniform, 0, new Uint32Array([clamped]));
+    writeFloat32(this.device, this.substrateChannelStartUniform, 8, new Uint32Array([count]));
   }
 
   /** [-2,2] — see field.wgsl's accent uniform/accentedMagnitude()/
@@ -864,7 +883,7 @@ export class Renderer {
     this.particleColorMode = mode;
     // Recurrent neural memory has eight fixed slots; cellular chemical memory
     // follows the run's configured channel count.
-    this.setInternalStateChannelStart(this.internalStateChannelStart);
+    this.setInternalStateChannelStart(this.internalStateChannelStart, this.internalStateChannelSize);
   }
 
   setParticleAlpha(alpha: number): void {
@@ -907,13 +926,15 @@ export class Renderer {
     writeFloat32(this.device, this.neuralColorStyleUniform, 12, new Float32Array([this.growthMagnitudeBoost]));
   }
 
-  setInternalStateChannelStart(start: number): void {
+  setInternalStateChannelStart(start: number, size = 3): void {
+    this.internalStateChannelSize = Math.max(1, Math.min(3, Math.floor(size)));
     this.internalStateChannelStart = Math.max(0, Math.floor(start));
     const channelCount = this.particleColorMode === "chemical-memory"
       ? this.environment.channels
       : 8;
-    const clamped = Math.min(Math.max(0, channelCount - 3), this.internalStateChannelStart);
-    writeFloat32(this.device, this.internalStateStyleUniform, 0, new Uint32Array([clamped, clamped + 1, clamped + 2, 0]));
+    const count = Math.min(channelCount, this.internalStateChannelSize);
+    const clamped = Math.min(Math.max(0, channelCount - count), this.internalStateChannelStart);
+    writeFloat32(this.device, this.internalStateStyleUniform, 0, new Uint32Array([clamped, Math.min(clamped + 1, channelCount - 1), Math.min(clamped + 2, channelCount - 1), count]));
   }
 
   /** Strength of the wrapped +3/+4/+5 private-state opponent triplet. */
@@ -1016,7 +1037,7 @@ export class Renderer {
       computePass.setBindGroup(0, this.colorizeBindGroup);
       computePass.dispatchWorkgroups(...this.fieldDispatch);
       computePass.end();
-    } else if (this.fieldMode === "substrate" || this.fieldMode === "orientation") {
+    } else if (this.fieldMode === "substrate" || this.fieldMode === "orientation" || this.fieldMode === "policy-orientation") {
       const computePass = encoder.beginComputePass();
       computePass.setPipeline(this.substrateColorizePipeline);
       computePass.setBindGroup(0, this.substrateColorizeBindGroups[this.environment.parity]);
@@ -1068,10 +1089,15 @@ export class Renderer {
       pass.setPipeline(this.morphologyPresentPipeline);
       pass.setBindGroup(0, this.morphologyPresentBindGroup);
       pass.draw(6);
-    } else if (this.fieldMode === "substrate" || this.fieldMode === "orientation") {
+    } else if (this.fieldMode === "substrate" || this.fieldMode === "orientation" || this.fieldMode === "policy-orientation") {
       pass.setPipeline(this.substratePresentPipeline);
       pass.setBindGroup(0, this.substratePresentBindGroup);
       pass.draw(6);
+      if (this.fieldMode === "policy-orientation") {
+        pass.setPipeline(this.policyOrientationPipeline);
+        pass.setBindGroup(0, this.policyOrientationBindGroup);
+        pass.draw(9, 32 * 32);
+      }
     } else if (this.fieldMode === "gradient") {
       pass.setPipeline(this.gradientPresentPipeline);
       pass.setBindGroup(0, this.gradientPresentBindGroup);

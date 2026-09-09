@@ -222,7 +222,7 @@ class AgentsGPU:
                     "POLICY_TAIL_DECODE": (
                         "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 18u]), safeSigmoid(outVec[ENV_WRITE_DIM + 19u]), safeSigmoid(outVec[ENV_WRITE_DIM + 20u]));\n"
                         "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
-                            "    out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 2u + s]);\n"
+                            "    out.stateDelta[s] = outVec[ENV_WRITE_DIM + 2u + s];\n"
                             "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]);\n"
                         "  }"
                         if policy_has_recurrence(self.policy_architecture) else

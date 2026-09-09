@@ -266,7 +266,7 @@ export class Agents {
           ? "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { inputVec[3u * CHANNELS + 6u + s] = tanh(agentState.particleMeta[pi].privateState[s]); }"
           : "",
         POLICY_TAIL_DECODE: policyHasRecurrence(this.policyArchitecture)
-          ? "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 18u]), safeSigmoid(outVec[ENV_WRITE_DIM + 19u]), safeSigmoid(outVec[ENV_WRITE_DIM + 20u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = safeTanh(outVec[ENV_WRITE_DIM + 2u + s]); out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]); }"
+          ? "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 18u]), safeSigmoid(outVec[ENV_WRITE_DIM + 19u]), safeSigmoid(outVec[ENV_WRITE_DIM + 20u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = outVec[ENV_WRITE_DIM + 2u + s]; out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]); }"
           : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 2u]), safeSigmoid(outVec[ENV_WRITE_DIM + 3u]), safeSigmoid(outVec[ENV_WRITE_DIM + 4u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
         ELASTIC_STRAIN_INPUTS_ENABLED: config.elasticStrainInputsEnabled ? "true" : "false",
         MORPHOLOGY_SAMPLER_DECLARATION: filterableMorphology

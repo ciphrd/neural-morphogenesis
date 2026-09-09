@@ -60,6 +60,7 @@ export class GpuSimulation {
   // gets a brand-new Renderer instance; the user's own render-option
   // choices shouldn't reset just because that happened).
   private pendingFieldMode: FieldMode = VIEWER_DEFAULTS.rendering.fieldMode;
+  private pendingSubstrateChannelSize = 3;
   private pendingSubstrateChannelStart = VIEWER_DEFAULTS.rendering.substrateChannelStart;
   private pendingSubstrateZeroIsBlack = VIEWER_DEFAULTS.rendering.substrateZeroIsBlack;
   private pendingBoundaryGradientZeroIsBlack = VIEWER_DEFAULTS.rendering.boundaryGradientZeroIsBlack;
@@ -70,6 +71,7 @@ export class GpuSimulation {
   private pendingGrowthLineVisible = VIEWER_DEFAULTS.rendering.growthLineVisible;
   private pendingDomainVisible = VIEWER_DEFAULTS.rendering.domainVisible;
   private pendingGrowthMagnitudeBoost = VIEWER_DEFAULTS.rendering.growthMagnitudeBoost;
+  private pendingInternalStateChannelSize = 3;
   private pendingInternalStateChannelStart = VIEWER_DEFAULTS.rendering.internalStateChannelStart;
   private pendingChemicalMemoryOpponentSubtraction = VIEWER_DEFAULTS.rendering.chemicalMemoryOpponentSubtraction;
   private pendingBoundaryGradientScale = VIEWER_DEFAULTS.rendering.boundaryGradientScale;
@@ -277,7 +279,7 @@ export class GpuSimulation {
     if (this.pendingTargetPoints) renderer.setTargetPoints(this.pendingTargetPoints);
     renderer.setTargetVisible(this.pendingTargetVisible);
     renderer.setFieldMode(this.pendingFieldMode);
-    renderer.setSubstrateChannelStart(this.pendingSubstrateChannelStart);
+    renderer.setSubstrateChannelStart(this.pendingSubstrateChannelStart, this.pendingSubstrateChannelSize);
     renderer.setSubstrateZeroIsBlack(this.pendingSubstrateZeroIsBlack);
     renderer.setBoundaryGradientZeroIsBlack(this.pendingBoundaryGradientZeroIsBlack);
     renderer.setParticleShape(this.pendingParticleShape);
@@ -287,7 +289,7 @@ export class GpuSimulation {
     renderer.setGrowthLineVisible(this.pendingGrowthLineVisible);
     renderer.setDomainVisible(this.pendingDomainVisible);
     renderer.setGrowthMagnitudeBoost(this.pendingGrowthMagnitudeBoost);
-    renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart);
+    renderer.setInternalStateChannelStart(this.pendingInternalStateChannelStart, this.pendingInternalStateChannelSize);
     renderer.setChemicalMemoryOpponentSubtraction(this.pendingChemicalMemoryOpponentSubtraction);
     renderer.setBoundaryGradientScale(this.pendingBoundaryGradientScale);
     if (this.pendingPointRadiusPx !== null) renderer.setPointRadiusPx(this.pendingPointRadiusPx);
@@ -628,9 +630,10 @@ export class GpuSimulation {
     this.renderer?.setFieldMode(mode);
   }
 
-  setSubstrateChannelStart(start: number): void {
+  setSubstrateChannelStart(start: number, size = 3): void {
     this.pendingSubstrateChannelStart = start;
-    this.renderer?.setSubstrateChannelStart(start);
+    this.pendingSubstrateChannelSize = size;
+    this.renderer?.setSubstrateChannelStart(start, size);
   }
 
   setSubstrateZeroIsBlack(enabled: boolean): void {
@@ -678,9 +681,10 @@ export class GpuSimulation {
     this.renderer?.setGrowthMagnitudeBoost(boost);
   }
 
-  setInternalStateChannelStart(start: number): void {
+  setInternalStateChannelStart(start: number, size = 3): void {
     this.pendingInternalStateChannelStart = start;
-    this.renderer?.setInternalStateChannelStart(start);
+    this.pendingInternalStateChannelSize = size;
+    this.renderer?.setInternalStateChannelStart(start, size);
   }
 
   setChemicalMemoryOpponentSubtraction(amount: number): void {

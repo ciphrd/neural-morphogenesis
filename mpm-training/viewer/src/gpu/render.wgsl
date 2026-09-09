@@ -325,6 +325,11 @@ fn growthMagnitudeParticleFragment(in: NeuralColorDotOut) -> @location(0) vec4<f
   return vec4<f32>(in.color, viewStyle.z);
 }
 
+// Unselected RGB components stay black after the display transform.
+fn selectedChannelColor(color: vec3<f32>) -> vec3<f32> {
+  return color * vec3<f32>(1.0, select(0.0, 1.0, internalStateStyle.channels.w >= 2u), select(0.0, 1.0, internalStateStyle.channels.w >= 3u));
+}
+
 @vertex
 fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin(instance_index) instanceIndex: u32) -> NeuralColorDotOut {
   let geometry = particleGeometry(vertexIndex, instanceIndex);
@@ -350,6 +355,7 @@ fn internalStateParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builtin
     vec3<f32>(0.0),
     vec3<f32>(1.0),
   );
+  out.color = selectedChannelColor(out.color);
   return out;
 }
 
@@ -371,7 +377,7 @@ fn chemicalLevelsParticleVertex(@builtin(vertex_index) vertexIndex: u32, @builti
   if (maxComponent > 1.0) {
     color = color / vec3<f32>(maxComponent);
   }
-  out.color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+  out.color = selectedChannelColor(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)));
   return out;
 }
 

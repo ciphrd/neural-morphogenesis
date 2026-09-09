@@ -611,6 +611,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="GA only: cycle offspring through these sigma multipliers, e.g. 1 .1 .01 .001")
     parser.add_argument("--initial-weights", type=Path,
         help="starting CMA mean or GA parent as flat .npy policy; select its matching architecture; not optimizer resume")
+    parser.add_argument("--fitness-function", choices=("polar", "multiscale"), default="polar",
+        help="polar: IsoNCA sharpened pixel loss over rotations/reflections (default); multiscale: legacy weighted shape loss")
     parser.add_argument("--fitness-alignment", choices=("raster", "geometry"), default="raster",
         help="PNG/JSON: raster uses image rotation; geometry refines exact triangle integration. SVG targets automatically use continuous vector target rotation")
     parser.add_argument(
@@ -633,7 +635,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deterministic-reference", action="store_true",
         help="slow native-GPU reference: order physics/chemical float reductions by sample index; not cross-device bit parity")
     parser.add_argument("--fitness-color-weight", type=float, default=1.0,
-        help="weight of triangle RGB error against PNG targets; zero disables color")
+        help="multiscale RGB weight; polar accepts 1 for RGBA or 0 for occupancy only")
     parser.add_argument(
         "--fitness-coverage-weight", type=float,
         default=DEFAULT_RUN_SETTINGS["fitnessCoverageWeight"],
@@ -728,6 +730,8 @@ def validate_fitness_configuration(args: argparse.Namespace) -> None:
     for name in ("shape_missing_tolerance", "shape_spill_tolerance", "shape_overlap_tolerance"):
         if not 0 <= getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be in [0,1)")
+    if getattr(args, "fitness_function", "multiscale") == "polar" and args.fitness_color_weight not in (0., 1.):
+        raise SystemExit("polar fitness uses equal RGBA channel weights; --fitness-color-weight must be 1 (RGBA) or 0 (occupancy only)")
     if args.raster_resolution < 8:
         raise SystemExit("--raster-resolution must be at least 8")
     for name in (
@@ -804,7 +808,8 @@ def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed
         'mutation_sigma': args.mutation_sigma,
         'mutation_factors': list(getattr(args, 'mutation_factors', [1.])),
         'initial_weights': str(args.initial_weights) if getattr(args, 'initial_weights', None) else None,
-        'fitness_alignment': 'svg' if target.svg_source is not None else getattr(args, 'fitness_alignment', 'raster'),
+        'fitness_function': getattr(args, 'fitness_function', 'multiscale'),
+        'fitness_alignment': 'polar' if getattr(args, 'fitness_function', 'multiscale') == 'polar' else ('svg' if target.svg_source is not None else getattr(args, 'fitness_alignment', 'raster')),
         'deterministic_reference': getattr(args, 'deterministic_reference', False),
         'policy_architecture': args.policy_architecture,
         'cell_memory': args.cell_memory,

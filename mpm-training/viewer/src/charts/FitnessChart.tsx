@@ -21,7 +21,8 @@ interface FitnessChartProps {
 const WIDTH = 1400;
 const HEIGHT = 130;
 const MARGIN = { top: 16, right: 20, bottom: 28, left: 48 };
-const PLOT_WIDTH = WIDTH - MARGIN.left - MARGIN.right;
+const SIGMA_COLOR = "#d6a9ff";
+const validSigma = (value: number | undefined): value is number => value !== undefined && Number.isFinite(value) && value > 0;
 const PLOT_HEIGHT = HEIGHT - MARGIN.top - MARGIN.bottom;
 
 // Validated categorical palette, dark-surface steps — slots 1-3, the
@@ -57,6 +58,23 @@ export function FitnessChart({ history, selectedGeneration, onSelectGeneration, 
     });
   };
   const visibleSeries = SERIES.filter((s) => visibleKeys.has(s.key));
+  const [showSigma, setShowSigma] = useState(true);
+  const sigmaValues = history.map(h => h.optimizerState?.sigma).filter(validSigma);
+  const hasSigma = sigmaValues.length > 0;
+  const sigmaVisible = hasSigma && showSigma;
+  const PLOT_WIDTH = WIDTH - MARGIN.left - (sigmaVisible ? 88 : MARGIN.right);
+  const sigmaMin = hasSigma ? Math.min(...sigmaValues) / 1.08 : 1;
+  const sigmaMax = hasSigma ? Math.max(...sigmaValues) * 1.08 : 2;
+  const yForSigma = (value: number) => PLOT_HEIGHT * (1 - (Math.log(value) - Math.log(sigmaMin)) / (Math.log(sigmaMax) - Math.log(sigmaMin)));
+  let sigmaPath = "";
+  let connected = false;
+  history.forEach((h, i) => {
+    const value = h.optimizerState?.sigma;
+    if (!validSigma(value)) { connected = false; return; }
+    const x = history.length > 1 ? i / (history.length - 1) * PLOT_WIDTH : PLOT_WIDTH / 2;
+    sigmaPath += `${connected ? "L" : "M"} ${x} ${yForSigma(value)} `;
+    connected = true;
+  });
 
   if (history.length === 0) {
     return (
@@ -164,6 +182,13 @@ export function FitnessChart({ history, selectedGeneration, onSelectGeneration, 
             </button>
           );
         })}
+        {hasSigma && <button type="button"
+          className={"fitness-chart-legend-item" + (showSigma ? "" : " is-hidden")}
+          onClick={() => setShowSigma(value => !value)} aria-pressed={showSigma}
+          title="CMA-ES step size after each generation’s update; separate logarithmic right axis">
+          <span className="fitness-chart-legend-swatch" style={{ background: SIGMA_COLOR }} />
+          Sigma σ (right axis)
+        </button>}
         <span className="fitness-chart-legend-spacer" />
         {!isLive && (
           <button className="fitness-chart-live-button" onClick={() => onSelectGeneration(null)}>
@@ -208,6 +233,16 @@ export function FitnessChart({ history, selectedGeneration, onSelectGeneration, 
             <path key={s.key} d={linePath(s.key)} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
           ))}
 
+          {sigmaVisible && <g>
+            <text x={PLOT_WIDTH + 8} y={-6} fill={SIGMA_COLOR} fontSize={11}>σ · log</text>
+            <line x1={PLOT_WIDTH} x2={PLOT_WIDTH} y1={0} y2={PLOT_HEIGHT} className="fitness-chart-axis" />
+            {[sigmaMin, Math.sqrt(sigmaMin * sigmaMax), sigmaMax].map((tick, i) => <text
+              key={i} x={PLOT_WIDTH + 8} y={yForSigma(tick)} dominantBaseline="middle" fill={SIGMA_COLOR} fontSize={11}>
+              {tick.toPrecision(3)}
+            </text>)}
+            <path d={sigmaPath} fill="none" stroke={SIGMA_COLOR} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+          </g>}
+
           {/* Persistent selection pointer — always visible, marks what's
               currently replaying. */}
           {selectedIndex >= 0 && (
@@ -251,7 +286,7 @@ export function FitnessChart({ history, selectedGeneration, onSelectGeneration, 
                 const imageMargin = 10;
                 const imageUrl = getPreviewImageUrl?.(hovered.generation);
                 const panelWidth = imageUrl ? textWidth + imageMargin + imageSize + imageMargin : textWidth;
-                const textPanelHeight = 14 + rowHeight * (visibleSeries.length + 1) + 6;
+                const textPanelHeight = 14 + rowHeight * (visibleSeries.length + 1 + (sigmaVisible ? 1 : 0)) + 6;
                 const panelHeight = imageUrl ? Math.max(textPanelHeight, imageSize + imageMargin * 2) : textPanelHeight;
                 const hoverX = xForIndex(hoverIndex!);
                 const overflowsRight = hoverX + 12 + panelWidth > PLOT_WIDTH;
@@ -274,6 +309,13 @@ export function FitnessChart({ history, selectedGeneration, onSelectGeneration, 
                         </text>
                       </g>
                     ))}
+                    {sigmaVisible && <g transform={`translate(0, ${16 + rowHeight * (visibleSeries.length + 1)})`}>
+                      <rect x={10} y={-8} width={8} height={8} rx={2} fill={SIGMA_COLOR} />
+                      <text x={24} className="fitness-chart-tooltip-label">Sigma σ</text>
+                      <text x={textWidth - 10} textAnchor="end" className="fitness-chart-tooltip-value">
+                        {validSigma(hovered.optimizerState?.sigma) ? hovered.optimizerState.sigma.toPrecision(3) : "—"}
+                      </text>
+                    </g>}
                     <text x={10} y={textPanelHeight - 6} className="fitness-chart-tooltip-hint">
                       Click to view this generation
                     </text>

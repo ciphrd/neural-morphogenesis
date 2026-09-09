@@ -48,14 +48,6 @@ export function policyWeightsShapeError(
   );
 }
 
-// Same overflow guard as agents.wgsl's own safeTanh() — naive tanh via
-// (e^2x-1)/(e^2x+1) isn't at risk in JS's own Math.tanh the way it was
-// on that WGSL backend, but clamping first costs nothing and keeps this
-// a faithful line-for-line port rather than a "close enough" one.
-function safeTanh(x: number): number {
-  return Math.tanh(Math.max(-20, Math.min(20, x)));
-}
-
 function safeSigmoid(x: number): number {
   return 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, x))));
 }
@@ -75,7 +67,7 @@ export function evalPolicy(
     let acc = weights.fc1b[j];
     const row = weights.fc1w[j];
     for (let i = 0; i < row.length; i++) acc += (input[i] ?? 0) * row[i];
-    hidden[j] = safeTanh(acc);
+    hidden[j] = Math.max(acc, 0);
   }
 
   const stateful = policyHasRecurrence(architecture);
@@ -92,15 +84,15 @@ export function evalPolicy(
   const envWrite = new Float32Array(envWriteDim);
   for (let k = 0; k < envWriteDim; k++) envWrite[k] = outVec[k] * maxEnvWrite;
   const growthVector: [number, number] = [
-    safeTanh(outVec[envWriteDim]),
-    safeTanh(outVec[envWriteDim + 1]),
+    outVec[envWriteDim],
+    outVec[envWriteDim + 1],
   ];
   const stateDelta = new Float32Array(8);
   const stateGate = new Float32Array(8);
   let color: [number, number, number];
   if (stateful) {
     for (let i = 0; i < 8; i++) {
-      stateDelta[i] = safeTanh(outVec[envWriteDim + 2 + i]);
+      stateDelta[i] = outVec[envWriteDim + 2 + i];
       stateGate[i] = safeSigmoid(outVec[envWriteDim + 10 + i]);
     }
   }

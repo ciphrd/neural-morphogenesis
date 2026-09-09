@@ -20,6 +20,7 @@ import {
 } from "./gpu/render"
 import type {
   CellMemory,
+  GenerationRecord,
   ChemicalCommunicationArchitecture,
   PhysicsSettings,
   UpdateRuleWeights,
@@ -31,8 +32,9 @@ import {
   physicsSettingsFromConfig,
   policyArchitectureForCellMemory,
 } from "./gpu/types"
+import { PolarFitnessPanel } from "./ui/PolarFitnessPanel"
 import { generationImageUrl } from "./net/images"
-import { fetchRunState } from "./net/runs"
+import { fetchRunState, fetchGeneration } from "./net/runs"
 import { DEFAULT_RUN_SETTINGS } from "./net/settingsStorage"
 import type { TrainingSocketState } from "./net/trainingSocket"
 import { EMPTY_STATE, useTrainingSocket } from "./net/trainingSocket"
@@ -90,19 +92,18 @@ export function TrainingView() {
   useEffect(() => {
     if (viewingRunId === null) return
     let cancelled = false
+    const controller = new AbortController()
     setArchivedState(EMPTY_STATE)
-    fetchRunState(TRAIN_API_URL, viewingRunId)
+    fetchRunState(TRAIN_API_URL, viewingRunId, controller.signal)
       .then((state) => {
         if (!cancelled) setArchivedState(state)
       })
-      .catch((err) =>
-        console.error(
-          "[mpm-training] failed to fetch archived run history",
-          err
-        )
-      )
+      .catch((err) => {
+        if (!cancelled) console.error("[mpm-training] failed to fetch archived run history", err)
+      })
     return () => {
       cancelled = true
+      controller.abort()
     }
   }, [viewingRunId])
   const { history, timingHistory, latest, configByGeneration } =
@@ -152,6 +153,7 @@ export function TrainingView() {
   )
   // First channel in the contiguous substrate RGB window. The renderer maps
   // start/start+1/start+2 to red/green/blue respectively.
+  const [substrateChannelSize, setSubstrateChannelSize] = useState(3)
   const [substrateChannelStart, setSubstrateChannelStart] = useState(
     VIEWER_DEFAULTS.rendering.substrateChannelStart
   )
@@ -240,6 +242,7 @@ export function TrainingView() {
   const [growthMagnitudeBoost, setGrowthMagnitudeBoost] = useState(
     VIEWER_DEFAULTS.rendering.growthMagnitudeBoost
   )
+  const [internalStateChannelSize, setInternalStateChannelSize] = useState(3)
   const [internalStateChannelStart, setInternalStateChannelStart] = useState(
     VIEWER_DEFAULTS.rendering.internalStateChannelStart
   )
@@ -261,14 +264,38 @@ export function TrainingView() {
     ...VIEWER_DEFAULTS.tools.deform,
   }))
 
-  // null selection = follow whatever's newest; otherwise replay whichever
-  // past generation was scrubbed to. configByGeneration and history are
-  // evicted in lockstep (see net/trainingSocket.ts), so any generation
-  // number that still appears on the chart is guaranteed to resolve here.
-  const activeConfig =
-    selectedGeneration !== null
-      ? (configByGeneration.get(selectedGeneration) ?? latest)
-      : latest
+  const generationCache = useRef(new Map<string, GenerationRecord>());
+  const [loadedGeneration, setLoadedGeneration] = useState<{ key: string; record: GenerationRecord } | null>(null);
+  const [generationLoadError, setGenerationLoadError] = useState<string | null>(null);
+  const selectionKey = `${viewingRunId ?? "current"}:${selectedGeneration}`;
+  useEffect(() => {
+    setGenerationLoadError(null);
+    if (selectedGeneration === null || configByGeneration.has(selectedGeneration)) return;
+    const cached = generationCache.current.get(selectionKey);
+    if (cached) {
+      setLoadedGeneration(prev => prev?.key === selectionKey ? prev : { key: selectionKey, record: cached });
+      return;
+    }
+    const controller = new AbortController();
+    // Debounce chart scrubbing so dragging doesn't download a policy per pixel.
+    const timer = setTimeout(() => {
+      fetchGeneration(TRAIN_API_URL, viewingRunId ?? "current", selectedGeneration, controller.signal).then(record => {
+        if (controller.signal.aborted) return;
+        generationCache.current.set(selectionKey, record);
+        if (generationCache.current.size > 8) generationCache.current.delete(generationCache.current.keys().next().value!);
+        setLoadedGeneration({ key: selectionKey, record });
+      }).catch(error => {
+        if (!controller.signal.aborted) setGenerationLoadError(String(error));
+      });
+    }, 120);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [selectedGeneration, selectionKey, viewingRunId, configByGeneration]);
+  const selectedConfig = useMemo(() => {
+    if (selectedGeneration === null) return latest;
+    return configByGeneration.get(selectedGeneration) ??
+      (loadedGeneration?.key === selectionKey && latest ? { ...latest, ...loadedGeneration.record } : null);
+  }, [selectedGeneration, configByGeneration, loadedGeneration, selectionKey, latest]);
+  const activeConfig = selectedConfig ?? latest;
   const [policyExploration, setPolicyExploration] = useState<{
     cellMemory: CellMemory
     hiddenWidth: number
@@ -356,9 +383,9 @@ export function TrainingView() {
     effectiveSubstrateResolution,
   ])
   useEffect(() => {
-    const maxStart = Math.max(0, (activeConfig?.channels ?? 3) - 3)
+    const maxStart = Math.max(0, (activeConfig?.channels ?? 3) - substrateChannelSize)
     setSubstrateChannelStart((start) => Math.min(start, maxStart))
-  }, [activeConfig?.channels])
+  }, [activeConfig?.channels, substrateChannelSize])
   // Shape-changing exploration never reinterprets checkpoint weights. It
   // creates a fresh random policy and retains its seed across re-renders.
   useEffect(() => {
@@ -685,7 +712,7 @@ export function TrainingView() {
   const particleStateChannelCount =
     particleColorMode === "neural-memory" ? 8 : (activeConfig?.channels ?? 1)
   const particleStateChannelStart = Math.min(
-    Math.max(0, particleStateChannelCount - 3),
+    Math.max(0, particleStateChannelCount - Math.min(internalStateChannelSize, particleStateChannelCount)),
     internalStateChannelStart
   )
   const neuralMemoryControlsInactive =
@@ -1088,13 +1115,13 @@ export function TrainingView() {
                 <div className="channel-window-label">
                   <span>Channels</span>
                   <span>
-                    {particleStateChannelStart}–{particleStateChannelStart + 2}
+                    {particleStateChannelStart}–{particleStateChannelStart + Math.min(internalStateChannelSize, particleStateChannelCount) - 1}
                   </span>
                 </div>
                 <ChannelWindowSlider
                   channels={particleStateChannelCount}
                   value={particleStateChannelStart}
-                  onChange={setInternalStateChannelStart}
+                  size={internalStateChannelSize} onChange={(start, size) => { setInternalStateChannelStart(start); setInternalStateChannelSize(size) }}
                   channelKind={
                     particleColorMode === "neural-memory"
                       ? "neural memory"
@@ -1159,7 +1186,7 @@ export function TrainingView() {
               <option value="morphology">Policy morphology</option>
               <option value="growth">Integrated growth</option>
               <option value="substrate">Substrate</option>
-              <option value="orientation">Orientation substrate (ch3)</option>
+              <option value="orientation">Orientation substrate (ch3)</option><option value="policy-orientation">Policy orientation</option>
               <option value="gradient">Boundary gradient</option>
             </select>
           </label>
@@ -1196,14 +1223,14 @@ export function TrainingView() {
                     {substrateChannelStart}–
                     {Math.min(
                       activeConfig.channels - 1,
-                      substrateChannelStart + 2
+                      substrateChannelStart + substrateChannelSize - 1
                     )}
                   </span>
                 </div>
                 <ChannelWindowSlider
                   channels={activeConfig.channels}
                   value={substrateChannelStart}
-                  onChange={setSubstrateChannelStart}
+                  size={substrateChannelSize} onChange={(start, size) => { setSubstrateChannelStart(start); setSubstrateChannelSize(size) }}
                 />
               </div>
               <label className="checkbox-row">
@@ -1216,7 +1243,7 @@ export function TrainingView() {
               </label>
             </>
           )}
-          {fieldMode === "orientation" && (
+          {(fieldMode === "orientation" || fieldMode === "policy-orientation") && (
             <label className="checkbox-row">
               <input
                 type="checkbox"
@@ -1412,7 +1439,7 @@ export function TrainingView() {
             particleCap={densityScaledParticleCap}
             initialParticleCount={densityScaledInitialParticleCount}
             fieldMode={fieldMode}
-            substrateChannelStart={substrateChannelStart}
+            substrateChannelStart={substrateChannelStart} substrateChannelSize={substrateChannelSize}
             substrateZeroIsBlack={substrateZeroIsBlack}
             boundaryGradientZeroIsBlack={boundaryGradientZeroIsBlack}
             accent={accent}
@@ -1433,7 +1460,7 @@ export function TrainingView() {
             particleRadiusPx={particleRadiusPx}
             growthMagnitudeBoost={growthMagnitudeBoost}
             boundaryGradientScale={boundaryGradientScale}
-            internalStateChannelStart={internalStateChannelStart}
+            internalStateChannelStart={internalStateChannelStart} internalStateChannelSize={internalStateChannelSize}
             chemicalMemoryOpponentSubtraction={
               chemicalMemoryOpponentSubtraction
             }
@@ -1731,6 +1758,9 @@ export function TrainingView() {
             </select>}
           </div>
           <div id="chart-panel-fitness" role="tabpanel" aria-labelledby="chart-tab-fitness" hidden={chartTab !== "fitness"}>
+          {selectedGeneration !== null && !selectedConfig && <p className="hint">
+            {generationLoadError ?? `Loading generation ${selectedGeneration}…`}
+          </p>}
           <FitnessChart
             history={history}
             selectedGeneration={selectedGeneration}
@@ -1842,6 +1872,10 @@ export function TrainingView() {
             <p className="hint">No generation selected yet.</p>
           )}
         </section>
+
+        {activeStat && selectedConfig && activeConfig?.selectedSnapshotFitness?.polar && <PolarFitnessPanel
+          info={activeConfig.selectedSnapshotFitness.polar} apiUrl={TRAIN_API_URL}
+          runId={activeRunId} generation={activeStat.generation} />}
 
         <NetworkPanel config={weightedPreviewConfig} physics={physicsValues} />
       </div>

@@ -14,6 +14,9 @@ const CH_TENSOR_XY: u32 = 3u;
 const CH_TENSOR_YY: u32 = 4u;
 const CH_WEIGHT: u32 = 5u;
 
+// Inward boundary intent contracts rest geometry and opposes interior growth.
+const INWARD_BOUNDARY_GROWTH_ENABLED: bool = true;
+
 // Scatter uses native integer additions; enforceGrowthField publishes f32 bits
 // after the accumulation barrier. Geometry uses a finer world-length scale.
 const FIELD_SCALE: f32 = __GROWTH_ACCUM_SCALE__.0;
@@ -425,8 +428,13 @@ fn enforceGrowthField(@builtin(global_invocation_id) gid: vec3<u32>) {
         let inward = min(magnitude, 1.0) * max(-dot(direction, normal), 0.0);
         // Pure inward intent reverses normal expansion into contraction;
         // tangential and outward commands retain their existing response.
-        tensor -= 2.0 * inward * vec3<f32>(
-          normal.x * normal.x, normal.x * normal.y, normal.y * normal.y);
+        if (INWARD_BOUNDARY_GROWTH_ENABLED) {
+          tensor -= 2.0 * inward * vec3<f32>(
+            normal.x * normal.x, normal.x * normal.y, normal.y * normal.y);
+        } else if (inward > 0.0) {
+          // Keep the displayed vector, but make inward boundary intent passive.
+          tensor = vec3<f32>(0.0);
+        }
       }
     }
 

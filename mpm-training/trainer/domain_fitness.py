@@ -8,12 +8,15 @@ from config import CONFIG
 _DEFAULTS = CONFIG["run"]
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from polar_fitness import PolarDiagnostics
 import numpy as np
 from scipy.ndimage import affine_transform, distance_transform_edt
 from raster import RasterFitnessBreakdown, _average_pool, _boundary_loss
 from triangle_vertices import unwrap_vertices
 
-FITNESS_MODEL_VERSION = 6
+FITNESS_MODEL_VERSION = 7
 
 def target_mask(target, resolution):
     return target.mask(resolution)
@@ -134,6 +137,7 @@ class DomainEvaluation:
     # SVG scoring keeps the candidate fixed and supplies the rotated reference.
     target_raster: np.ndarray | None = None
     target_color_raster: np.ndarray | None = None
+    polar: "PolarDiagnostics | None" = None
 
 def evaluate_domains(vertices, target, mask, *, coverage_weight=_DEFAULTS["fitnessCoverageWeight"], spill_weight=_DEFAULTS["fitnessSpillWeight"],
                      boundary_weight=_DEFAULTS["fitnessBoundaryWeight"], crowding_weight=_DEFAULTS["fitnessCrowdingWeight"], outside_weight=_DEFAULTS["outsideWeight"],
@@ -249,6 +253,10 @@ def stopping_from_args(args):
                           args.shape_spill_tolerance, args.shape_overlap_tolerance)
 
 def score_domains(vertices, target, mask, args, colors=None):
+    if getattr(args, "fitness_function", "multiscale") == "polar":
+        from polar_fitness import evaluate_polar
+        return evaluate_polar(vertices, target, mask, colors if getattr(args, "fitness_color_weight", 1.) > 0 else None)
+
     if target.svg_source is not None:
         from svg_fitness import evaluate_svg
         return evaluate_svg(vertices, target, mask, coverage_weight=args.fitness_coverage_weight,

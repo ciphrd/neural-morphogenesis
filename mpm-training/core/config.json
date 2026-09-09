@@ -109,7 +109,7 @@
     "neuralUpdatesPerMacro": 1,
     "initialConditionChannel": 0,
     "version": 1,
-    "preset": "developmental-3-3-3",
+    "preset": "developmental-4-4-4",
     "profiles": {
       "global": {
         "resolutionScale": 1.0,
@@ -157,6 +157,15 @@
       },
       {
         "scale": "local"
+      },
+      {
+        "scale": "local"
+      },
+      {
+        "scale": "global"
+      },
+      {
+        "scale": "regional"
       },
       {
         "scale": "local"

@@ -77,3 +77,33 @@ def save_raster_image(raster: np.ndarray, path: Path) -> None:
     visual orientation."""
     img = np.clip(raster[::-1], 0.0, 1.0)
     Image.fromarray((img * 255.0).astype(np.uint8), mode="RGB" if img.ndim == 3 else "L").save(path)
+
+
+def save_polar_images(polar, directory: Path, prefix: str) -> dict:
+    """Export actual loss inputs, never a second independently aligned preview.
+
+    Polar rows are radius (zero at the top), columns angle (CCW, +x at left).
+    Signed sharpening values share a fixed [-2,3] display range. NPZ preserves
+    full precision, all channels and the squared differences used for scoring.
+    """
+    difference = np.square(polar.candidate-polar.aligned_target)
+    arrays = {'target': polar.target, 'candidate': polar.candidate,
+              'aligned': polar.aligned_target}
+    for name, array in arrays.items():
+        # Display alpha separately: an RGBA PNG would hide loss-bearing RGB.
+        visual = array[..., :3] if array.shape[-1] == 4 else array[..., 0]
+        Image.fromarray(np.rint(np.clip((visual+2)/5, 0, 1)*255).astype(np.uint8)).save(directory/f'{prefix}_polar_{name}.png')
+        alpha = array[..., -1]
+        Image.fromarray(np.rint(np.clip((alpha+2)/5, 0, 1)*255).astype(np.uint8)).save(directory/f'{prefix}_polar_{name}_alpha.png')
+    error = difference.mean(axis=-1)
+    # Absolute fixed scale, not per-image contrast normalization.
+    Image.fromarray(np.rint(np.clip(error, 0, 1)*255).astype(np.uint8)).save(directory/f'{prefix}_polar_diff.png')
+    np.savez_compressed(directory/f'{prefix}_polar.npz', target=polar.target,
+                        candidate=polar.candidate, aligned_target=polar.aligned_target,
+                        squared_difference=difference, losses=polar.losses,
+                        shift=polar.shift, reflected=polar.reflected,
+                        angle=polar.angle, radius=polar.radius)
+    return {'angle': polar.angle, 'reflected': polar.reflected, 'shift': polar.shift,
+            'radialSamples': polar.target.shape[0], 'angularSamples': polar.target.shape[1],
+            'channels': polar.target.shape[2], 'radius': polar.radius,
+            'losses': polar.losses.tolist(), 'displayRange': [-2, 3], 'differenceRange': [0, 1]}
