@@ -1,3 +1,4 @@
+import coreConfig from "../../../core/config.json";
 
 import { policyHasRecurrence, type PolicyArchitecture, type UpdateRuleWeights } from "./types";
 
@@ -5,7 +6,7 @@ export interface PolicyOutput {
   /** One signed chemical delta rate per channel. */
   envWrite: Float32Array;
   growthVector: [number, number];
-  color: [number, number, number];
+  color: [number, number, number] | null;
   stateDelta: Float32Array;
   stateGate: Float32Array;
 }
@@ -21,7 +22,7 @@ export function policyWeightsShapeError(
 ): string | null {
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  const outDim = channels + (stateful ? 21 : 5);
+  const outDim = channels + (stateful ? 18 : 2) + (coreConfig.coloring.source === "neural" ? 3 : 0);
   const fc1w = weights?.fc1w;
   const fc1b = weights?.fc1b;
   const fc2w = weights?.fc2w;
@@ -44,7 +45,7 @@ export function policyWeightsShapeError(
   return (
     `Incompatible policy weights: expected ${inDim} inputs and ${outDim} outputs ` +
     `(chemical deltas plus a 2-D growth vector and state/RGB outputs), but received ${receivedIn} inputs and ${receivedOut} output rows. ` +
-    "The current policy requires three dedicated RGB outputs; restart the training backend and retrain incompatible checkpoints."
+    "The configured coloring source determines whether RGB outputs exist; use matching core/config.json settings and restart the backend for incompatible checkpoints."
   );
 }
 
@@ -71,7 +72,7 @@ export function evalPolicy(
   }
 
   const stateful = policyHasRecurrence(architecture);
-  const outDim = channels + (stateful ? 21 : 5);
+  const outDim = channels + (stateful ? 18 : 2) + (coreConfig.coloring.source === "neural" ? 3 : 0);
   const outVec = new Float32Array(outDim);
   for (let j = 0; j < outDim; j++) {
     let acc = weights.fc2b[j];
@@ -89,7 +90,7 @@ export function evalPolicy(
   ];
   const stateDelta = new Float32Array(8);
   const stateGate = new Float32Array(8);
-  let color: [number, number, number];
+  let color: [number, number, number] | null;
   if (stateful) {
     for (let i = 0; i < 8; i++) {
       stateDelta[i] = outVec[envWriteDim + 2 + i];
@@ -97,7 +98,8 @@ export function evalPolicy(
     }
   }
   const colorOffset = envWriteDim + (stateful ? 18 : 2);
-  color = [
+  // Substrate color requires raw spatial field samples, unavailable to this NN-only evaluator.
+  color = coreConfig.coloring.source === "substrate" ? null : [
     safeSigmoid(outVec[colorOffset]),
     safeSigmoid(outVec[colorOffset + 1]),
     safeSigmoid(outVec[colorOffset + 2]),

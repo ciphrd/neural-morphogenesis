@@ -1,6 +1,7 @@
 {
   "simulation": {
     "GRID_N": 64,
+    "HEADING_CHANNEL_INDEX": 4,
     "GROWTH_FIELD_CHANNELS": 12,
     "GROWTH_ACCUM_SCALE": 8192,
     "GROWTH_BOUNDARY_ACCUM_SCALE": 16777216,
@@ -107,9 +108,9 @@
     "chemicalGradientInputScale": 0.045,
     "communicationSpeed": 1.0,
     "neuralUpdatesPerMacro": 1,
-    "initialConditionChannel": 0,
+    "initialConditionChannel": 3,
     "version": 1,
-    "preset": "developmental-4-4-4",
+    "preset": "developmental-5-5-6",
     "profiles": {
       "global": {
         "resolutionScale": 1.0,
@@ -135,10 +136,13 @@
     },
     "channels": [
       {
-        "scale": "global"
+        "scale": "regional"
       },
       {
-        "scale": "global"
+        "scale": "regional"
+      },
+      {
+        "scale": "regional"
       },
       {
         "scale": "global"
@@ -147,10 +151,7 @@
         "scale": "regional"
       },
       {
-        "scale": "regional"
-      },
-      {
-        "scale": "regional"
+        "scale": "global"
       },
       {
         "scale": "local"
@@ -165,7 +166,19 @@
         "scale": "global"
       },
       {
+        "scale": "global"
+      },
+      {
+        "scale": "local"
+      },
+      {
+        "scale": "global"
+      },
+      {
         "scale": "regional"
+      },
+      {
+        "scale": "local"
       },
       {
         "scale": "local"
@@ -179,6 +192,15 @@
       "decayExponent": 1.0,
       "diffusionMultiplier": 1.0
     }
+  },
+  "polarFitness": {
+    "maxColorContribution": 0.1,
+    "colorFloor": 0.1,
+    "shapeScale": 0.25
+  },
+  "coloring": {
+    "source": "substrate",
+    "channels": [0, 1, 2]
   },
   "policy": {
     "trunk": {
@@ -275,7 +297,7 @@
       "blur": 0,
       "gradientExponent": 1,
       "particleShape": "dot",
-      "particleColorMode": "neural-memory",
+      "particleColorMode": "neural-color",
       "particleAlpha": 0.4,
       "directionalLineVisible": false,
       "growthLineVisible": false,

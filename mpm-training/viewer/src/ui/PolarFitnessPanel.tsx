@@ -6,24 +6,28 @@ export function PolarFitnessPanel({ info, apiUrl, runId, generation }: {
   info: PolarFitnessInfo; apiUrl: string; runId: string; generation: number;
 }) {
   const [alpha, setAlpha] = useState(false);
+  const [expandedRange, setExpandedRange] = useState(false);
   const maxLoss = Math.max(1e-9, ...info.losses.flat());
   const curve = (values: number[]) => values.map((v, i) => `${10+300*i/(values.length-1)},${100-85*v/maxLoss}`).join(" ");
   const chosenLoss = info.losses[info.reflected ? 1 : 0][info.shift];
-  const panels: [string, string][] = [["target", "Target (unrotated)"], ["candidate", "Candidate"], ["aligned", "Target (matched)"], ["diff", "Squared difference (all channels)"]];
+  const panels: [string, string][] = [["target", "Target (unrotated)"], ["candidate", "Candidate"], ["aligned", "Target (matched)"], ["diff", "Raw squared difference (unweighted)"]];
   const download = `${apiUrl}/runs/${encodeURIComponent(runId)}/images/gen_${String(generation).padStart(5, "0")}_polar.npz`;
   return <section>
     <h2>Polar fitness</h2>
     <p className="hint">Pixel loss {chosenLoss.toPrecision(5)} · {(info.angle*180/Math.PI).toFixed(2)}° CCW · {info.reflected ? "Reflected target" : "Original target"}</p>
+    {info.objective && <p className="hint">Shape {info.objective.shapeLoss.toPrecision(5)} + color {info.objective.colorContribution.toPrecision(5)}. Color stays active and gains influence as shape improves.</p>}
     <p className="hint">Horizontal: angle 0–360°. Vertical: radius 0–{info.radius.toFixed(3)}, increasing downward. {info.radialSamples} × {info.angularSamples} samples, {info.channels} channel{info.channels === 1 ? "" : "s"}.</p>
     {info.channels === 4 && <label className="checkbox-row"><input type="checkbox" checked={alpha} onChange={e => setAlpha(e.target.checked)} />Show occupancy channel</label>}
+    <label className="checkbox-row"><input type="checkbox" checked={expandedRange} onChange={e => setExpandedRange(e.target.checked)} />Show expanded diagnostic range (−2 to 3)</label>
     <div className="snapshot-grid">
       {panels.map(([kind, label]) => <div className="snapshot-item snapshot-item-wide" key={kind}>
-        <img style={{ width: "100%", height: "auto", imageRendering: "pixelated" }}
+        {/* PNGs encode (value + 2) / 5; contrast(5) restores value and clips to 0–1. */}
+        <img style={{ width: "100%", height: "auto", imageRendering: "pixelated", filter: !expandedRange && kind !== "diff" ? "contrast(5)" : undefined }}
           src={generationImageUrl(apiUrl, runId, generation, `polar_${kind}${alpha && kind !== "diff" ? "_alpha" : ""}` as GenerationImageKind)} alt={label} />
         <span className="snapshot-label">{label}</span>
       </div>)}
     </div>
-    <p className="hint">Sharpened values use a fixed −2 to 3 grayscale/RGB scale (zero = 40% gray). Squared difference uses 0–1 (larger errors appear white); black means an exact match.</p>
+    <p className="hint">{expandedRange ? "Sharpened values use a fixed −2 to 3 grayscale/RGB scale (zero = 40% gray)." : "Natural colors: sharpened values are clipped to 0–1 for display. Enable the expanded diagnostic range to see values below zero and above one."} Display settings do not affect the loss. Squared difference uses 0–1 (larger errors appear white); black means an exact match.</p>
     <svg viewBox="0 0 320 120" role="img" aria-label="Loss across rotations: blue original target, orange reflected target" style={{ width: "100%" }}>
       <path d="M10 10V100H310" fill="none" stroke="currentColor" opacity=".3" />
       <polyline points={curve(info.losses[0])} fill="none" stroke="#66afff" strokeWidth="1.5" />

@@ -79,9 +79,9 @@ def main() -> None:
         CHEM_CHANNELS, stateful_hidden, np.random.default_rng(31), STATEFUL_ARCHITECTURE
     )
     assert stateful_flat.size == stateful_random.size
-    assert [head.name for head in policy_heads(CHEM_CHANNELS, STATEFUL_ARCHITECTURE)][-3:] == [
-        "stateDelta", "stateGate", "color"
-    ]
+    from config import CONFIG
+    expected_tail = ["stateDelta", "stateGate"] + (["color"] if CONFIG["coloring"]["source"] == "neural" else [])
+    assert [head.name for head in policy_heads(CHEM_CHANNELS, STATEFUL_ARCHITECTURE)][2:] == expected_tail
     stateful_mutated = mutate(
         stateful_flat, sigma, np.random.default_rng(32), STATEFUL_ARCHITECTURE
     )

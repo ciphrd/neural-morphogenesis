@@ -1045,7 +1045,7 @@ export function TrainingView() {
               }
             >
               <option value="white">White</option>
-              <option value="neural-color">NN output</option>
+              <option value="neural-color">Sample color</option>
               <option value="growth-magnitude">Growth magnitude</option>
               <option value="neural-memory">Neural memory</option>
               <option value="chemical-memory">Chemical memory</option>

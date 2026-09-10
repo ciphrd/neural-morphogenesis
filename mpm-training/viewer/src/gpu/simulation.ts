@@ -373,7 +373,7 @@ export class GpuSimulation {
     this.agents.setMaxActiveParticles(this.particleCap);
     this.agents.setActiveCount(scene.count);
     // Clear rollout-scoped policy state. The first agent evaluation derives
-    // alignment from chemical channel index 3's freshly sensed gradient.
+    // alignment from chemical channel index 4's freshly sensed gradient.
     this.agents.resetState( perturbation.states(scene.positions, this.config.channels));
     if (this.environment.chemicalCommunicationArchitecture === "persistent-environment") {
       perturbation.seedEnvironment(this.device, this.environment);

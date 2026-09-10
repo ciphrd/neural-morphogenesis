@@ -31,14 +31,14 @@ from training_sim import TrainingRollout
 def check_layout() -> None:
     profiles = default_channel_profiles(CHEM_CHANNELS)
     assert [profile.scale for profile in profiles] == [
-        "global", "global", "global", "regional", "regional", "regional", "local", "local", "local",
-        "global", "regional", "local"
+        "regional", "regional", "regional", "global", "regional", "global", "local", "local", "local",
+        "global", "global", "local", "global", "regional", "local", "local"
     ]
     assert all(profile.role is None for profile in profiles)
     widths, heights = resolved_dimensions(FIELD_N, FIELD_N, profiles)
     assert widths == heights
-    assert widths[0] == widths[1] == widths[2]
-    assert widths[3] == widths[4] == widths[5]
+    assert widths[3] == widths[5] == widths[9] == widths[10]
+    assert widths[0] == widths[1] == widths[2] == widths[4]
     assert widths[6] == widths[7] == widths[8]
     assert widths == (FIELD_N,) * CHEM_CHANNELS
     offsets, total = packed_offsets(widths, heights)
@@ -54,7 +54,7 @@ def check_layout() -> None:
     constants = channel_shader_constants(FIELD_N, FIELD_N, profiles)
     assert constants["FIELD_TOTAL"] == total
     assert constants["FIELD_MAX_WIDTH"] == FIELD_N
-    print("[PASS] 4/4/4 profiles resolve and round-trip through run metadata")
+    print("[PASS] 5/5/6 profiles resolve and round-trip through run metadata")
 
 def check_gpu_pipelines() -> None:
     device = pick_device()

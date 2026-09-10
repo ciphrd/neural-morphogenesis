@@ -16,7 +16,7 @@ from scipy.ndimage import affine_transform, distance_transform_edt
 from raster import RasterFitnessBreakdown, _average_pool, _boundary_loss
 from triangle_vertices import unwrap_vertices
 
-FITNESS_MODEL_VERSION = 7
+FITNESS_MODEL_VERSION = 9
 
 def target_mask(target, resolution):
     return target.mask(resolution)
@@ -255,7 +255,8 @@ def stopping_from_args(args):
 def score_domains(vertices, target, mask, args, colors=None):
     if getattr(args, "fitness_function", "multiscale") == "polar":
         from polar_fitness import evaluate_polar
-        return evaluate_polar(vertices, target, mask, colors if getattr(args, "fitness_color_weight", 1.) > 0 else None)
+        return evaluate_polar(vertices, target, mask, colors,
+                              color_weight=getattr(args, "fitness_color_weight", 1.))
 
     if target.svg_source is not None:
         from svg_fitness import evaluate_svg

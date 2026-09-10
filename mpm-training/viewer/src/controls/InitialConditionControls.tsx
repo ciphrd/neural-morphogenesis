@@ -36,7 +36,7 @@ export function InitialConditionControls({ config, recurrent, onChange }: {
       <select className="select" aria-label="Initial chemical channel" value={channel}
         onChange={e => change({ initialConditionChannel: Number(e.target.value) })}>
         {Array.from({ length: config?.channels ?? 0 }, (_, i) => <option key={i} value={i}>
-          {i}{i === 3 ? ' (orientation)' : ''}{preset === 'handed-chemistry' ? ` + ${(i+1)%(config?.channels ?? 1)}` : ''}
+          {i}{i === Math.min(defaultsConfig.simulation.HEADING_CHANNEL_INDEX, (config?.channels ?? 1) - 1) ? ' (orientation)' : ''}{preset === 'handed-chemistry' ? ` + ${(i+1)%(config?.channels ?? 1)}` : ''}
         </option>)}
       </select>
     </div>}

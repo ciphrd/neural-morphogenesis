@@ -1,6 +1,8 @@
 
 
 
+const SUBSTRATE_COLOR: bool = __SUBSTRATE_COLOR__;
+const COLOR_CHANNELS: vec3<u32> = vec3<u32>(__COLOR_CHANNEL_R__u, __COLOR_CHANNEL_G__u, __COLOR_CHANNEL_B__u);
 const STATEFUL: bool = __STATEFUL__;
 const CELL_OWNED_CHEMISTRY: bool = __CELL_OWNED_CHEMISTRY__;
 const ELASTIC_STRAIN_INPUTS_ENABLED: bool = __ELASTIC_STRAIN_INPUTS_ENABLED__;
@@ -8,7 +10,7 @@ const PRIVATE_STATE_DIM: u32 = 8u;
 
 const CHANNELS: u32 = __CHANNELS__u;
 
-const HEADING_CHANNEL: u32 = min(3u, CHANNELS - 1u);
+const HEADING_CHANNEL: u32 = min(__HEADING_CHANNEL_INDEX__u, CHANNELS - 1u);
 const HIDDEN_DIM: u32 = __HIDDEN_DIM__u;
 
 const IN_DIM: u32 = __IN_DIM__u;
@@ -365,6 +367,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
   let morphologyGy = 0.5 * (sampleMorphology(morphologyPos + vec2<f32>(0.0, 1.0)) - sampleMorphology(morphologyPos - vec2<f32>(0.0, 1.0)));
   let morphologyGradient = vec2<f32>(morphologyGx, morphologyGy);
 
+  var substrateColor = vec3<f32>(0.0);
   var inputVec: array<f32, IN_DIM>;
   for (var c: u32 = 0u; c < CHANNELS; c = c + 1u) {
     let fieldPos = fract(pos)
@@ -373,6 +376,13 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     let k = corners(c, fieldPos);
     let rawValue = sampleValue(c, k);
     inputVec[c] = normalizeChemicalValue(rawValue);
+    // Read the same pre-update field as the policy, before depositing this tick.
+    // Clamp indices for reduced-channel diagnostic configurations.
+    for (var rgb = 0u; rgb < 3u; rgb += 1u) {
+      if (c == min(COLOR_CHANNELS[rgb], CHANNELS - 1u)) {
+        substrateColor[rgb] = rawValue;
+      }
+    }
 
     let gx = sampleGrad(0u, c, k) * f32(FIELD_WIDTHS[c]) / f32(FIELD_MAX_WIDTH);
     let gy = sampleGrad(FIELD_TOTAL, c, k) * f32(FIELD_HEIGHTS[c]) / f32(FIELD_MAX_HEIGHT);
@@ -433,7 +443,7 @@ fn agentStep(@builtin(global_invocation_id) gid: vec3<u32>) {
     growthVectorWorld = normalize(physics.forcedGrowthDirection) * forcedMagnitude;
   }
   growthVectorWorld *= select(0.0, 1.0, physics.growthEnabled > 0.5);
-  agentState.particleMeta[pi].color = vec4<f32>(result.color, 1.0);
+  agentState.particleMeta[pi].color = vec4<f32>(select(result.color, substrateColor, SUBSTRATE_COLOR), 1.0);
 
   if (stepMode.commitGrowth != 0u) {
 

@@ -44,9 +44,8 @@ function weightLayout(channels: number, hiddenDim: number, architecture: PolicyA
   // gradient per channel, with no positional inputs.
   const stateful = policyHasRecurrence(architecture);
   const inDim = channels * 3 + 6 + (stateful ? 8 : 0);
-  // Chemical deltas plus a two-component local growth vector and either
-  // private-state updates or RGB.
-  const outDim = channels + (stateful ? 21 : 5);
+  // Chemical deltas, local growth, optional private state, and optional RGB.
+  const outDim = channels + (stateful ? 18 : 2) + (policyParametersConfig.coloring.source === "neural" ? 3 : 0);
   const fc1wOffset = 0;
   const fc1bOffset = fc1wOffset + hiddenDim * inDim;
   const fc2wOffset = fc1bOffset + hiddenDim;
@@ -141,8 +140,9 @@ export function randomWeights(
     [2, policyParameters.heads.growthVector],
   ] as const;
   const specs = policyHasRecurrence(architecture)
-    ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const, [3, policyParameters.heads.color] as const]
-    : [...common, [3, policyParameters.heads.color] as const];
+    ? [...common, [8, policyParameters.heads.stateDelta] as const, [8, policyParameters.heads.stateGate] as const]
+    : [...common];
+  if (policyParametersConfig.coloring.source === "neural") specs.push([3, policyParameters.heads.color]);
   const initialized = specs.map(([size, config]) => randomHead(size, hiddenDim, config, random));
   return {
     fc1w,
@@ -260,14 +260,21 @@ export class Agents {
         // parity with agents_gpu.py's own version of this same
         // gotcha (Python's str(bool) gives "True"/"False", invalid
         // WGSL, so that side needs the explicit conversion).
+        SUBSTRATE_COLOR: policyParametersConfig.coloring.source === "substrate" ? "true" : "false",
+        COLOR_CHANNEL_R: policyParametersConfig.coloring.channels[0],
+        COLOR_CHANNEL_G: policyParametersConfig.coloring.channels[1],
+        COLOR_CHANNEL_B: policyParametersConfig.coloring.channels[2],
         STATEFUL: policyHasRecurrence(this.policyArchitecture) ? "true" : "false",
         CELL_OWNED_CHEMISTRY: (config.chemicalCommunicationArchitecture) === "cell-owned-projection" ? "true" : "false",
         PRIVATE_STATE_INPUTS: policyHasRecurrence(this.policyArchitecture)
           ? "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { inputVec[3u * CHANNELS + 6u + s] = tanh(agentState.particleMeta[pi].privateState[s]); }"
           : "",
-        POLICY_TAIL_DECODE: policyHasRecurrence(this.policyArchitecture)
-          ? "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 18u]), safeSigmoid(outVec[ENV_WRITE_DIM + 19u]), safeSigmoid(outVec[ENV_WRITE_DIM + 20u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = outVec[ENV_WRITE_DIM + 2u + s]; out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]); }"
-          : "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 2u]), safeSigmoid(outVec[ENV_WRITE_DIM + 3u]), safeSigmoid(outVec[ENV_WRITE_DIM + 4u])); for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }",
+        POLICY_TAIL_DECODE:
+          (policyParametersConfig.coloring.source === "substrate" ? "out.color = vec3<f32>(0.5);" :
+            `out.color = vec3<f32>(${[0, 1, 2].map(i => `safeSigmoid(outVec[ENV_WRITE_DIM + ${(policyHasRecurrence(this.policyArchitecture) ? 18 : 2) + i}u])`).join(", ")});`)
+          + (policyHasRecurrence(this.policyArchitecture)
+            ? "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = outVec[ENV_WRITE_DIM + 2u + s]; out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]); }"
+            : "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) { out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }"),
         ELASTIC_STRAIN_INPUTS_ENABLED: config.elasticStrainInputsEnabled ? "true" : "false",
         MORPHOLOGY_SAMPLER_DECLARATION: filterableMorphology
           ? "@group(0) @binding(14) var morphologySampler: sampler;"
@@ -590,7 +597,7 @@ export class Agents {
   }
 
   /** Clears all rollout-scoped agent state. Alignment is deliberately zero
-   * here and is reconstructed from channel index 3's gradient by agentStep. */
+   * here and is reconstructed from channel index 4's gradient by agentStep. */
   resetState(initial?: { chemistry: Float32Array; privateState: Float32Array }): void {
     this.unresolvedSamples = 0;
     this.capacityBlocked = false;

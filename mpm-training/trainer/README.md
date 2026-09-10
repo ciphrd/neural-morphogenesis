@@ -18,7 +18,7 @@ not rotate or modify checkpoint files.
 The policy uses a ReLU hidden layer and linear chemical, growth-vector, and
 private-memory residual outputs. Growth vectors are capped by magnitude in the
 growth-field scatter; memory retains sigmoid gates and a state clamp of [-4, 4].
-RGB uses sigmoid. Input normalization still uses tanh. This changes the behavior
+Optional neural RGB uses sigmoid; substrate RGB uses raw channel values. Input normalization still uses tanh. This changes the behavior
 of existing tanh-trained weights even though their layout still loads; start a
 fresh run to evaluate this activation change. Trainer GPU inference and browser
 replay share the same shader.
@@ -204,3 +204,48 @@ for compatibility but no longer affects scoring.
 
 Taking the minimum tolerates variations in when the shape is reached. It does
 not require the shape to remain stable throughout the window.
+
+### Sample coloring
+
+`core/config.json` → `coloring` selects the shared trainer/viewer color source.
+The default `source: "substrate"` removes the RGB policy head and uses raw
+substrate channels `[0, 1, 2]` as red, green, blue. Each component is the raw sampled
+channel value, with no sigmoid, gain, or signed-range remapping: 0 is black,
+0.5 is half intensity, and 1 is full intensity. Metadata retains out-of-range
+values; rendering and color fitness clamp to the display range [0, 1].
+These regional channels remain policy inputs and outputs. Channel 4 supplies
+the heading gradient (`simulation.HEADING_CHANNEL_INDEX`); all channel indices
+are zero-based. RGB and heading keep matching regional profiles. The default
+initial-condition channel is 3, separate from RGB. The substrate has 16 channels;
+channels 12–15 use global, regional, local, and local profiles respectively
+(five global, five regional, six local in total).
+
+Colors use quadratic interpolation of the field at each sample's position on each policy tick,
+before that tick's chemical updates. The resulting sample metadata is shared by
+rendering and color fitness and held until the next tick. Both communication
+architectures read the spatial field (including cell-owned chemistry's projected
+field), rather than reading private chemical state. Reduced-channel diagnostic
+configurations clamp each requested index to the final available channel.
+The viewer's **Sample color** option displays this result; field visualization
+controls do not change training colors. The substrate background is a separate
+diagnostic visualization with signed-value remapping and accent controls; it is
+not the raw sample RGB display. Sample colors have no extra saturation/contrast
+boost. Alpha blending and updates since sampling can also affect appearance.
+
+Set `source: "neural"` to restore the separate RGB head for comparison. Restart
+the trainer and reload the viewer after changing this configuration. The two
+modes have different weight dimensions: existing RGB checkpoints require neural
+mode; substrate mode requires a fresh run. Keep the coloring channels
+with the configuration used for an experiment when replaying its checkpoints.
+
+Polar loss uses opaque geometry: before sharpening and polar sampling, every
+covered candidate pixel has alpha 1 and empty pixels have alpha 0, independently
+of RGB. The target uses the same conversion, recovering straight RGB from its
+premultiplied raster. Black is opaque material, never void. See POLAR_FITNESS.md.
+
+Polar fitness prioritizes shape continuously: normalized alpha error is the main
+term, while color has a bounded contribution (at most 0.1 by default) that
+increases smoothly as shape improves. Both remain active throughout training.
+Configure this in `core/config.json` → `polarFitness`; see POLAR_FITNESS.md for
+the formula and snapshot-score reconstruction. The viewer reports the actual
+shape and color contributions separately.

@@ -251,8 +251,12 @@ fn colorizeSubstrate(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (substrateDisplay.z < 2u) { color.g = 0.0; }
   if (substrateDisplay.y != 0u) {
 
-    let orientationChannel = min(3u, SUBSTRATE_CHANNELS - 1u);
-    color = vec3<f32>(substrateDisplayValue(substrateValue(orientationChannel, x, y)));
+    let orientationChannel = min(__HEADING_CHANNEL_INDEX__u, SUBSTRATE_CHANNELS - 1u);
+    let value = substrateValue(orientationChannel, x, y);
+    // Preserve the diagnostic orientation display's signed scale.
+    let orientationValue = select(graypoint(value, SUBSTRATE_MAX),
+      max(accentedSigned(value / SUBSTRATE_MAX), 0.0), backgroundZeroIsBlack.x != 0u);
+    color = vec3<f32>(orientationValue);
   }
 
   textureStore(substrateOutputTex, vec2<i32>(i32(x), i32(y)), vec4<f32>(color, 1.0));
@@ -492,7 +496,7 @@ fn growthVectorFragment(in: GrowthVectorOut) -> @location(0) vec4<f32> {
 // Match core/agents.wgsl: periodic quadratic sampling of the cached gradient,
 // including the per-channel resolution correction used by agentStep.
 fn policyOrientationAt(uv: vec2<f32>) -> vec2<f32> {
-  let c = min(3u, SUBSTRATE_CHANNELS - 1u);
+  let c = min(__HEADING_CHANNEL_INDEX__u, SUBSTRATE_CHANNELS - 1u);
   let size = vec2<u32>(SUBSTRATE_WIDTHS[c], SUBSTRATE_HEIGHTS[c]);
   let pos = fract(uv) * vec2<f32>(size) - vec2<f32>(0.5);
   let base = vec2<i32>(floor(pos - vec2<f32>(0.5)));

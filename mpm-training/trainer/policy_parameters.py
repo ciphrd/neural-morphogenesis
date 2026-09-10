@@ -79,7 +79,8 @@ def policy_heads(num_channels: int, architecture: str = CONFIG["run"]["policyArc
     }
     if policy_has_recurrence(architecture):
         sizes.update({"stateDelta": PRIVATE_STATE_DIM, "stateGate": PRIVATE_STATE_DIM})
-    sizes["color"] = 3
+    if CONFIG["coloring"]["source"] == "neural":
+        sizes["color"] = 3
     heads: list[PolicyHead] = []
     for name, size in sizes.items():
         raw = _CONFIG["heads"][name]

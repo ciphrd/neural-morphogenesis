@@ -509,7 +509,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
           </div>
           <p className="hint">
             {elasticInputsEnabled
-              ? "Normalized channel-index-3-gradient-frame Hencky strain as received by the policy."
+              ? "Normalized channel-index-4-gradient-frame Hencky strain as received by the policy."
               : "Temporarily unwired: all three policy lanes are forced to zero."}
           </p>
         </div>
@@ -568,7 +568,7 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
             </div>
           )}
 
-          <div className="nn-block">
+          {output.color && <div className="nn-block">
             <h3>Output — cell color [0, 1]</h3>
             <div
               aria-label="Current neural RGB color"
@@ -585,7 +585,8 @@ export function NetworkPanel({ config, physics }: NetworkPanelProps) {
               <ActivationBar label="green" value={output.color[1]} domain={1} />
               <ActivationBar label="blue" value={output.color[2]} domain={1} />
             </div>
-          </div>
+          </div>}
+          {!output.color && <p className="hint">Sample color comes from the substrate field.</p>}
         </>
       )}
     </section>

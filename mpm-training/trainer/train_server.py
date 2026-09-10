@@ -451,6 +451,7 @@ async def _training_loop_body() -> None:
         "fitnessTemporalAggregation": "min",
         "fitnessCaptureFractions": [1-offset for offset in CAPTURE_OFFSETS],
         "fitnessModelVersion": FITNESS_MODEL_VERSION,
+        "polarFitness": dict(CONFIG["polarFitness"]),
         "runSeed": args.seed,
         "totalGenerations": args.generations,
         "checkpointEvery": args.checkpoint_every,

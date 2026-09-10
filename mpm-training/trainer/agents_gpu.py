@@ -199,6 +199,10 @@ class AgentsGPU:
             code=load_core_shader(
                 "agents.wgsl",
                 {
+                    "SUBSTRATE_COLOR": str(CONFIG["coloring"]["source"] == "substrate").lower(),
+                    "COLOR_CHANNEL_R": CONFIG["coloring"]["channels"][0],
+                    "COLOR_CHANNEL_G": CONFIG["coloring"]["channels"][1],
+                    "COLOR_CHANNEL_B": CONFIG["coloring"]["channels"][2],
                     "CHANNELS": channels,
                     "HIDDEN_DIM": hidden_dim,
                     "IN_DIM": layout["in_dim"],
@@ -220,20 +224,18 @@ class AgentsGPU:
                         if policy_has_recurrence(self.policy_architecture) else ""
                     ),
                     "POLICY_TAIL_DECODE": (
-                        "out.color = vec3<f32>(safeSigmoid(outVec[ENV_WRITE_DIM + 18u]), safeSigmoid(outVec[ENV_WRITE_DIM + 19u]), safeSigmoid(outVec[ENV_WRITE_DIM + 20u]));\n"
-                        "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
-                            "    out.stateDelta[s] = outVec[ENV_WRITE_DIM + 2u + s];\n"
-                            "    out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]);\n"
-                        "  }"
-                        if policy_has_recurrence(self.policy_architecture) else
-                        "out.color = vec3<f32>(\n"
-                            "    safeSigmoid(outVec[ENV_WRITE_DIM + 2u]),\n"
-                            "    safeSigmoid(outVec[ENV_WRITE_DIM + 3u]),\n"
-                            "    safeSigmoid(outVec[ENV_WRITE_DIM + 4u])\n"
-                        "  );\n"
-                        "  for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {\n"
-                        "    out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0;\n"
-                        "  }"
+                        ("out.color = vec3<f32>(0.5);" if CONFIG["coloring"]["source"] == "substrate" else
+                         "out.color = vec3<f32>(" + ", ".join(
+                             f"safeSigmoid(outVec[ENV_WRITE_DIM + {offset}u])"
+                             for offset in range(18 if policy_has_recurrence(self.policy_architecture) else 2,
+                                                 21 if policy_has_recurrence(self.policy_architecture) else 5)
+                         ) + ");")
+                        + ("for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {"
+                           "out.stateDelta[s] = outVec[ENV_WRITE_DIM + 2u + s];"
+                           "out.stateGate[s] = safeSigmoid(outVec[ENV_WRITE_DIM + 2u + PRIVATE_STATE_DIM + s]); }"
+                           if policy_has_recurrence(self.policy_architecture) else
+                           "for (var s: u32 = 0u; s < PRIVATE_STATE_DIM; s = s + 1u) {"
+                           "out.stateDelta[s] = 0.0; out.stateGate[s] = 0.0; }")
                     ),
                     "ELASTIC_STRAIN_INPUTS_ENABLED": "true" if elastic_strain_inputs_enabled else "false",
                     "MORPHOLOGY_SAMPLER_DECLARATION": (
@@ -519,7 +521,7 @@ class AgentsGPU:
         self.device.queue.write_buffer(self._agent_state_buffer, 0, np.array([active_count], dtype=np.uint32))
 
     def read_colors(self, active_count: int) -> np.ndarray:
-        """Read NN RGB outputs only at fitness snapshots."""
+        """Read shared sample RGB colors at fitness snapshots."""
         if active_count == 0:
             return np.empty((0, 3), dtype=np.float32)
         raw = self.device.queue.read_buffer(self._agent_state_buffer,

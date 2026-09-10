@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from config import CONFIG
+
 import argparse
 import json
 import os
@@ -282,7 +284,7 @@ def rollout(
         initial_particle_count=density.initial_particles,
         initial_condition=getattr(args, "initial_condition", "none"),
         initial_condition_strength=getattr(args, "initial_condition_strength", 0.3),
-        initial_condition_channel=getattr(args, "initial_condition_channel", 0),
+        initial_condition_channel=getattr(args, "initial_condition_channel", DEFAULT_RUN_SETTINGS["initialConditionChannel"]),
         initial_spacing=density.initial_spacing,
     )
 
@@ -635,7 +637,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--deterministic-reference", action="store_true",
         help="slow native-GPU reference: order physics/chemical float reductions by sample index; not cross-device bit parity")
     parser.add_argument("--fitness-color-weight", type=float, default=1.0,
-        help="multiscale RGB weight; polar accepts 1 for RGBA or 0 for occupancy only")
+        help="multiscale RGB weight; polar color-strength multiplier in [0,1] (0: shape only, 1: configured maximum)")
     parser.add_argument(
         "--fitness-coverage-weight", type=float,
         default=DEFAULT_RUN_SETTINGS["fitnessCoverageWeight"],
@@ -720,7 +722,7 @@ def validate_fitness_configuration(args: argparse.Namespace) -> None:
     try:
         validate_initial_condition(getattr(args, "initial_condition", "none"),
                                    getattr(args, "initial_condition_strength", .3),
-                                   getattr(args, "initial_condition_channel", 0),
+                                   getattr(args, "initial_condition_channel", DEFAULT_RUN_SETTINGS["initialConditionChannel"]),
                                    CHEM_CHANNELS, policy_has_recurrence(args.policy_architecture))
     except ValueError as error:
         raise SystemExit(str(error)) from error
@@ -730,8 +732,8 @@ def validate_fitness_configuration(args: argparse.Namespace) -> None:
     for name in ("shape_missing_tolerance", "shape_spill_tolerance", "shape_overlap_tolerance"):
         if not 0 <= getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be in [0,1)")
-    if getattr(args, "fitness_function", "multiscale") == "polar" and args.fitness_color_weight not in (0., 1.):
-        raise SystemExit("polar fitness uses equal RGBA channel weights; --fitness-color-weight must be 1 (RGBA) or 0 (occupancy only)")
+    if getattr(args, "fitness_function", "multiscale") == "polar" and not 0 <= args.fitness_color_weight <= 1:
+        raise SystemExit("polar --fitness-color-weight must be in [0,1] (0: shape only, 1: configured maximum)")
     if args.raster_resolution < 8:
         raise SystemExit("--raster-resolution must be at least 8")
     for name in (
@@ -754,6 +756,7 @@ def checkpoint_metadata(args, target, generation, best_fitness, best_winner_seed
         'generation': generation,
         'fitness': best_fitness,
         'fitness_model_version': FITNESS_MODEL_VERSION,
+        'polar_fitness': dict(CONFIG['polarFitness']),
         'target': args.target,
         'particles': args.particles,
         'initial_particle_count': args.initial_particles,

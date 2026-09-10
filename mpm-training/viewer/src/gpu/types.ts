@@ -210,6 +210,9 @@ export interface TimingEntry {
 }
 
 export interface PolarFitnessInfo {
+  objective?: { name: string; shapeEnergy: number; shapeLoss: number;
+    colorContribution: number; colorWeight: number; maxColorContribution: number;
+    colorFloor: number; shapeScale: number } | null;
   angle: number;
   reflected: boolean;
   shift: number;

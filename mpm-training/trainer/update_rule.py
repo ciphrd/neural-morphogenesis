@@ -67,7 +67,7 @@ class UpdateRule(nn.Module):
         (training_sim.py/core/agents.wgsl); this method is frame-agnostic and
         simply concatenates the three channel blocks. Returns
         (env_write, growth_vector, tail), all raw/un-squashed;
-        tail is RGB for stateless policies or concatenated state residual/gate/RGB for recurrent policies
+        tail contains optional state residual/gate and optional neural RGB outputs
         and still in LOCAL frame — chemical deltas remain linear; scaling them,
         decoding gates/colors, and rotating the growth vector to world frame are training_sim.py's/core/agents.wgsl's
         own job (this reference forward() only knows raw tensor shapes,
@@ -82,11 +82,9 @@ class UpdateRule(nn.Module):
         hidden = self.activation(self.input_layer(x))
         env_write = self.heads["chemical"](hidden)
         growth_vector = self.heads["growthVector"](hidden)
-        tail = (
-            self.heads["color"](hidden)
-            if not policy_has_recurrence(self.architecture)
-            else torch.cat([self.heads["stateDelta"](hidden), self.heads["stateGate"](hidden), self.heads["color"](hidden)], dim=-1)
-        )
+        tail_parts = [self.heads[spec.name](hidden)
+                      for spec in policy_heads(self.num_channels, self.architecture)[2:]]
+        tail = torch.cat(tail_parts, dim=-1) if tail_parts else hidden[..., :0]
         return env_write, growth_vector, tail
 
     def concatenated_output_parameters(self) -> tuple[torch.Tensor, torch.Tensor]:

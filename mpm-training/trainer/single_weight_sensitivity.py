@@ -354,7 +354,7 @@ Blue is the baseline output; orange is the one-weight-perturbed output.
 |---:|---:|---:|---:|---:|---:|---:|---:|
 {rows}
 
-Chamfer is the symmetric nearest-neighbor distance between raw output point clouds. Paired values compare particles by stable slot index for the shared prefix. "Saved values" covers positions, velocities, deformation, affine state, tensor-growth/rest state, channel-index-3-gradient alignment, color, growth magnitude, recurrent private state, and per-agent chemical state. Coordinates use the simulation's unit-square domain.
+Chamfer is the symmetric nearest-neighbor distance between raw output point clouds. Paired values compare particles by stable slot index for the shared prefix. "Saved values" covers positions, velocities, deformation, affine state, tensor-growth/rest state, channel-index-4-gradient alignment, color, growth magnitude, recurrent private state, and per-agent chemical state. Coordinates use the simulation's unit-square domain.
 
 ## Output files
 

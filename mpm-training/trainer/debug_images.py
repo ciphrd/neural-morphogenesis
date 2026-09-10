@@ -98,12 +98,17 @@ def save_polar_images(polar, directory: Path, prefix: str) -> dict:
     error = difference.mean(axis=-1)
     # Absolute fixed scale, not per-image contrast normalization.
     Image.fromarray(np.rint(np.clip(error, 0, 1)*255).astype(np.uint8)).save(directory/f'{prefix}_polar_diff.png')
+    # Preserve the exact weighting parameters with each snapshot. Raw pixel
+    # differences remain available, but their plain mean is not the objective.
+    objective = getattr(polar, 'objective', None)
+    import json
     np.savez_compressed(directory/f'{prefix}_polar.npz', target=polar.target,
                         candidate=polar.candidate, aligned_target=polar.aligned_target,
                         squared_difference=difference, losses=polar.losses,
                         shift=polar.shift, reflected=polar.reflected,
-                        angle=polar.angle, radius=polar.radius)
+                        angle=polar.angle, radius=polar.radius,
+                        objective_json=json.dumps(objective))
     return {'angle': polar.angle, 'reflected': polar.reflected, 'shift': polar.shift,
             'radialSamples': polar.target.shape[0], 'angularSamples': polar.target.shape[1],
             'channels': polar.target.shape[2], 'radius': polar.radius,
-            'losses': polar.losses.tolist(), 'displayRange': [-2, 3], 'differenceRange': [0, 1]}
+            'objective': objective, 'losses': polar.losses.tolist(), 'displayRange': [-2, 3], 'differenceRange': [0, 1]}
