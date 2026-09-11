@@ -1185,11 +1185,12 @@ export function TrainingView() {
               <option value="repulsion">Repulsion field</option>
               <option value="morphology">Policy morphology</option>
               <option value="growth">Integrated growth</option>
-              <option value="substrate">Substrate</option>
+              <option value="substrate">Substrate</option><option value="substrate-rings">Substrate rings</option>
               <option value="orientation">Orientation substrate (ch3)</option><option value="policy-orientation">Policy orientation</option>
               <option value="gradient">Boundary gradient</option>
             </select>
           </label>
+          {fieldMode === "substrate-rings" && <p className="hint">Passive rings follow substrate motion. Tracking starts when first selected; restart to compare from the seed. Overlay particle domains to inspect alignment.</p>}
           {fieldMode === "morphology" && (
             <>
               <label className="checkbox-row">

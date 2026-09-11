@@ -334,6 +334,7 @@ def check_viewer_morphology_visualization_shader(device: wgpu.GPUDevice) -> None
         {
             "GRID_N": 64,
             "REPULSION_FIELD_N": 256,
+            "SUBSTRATE_MARKER_N": 512,
             "FIELD_MAX_WIDTH": 256,
             "FIELD_MAX_HEIGHT": 256,
             "CHANNELS": 8,

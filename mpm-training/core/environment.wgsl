@@ -149,6 +149,20 @@ fn diffuseDecayStationary(@builtin(global_invocation_id) gid: vec3<u32>) {
   evolveField(gid, false);
 }
 
+// Passive diagnostic coordinates: exactly the substrate's backtrace and
+// interpolation, without reaction, diffusion, or decay.
+@compute @workgroup_size(16, 16, 1)
+fn advectOnly(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let c = gid.z;
+  if (c >= CHANNELS) { return; }
+  let dimensions = vec2<u32>(FIELD_WIDTHS[c], FIELD_HEIGHTS[c]);
+  if (any(gid.xy >= dimensions)) { return; }
+  let size = vec2<f32>(dimensions);
+  let worldPos = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / size;
+  let backtraced = fract(worldPos - sampleMpmVelocity(worldPos) * max(physics.advectionDt, 0.0));
+  gridNext[gridIndex(c, gid.y, gid.x)] = sampleChemical(c, backtraced * size - vec2<f32>(0.5));
+}
+
 fn evolveField(gid: vec3<u32>, transport: bool) {
   let x = gid.x;
   let y = gid.y;

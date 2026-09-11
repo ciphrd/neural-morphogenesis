@@ -426,10 +426,11 @@ export function LabView() {
           <label className="slider-row">
             <span>Background</span>
             <select className="select" value={fieldMode} onChange={(event) => setFieldMode(event.target.value as FieldMode)}>
-              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="growth">Integrated growth</option><option value="substrate">Substrate</option><option value="orientation">Orientation substrate (ch3)</option><option value="policy-orientation">Policy orientation</option><option value="gradient">Boundary gradient</option>
+              <option value="none">None</option><option value="density">Density</option><option value="speed">Speed</option><option value="deformation">Deformation</option><option value="pressure">Pressure</option><option value="shear">Shear</option><option value="repulsion">Repulsion field</option><option value="morphology">Policy morphology</option><option value="growth">Integrated growth</option><option value="substrate">Substrate</option><option value="substrate-rings">Substrate rings</option><option value="orientation">Orientation substrate (ch3)</option><option value="policy-orientation">Policy orientation</option><option value="gradient">Boundary gradient</option>
             </select>
           </label>
           {fieldMode === "growth" && <p className="hint">Brightness shows regional drive or accumulated admission credit. Direction cycles right=red, up=yellow, left=cyan, down=violet; green is broad or ambiguous.</p>}
+          {fieldMode === "substrate-rings" && <p className="hint">Passive rings follow substrate motion. Tracking starts when first selected; restart to compare from the seed. Overlay particle domains to inspect alignment.</p>}
           {fieldMode === "morphology" && <>
             <label className="checkbox-row"><input type="checkbox" checked={morphologyGradientVisible} onChange={(event) => setMorphologyGradientVisible(event.target.checked)} />Show morphology gradient (R/G)</label>
             <label className="checkbox-row"><input type="checkbox" checked={morphologyDensityVisible} onChange={(event) => setMorphologyDensityVisible(event.target.checked)} />Show morphology density (B)</label>

@@ -26,6 +26,7 @@ import { VIEWER_DEFAULTS } from "../viewerConfig";
 // a first step toward a "shape boundary" background, see field.wgsl's
 // own colorizeGradient() comment for the full reasoning.
 
+import { SUBSTRATE_MARKER_N, type SubstrateMarker } from "./substrateMarker";
 import fieldSrc from "./field.wgsl?raw";
 import fieldDiagnosticsSrc from "./fieldDiagnostics.wgsl?raw";
 import renderSrc from "./render.wgsl?raw";
@@ -36,12 +37,12 @@ import type { Environment } from "./environment";
 import { DX, GRID_N, INV_DX, NODE_COUNT, REPULSION_FIELD_N, type MpmCore } from "./mpmCore";
 import { templateShader } from "./shaderTemplate";
 
-export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "policy-orientation" | "gradient" | "growth";
+export type FieldMode = "none" | "density" | "speed" | "deformation" | "pressure" | "shear" | "repulsion" | "morphology" | "substrate" | "orientation" | "policy-orientation" | "gradient" | "growth" | "substrate-rings";
 export type ParticleShape = "dot" | "triangle" | "domain";
 export type ParticleColorMode = "white" | "neural-color" | "growth-magnitude" | "neural-memory" | "chemical-memory" | "boundary-value" | "neurons";
 export const MAX_ZOOM = 32;
 
-const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "orientation" | "policy-orientation" | "gradient" | "growth">, number> = {
+const FIELD_MODE_CODE: Record<Exclude<FieldMode, "repulsion" | "morphology" | "substrate" | "orientation" | "policy-orientation" | "gradient" | "growth" | "substrate-rings">, number> = {
   none: 0,
   density: 1,
   speed: 2,
@@ -224,6 +225,9 @@ export class Renderer {
   private readonly growthVectorBindGroup: GPUBindGroup;
   private readonly growthDispatch: [number, number];
 
+  private readonly markerPipeline: GPURenderPipeline;
+  private readonly markerBindGroups: [GPUBindGroup, GPUBindGroup];
+
   private fieldMode: FieldMode = VIEWER_DEFAULTS.rendering.fieldMode;
 
   constructor(
@@ -233,6 +237,7 @@ export class Renderer {
     environment: Environment,
     particleMetaState: GPUBuffer,
     integratedGrowthField: GPUBuffer,
+    private readonly substrateMarker: SubstrateMarker,
   ) {
     this.device = device;
     this.environment = environment;
@@ -499,6 +504,7 @@ export class Renderer {
     // --- field-visualize background ---
     const fieldModule = device.createShaderModule({
       code: templateShader(fieldSrc, {
+        SUBSTRATE_MARKER_N,
         GRID_N,
         REPULSION_FIELD_N,
         CHANNELS: environment.channels,
@@ -622,6 +628,19 @@ export class Renderer {
         { binding: 22, resource: { buffer: this.viewUniform } },
       ],
     });
+
+    this.markerPipeline = device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: fieldModule, entryPoint: "fieldVertex" },
+      fragment: { module: fieldModule, entryPoint: "substrateRingsFragment", targets: [{ format: BLOOM_SCENE_FORMAT }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.markerBindGroups = [0, 1].map(p => device.createBindGroup({
+      layout: this.markerPipeline.getBindGroupLayout(0), entries: [
+        { binding: 22, resource: { buffer: this.viewUniform } },
+        { binding: 27, resource: { buffer: substrateMarker.buffers[p] } },
+      ],
+    })) as [GPUBindGroup, GPUBindGroup];
 
     // --- substrate background ---
     this.substrateTexture = device.createTexture({
@@ -807,7 +826,7 @@ export class Renderer {
       4,
       new Uint32Array([(mode === "orientation" || mode === "policy-orientation") ? 1 : 0]),
     );
-    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "orientation" && mode !== "policy-orientation" && mode !== "gradient" && mode !== "growth") {
+    if (mode !== "repulsion" && mode !== "morphology" && mode !== "substrate" && mode !== "orientation" && mode !== "policy-orientation" && mode !== "gradient" && mode !== "growth" && mode !== "substrate-rings") {
       writeFloat32(this.device, this.fieldModeUniform, 0, new Uint32Array([FIELD_MODE_CODE[mode]]));
     }
   }
@@ -1081,6 +1100,10 @@ export class Renderer {
     if (GRID_FIELD_MODES.has(this.fieldMode)) {
       pass.setPipeline(this.fieldPresentPipeline);
       pass.setBindGroup(0, this.fieldPresentBindGroup);
+      pass.draw(6);
+    } else if (this.fieldMode === "substrate-rings") {
+      pass.setPipeline(this.markerPipeline);
+      pass.setBindGroup(0, this.markerBindGroups[this.substrateMarker.parity]);
       pass.draw(6);
     } else if (this.fieldMode === "repulsion") {
       pass.setPipeline(this.repulsionPresentPipeline);

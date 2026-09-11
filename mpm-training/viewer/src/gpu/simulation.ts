@@ -8,6 +8,7 @@ import { StableMatchStop, targetMask, matchDomains } from "./shapeMatch";
 import { Agents } from "./agents";
 import type { BloomSettings } from "./bloom";
 import { Deform, type DeformDirection, type DeformMode } from "./deform";
+import { SubstrateMarker } from "./substrateMarker";
 import { Environment } from "./environment";
 import { Interact } from "./interact";
 import { MAX_PARTICLES, MpmCore } from "./mpmCore";
@@ -41,6 +42,7 @@ export class GpuSimulation {
 
   private mpmCore: MpmCore | null = null;
   private environment: Environment | null = null;
+  private substrateMarker: SubstrateMarker | null = null;
   private agents: Agents | null = null;
   private renderer: Renderer | null = null;
   // "Move Particles" tool's own pick/drag state (gpu/interact.ts) — a
@@ -267,6 +269,8 @@ export class GpuSimulation {
     });
     agents.loadWeights(config.weights);
 
+    const substrateMarker = new SubstrateMarker(this.device, mpmCore.gridVel);
+    substrateMarker.enabled = this.pendingFieldMode === "substrate-rings";
     const renderer = new Renderer(
       this.device,
       this.format,
@@ -274,6 +278,7 @@ export class GpuSimulation {
       environment,
       agents.particleMetaState,
       mpmCore.growthField,
+      substrateMarker,
     );
     if (this.pendingCanvasSizePx) renderer.setCanvasSizePx(...this.pendingCanvasSizePx);
     if (this.pendingTargetPoints) renderer.setTargetPoints(this.pendingTargetPoints);
@@ -305,6 +310,7 @@ export class GpuSimulation {
 
     this.mpmCore = mpmCore;
     this.environment = environment;
+    this.substrateMarker = substrateMarker;
     this.agents = agents;
     this.renderer = renderer;
     this.interact = interact;
@@ -369,6 +375,7 @@ export class GpuSimulation {
     // already giving genuinely-seeded particles these exact same fresh
     // defaults.
     this.environment.reset();
+    this.substrateMarker?.reset(this.config.spawnX, this.config.spawnY);
     this.agents.setSpawnCenter(this.config.spawnX, this.config.spawnY);
     this.agents.setMaxActiveParticles(this.particleCap);
     this.agents.setActiveCount(scene.count);
@@ -558,6 +565,8 @@ export class GpuSimulation {
     );
     const encoder = this.device.createCommandEncoder();
     this.mpmCore.encodeMorphology(encoder);
+    this.substrateMarker?.encodeTransport(encoder,
+      this.mpmEnabled ? this.config.substepsPerMacro * coreConstants.DT : 0);
     // Carry the persistent substrate through the preceding MPM motion before
     // this tick's first policy read. Divergent growth flow therefore expands
     // the substrate together with the material rather than leaving it behind.
@@ -627,6 +636,8 @@ export class GpuSimulation {
    * rather than extending core/'s shared physics shaders. */
   setFieldMode(mode: FieldMode): void {
     this.pendingFieldMode = mode;
+    // Once selected, keep tracking through display changes until reset/rebuild.
+    if (mode === "substrate-rings" && this.substrateMarker) this.substrateMarker.enabled = true;
     this.renderer?.setFieldMode(mode);
   }
 
@@ -810,12 +821,14 @@ export class GpuSimulation {
   private destroySimObjects(): void {
     this.mpmCore?.destroy();
     this.environment?.destroy();
+    this.substrateMarker?.destroy();
     this.agents?.destroy();
     this.renderer?.destroy();
     this.interact?.destroy();
     this.deform?.destroy();
     this.mpmCore = null;
     this.environment = null;
+    this.substrateMarker = null;
     this.agents = null;
     this.renderer = null;
     this.interact = null;

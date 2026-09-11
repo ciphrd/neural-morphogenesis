@@ -269,6 +269,36 @@ fn substrateFragment(in: QuadOut) -> @location(0) vec4<f32> {
   return textureSample(substrateTex, fieldSampler, in.uv);
 }
 
+const MARKER_N: u32 = __SUBSTRATE_MARKER_N__u;
+@group(0) @binding(27) var<storage, read> markerRadius: array<f32>;
+
+fn markerAt(cell: vec2<i32>) -> f32 {
+  let p = vec2<u32>((cell % i32(MARKER_N) + i32(MARKER_N)) % i32(MARKER_N));
+  return markerRadius[p.y * MARKER_N + p.x];
+}
+
+// Integral of a periodic white/black square wave, for pixel-footprint filtering.
+fn ringIntegral(x: f32) -> f32 {
+  return 0.5 * floor(x) + min(fract(x), 0.5);
+}
+
+@fragment
+fn substrateRingsFragment(in: QuadOut) -> @location(0) vec4<f32> {
+  let p = in.uv * f32(MARKER_N) - vec2<f32>(0.5);
+  let base = vec2<i32>(floor(p));
+  let f = fract(p);
+  let radius = mix(mix(markerAt(base), markerAt(base + vec2<i32>(1, 0)), f.x),
+    mix(markerAt(base + vec2<i32>(0, 1)), markerAt(base + vec2<i32>(1, 1)), f.x), f.y);
+  // 1/256 world units per band; 115 alternating bands within radius 0.45.
+  let phase = radius * 128.0;
+  let footprint = max(fwidth(phase), 1e-4);
+  let white = clamp((ringIntegral(phase + footprint * 0.5)
+    - ringIntegral(phase - footprint * 0.5)) / footprint, 0.0, 1.0);
+  let edgeWidth = max(fwidth(radius), 1e-5);
+  let disk = 1.0 - smoothstep(0.45 - edgeWidth, 0.45 + edgeWidth, radius);
+  return vec4<f32>(vec3<f32>(mix(0.02, white, disk)), 1.0);
+}
+
 const GRADIENT_MAX: f32 = 0.25;
 
 fn densityAt(x: i32, y: i32) -> f32 {
